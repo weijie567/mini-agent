@@ -6,7 +6,7 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "5"
 status: "in_progress"
-last_updated: "2026-07-27T07:42:19+08:00"
+last_updated: "2026-07-27T07:50:51+08:00"
 last_activity: "2026-07-27 — PR #26 initial exact-head review blocked; findings corrected; new exact-head review pending"
 progress:
   total_phases: 6
@@ -46,12 +46,12 @@ Progress: 0%
 Phase: 1 of 6（第一最薄 E2E-01）
 Plan: 5 of 8（01-04E/F/G owner dependencies均已关闭；01-05/06/07 planning PR pending）
 Status: `ACTIVE / W2_PLANS_REVISED / EXACT_HEAD_REVIEW_PENDING`
-Last activity: 2026-07-27 — 01-04E/F/G均已合并；01-05/06/07已修正PR #26首个exact-head review findings与后续checker audit的两项MAJOR；新published head与双路review仍待完成，实际Task Packet完成口径为8/12
+Last activity: 2026-07-27 — 01-04E/F/G均已合并；01-05/06/07已修正PR #26首个exact-head review findings与后续checker audit的两项MAJOR；修正版已发布，当前双路exact-head review与merge仍待完成，实际Task Packet完成口径为8/12
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 将review revision作为追加commit push到既有draft PR #26；对新的published exact head完成两路只读review，所有finding关闭后再转ready并merge。
+1. 对draft PR #26已发布修正版的当前exact head完成两路只读review，所有finding关闭后再转ready并merge。
 2. planning PR合并后，从execution base `c35687dafa3881bb322d91515068d8d39be79df6`分别预建`codex/e2e01-w2-runtime`、`codex/e2e01-w2-infra`、`codex/e2e01-w2-eval`三个互斥Worktree；验证Plan provenance、所有owned path在三个Worktree相对base均byte-identical或按计划不存在。
 3. 并行执行01-05 Runtime、01-06 Infra、01-07 Eval；每个Agent按Task Packet TDD、exact allowlist、focused/full gate、handoff与draft PR要求交付。
 4. Integrator按Runtime → Infra → Eval顺序对latest integration overlay逐个复验、review、fix并合并，随后规划并执行01-08 Composition Root与纵向证据。
@@ -71,11 +71,11 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / 01-04E_COMPLETE`: PR #23 merge `be68490...`已实现required TokenCounts object + nullable strict per-direction exact semantics；357-test full gate通过。
 - `CONFIRMED / 01-04F_COMPLETE`: PR #24 merge `1d47fae...`已对齐canonical fault transition、fact-bearing presentation rejection与version manifest；364-test full gate通过。
 - `CONFIRMED / 01-04G_COMPLETE`: PR #25 merge `c35687d...`已冻结并实现Core-produced recovery Trace与Port-level APPLIED state/link/Trace atomic contract；466-test full gate通过。
-- `CONFIRMED / W2_PLAN_REVISION_APPLIED`: 首个published head `436ce5b...`的双路review发现Provider参数替换、not-found终态、Eval lane identity、Worktree事实、full-gate preflight与canonical执行owner状态问题；当前working revision已逐项修正。后续checker audit又识别出旧approval与第二条零网络命令两项MAJOR，均已修正。
+- `CONFIRMED / W2_PLAN_REVISION_APPLIED`: 首个published head `436ce5b...`的双路review发现Provider参数替换、not-found终态、Eval lane identity、Worktree事实、full-gate preflight与canonical执行owner状态问题；当前published revision已逐项修正。后续checker audit又识别出旧approval与第二条零网络命令两项MAJOR，均已修正。
 - `CONFIRMED / GSD_REVISION_CAP_REACHED`: 初始loop-3 approval已supersede；三轮revision cap后不再启动第5个planner loop，最终planning gate转为当前published exact head的双路独立review。
 - `CONFIRMED / GRAPHIFY_SERIAL_GATE_PASS`: `c35687d...`已完成AST refresh；最终3353 nodes、5999 links、50 hyperedges，graph health error为0、stale marker清除、tracked integration tree clean。
 - `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: planning PR提交前重新运行SDK/CJS health；后续Phase目录warning与保留历史Worktree warning不触发repair、force或cleanup，任何新error必须BLOCK。
-- `OPEN / PLANNING_PR_REVIEW`: draft PR #26已存在；当前revision仍须追加commit、push并取得双路exact-head `PASS`，未通过前不得创建三个execution Worktree。
+- `OPEN / PLANNING_PR_REVIEW`: draft PR #26已存在且修正版已发布；当前仅待双路exact-head `PASS`与merge，未通过前不得创建三个execution Worktree。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
