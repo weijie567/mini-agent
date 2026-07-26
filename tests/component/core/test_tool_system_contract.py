@@ -775,6 +775,89 @@ def test_toolcall_requires_binding_chain_and_status_specific_safe_codes() -> Non
 
 
 @pytest.mark.parametrize(
+    ("status", "attempt_count", "lifecycle_values"),
+    [
+        pytest.param(
+            ToolCallStatus.CREATED,
+            0,
+            {},
+            id="created-before-dispatch",
+        ),
+        pytest.param(
+            ToolCallStatus.RUNNING,
+            1,
+            {},
+            id="running-first-attempt",
+        ),
+        pytest.param(
+            ToolCallStatus.SUCCEEDED,
+            1,
+            {"finished_at": NOW, "result_ref": uuid4()},
+            id="succeeded-first-attempt",
+        ),
+        pytest.param(
+            ToolCallStatus.FAILED,
+            1,
+            {"finished_at": NOW, "failure_code": "UPSTREAM_FAILURE"},
+            id="failed-first-attempt",
+        ),
+        pytest.param(
+            ToolCallStatus.TIMED_OUT,
+            1,
+            {
+                "finished_at": NOW,
+                "timeout_phase": ToolTimeoutPhase.AFTER_DISPATCH,
+            },
+            id="timed-out-first-attempt",
+        ),
+        pytest.param(
+            ToolCallStatus.INTERRUPTED,
+            0,
+            {
+                "finished_at": NOW,
+                "interruption_reason": "PROCESS_RESTART_DETECTED",
+            },
+            id="interrupted-before-dispatch",
+        ),
+        pytest.param(
+            ToolCallStatus.INTERRUPTED,
+            1,
+            {
+                "finished_at": NOW,
+                "interruption_reason": "PROCESS_RESTART_DETECTED",
+            },
+            id="interrupted-first-attempt",
+        ),
+        pytest.param(
+            ToolCallStatus.INTERRUPTED,
+            2,
+            {
+                "finished_at": NOW,
+                "interruption_reason": "PROCESS_RESTART_DETECTED",
+            },
+            id="interrupted-after-retry",
+        ),
+    ],
+)
+def test_toolcall_accepts_valid_status_lifecycle(
+    status: ToolCallStatus,
+    attempt_count: int,
+    lifecycle_values: dict[str, object],
+) -> None:
+    record = ToolCallRecord(
+        **{
+            **_tool_call_values(),
+            "attempt_count": attempt_count,
+            **lifecycle_values,
+        },
+        status=status,
+    )
+
+    assert record.status is status
+    assert record.attempt_count == attempt_count
+
+
+@pytest.mark.parametrize(
     ("status", "lifecycle_values"),
     [
         (ToolCallStatus.RUNNING, {}),
@@ -790,16 +873,9 @@ def test_toolcall_requires_binding_chain_and_status_specific_safe_codes() -> Non
                 "timeout_phase": ToolTimeoutPhase.UNKNOWN,
             },
         ),
-        (
-            ToolCallStatus.INTERRUPTED,
-            {
-                "finished_at": NOW,
-                "interruption_reason": "PROCESS_RESTART_DETECTED",
-            },
-        ),
     ],
 )
-def test_initiated_toolcall_requires_at_least_one_attempt(
+def test_dispatched_toolcall_requires_at_least_one_attempt(
     status: ToolCallStatus,
     lifecycle_values: dict[str, object],
 ) -> None:
@@ -813,29 +889,90 @@ def test_initiated_toolcall_requires_at_least_one_attempt(
             status=status,
         )
 
-    created = ToolCallRecord(
-        **{
+
+def test_created_toolcall_requires_zero_attempts() -> None:
+    with pytest.raises(ValidationError, match="attempt_count = 0"):
+        ToolCallRecord(
             **_tool_call_values(),
-            "attempt_count": 0,
-        },
-        status=ToolCallStatus.CREATED,
+            status=ToolCallStatus.CREATED,
+        )
+
+
+def test_active_tool_attempt_has_only_started_identity() -> None:
+    attempt = ToolAttemptRecord(
+        tool_call_id=uuid4(),
+        attempt_no=1,
+        started_at=NOW,
     )
-    assert created.attempt_count == 0
+
+    assert attempt.finished_at is None
+    assert attempt.outcome is None
+    assert attempt.failure_code is None
+
+
+@pytest.mark.parametrize(
+    ("lifecycle_values", "message"),
+    [
+        ({"outcome": ToolResultOutcome.SYSTEM_FAILURE}, "cannot carry outcome"),
+        ({"failure_code": "UPSTREAM_FAILURE"}, "cannot carry failure_code"),
+        ({"finished_at": NOW}, "requires outcome"),
+    ],
+)
+def test_tool_attempt_rejects_partial_lifecycle_state(
+    lifecycle_values: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ToolAttemptRecord(
+            tool_call_id=uuid4(),
+            attempt_no=1,
+            started_at=NOW,
+            **lifecycle_values,
+        )
+
+
+def test_successful_tool_attempt_rejects_failure_code() -> None:
+    with pytest.raises(ValidationError, match="cannot carry failure_code"):
+        ToolAttemptRecord(
+            tool_call_id=uuid4(),
+            attempt_no=1,
+            started_at=NOW,
+            finished_at=NOW,
+            outcome=ToolResultOutcome.SUCCESS,
+            failure_code="UPSTREAM_FAILURE",
+        )
 
 
 def test_tool_attempt_record_has_append_only_attempt_identity_and_utc_order() -> None:
-    attempt = ToolAttemptRecord(
-        tool_call_id=uuid4(),
+    tool_call_id = uuid4()
+    first_attempt = ToolAttemptRecord(
+        tool_call_id=tool_call_id,
         attempt_no=1,
         started_at=NOW,
         finished_at=NOW,
         outcome=ToolResultOutcome.SUCCESS,
     )
-    assert attempt.attempt_no == 1
+    retry_attempt = ToolAttemptRecord(
+        tool_call_id=tool_call_id,
+        attempt_no=2,
+        started_at=NOW,
+        finished_at=NOW,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="UPSTREAM_FAILURE",
+    )
+
+    assert (first_attempt.attempt_no, retry_attempt.attempt_no) == (1, 2)
+
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        ToolAttemptRecord(
+            tool_call_id=tool_call_id,
+            attempt_no=0,
+            started_at=NOW,
+        )
 
     with pytest.raises(ValidationError, match="cannot precede"):
         ToolAttemptRecord(
-            tool_call_id=uuid4(),
+            tool_call_id=tool_call_id,
             attempt_no=1,
             started_at=NOW,
             finished_at=datetime(2029, 1, 1, tzinfo=UTC),
