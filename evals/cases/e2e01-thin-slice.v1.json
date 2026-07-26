@@ -763,7 +763,7 @@
           "script:fault-provider:multiple-target-functions",
           "script:fault-provider:invalid-request-understanding-schema",
           "script:fault-provider:source-authority-mismatch",
-          "script:fault-provider:stale-task-state-version",
+          "script:fault-runtime:state-advanced-before-gate",
           "script:fault-provider:trusted-field-override",
           "script:fault-provider:unknown-tool-name"
         ]
@@ -819,8 +819,25 @@
           "DETERMINISTIC_FAILURE_IS_NOT_RETRIED",
           "INVALID_CANDIDATE_IS_NOT_AUTHORITY",
           "GATEWAY_FAULTS_BLOCK_TASK_AND_REQUEST_UNIT",
-          "GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1",
+          "UNKNOWN_TOOL_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_1",
+          "STALE_STATE_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_2",
           "GATEWAY_FAULTS_REQUIRE_FAULT_MATCHED_DETERMINISTIC_REASON"
+        ],
+        "state_assertion_scopes": [
+          {
+            "state_assertion_id": "UNKNOWN_TOOL_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_1",
+            "model_script_ref": "script:fault-provider:unknown-tool-name",
+            "trace_variant": "CONTROL_GATEWAY_REJECTED",
+            "task_state_version_delta": 1,
+            "request_unit_state_version_delta": 1
+          },
+          {
+            "state_assertion_id": "STALE_STATE_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_2",
+            "model_script_ref": "script:fault-runtime:state-advanced-before-gate",
+            "trace_variant": "CONTROL_GATEWAY_STALE_STATE_REJECTED",
+            "task_state_version_delta": 2,
+            "request_unit_state_version_delta": 2
+          }
         ],
         "trace_expectation_variants": [
           {
@@ -917,7 +934,6 @@
           {
             "variant": "CONTROL_GATEWAY_REJECTED",
             "model_script_refs": [
-              "script:fault-provider:stale-task-state-version",
               "script:fault-provider:unknown-tool-name"
             ],
             "required_events": [
@@ -951,6 +967,50 @@
                 "event": "TaskStateChanged",
                 "operator": "EQUALS",
                 "count": 2
+              },
+              {
+                "event": "GateDecisionRecorded",
+                "operator": "EQUALS",
+                "count": 1
+              }
+            ]
+          },
+          {
+            "variant": "CONTROL_GATEWAY_STALE_STATE_REJECTED",
+            "model_script_refs": [
+              "script:fault-runtime:state-advanced-before-gate"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "NextMoveProposed",
+              "TaskDeltaValidated",
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ResponseRendered",
+              "RunStopped",
+              "EvalCaseGraded"
+            ],
+            "forbidden_events": [
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolCallFailed",
+              "ToolCallInterrupted",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "PresentationPlanProposed"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "TaskStateChanged",
+                "operator": "EQUALS",
+                "count": 3
               },
               {
                 "event": "GateDecisionRecorded",
@@ -1056,7 +1116,7 @@
           "script:fault-presentation:zero-target-functions",
           "script:fault-presentation:multiple-target-functions",
           "script:fault-presentation:invalid-schema",
-          "script:fault-presentation:fact-bearing-plan"
+          "script:fault-presentation:fact-bearing-envelope"
         ]
       },
       "expectations": {
@@ -1124,7 +1184,8 @@
             "model_script_refs": [
               "script:fault-presentation:zero-target-functions",
               "script:fault-presentation:multiple-target-functions",
-              "script:fault-presentation:invalid-schema"
+              "script:fault-presentation:invalid-schema",
+              "script:fault-presentation:fact-bearing-envelope"
             ],
             "required_events": [
               "MessageAccepted",
@@ -1157,45 +1218,6 @@
                 "event": "PresentationPlanProposed",
                 "operator": "EQUALS",
                 "count": 0
-              }
-            ]
-          },
-          {
-            "variant": "PRESENTATION_PLAN_GATE_REJECTED",
-            "model_script_refs": [
-              "script:fault-presentation:fact-bearing-plan"
-            ],
-            "required_events": [
-              "MessageAccepted",
-              "RunStarted",
-              "RequestUnderstandingStarted",
-              "ContextManifestRecorded",
-              "NextMoveProposed",
-              "TaskDeltaValidated",
-              "TaskDeltaAccepted",
-              "InputBindingRecorded",
-              "TaskStateChanged",
-              "NextMoveRevalidated",
-              "GateDecisionRecorded",
-              "ToolCallCreated",
-              "ToolCallStarted",
-              "ToolCallSucceeded",
-              "ToolResultNormalized",
-              "ObservationRecorded",
-              "PresentationPlanProposed",
-              "ResponseRendered",
-              "RunStopped",
-              "EvalCaseGraded"
-            ],
-            "forbidden_events": [
-              "ToolCallFailed",
-              "ToolCallInterrupted"
-            ],
-            "event_count_assertions": [
-              {
-                "event": "PresentationPlanProposed",
-                "operator": "EQUALS",
-                "count": 1
               }
             ]
           }
