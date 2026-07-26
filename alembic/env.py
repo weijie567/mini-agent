@@ -8,6 +8,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.schema import CreateSchema
 
+from mini_agent.infrastructure.persistence.database import (
+    guard_test_database_engine,
+    test_database_connect_args,
+)
 from mini_agent.infrastructure.persistence.models import Base
 
 config = context.config
@@ -70,12 +74,18 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = _database_url()
+    database_url = _database_url()
+    configuration["sqlalchemy.url"] = database_url
+    testing = config.attributes.get("testing") is True
+    connect_args = test_database_connect_args(database_url) if testing else {}
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
+    if testing:
+        guard_test_database_engine(connectable)
     schema = _schema_name()
 
     with connectable.connect() as connection:

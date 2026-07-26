@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, text
 from sqlalchemy.schema import DropSchema
 
 from mini_agent.infrastructure.persistence.database import (
-    build_engine,
+    build_test_engine,
     database_url_from_environment,
 )
 from mini_agent.infrastructure.persistence.migrations import (
@@ -28,7 +28,7 @@ class PostgresTestNamespace:
     schema: str
 
     def build_engine(self) -> Engine:
-        return build_engine(self.database_url, schema=self.schema)
+        return build_test_engine(self.database_url, schema=self.schema)
 
 
 class PostgresNamespaceFactory:
@@ -52,11 +52,11 @@ class PostgresNamespaceFactory:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
         schema = f"test_{label[:30]}_{self.worker_id[:8]}_{digest}"
         self._schemas.append(schema)
-        upgrade_database_to_head(self.database_url, schema=schema)
+        upgrade_database_to_head(self.database_url, schema=schema, testing=True)
         return PostgresTestNamespace(self.database_url, schema)
 
     def _drop_schema(self, schema: str) -> None:
-        engine = create_engine(self.database_url, pool_pre_ping=True)
+        engine = build_test_engine(self.database_url)
         try:
             with engine.begin() as connection:
                 connection.execute(DropSchema(schema, cascade=True, if_exists=True))
@@ -95,7 +95,7 @@ def postgres_database_url() -> str:
     except ValueError as exc:
         pytest.fail(str(exc))
 
-    engine = create_engine(database_url, pool_pre_ping=True)
+    engine = build_test_engine(database_url)
     try:
         with engine.connect() as connection:
             if (

@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 
 from mini_agent.infrastructure.persistence.database import (
+    DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_LOCAL_TEST_DATABASE_URL,
+    build_engine,
+    build_test_engine,
     database_url_from_environment,
     validate_test_database_url,
 )
@@ -15,9 +18,22 @@ from mini_agent.infrastructure.persistence.migrations import (
 )
 from mini_agent.infrastructure.persistence.models import Base
 
+_LIBPQ_ROUTING_ENVIRONMENT_CASES = [
+    ("PGHOSTADDR", "203.0.113.10"),
+    ("PGHOST", "db.example"),
+    ("PGPORT", "5432"),
+    ("PGDATABASE", "mini_agent"),
+    ("PGSERVICE", "production"),
+    ("PGSERVICEFILE", "/tmp/unsafe-pg-service.conf"),
+    ("PGSYSCONFDIR", "/tmp/unsafe-pg-system"),
+    ("PGTARGETSESSIONATTRS", "read-write"),
+    ("PGLOADBALANCEHOSTS", "random"),
+    ("PGOPTIONS", "-csearch_path=public"),
+]
+
 
 def _extension_schema(database_url: str) -> str | None:
-    engine = create_engine(database_url, pool_pre_ping=True)
+    engine = build_test_engine(database_url)
     try:
         with engine.connect() as connection:
             return connection.scalar(
@@ -36,7 +52,7 @@ def _extension_schema(database_url: str) -> str | None:
 
 
 def _schema_exists(database_url: str, schema: str) -> bool:
-    engine = create_engine(database_url, pool_pre_ping=True)
+    engine = build_test_engine(database_url)
     try:
         with engine.connect() as connection:
             return bool(
@@ -110,6 +126,61 @@ def test_encoded_password_cannot_override_test_target() -> None:
     assert validate_test_database_url(encoded_user_info_url) == encoded_user_info_url
 
 
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    _LIBPQ_ROUTING_ENVIRONMENT_CASES,
+)
+def test_testing_connection_rejects_libpq_routing_environment(
+    monkeypatch,
+    variable: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValueError, match=variable):
+        database_url_from_environment(testing=True)
+
+
+def test_test_engine_rechecks_routing_environment_before_each_connection(
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    engine = build_test_engine(postgres_database_url)
+    try:
+        with engine.connect() as connection:
+            connection_info = connection.connection.driver_connection.info
+            assert connection_info.host == "127.0.0.1"
+            assert connection_info.hostaddr == "127.0.0.1"
+            assert connection_info.port == 55433
+            assert connection_info.dbname == "mini_agent_test"
+
+        monkeypatch.setenv("PGHOSTADDR", "203.0.113.10")
+        with pytest.raises(ValueError, match="PGHOSTADDR"):
+            engine.connect()
+
+        monkeypatch.delenv("PGHOSTADDR")
+        with engine.connect() as connection:
+            connection_info = connection.connection.driver_connection.info
+            assert connection_info.host == "127.0.0.1"
+            assert connection_info.hostaddr == "127.0.0.1"
+            assert connection_info.port == 55433
+            assert connection_info.dbname == "mini_agent_test"
+    finally:
+        engine.dispose()
+
+
+def test_development_engine_does_not_enable_test_environment_guard(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.10")
+
+    engine = build_engine(DEFAULT_LOCAL_DATABASE_URL)
+    try:
+        assert engine.url.database == "mini_agent"
+    finally:
+        engine.dispose()
+
+
 def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
     engine = postgres_namespace.build_engine()
     try:
@@ -142,10 +213,31 @@ def test_programmatic_migration_cannot_be_redirected_to_dev_url(
         postgres_namespace_factory.drop(namespace)
 
 
+def test_programmatic_migration_rejects_libpq_routing_environment(
+    postgres_namespace,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PGSERVICE", "production")
+    with pytest.raises(ValueError, match="PGSERVICE"):
+        upgrade_database_to_head(
+            postgres_namespace.database_url,
+            schema=postgres_namespace.schema,
+            testing=True,
+        )
+
+    monkeypatch.delenv("PGSERVICE")
+    upgrade_database_to_head(
+        postgres_namespace.database_url,
+        schema=postgres_namespace.schema,
+        testing=True,
+    )
+
+
 def test_upgrade_head_is_idempotent(postgres_namespace) -> None:
     upgrade_database_to_head(
         postgres_namespace.database_url,
         schema=postgres_namespace.schema,
+        testing=True,
     )
     engine = postgres_namespace.build_engine()
     try:
@@ -229,3 +321,29 @@ def test_cleanup_retains_failures_and_continues_other_drops(
     finally:
         monkeypatch.setattr(factory, "_drop_schema", original_drop)
         factory.cleanup()
+
+
+def test_drop_and_cleanup_reject_libpq_routing_environment(
+    postgres_namespace_factory,
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    factory = type(postgres_namespace_factory)(postgres_database_url, "routing")
+    first = factory.create("first")
+    second = factory.create("second")
+
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.10")
+    with pytest.raises(ValueError, match="PGHOSTADDR"):
+        factory.drop(first)
+    assert set(factory.tracked_schemas) == {first.schema, second.schema}
+
+    with pytest.raises(ExceptionGroup) as captured:
+        factory.cleanup()
+    assert len(captured.value.exceptions) == 2
+    assert set(factory.tracked_schemas) == {first.schema, second.schema}
+
+    monkeypatch.delenv("PGHOSTADDR")
+    factory.cleanup()
+    assert not factory.tracked_schemas
+    assert not _schema_exists(postgres_database_url, first.schema)
+    assert not _schema_exists(postgres_database_url, second.schema)
