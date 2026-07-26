@@ -103,7 +103,7 @@
 - 新建空 GitHub repository 时，Integrator 可以一次性 push 已确认的 `main` 与 active integration baseline 以建立 PR base；必须记录精确 commit，并在 bootstrap 后立即配置可用的 branch protection。该例外不适用于后续开发变更。
 - E2E 实现 feature branch 先创建 draft PR 到对应 integration branch；Integrator 串行合并后，再由 integration branch 创建 PR 到 `main`。Repository 级流程或紧急修复可直接 PR 到 `main`，但仍不得绕过验证和 review。
 - PR 必须使用 [`.github/pull_request_template.md`](./.github/pull_request_template.md)，如实记录 Task Packet、ownership、契约变化、检查结果、未执行项、安全 / Eval 影响、风险和回滚方式。
-- GSD 只可作为派生的规划、执行和验证辅助；`.planning/` 不得成为产品、架构、契约或 Eval 语义的第二套 canonical owner。未完成现有 active 文档的 owner 映射与冲突审查前，不运行会批量生成或覆盖项目状态的 GSD 流程。
+- GSD 只可作为派生的规划、执行和验证辅助；`.planning/` 不得成为产品、架构、契约或 Eval 语义的第二套 canonical owner。其 owner mapping、single-writer、severity、GitHub / Worktree 映射、quality gate 与 rollback 见 [`.planning/GOVERNANCE.md`](./.planning/GOVERNANCE.md)，activation 基线、allowlist、冲突审查与实际验证见 [`.planning/ACTIVATION.md`](./.planning/ACTIVATION.md)。Activation 只有在独立 PR 的精确 head review 为 `PASS` 且合并后才生效；生效后也只能按已批准 Task Packet 派生使用 `import / plan / execute / code-review / fix / validate / eval / secure / verify / ship`，不得自动覆盖 active owner、Case 生命周期、`main`、active integration branch 或共享 State。
 - `E2E01-01/04` 的具体 Wave、ownership 与 Task Packet 见 [`docs/implementation/e2e01-thin-slice-multi-agent-plan.md`](./docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。该 Plan 只拥有执行拆分，不覆盖任何 active canonical owner。
 
 ## graphify

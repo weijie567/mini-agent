@@ -63,8 +63,8 @@ integration PR → main
 
 写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。每个 Task Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令和交接格式；禁止直接 push `main` 或 integration。
 
-下一步不是立即并行写 W2，而是先完成串行 `W2-CONTRACT-FREEZE`：补齐跨 Runtime / Infra / Eval 共用的持久化 DTO、Port、恢复读取边界和测试 bootstrap contract。冻结 PR 合并后，三个 W2 worktree 才从同一精确 SHA 并行启动。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并。下一步仍不是立即并行写 W2，而是先完成串行 `W2.0b Core RecordSchema` prerequisite；其 exact-head PR 合并后，三个 W2 worktree 才从同一精确 integration SHA 并行启动。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## GSD
 
-当前不启用会写入 `.planning/` 的 GSD 流程。GSD 可以在未来作为派生的规划、执行和验证辅助，但必须先通过独立 activation PR 完成 active owner mapping、冲突审查和隔离演练；它不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。
+GSD 只作为派生的规划、执行和验证层，不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。独立 activation PR 合并前，依赖 Roadmap / Phase state 的 GSD 写入流程保持暂停；合并后也必须按 [GSD Governance](.planning/GOVERNANCE.md)、[Activation Record](.planning/ACTIVATION.md) 与[当前派生 State](.planning/STATE.md) 受控使用，并继续服从 Task Packet、独立 Worktree、feature PR 与 exact-head review。
