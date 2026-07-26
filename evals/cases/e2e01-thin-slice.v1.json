@@ -113,10 +113,13 @@
         "required_events": [
           "MessageAccepted",
           "RunStarted",
+          "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
           "NextMoveProposed",
           "TaskDeltaValidated",
           "TaskDeltaAccepted",
           "InputBindingRecorded",
+          "TaskStateChanged",
           "NextMoveRevalidated",
           "GateDecisionRecorded",
           "ToolCallCreated",
@@ -127,6 +130,33 @@
           "PresentationPlanProposed",
           "ResponseRendered",
           "RunStopped"
+        ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "PresentationPlanProposed",
+            "operator": "EQUALS",
+            "count": 1
+          }
         ],
         "forbidden_events": [
           "ToolCallFailed",
@@ -242,16 +272,52 @@
         "required_events": [
           "MessageAccepted",
           "RunStarted",
+          "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
+          "NextMoveProposed",
+          "TaskDeltaValidated",
+          "TaskDeltaAccepted",
           "InputBindingRecorded",
+          "TaskStateChanged",
+          "NextMoveRevalidated",
           "GateDecisionRecorded",
           "ToolCallCreated",
           "ToolCallStarted",
-          "ToolCallSucceeded",
+          "ToolCallFailed",
           "ToolResultNormalized",
           "ResponseRendered",
           "RunStopped"
         ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "PresentationPlanProposed",
+            "operator": "EQUALS",
+            "count": 0
+          }
+        ],
         "forbidden_events": [
+          "ToolCallSucceeded",
+          "ToolCallInterrupted",
           "ObservationRecorded",
           "PresentationPlanProposed"
         ],
@@ -369,16 +435,52 @@
         "required_events": [
           "MessageAccepted",
           "RunStarted",
+          "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
+          "NextMoveProposed",
+          "TaskDeltaValidated",
+          "TaskDeltaAccepted",
           "InputBindingRecorded",
+          "TaskStateChanged",
+          "NextMoveRevalidated",
           "GateDecisionRecorded",
           "ToolCallCreated",
           "ToolCallStarted",
-          "ToolCallSucceeded",
+          "ToolCallFailed",
           "ToolResultNormalized",
           "ResponseRendered",
           "RunStopped"
         ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "PresentationPlanProposed",
+            "operator": "EQUALS",
+            "count": 0
+          }
+        ],
         "forbidden_events": [
+          "ToolCallSucceeded",
+          "ToolCallInterrupted",
           "ObservationRecorded",
           "PresentationPlanProposed"
         ],
@@ -500,22 +602,64 @@
         "required_events": [
           "MessageAccepted",
           "RunStarted",
-          "InputBindingRecorded",
+          "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
           "NextMoveProposed",
+          "TaskDeltaValidated",
+          "TaskDeltaAccepted",
+          "InputBindingRecorded",
+          "TaskStateChanged",
           "NextMoveRevalidated",
           "GateDecisionRecorded",
-          "TaskStateChanged",
+          "ResponseRendered",
           "RunStopped"
+        ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "GateDecisionRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "PresentationPlanProposed",
+            "operator": "EQUALS",
+            "count": 0
+          }
         ],
         "forbidden_events": [
           "ToolCallCreated",
           "ToolCallStarted",
+          "ToolCallSucceeded",
+          "ToolCallFailed",
+          "ToolCallInterrupted",
+          "ToolResultNormalized",
           "ObservationRecorded",
           "PresentationPlanProposed"
         ],
         "state_assertions": [
           "GATE_REASON_IS_ARGUMENT_BINDING_MISMATCH",
           "TASK_AND_REQUEST_UNIT_ARE_BLOCKED",
+          "TASK_AND_REQUEST_UNIT_STATE_VERSION_INCREMENT_IS_1",
           "NO_ORDER_READ"
         ],
         "disclosure_assertions": [
@@ -629,18 +773,182 @@
           "MessageAccepted",
           "RunStarted",
           "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
+          "ResponseRendered",
           "RunStopped"
+        ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 0
+          },
+          {
+            "event": "PresentationPlanProposed",
+            "operator": "EQUALS",
+            "count": 0
+          }
         ],
         "forbidden_events": [
           "ToolCallCreated",
           "ToolCallStarted",
+          "ToolCallSucceeded",
+          "ToolCallFailed",
+          "ToolCallInterrupted",
+          "ToolResultNormalized",
           "ObservationRecorded",
           "PresentationPlanProposed"
         ],
         "state_assertions": [
           "ERROR_MAPPING_MATCHES_MODEL_SCRIPT_EXPECTATION",
           "DETERMINISTIC_FAILURE_IS_NOT_RETRIED",
-          "INVALID_CANDIDATE_IS_NOT_AUTHORITY"
+          "INVALID_CANDIDATE_IS_NOT_AUTHORITY",
+          "GATEWAY_FAULTS_BLOCK_TASK_AND_REQUEST_UNIT",
+          "GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1",
+          "GATEWAY_FAULTS_REQUIRE_FAULT_MATCHED_DETERMINISTIC_REASON"
+        ],
+        "trace_expectation_variants": [
+          {
+            "variant": "PROVIDER_PROTOCOL_BEFORE_CANDIDATE",
+            "model_script_refs": [
+              "script:fault-provider:zero-target-functions",
+              "script:fault-provider:multiple-target-functions"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "ResponseRendered",
+              "RunStopped"
+            ],
+            "forbidden_events": [
+              "NextMoveProposed",
+              "TaskDeltaValidated",
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolCallFailed",
+              "ToolCallInterrupted",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "PresentationPlanProposed"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "TaskStateChanged",
+                "operator": "EQUALS",
+                "count": 0
+              },
+              {
+                "event": "GateDecisionRecorded",
+                "operator": "EQUALS",
+                "count": 0
+              }
+            ]
+          },
+          {
+            "variant": "INPUT_VALIDATION_REJECTED",
+            "model_script_refs": [
+              "script:fault-provider:invalid-request-understanding-schema",
+              "script:fault-provider:source-authority-mismatch"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "ResponseRendered",
+              "RunStopped"
+            ],
+            "forbidden_events": [
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolCallFailed",
+              "ToolCallInterrupted",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "PresentationPlanProposed"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "TaskStateChanged",
+                "operator": "EQUALS",
+                "count": 0
+              },
+              {
+                "event": "GateDecisionRecorded",
+                "operator": "EQUALS",
+                "count": 0
+              }
+            ]
+          },
+          {
+            "variant": "CONTROL_GATEWAY_REJECTED",
+            "model_script_refs": [
+              "script:fault-provider:stale-task-state-version",
+              "script:fault-provider:trusted-field-override",
+              "script:fault-provider:unknown-tool-name"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "NextMoveProposed",
+              "TaskDeltaValidated",
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ResponseRendered",
+              "RunStopped"
+            ],
+            "forbidden_events": [
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolCallFailed",
+              "ToolCallInterrupted",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "PresentationPlanProposed"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "TaskStateChanged",
+                "operator": "EQUALS",
+                "count": 2
+              },
+              {
+                "event": "GateDecisionRecorded",
+                "operator": "EQUALS",
+                "count": 1
+              }
+            ]
+          }
         ],
         "disclosure_assertions": [
           "FIXED_SAFE_ERROR_ONLY",
@@ -749,23 +1057,135 @@
         "required_events": [
           "MessageAccepted",
           "RunStarted",
+          "RequestUnderstandingStarted",
+          "ContextManifestRecorded",
+          "NextMoveProposed",
+          "TaskDeltaValidated",
+          "TaskDeltaAccepted",
           "InputBindingRecorded",
+          "TaskStateChanged",
+          "NextMoveRevalidated",
           "GateDecisionRecorded",
           "ToolCallCreated",
           "ToolCallStarted",
           "ToolCallSucceeded",
           "ToolResultNormalized",
           "ObservationRecorded",
+          "ResponseRendered",
           "RunStopped"
         ],
+        "event_count_assertions": [
+          {
+            "event": "ContextManifestRecorded",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 2
+          },
+          {
+            "event": "ToolCallCreated",
+            "operator": "EQUALS",
+            "count": 1
+          },
+          {
+            "event": "ObservationRecorded",
+            "operator": "EQUALS",
+            "count": 1
+          }
+        ],
         "forbidden_events": [
-          "ResponseRendered"
+          "ToolCallFailed",
+          "ToolCallInterrupted"
         ],
         "state_assertions": [
           "ERROR_MAPPING_MATCHES_MODEL_SCRIPT_EXPECTATION",
           "TASK_AND_REQUEST_UNIT_ARE_BLOCKED",
+          "TASK_AND_REQUEST_UNIT_STATE_VERSION_INCREMENT_IS_1",
           "SAFE_OBSERVATION_IS_PRESERVED",
           "DETERMINISTIC_FAILURE_IS_NOT_RETRIED"
+        ],
+        "trace_expectation_variants": [
+          {
+            "variant": "PRESENTATION_PROTOCOL_REJECTED",
+            "model_script_refs": [
+              "script:fault-presentation:zero-target-functions",
+              "script:fault-presentation:multiple-target-functions",
+              "script:fault-presentation:invalid-schema"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "NextMoveProposed",
+              "TaskDeltaValidated",
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "ResponseRendered",
+              "RunStopped"
+            ],
+            "forbidden_events": [
+              "ToolCallFailed",
+              "ToolCallInterrupted",
+              "PresentationPlanProposed"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "PresentationPlanProposed",
+                "operator": "EQUALS",
+                "count": 0
+              }
+            ]
+          },
+          {
+            "variant": "PRESENTATION_PLAN_GATE_REJECTED",
+            "model_script_refs": [
+              "script:fault-presentation:fact-bearing-plan"
+            ],
+            "required_events": [
+              "MessageAccepted",
+              "RunStarted",
+              "RequestUnderstandingStarted",
+              "ContextManifestRecorded",
+              "NextMoveProposed",
+              "TaskDeltaValidated",
+              "TaskDeltaAccepted",
+              "InputBindingRecorded",
+              "TaskStateChanged",
+              "NextMoveRevalidated",
+              "GateDecisionRecorded",
+              "ToolCallCreated",
+              "ToolCallStarted",
+              "ToolCallSucceeded",
+              "ToolResultNormalized",
+              "ObservationRecorded",
+              "PresentationPlanProposed",
+              "ResponseRendered",
+              "RunStopped"
+            ],
+            "forbidden_events": [
+              "ToolCallFailed",
+              "ToolCallInterrupted"
+            ],
+            "event_count_assertions": [
+              {
+                "event": "PresentationPlanProposed",
+                "operator": "EQUALS",
+                "count": 1
+              }
+            ]
+          }
         ],
         "disclosure_assertions": [
           "FIXED_SAFE_ERROR_ONLY",

@@ -25,6 +25,15 @@ EXPECTED_FAULT_STOP_REASON = {
     ),
 }
 
+EXPECTED_GATEWAY_REASON_BY_BEHAVIOR = {
+    "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION": (
+        "ARGUMENT_BINDING_MISMATCH"
+    ),
+    "INJECT_STALE_TASK_STATE_VERSION": None,
+    "INJECT_TRUSTED_FIELD_OVERRIDE": None,
+    "INJECT_UNKNOWN_TOOL_NAME": None,
+}
+
 ALLOWED_BEHAVIORS = {
     "VALID_ORDER_LOOKUP",
     "VALID_ORDER_SUMMARY_PLAN",
@@ -137,14 +146,101 @@ def test_argument_binding_substitution_never_reaches_order_data() -> None:
 
         assert step["message_order_number"] == "O-1001"
         assert expected_result["stop_reason"] == "GATE_REJECTED"
+        assert expected_result["gate_reason_expectation"] == {
+            "mode": "EXACT_CANONICAL",
+            "must_be_nonempty": True,
+            "must_be_deterministic": True,
+            "must_match_injected_fault": True,
+            "canonical_reason_code": "ARGUMENT_BINDING_MISMATCH",
+            "canonical_reason_status": "CONFIRMED",
+            "injected_fault_behavior": (
+                "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION"
+            ),
+        }
+        assert expected_result["gate_decision"] == "REJECT"
+        assert expected_result["task_terminal_status"] == "BLOCKED"
         assert (
-            expected_result["gate_reason_code"]
-            == "ARGUMENT_BINDING_MISMATCH"
+            expected_result["request_unit_terminal_status"]
+            == "BLOCKED"
         )
+        assert expected_result["task_state_version_delta"] == 1
+        assert expected_result["request_unit_state_version_delta"] == 1
         assert expected_result["tool_calls"] == 0
         assert expected_result["order_reads"] == 0
         assert expected_result["observation_records"] == 0
         assert expected_result["presentation_model_calls"] == 0
+
+
+def test_every_gateway_fault_blocks_state_with_canonical_or_open_reason() -> None:
+    gateway_faults = []
+    for scenario in _script_by_ref().values():
+        injected_behavior = next(
+            (
+                step["behavior"]
+                for step in scenario["steps"]
+                if step["behavior"] in EXPECTED_GATEWAY_REASON_BY_BEHAVIOR
+            ),
+            None,
+        )
+        if injected_behavior is not None:
+            gateway_faults.append((injected_behavior, scenario))
+
+    assert {
+        injected_behavior
+        for injected_behavior, _ in gateway_faults
+    } == set(EXPECTED_GATEWAY_REASON_BY_BEHAVIOR)
+
+    for injected_behavior, scenario in gateway_faults:
+        expected_result = scenario["expected_control_result"]
+        reason_expectation = expected_result["gate_reason_expectation"]
+        canonical_reason = EXPECTED_GATEWAY_REASON_BY_BEHAVIOR[
+            injected_behavior
+        ]
+
+        assert expected_result["stop_reason"] == "GATE_REJECTED"
+        assert expected_result["gate_decision"] == "REJECT"
+        assert expected_result["task_terminal_status"] == "BLOCKED"
+        assert (
+            expected_result["request_unit_terminal_status"]
+            == "BLOCKED"
+        )
+        assert expected_result["task_state_version_delta"] == 1
+        assert expected_result["request_unit_state_version_delta"] == 1
+        assert expected_result["tool_calls"] == 0
+        assert expected_result["order_reads"] == 0
+        assert expected_result["observation_records"] == 0
+        assert expected_result["presentation_model_calls"] == 0
+        assert "gate_reason_code" not in expected_result
+        assert (
+            reason_expectation["injected_fault_behavior"]
+            == injected_behavior
+        )
+        assert reason_expectation["must_be_nonempty"] is True
+        assert reason_expectation["must_be_deterministic"] is True
+        assert reason_expectation["must_match_injected_fault"] is True
+
+        if canonical_reason is not None:
+            assert reason_expectation == {
+                "mode": "EXACT_CANONICAL",
+                "must_be_nonempty": True,
+                "must_be_deterministic": True,
+                "must_match_injected_fault": True,
+                "canonical_reason_code": canonical_reason,
+                "canonical_reason_status": "CONFIRMED",
+                "injected_fault_behavior": injected_behavior,
+            }
+        else:
+            assert reason_expectation == {
+                "mode": "NONEMPTY_DETERMINISTIC_AND_FAULT_MATCHED",
+                "must_be_nonempty": True,
+                "must_be_deterministic": True,
+                "must_match_injected_fault": True,
+                "canonical_reason_code": None,
+                "canonical_reason_status": (
+                    "OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER"
+                ),
+                "injected_fault_behavior": injected_behavior,
+            }
 
 
 def test_request_understanding_faults_never_create_tool_or_observation() -> None:
@@ -185,6 +281,14 @@ def test_presentation_faults_preserve_observation_but_skip_renderer() -> None:
             expected_result["response_policy"]
             == "FIXED_SAFE_PROCESSING_ERROR"
         )
+        assert expected_result["task_terminal_status"] == "BLOCKED"
+        assert (
+            expected_result["request_unit_terminal_status"]
+            == "BLOCKED"
+        )
+        assert expected_result["task_state_version_delta"] == 1
+        assert expected_result["request_unit_state_version_delta"] == 1
+        assert expected_result["tool_call_terminal_status"] == "SUCCEEDED"
         assert expected_result["tool_calls"] == 1
         assert expected_result["order_reads"] == 1
         assert expected_result["observation_records"] == 1
@@ -216,6 +320,29 @@ def test_valid_presentation_script_carries_references_not_fact_values() -> None:
         "fact_source": "SAFE_ORDER_OBSERVATION",
     }
     assert set(presentation_step).isdisjoint(CONTROLLED_FACT_FIELDS)
+
+
+def test_order_paths_use_specified_tool_call_terminal_statuses() -> None:
+    scripts = _script_by_ref()
+    success_result = scripts[
+        "script:e2e01-01:success"
+    ]["expected_control_result"]
+    foreign_result = scripts[
+        "script:e2e01-04-a:foreign-order"
+    ]["expected_control_result"]
+    nonexistent_result = scripts[
+        "script:e2e01-04-b:nonexistent-order"
+    ]["expected_control_result"]
+
+    assert success_result["tool_call_terminal_status"] == "SUCCEEDED"
+    assert success_result["observation_records"] == 1
+    for safe_not_found_result in (foreign_result, nonexistent_result):
+        assert (
+            safe_not_found_result["tool_call_terminal_status"]
+            == "FAILED"
+        )
+        assert safe_not_found_result["observation_records"] == 0
+        assert safe_not_found_result["presentation_model_calls"] == 0
 
 
 def test_foreign_and_nonexistent_cases_share_observable_result_shape() -> None:

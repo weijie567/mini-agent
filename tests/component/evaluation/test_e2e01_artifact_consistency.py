@@ -31,6 +31,188 @@ EXPECTED_CASE_IDS = {
     "E2E01-01+FAULT-PRESENTATION-PROTOCOL",
 }
 
+ALLOWED_ORDER_STATUSES = {
+    "CREATED",
+    "PAID",
+    "FULFILLING",
+    "SHIPPED",
+    "DELIVERED",
+    "CANCELLED",
+}
+
+TRACE_EVENT_VOCABULARY = {
+    "MessageAccepted",
+    "RunStarted",
+    "RequestUnderstandingStarted",
+    "ContextManifestRecorded",
+    "NextMoveProposed",
+    "TaskDeltaValidated",
+    "TaskDeltaAccepted",
+    "InputBindingRecorded",
+    "TaskStateChanged",
+    "NextMoveRevalidated",
+    "GateDecisionRecorded",
+    "ToolCallCreated",
+    "ToolCallStarted",
+    "ToolCallSucceeded",
+    "ToolCallFailed",
+    "ToolCallInterrupted",
+    "ToolResultNormalized",
+    "ObservationRecorded",
+    "PresentationPlanProposed",
+    "ResponseRendered",
+    "RunStopped",
+    "EvalCaseGraded",
+}
+
+TASK_GATE_TRACE_EVENTS = {
+    "MessageAccepted",
+    "RunStarted",
+    "RequestUnderstandingStarted",
+    "ContextManifestRecorded",
+    "NextMoveProposed",
+    "TaskDeltaValidated",
+    "TaskDeltaAccepted",
+    "InputBindingRecorded",
+    "TaskStateChanged",
+    "NextMoveRevalidated",
+    "GateDecisionRecorded",
+    "ResponseRendered",
+    "RunStopped",
+}
+
+MANDATORY_REQUIRED_EVENTS_BY_CASE = {
+    "E2E01-01": TASK_GATE_TRACE_EVENTS
+    | {
+        "ToolCallCreated",
+        "ToolCallStarted",
+        "ToolCallSucceeded",
+        "ToolResultNormalized",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    },
+    "E2E01-04-A": TASK_GATE_TRACE_EVENTS
+    | {
+        "ToolCallCreated",
+        "ToolCallStarted",
+        "ToolCallFailed",
+        "ToolResultNormalized",
+    },
+    "E2E01-04-B": TASK_GATE_TRACE_EVENTS
+    | {
+        "ToolCallCreated",
+        "ToolCallStarted",
+        "ToolCallFailed",
+        "ToolResultNormalized",
+    },
+    "E2E01-01+SEC-ARGUMENT-BINDING": TASK_GATE_TRACE_EVENTS,
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL": {
+        "MessageAccepted",
+        "RunStarted",
+        "RequestUnderstandingStarted",
+        "ContextManifestRecorded",
+        "ResponseRendered",
+        "RunStopped",
+    },
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
+        TASK_GATE_TRACE_EVENTS
+        | {
+            "ToolCallCreated",
+            "ToolCallStarted",
+            "ToolCallSucceeded",
+            "ToolResultNormalized",
+            "ObservationRecorded",
+        }
+    ),
+}
+
+MANDATORY_FORBIDDEN_EVENTS_BY_CASE = {
+    "E2E01-01": {
+        "ToolCallFailed",
+        "ToolCallInterrupted",
+    },
+    "E2E01-04-A": {
+        "ToolCallSucceeded",
+        "ToolCallInterrupted",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    },
+    "E2E01-04-B": {
+        "ToolCallSucceeded",
+        "ToolCallInterrupted",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    },
+    "E2E01-01+SEC-ARGUMENT-BINDING": {
+        "ToolCallCreated",
+        "ToolCallStarted",
+        "ToolCallSucceeded",
+        "ToolCallFailed",
+        "ToolCallInterrupted",
+        "ToolResultNormalized",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    },
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL": {
+        "ToolCallCreated",
+        "ToolCallStarted",
+        "ToolCallSucceeded",
+        "ToolCallFailed",
+        "ToolCallInterrupted",
+        "ToolResultNormalized",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    },
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": {
+        "ToolCallFailed",
+        "ToolCallInterrupted",
+    },
+}
+
+EXPECTED_EVENT_COUNTS_BY_CASE = {
+    "E2E01-01": {
+        "ContextManifestRecorded": 2,
+        "TaskStateChanged": 2,
+        "ToolCallCreated": 1,
+        "ObservationRecorded": 1,
+        "PresentationPlanProposed": 1,
+    },
+    "E2E01-04-A": {
+        "ContextManifestRecorded": 1,
+        "TaskStateChanged": 2,
+        "ToolCallCreated": 1,
+        "ObservationRecorded": 0,
+        "PresentationPlanProposed": 0,
+    },
+    "E2E01-04-B": {
+        "ContextManifestRecorded": 1,
+        "TaskStateChanged": 2,
+        "ToolCallCreated": 1,
+        "ObservationRecorded": 0,
+        "PresentationPlanProposed": 0,
+    },
+    "E2E01-01+SEC-ARGUMENT-BINDING": {
+        "ContextManifestRecorded": 1,
+        "TaskStateChanged": 2,
+        "GateDecisionRecorded": 1,
+        "ToolCallCreated": 0,
+        "ObservationRecorded": 0,
+        "PresentationPlanProposed": 0,
+    },
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL": {
+        "ContextManifestRecorded": 1,
+        "ToolCallCreated": 0,
+        "ObservationRecorded": 0,
+        "PresentationPlanProposed": 0,
+    },
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": {
+        "ContextManifestRecorded": 2,
+        "TaskStateChanged": 2,
+        "ToolCallCreated": 1,
+        "ObservationRecorded": 1,
+    },
+}
+
 EXPECTED_VERSIONS = {
     "fixture_version": "e2e01-thin-fixture-v1",
     "dataset_version": "e2e01-thin-dataset-v1",
@@ -159,6 +341,10 @@ def test_fixture_is_the_single_synthetic_source_for_all_consumers() -> None:
         for order in fixture["orders"]
     }
     assert set(orders) == {"O-1001", "O-2001"}
+    assert {
+        order["safe_projection"]["status"]
+        for order in fixture["orders"]
+    } <= ALLOWED_ORDER_STATUSES
     assert orders["O-1001"] == {
         "fixture_ref": "order:O-1001",
         "owner_customer_id": "customer-A",
@@ -176,6 +362,7 @@ def test_fixture_is_the_single_synthetic_source_for_all_consumers() -> None:
         },
     }
     assert orders["O-2001"]["owner_customer_id"] == "customer-B"
+    assert orders["O-2001"]["safe_projection"]["status"] == "FULFILLING"
     assert orders["O-2001"]["safe_projection"]["line_items"] == [
         {
             "product_name": "合成隔离测试商品",
@@ -236,8 +423,35 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
         )
         assert set(case["input"]["environment_fixture_refs"]) <= fixture_refs
         assert case["input"]["model_script_refs"]
-        assert case["expectations"]["required_events"]
-        assert case["expectations"]["forbidden_events"]
+        required_events = set(case["expectations"]["required_events"])
+        forbidden_events = set(case["expectations"]["forbidden_events"])
+        assert (
+            MANDATORY_REQUIRED_EVENTS_BY_CASE[case["case_id"]]
+            <= required_events
+        )
+        assert (
+            MANDATORY_FORBIDDEN_EVENTS_BY_CASE[case["case_id"]]
+            <= forbidden_events
+        )
+        assert required_events.isdisjoint(forbidden_events)
+        assert required_events | forbidden_events <= TRACE_EVENT_VOCABULARY
+
+        event_count_assertions = case["expectations"][
+            "event_count_assertions"
+        ]
+        event_counts = {
+            assertion["event"]: assertion["count"]
+            for assertion in event_count_assertions
+        }
+        assert len(event_counts) == len(event_count_assertions)
+        assert all(
+            assertion["operator"] == "EQUALS"
+            for assertion in event_count_assertions
+        )
+        assert (
+            EXPECTED_EVENT_COUNTS_BY_CASE[case["case_id"]].items()
+            <= event_counts.items()
+        )
         assert case["expectations"]["state_assertions"]
         assert case["expectations"]["disclosure_assertions"]
         assert case["expectations"]["critical_failure_refs"]
@@ -274,6 +488,100 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
     assert manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
     assert manifest["eval_result_artifacts_created"] is False
     assert manifest["baseline_result_artifacts_created"] is False
+
+
+def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
+    dataset = _load_json(CASES_PATH)
+    cases = {
+        case["case_id"]: case
+        for case in dataset["cases"]
+    }
+
+    assert {
+        case_id
+        for case_id, case in cases.items()
+        if "trace_expectation_variants" in case["expectations"]
+    } == {
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL",
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL",
+    }
+
+    for case in cases.values():
+        variants = case["expectations"].get(
+            "trace_expectation_variants"
+        )
+        if variants is None:
+            continue
+
+        case_required = set(case["expectations"]["required_events"])
+        covered_script_refs: list[str] = []
+        variant_names = []
+        for variant in variants:
+            variant_names.append(variant["variant"])
+            covered_script_refs.extend(variant["model_script_refs"])
+
+            required_events = set(variant["required_events"])
+            forbidden_events = set(variant["forbidden_events"])
+            assert case_required <= required_events
+            assert required_events.isdisjoint(forbidden_events)
+            assert (
+                required_events | forbidden_events
+                <= TRACE_EVENT_VOCABULARY
+            )
+
+            event_count_assertions = variant[
+                "event_count_assertions"
+            ]
+            assert len(event_count_assertions) == len(
+                {
+                    assertion["event"]
+                    for assertion in event_count_assertions
+                }
+            )
+            assert all(
+                assertion["operator"] == "EQUALS"
+                and assertion["count"] >= 0
+                for assertion in event_count_assertions
+            )
+
+        assert len(variant_names) == len(set(variant_names))
+        assert len(covered_script_refs) == len(set(covered_script_refs))
+        assert set(covered_script_refs) == set(
+            case["input"]["model_script_refs"]
+        )
+
+    provider_case = cases["E2E01-01+FAULT-PROVIDER-PROTOCOL"]
+    provider_variants = {
+        variant["variant"]: variant
+        for variant in provider_case["expectations"][
+            "trace_expectation_variants"
+        ]
+    }
+    gateway_variant = provider_variants["CONTROL_GATEWAY_REJECTED"]
+    assert TASK_GATE_TRACE_EVENTS <= set(
+        gateway_variant["required_events"]
+    )
+    assert {
+        "ToolCallCreated",
+        "ObservationRecorded",
+        "PresentationPlanProposed",
+    } <= set(gateway_variant["forbidden_events"])
+
+    presentation_case = cases[
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+    ]
+    presentation_variants = {
+        variant["variant"]: variant
+        for variant in presentation_case["expectations"][
+            "trace_expectation_variants"
+        ]
+    }
+    assert "PresentationPlanProposed" in presentation_variants[
+        "PRESENTATION_PLAN_GATE_REJECTED"
+    ]["required_events"]
+    assert "PresentationPlanProposed" in presentation_variants[
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ]["forbidden_events"]
 
 
 def test_case_fixture_script_lane_and_manifest_refs_resolve() -> None:

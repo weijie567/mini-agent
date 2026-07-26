@@ -27,21 +27,21 @@
       "path": "evals/fixtures/e2e01-thin-slice.v1.json",
       "version_field": "fixture_version",
       "version": "e2e01-thin-fixture-v1",
-      "sha256": "cf5558794b95c073ff146ae2295937377b19349a44167dbdf30532fa784a19a5"
+      "sha256": "3940f5755ab001339d254077b36b3ae2965e590adee43ea0fb4e1d7cd2648c33"
     },
     {
       "artifact_id": "e2e01-thin-cases",
       "path": "evals/cases/e2e01-thin-slice.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-thin-dataset-v1",
-      "sha256": "cff4cbd96aedf38c3ca9db7a3d94df94446e936ffde884b6bb48fb04f0ce7f6c"
+      "sha256": "2422ffc9e3b50678ebe424cada9b28d6fdd4de9f8b98a114ee3d8dee63891d20"
     },
     {
       "artifact_id": "e2e01-thin-model-scripts",
       "path": "evals/model_scripts/e2e01-thin-slice.v1.json",
       "version_field": "model_script_catalog_version",
       "version": "e2e01-thin-model-scripts-v1",
-      "sha256": "52fe742c5cd086a2b5503c2459a50c6a3cd22bca1563adb15659fe435674a575"
+      "sha256": "0706dfc7529d0a9adaaae1b08c568b27d58e54093b84552471b17bed62f9ab1d"
     },
     {
       "artifact_id": "e2e01-thin-lanes",

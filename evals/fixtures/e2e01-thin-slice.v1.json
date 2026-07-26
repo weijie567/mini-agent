@@ -52,7 +52,7 @@
       "owner_customer_id": "customer-B",
       "safe_projection": {
         "order_number": "O-2001",
-        "status": "PROCESSING",
+        "status": "FULFILLING",
         "line_items": [
           {
             "product_name": "合成隔离测试商品",
