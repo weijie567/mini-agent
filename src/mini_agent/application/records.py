@@ -1120,6 +1120,7 @@ _RECOVERY_TRACE_COMMON_FIELDS = frozenset(
         "run_id",
     }
 )
+_TRACE_EVENT_FIELD_NAMES = frozenset(TraceEvent.model_fields)
 _RECOVERY_TRACE_ALLOWED_FIELDS = {
     TraceEventType.RUN_STOPPED: _RECOVERY_TRACE_COMMON_FIELDS
     | {"user_outcome", "stop_reason"},
@@ -1320,6 +1321,35 @@ class ApplyRestartRecoveryCommand(_StrictRuntimePrivateRecord):
         tuple[TraceEvent, ...],
         Field(min_length=1, max_length=3),
     ]
+
+    @field_validator("recovery_trace_events")
+    @classmethod
+    def recovery_trace_events_are_canonical(
+        cls,
+        events: tuple[TraceEvent, ...],
+    ) -> tuple[TraceEvent, ...]:
+        canonical_events: list[TraceEvent] = []
+        for event in events:
+            if type(event) is not TraceEvent:
+                raise ValueError("recovery Trace requires exact TraceEvent records")
+            event_field_names = frozenset(vars(event))
+            has_only_known_fields = event.model_fields_set.issubset(
+                _TRACE_EVENT_FIELD_NAMES
+            )
+            if (
+                event_field_names != _TRACE_EVENT_FIELD_NAMES
+                or not has_only_known_fields
+            ):
+                raise ValueError(
+                    "recovery TraceEvent records must contain only canonical fields"
+                )
+            canonical_events.append(
+                TraceEvent.model_validate(
+                    dict(vars(event)),
+                    strict=True,
+                )
+            )
+        return tuple(canonical_events)
 
     @model_validator(mode="after")
     def next_projections_are_bijective_with_expected_closure(self) -> Self:

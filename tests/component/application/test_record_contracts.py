@@ -2613,6 +2613,49 @@ def test_restart_recovery_requires_the_exact_bounded_trace_event_set() -> None:
 
 
 @pytest.mark.parametrize(
+    "updates",
+    (
+        {"trace_event_id": "not-a-uuid"},
+        {"trace_event_id": []},
+        {"case_id": ()},
+        {"argument_binding_refs": None},
+    ),
+)
+def test_restart_recovery_strictly_revalidates_nested_trace_event_known_fields(
+    updates: dict[str, object],
+) -> None:
+    command = _restart_recovery_command()
+
+    with pytest.raises(ValidationError):
+        _rebuild(
+            command,
+            recovery_trace_events=_updated_recovery_trace_events(
+                command,
+                TraceEventType.RUN_STOPPED,
+                **updates,
+            ),
+        )
+
+
+def test_restart_recovery_rejects_hidden_nested_trace_event_fields() -> None:
+    command = _restart_recovery_command()
+    events = _updated_recovery_trace_events(
+        command,
+        TraceEventType.RUN_STOPPED,
+        secret="must-not-cross-application-boundary",
+    )
+    injected_event = next(
+        event for event in events if event.event_type is TraceEventType.RUN_STOPPED
+    )
+
+    assert "secret" in vars(injected_event)
+    assert "secret" in injected_event.model_fields_set
+    assert "secret" not in injected_event.model_dump(mode="python")
+    with pytest.raises(ValidationError):
+        _rebuild(command, recovery_trace_events=events)
+
+
+@pytest.mark.parametrize(
     ("missing_event_type", "error_match"),
     (
         (TraceEventType.RUN_STOPPED, "exactly one RunStopped"),
