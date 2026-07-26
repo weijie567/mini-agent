@@ -24,6 +24,7 @@ must_haves:
     - "That race yields GATE_REJECTED with exact GateReasonCode.STATE_VERSION_MISMATCH and never creates a ToolCall."
     - "Gateway rejection then uses the current WAITING_USER/v2 projection for a second canonical transition to BLOCKED/v3; total version delta is 2 and total TaskStateChanged count is 3 including initial creation."
     - "The stale-state script has its own CONTROL_GATEWAY_STALE_STATE_REJECTED trace variant; unknown-tool rejection remains in CONTROL_GATEWAY_REJECTED with its existing two TaskStateChanged events."
+    - "The Case removes the obsolete global GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1 assertion and replaces it with script-scoped unknown-tool delta-1 and stale-state delta-2 assertions."
     - "Fact-bearing raw presentation output fails the Provider/Pydantic boundary as PROVIDER_PROTOCOL_ERROR; no PresentationPlanProposed event and no Renderer call occur."
     - "No model_construct, shadow DTO, copied contract or noncanonical object is permitted."
     - "The correction is an explicit pre-executable contract bug fix: no Baseline or Eval Result exists, Case lifecycle stays CONTRACT_DEFINED, and manifest hashes are recalculated from exact bytes."
@@ -37,6 +38,7 @@ must_haves:
     - "Fact-bearing raw provider envelope → strict PresentationPlan validation failure → ProviderProtocolError → zero PresentationPlanProposed."
     - "Case trace variants and model-script expected_control_result use the same stop reason and event counts."
     - "Every script ref belongs to exactly one trace variant; stale-state and unknown-tool scripts do not share an incompatible event-count assertion."
+    - "Case state assertions name the exact per-script version delta; no global delta-1 assertion applies to the stale-state script."
 ---
 
 <objective>
@@ -203,6 +205,10 @@ Artifact representation must use:
 - exact confirmed reason `STATE_VERSION_MISMATCH`
 - move the stale script into a dedicated `CONTROL_GATEWAY_STALE_STATE_REJECTED` Case trace variant with `TaskStateChanged == 3` and `GateDecisionRecorded == 1`
 - keep `script:fault-provider:unknown-tool-name` alone in the existing `CONTROL_GATEWAY_REJECTED` variant with its existing `TaskStateChanged == 2` and `GateDecisionRecorded == 1`
+- remove the obsolete Case state assertion `GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1`
+- add the exact script-scoped Case state assertions:
+  - `UNKNOWN_TOOL_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_1`
+  - `STALE_STATE_GATEWAY_REJECTION_INCREMENTS_TASK_AND_REQUEST_UNIT_STATE_VERSION_BY_2`
 
 The injected transition must update both Task and RequestUnit through one canonical `ApplyTaskTransitionCommand`, carry an opaque UUID `reason_ref`, and persist/emit its matching `TaskStateChanged`. If the conditional write is not `APPLIED`, the lane records an Eval execution failure instead of fabricating a Gateway result. Direct in-memory version mutation is forbidden.
 
@@ -244,7 +250,7 @@ Artifact representation must use:
   <name>Task 1: RED — prove both artifact paths contradict frozen DTOs</name>
   <files>tests/component/evaluation/test_e2e01_artifact_consistency.py, tests/component/model/test_e2e01_scripted_scenario_catalog.py</files>
   <read_first>AGENTS.md, docs/implementation/e2e01-thin-slice-implementation-spec.md, src/mini_agent/core/request_understanding.py, src/mini_agent/core/presentation.py, src/mini_agent/core/tool_system.py, src/mini_agent/application/ports.py, evals/cases/e2e01-thin-slice.v1.json, evals/model_scripts/e2e01-thin-slice.v1.json, tests/component/evaluation/test_e2e01_artifact_consistency.py, tests/component/model/test_e2e01_scripted_scenario_catalog.py</read_first>
-  <action>Add assertions that a non-null first-new-goal base version fails RequestUnderstandingOutput validation and a fact-bearing raw Presentation payload fails strict PresentationPlan validation. Add desired artifact assertions for the exact target representation in the interfaces block, including the canonical ACTIVE/v1 → WAITING_USER/v2 → BLOCKED/v3 chain, delta 2, the dedicated stale-state variant with three TaskStateChanged events, and the unchanged unknown-tool variant with two. Run the two focused files before artifact changes and record failure due to current expectations, not syntax/import errors.</action>
+  <action>Add assertions that a non-null first-new-goal base version fails RequestUnderstandingOutput validation and a fact-bearing raw Presentation payload fails strict PresentationPlan validation. Add desired artifact assertions for the exact target representation in the interfaces block, including the canonical ACTIVE/v1 → WAITING_USER/v2 → BLOCKED/v3 chain, delta 2, the dedicated stale-state variant with three TaskStateChanged events, and the unchanged unknown-tool variant with two. Assert that the obsolete global `GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1` Case assertion is absent and the two exact script-scoped delta-1/delta-2 assertion identifiers are present and mapped to the corresponding model-script refs/trace variants. Run the two focused files before artifact changes and record failure due to current expectations, not syntax/import errors.</action>
   <verify>`uv run pytest tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/model/test_e2e01_scripted_scenario_catalog.py -x` must fail on the new alignment assertions before GREEN changes.</verify>
   <acceptance_criteria>
     - canonical validation failures are reproduced with public Pydantic APIs
@@ -258,8 +264,8 @@ Artifact representation must use:
   <name>Task 2: GREEN — align stale-state race at the Runtime/Gateway boundary</name>
   <files>docs/implementation/e2e01-thin-slice-implementation-spec.md, evals/model_scripts/e2e01-thin-slice.v1.json, evals/cases/e2e01-thin-slice.v1.json, tests/component/evaluation/test_e2e01_artifact_consistency.py, tests/component/model/test_e2e01_scripted_scenario_catalog.py</files>
   <read_first>AGENTS.md, docs/architecture/intent-design-reference.md, docs/architecture/tool-calling-design-reference.md, docs/implementation/e2e01-thin-slice-implementation-spec.md, src/mini_agent/core/request_understanding.py, src/mini_agent/core/tool_system.py, evals/model_scripts/e2e01-thin-slice.v1.json, evals/cases/e2e01-thin-slice.v1.json, tests/component/evaluation/test_e2e01_artifact_consistency.py, tests/component/model/test_e2e01_scripted_scenario_catalog.py</read_first>
-  <action>Apply the exact stale-state representation from the interfaces block. Provider output stays valid and null-based. Rename the script ref, update every bidirectional Case reference, set the exact confirmed Gate reason, and document that Harness activates a Runtime-only post-revalidation/pre-Gate seam by submitting an exact ApplyTaskTransitionCommand through RuntimeRecordPort. Freeze ACTIVE/v1 → WAITING_USER/v2 as the injected transition, WAITING_USER/v2 → BLOCKED/v3 as the rejection transition, version deltas 2 and exact TaskStateChanged count 3. Split the stale script into `CONTROL_GATEWAY_STALE_STATE_REJECTED`; leave unknown-tool alone in `CONTROL_GATEWAY_REJECTED` with count 2. Remove old `INJECT_STALE_TASK_STATE_VERSION` and `OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER` occurrences.</action>
-  <verify>`rg -n "INJECT_STALE_TASK_STATE_VERSION|OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER" docs/implementation/e2e01-thin-slice-implementation-spec.md evals tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/model/test_e2e01_scripted_scenario_catalog.py` returns no match; exact new ref/behavior/reason appear in Spec, artifacts and tests.</verify>
+  <action>Apply the exact stale-state representation from the interfaces block. Provider output stays valid and null-based. Rename the script ref, update every bidirectional Case reference, set the exact confirmed Gate reason, and document that Harness activates a Runtime-only post-revalidation/pre-Gate seam by submitting an exact ApplyTaskTransitionCommand through RuntimeRecordPort. Freeze ACTIVE/v1 → WAITING_USER/v2 as the injected transition, WAITING_USER/v2 → BLOCKED/v3 as the rejection transition, version deltas 2 and exact TaskStateChanged count 3. Split the stale script into `CONTROL_GATEWAY_STALE_STATE_REJECTED`; leave unknown-tool alone in `CONTROL_GATEWAY_REJECTED` with count 2. Remove the obsolete global `GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1` state assertion and replace it with the two exact script-scoped delta assertions named in the interfaces block. Remove old `INJECT_STALE_TASK_STATE_VERSION` and `OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER` occurrences.</action>
+  <verify>`rg -n "INJECT_STALE_TASK_STATE_VERSION|OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER|GATEWAY_FAULTS_INCREMENT_STATE_VERSION_BY_1" docs/implementation/e2e01-thin-slice-implementation-spec.md evals tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/model/test_e2e01_scripted_scenario_catalog.py` returns no match; exact new ref/behavior/reason and both script-scoped state assertion identifiers appear in Case, Spec where applicable, and tests.</verify>
   <acceptance_criteria>
     - provider step is `VALID_ORDER_LOOKUP`
     - proposed base version remains null
@@ -267,6 +273,7 @@ Artifact representation must use:
     - expected stop reason is GATE_REJECTED with STATE_VERSION_MISMATCH
     - terminal Task/RequestUnit version is 3, both deltas are 2 and TaskStateChanged count is 3
     - stale-state and unknown-tool scripts are in separate variants with counts 3 and 2 respectively
+    - the Case has no global gateway delta-1 state assertion; exact script-scoped assertions freeze unknown-tool delta 1 and stale-state delta 2
     - ToolCall/order-read/Observation counts remain zero
   </acceptance_criteria>
   <done>The versioned artifacts specify a stale-state path implementable through canonical DTO/Port boundaries; Runtime/Harness execution remains unimplemented.</done>
