@@ -79,6 +79,7 @@ TASK_GATE_TRACE_EVENTS = {
     "GateDecisionRecorded",
     "ResponseRendered",
     "RunStopped",
+    "EvalCaseGraded",
 }
 
 MANDATORY_REQUIRED_EVENTS_BY_CASE = {
@@ -113,6 +114,7 @@ MANDATORY_REQUIRED_EVENTS_BY_CASE = {
         "ContextManifestRecorded",
         "ResponseRendered",
         "RunStopped",
+        "EvalCaseGraded",
     },
     "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
         TASK_GATE_TRACE_EVENTS
@@ -582,6 +584,28 @@ def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
     assert "PresentationPlanProposed" in presentation_variants[
         "PRESENTATION_PROTOCOL_REJECTED"
     ]["forbidden_events"]
+
+
+def test_eval_case_graded_is_required_without_inventing_event_count() -> None:
+    dataset = _load_json(CASES_PATH)
+
+    for case in dataset["cases"]:
+        expectations = case["expectations"]
+        assert "EvalCaseGraded" in expectations["required_events"]
+        assert "EvalCaseGraded" not in {
+            assertion["event"]
+            for assertion in expectations["event_count_assertions"]
+        }
+
+        for variant in expectations.get(
+            "trace_expectation_variants",
+            [],
+        ):
+            assert "EvalCaseGraded" in variant["required_events"]
+            assert "EvalCaseGraded" not in {
+                assertion["event"]
+                for assertion in variant["event_count_assertions"]
+            }
 
 
 def test_case_fixture_script_lane_and_manifest_refs_resolve() -> None:

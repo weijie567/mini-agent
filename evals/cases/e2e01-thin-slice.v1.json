@@ -129,7 +129,8 @@
           "ObservationRecorded",
           "PresentationPlanProposed",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -286,7 +287,8 @@
           "ToolCallFailed",
           "ToolResultNormalized",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -449,7 +451,8 @@
           "ToolCallFailed",
           "ToolResultNormalized",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -612,7 +615,8 @@
           "NextMoveRevalidated",
           "GateDecisionRecorded",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -775,7 +779,8 @@
           "RequestUnderstandingStarted",
           "ContextManifestRecorded",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -830,7 +835,8 @@
               "RequestUnderstandingStarted",
               "ContextManifestRecorded",
               "ResponseRendered",
-              "RunStopped"
+              "RunStopped",
+              "EvalCaseGraded"
             ],
             "forbidden_events": [
               "NextMoveProposed",
@@ -874,7 +880,8 @@
               "RequestUnderstandingStarted",
               "ContextManifestRecorded",
               "ResponseRendered",
-              "RunStopped"
+              "RunStopped",
+              "EvalCaseGraded"
             ],
             "forbidden_events": [
               "TaskDeltaAccepted",
@@ -924,7 +931,8 @@
               "NextMoveRevalidated",
               "GateDecisionRecorded",
               "ResponseRendered",
-              "RunStopped"
+              "RunStopped",
+              "EvalCaseGraded"
             ],
             "forbidden_events": [
               "ToolCallCreated",
@@ -1072,7 +1080,8 @@
           "ToolResultNormalized",
           "ObservationRecorded",
           "ResponseRendered",
-          "RunStopped"
+          "RunStopped",
+          "EvalCaseGraded"
         ],
         "event_count_assertions": [
           {
@@ -1133,7 +1142,8 @@
               "ToolResultNormalized",
               "ObservationRecorded",
               "ResponseRendered",
-              "RunStopped"
+              "RunStopped",
+              "EvalCaseGraded"
             ],
             "forbidden_events": [
               "ToolCallFailed",
@@ -1172,7 +1182,8 @@
               "ObservationRecorded",
               "PresentationPlanProposed",
               "ResponseRendered",
-              "RunStopped"
+              "RunStopped",
+              "EvalCaseGraded"
             ],
             "forbidden_events": [
               "ToolCallFailed",

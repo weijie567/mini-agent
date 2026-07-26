@@ -34,7 +34,7 @@
       "path": "evals/cases/e2e01-thin-slice.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-thin-dataset-v1",
-      "sha256": "2422ffc9e3b50678ebe424cada9b28d6fdd4de9f8b98a114ee3d8dee63891d20"
+      "sha256": "8ec6e7756d0c904f8864e6a576f973478bc9ec340da88ec8d1baa1776b987d33"
     },
     {
       "artifact_id": "e2e01-thin-model-scripts",
