@@ -439,6 +439,45 @@ Memory 语义：
 
 L2 不复制权威事实、政策正文、确认或副作用结果。当前业务事实来自受控业务系统形成的 Observation；知识依据来自版本化 Evidence；确认、幂等和执行结果记录在 Decision & Action Ledger。用户陈述和模型总结不得自动升级为业务事实。
 
+### 9.1 持久化契约的四轴 ownership 与版本维度
+
+持久化边界同时存在四种 ownership；它们可以落在同一个 Python package 或由同一个开发者维护，但不能因此合并语义权限：
+
+| ownership 轴 | 负责 | 不得据此获得的权限 |
+|---|---|---|
+| `semantic owner` | 定义逻辑记录字段、不变量、逻辑 `record_schema_version`、兼容 / 转换规则和安全失败语义 | 不能把数据库或 Adapter 的偶然形状升级为领域契约 |
+| `Python source owner` | 决定当前类 / Protocol 的源码位置和允许的依赖方向 | 类位于 `application/` 不会把 Core、Tool、Memory、RAG、Action 或 Eval 语义转交给 Application |
+| `Port declaration owner` | 定义调用接口、用例协调位置和事务义务；当前 Protocol 可以继续位于 `application/ports.py` | 不能复制、放宽或改写记录的 `semantic owner` 契约，也不因声明 Port 而拥有所有入参 / 返回记录的语义 |
+| `adapter owner` | Infrastructure 拥有 table、column、index、JSONB mapping、transaction、Alembic mechanics 和数据库错误适配 | 不得定义第二套 DTO、record code 或逻辑版本，不得动态 import 未批准类型、`fallback-to-latest`，也不得改变授权、最小披露或状态迁移 |
+
+上述 `semantic owner` 按现有专项 owner 分配：Conversation 生命周期和消息语义服从 Application；Run / Task State 和共享 Trace 结构服从 Core Runtime；Observation、Evidence Binding、Context Manifest 与 Action Ledger 服从 Memory 及其中指定的 Evidence / ActionPolicy 边界；Policy Corpus、检索与排序 Artifact 服从 RAG；ToolCall / Toolset Artifact 服从 Tool；Eval Result / Failure 服从 Eval。`Python source owner`、`Port declaration owner` 或 `adapter owner` 只能消费这些契约，不能建立第二套 canonical 语义。
+
+以下五种版本维度互不替代，也不得由名称相近或存储在同一行而相互推断：
+
+| 版本维度 | 含义 |
+|---|---|
+| `record_schema_version` | 某类持久化逻辑记录的结构与语义版本，由该记录的 `semantic owner` 定义 |
+| `state_version` | Task / RequestUnit 等工作投影的 optimistic concurrency / CAS 版本 |
+| `artifact_schema_version` | 可重放 Artifact 内容及 Hash 输入契约的版本 |
+| `tool_registry_version` | 一次 Runtime 启动使用的完整工具注册配置快照版本 |
+| Eval `version_manifest` | 一次评价运行引用的 Dataset、Candidate、Baseline、Prompt / Model、Toolset 等单一版本快照 |
+
+可信身份和完整性边界不随持久化而转移：
+
+- `CustomerContext` 和由其派生的 `TrustedOwnerScope` 只能来自服务端可信认证上下文。模型输出、用户消息、persisted payload / metadata、源码位置或数据库字段都不能创建、覆盖或扩大 `customer_id` 与授权范围。
+- 私有资源不存在、非本人或无法确认归属时，对外结果仍不可区分；未经归属校验的 payload 不得进入标准 Observation、Memory、Context Manifest、模型输入或普通 Trace。
+- 未来 scoped decoder 对已由 owner-scoped lookup 读取到的 record / envelope 解码时，如必填字段、record code、`record_schema_version` 或 payload 缺失、损坏或不受支持，不得把该完整性错误伪装成 absent / unauthorized 的安全 `None`，也不得 fail open；业务查询“查无行 / 无权访问”仍按 active scoped contract 返回同一安全结果，不属于 decode / integrity failure。内部必须保留可诊断的完整性失败类别，但普通 Trace / 诊断不得记录 raw payload、原始 Token 或不必要的 PII，对外仍服从最小披露。
+
+逻辑与物理 migration 的批准边界如下：
+
+- 逻辑 `record_schema_version` 的兼容、转换、审计与回滚义务由对应 `semantic owner` 先行批准；Infrastructure 只能实现已批准的显式 physical / data migration。
+- Adapter 不得在读取时自行静默 upgrade、downgrade、quarantine、rewrite 或选择 `fallback-to-latest`。是否 exact-version-only、unknown / mismatch decode、startup recovery readiness 和允许的隔离策略，延期由 Plan 01-02 的 Memory owner scoped contract 裁决。
+- Thin Slice Spec 第 10.1 节当前 17 项最低持久化集合（包括 `ModelVisibleToolsetArtifact`）的 item code、版本和实现 API，延期由 Plan 01-03 的 Thin Slice scoped owner 裁决；不得从源码中的辅助 Pydantic 模型或 Command 反推额外 canonical record。
+
+`TraceEvent` / `TraceEventRecord` 采用一条更精确的联合所有权规则：共享 record structure、公共字段和逻辑 `record_schema_version` 的唯一项目级批准者，是本 Project Direction 所代表的 Core Runtime shared-contract owner（下称 `Core Runtime / Project Direction owner`）。Request Understanding、Tool、Memory、RAG、Action 和 Eval 等 `specialized owner` 继续拥有各自 event type、专项 payload 字段、visibility 和必备事件语义。只修改 shared record structure 的 future logical migration 由 `Core Runtime / Project Direction owner` 批准；同时修改专项 payload 的 migration 还必须取得对应 `specialized owner` 批准。Infrastructure 只执行双方已经批准的显式 physical / data migration，不能以存储实现反向覆盖任一语义 owner。
+
+本节只固定后续 Plan 必须服从的 ownership、版本和批准关系，不表示 `PersistenceEnvelope`、Record Schema registry、strict decoder、业务表、兼容层或对应 migration 已经实现。
+
 ## 10. Tool、RAG 与退款动作
 
 Read / Retrieval 工具：
