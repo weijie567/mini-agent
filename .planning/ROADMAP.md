@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / PLAN_01-04_READY`
+**Status**: `ACTIVE / PACKET_01-04D_PORT_OWNER_DEPENDENCY`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping merge `9632c18532baa2f4cd6ab7526d0e6db30328ea65` 与 projection clarification merge `9602fc18148b19c841889a8041daf10ccc5b8f1c`（均已满足）。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping / clarification chain `9632c18532baa2f4cd6ab7526d0e6db30328ea65` → `9602fc18148b19c841889a8041daf10ccc5b8f1c`、Plan 01-04 persistence codec merge `bde99edec0bbb9ba331c6099c8b467c14fe24e58` 与后续 Graphify code + semantic freshness gate（均已满足）。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -47,17 +47,18 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 8 plans（01-01/01-02/01-03 已形成 Summary 与 exact merge 证据；当前 01-04 具备 exact two-file Task Packet，其余只是依赖有序的 execution / planning slots。每个 PLAN 文件均由 GSD planner / checker 角色提供只读建议，再由 Integrator 在 dedicated planning-status Worktree 中写入并通过 PR 创建；不运行 stock import / plan-phase）
+**Plans**: 8 numbered plans + 1 inserted dependency Packet（01-01/01-02/01-03/01-04 已形成 Summary 与 exact merge 证据；01-04 后的 source audit与独立 review发现 frozen Port 无法携带 codec external relation context、无法原子创建/推进 Task graph与终结 Run links，也无法表达 Memory 15.2 fenced closed-graph claim，因此插入 `01-04D` Application Port closure，不重编号既有 01-05 Runtime、01-06 Infra、01-07 Eval与 01-08 Integration。每个 PLAN / dependency文件均由 GSD planner / checker角色提供只读建议，再由 Integrator在 dedicated planning-status Worktree中写入并通过 PR创建；不运行 stock import / plan-phase）
 
 Plans:
 
 - [ ] 01-01: Project Direction persistence ownership / Trace structure decision（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #12 merged；依据 Lifecycle Control，checkbox 保持未勾选，不提前推进 Phase / Case progress）
 - [ ] 01-02: Memory persistence decode / recovery / migration contract（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #14 merged；security finding 已修复复审；checkbox 保持未勾选）
 - [ ] 01-03: Thin Slice 17-item minimum-persistence schema/version scoped mapping（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #16 与 clarification PR #17 merged；checkbox 保持未勾选）
-- [ ] 01-04: persistence schema/version implementation（`READY`；base `9602fc1...`，只允许 owner 冻结的 two-file Application mapping / codec Packet）
-- [ ] 01-05: W2 Runtime（依赖 01-04 merge）
-- [ ] 01-06: W2 Infra（依赖 01-04 merge）
-- [ ] 01-07: W2 Eval（依赖 01-04 merge）
+- [ ] 01-04: persistence schema/version implementation（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：PR #19 merge `bde99ed...`；134 focused / 315 full tests、双 reviewer final `PASS` 与 Graphify gate通过；checkbox 保持未勾选）
+- [ ] 01-04D: Application persistence write / recovery Port closure（插入式 `CONTROLLED_PLANNING / BLOCKER OWNER PACKET`；base `bde99ed...`；只拥有 Application Port / Command contract 与契约测试；不计入8个主 Plan）
+- [ ] 01-05: W2 Runtime（`BLOCKED_ON_01-04D`；只拥有 Core / Application runtime behavior 与新增 Component tests）
+- [ ] 01-06: W2 Infra（`BLOCKED_ON_01-04D`；只拥有 Session / HTTP / PostgreSQL / migration / scoped `get_order` / recovery Adapter 与 Infra tests）
+- [ ] 01-07: W2 Eval（`BLOCKED_ON_01-04D`；只拥有 versioned loader、Provider Adapter、Harness / Graders、structured Eval records、fault injection 与 Eval tests）
 - [ ] 01-08: W3 Composition Root 与纵向集成（Integrator 串行）
 
 #### Phase 1 Execution Gates
@@ -68,14 +69,15 @@ Plans:
 | 01-01 | Project Direction owner PR | `COMPLETE / EVIDENCE_INDEXED`：PR #12 merge `c96dea9...`，181 tests，independent exact-head `PASS` |
 | 01-02 | Memory owner PR | `COMPLETE / EVIDENCE_INDEXED`：PR #14 merge `af5afd2...`，181 tests，初始 HIGH 已修复并经 current-remote exact-head review `PASS` |
 | 01-03 | Thin Slice scoped mapping PR | `COMPLETE / EVIDENCE_INDEXED`：PR #16 merge `9632c18...`；projection clarification PR #17 merge `9602fc1...`；181 tests；双 reviewer final `PASS` |
-| 01-04 | schema/version implementation | `READY`：execution Worktree / branch 已从 `9602fc1...` 预建；先合并本 Plan 的 planning-status PR；只实现已裁决 two-file contract |
-| 01-05/06/07 | Runtime / Infra / Eval 并行 | Integrator 从同一 01-04 merge SHA 预建三个 ownership 不重叠的 Worktree；不调用 stock execute |
-| 01-08 | W3 串行集成 | 三个 W2 feature PR 逐个审查、重验并合并 |
+| 01-04 | schema/version implementation | `COMPLETE / EVIDENCE_INDEXED`：PR #19 merge `bde99ed...`；315 tests、two-file containment、final dual review与 Graphify gate通过 |
+| 01-04D | Application Port owner dependency | `CONTROLLED_PLANNING`：先冻结 persistence write context、initial/transition/Run-finalization原子 aggregate与 fenced recovery snapshot / claim boundary；owner PR合并前 W2 dispatch为 `BLOCK` |
+| 01-05/06/07 | Runtime / Infra / Eval 并行 | 01-04D merge后，Integrator从同一新 exact integration SHA预建三个 ownership不重叠的 Worktree；不调用 stock execute |
+| 01-08 | W3 串行集成 | 三个 W2 feature PR逐个审查、重验并合并后，由 Integrator完成 Composition Root与纵向证据 |
 | Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
 
 #### Post-execution Quality Gate（不是 Plan）
 
-1. 在 exact-integration-SHA review-artifact Worktree 中运行受控 `gsd-code-review --files=<normalized absolute exact list>`；启动前确认 requested / accepted 路径数量完全相等、每项均为仓库内 tracked file；workflow transcript 必须显示完全相同的 `File scope: <N> files`，且不含真实的 outside-repository / file-not-found skip 输出；只允许写 Phase `REVIEW.md`。
+1. 在 01-08 exact-integration-SHA review-artifact Worktree 中运行受控 `gsd-code-review --files=<normalized absolute exact list>`；启动前确认 requested / accepted 路径数量完全相等、每项均为仓库内 tracked file；workflow transcript 必须显示完全相同的 `File scope: <N> files`，且不含真实的 outside-repository / file-not-found skip 输出；只允许写 Phase `REVIEW.md`。
 2. Findings 只能在 Integrator 预建的专用 fix Worktree / feature branch 中处理；前后比较 base、head、allowlist、changed files 与 commits。
 3. Validation 补缺只能在预建 validation Worktree / branch 中处理，并按同样 diff containment gate 审查。
 4. `gsd-eval-review` 只有派生 AI / Eval mapping 明确引用 canonical Eval owner 后才构成 gate；`gsd-secure-phase` 只有完整 `<threat_model>` 映射项目安全不变量后才构成 gate。
@@ -178,7 +180,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Plan 01-04 ready；01-01/01-02/01-03 Task Packet evidence indexed` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；实际主 Plan 01-01/01-02/01-03/01-04 evidence indexed；若按全部 Task Packet计为4/9；01-04D blocker owner planning` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |

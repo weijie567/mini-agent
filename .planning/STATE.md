@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "4"
+current_plan: "5"
 status: "in_progress"
-last_updated: "2026-07-26T15:05:52Z"
-last_activity: "2026-07-26 — Plan 01-04 controlled planning adapter passed independent Checker review with 0 unresolved findings"
+last_updated: "2026-07-26T17:24:17Z"
+last_activity: "2026-07-27 — Inserted Packet 01-04D passed focused contract review and independent GSD Plan Checker with 0/0/0/0 unresolved findings"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,28 +33,28 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 4
+Current Plan: 5
 Total Phases: 6
 Total Plans in Phase: 8
-Status: Plan 01-04 ready / in progress
-Last Activity: 2026-07-26
-Last Activity Description: Plan 01-03 mapping PR #16 与 projection clarification PR #17 已合并；01-04 exact two-file Task Packet 已通过独立 Checker，最终 findings 为 0/0/0/0
+Status: Inserted Packet 01-04D Application Port owner dependency / in progress
+Last Activity: 2026-07-27
+Last Activity Description: 01-04D exact Plan已关闭 relation、initial/transition/Run-finalization与 recovery contract review findings；focused reviewer和独立 GSD Plan Checker均为PASS
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 4 of 8
-Status: `ACTIVE / PLAN_01-04_READY`
-Last activity: 2026-07-26 — 01-03 owner chain 已到 exact integration `9602fc1...`；01-04 planning-status 已通过独立 Checker，等待 exact-head publication
+Plan: 5 of 8（进入 01-05 前先关闭 inserted Packet 01-04D）
+Status: `ACTIVE / PACKET_01-04D_PORT_OWNER_DEPENDENCY`
+Last activity: 2026-07-27 — 01-04D controlled planning已通过两路只读审查，最终 unresolved findings为0/0/0/0；W2三路在 owner Packet合并前保持`BLOCK`
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 使 01-04 planning-status branch 通过 Plan structure、八文件 containment、GSD health 双表面、181-test regression 与独立 Checker。
-2. 通过 draft PR 合并 `.planning/phases/01-cycle-1-e2e-01/01-04-PLAN.md` 与 `01-03-SUMMARY.md`，捕获 exact planning merge SHA / Plan blob / Summary blob。
-3. 在已从 `9602fc1...` 预建的 `codex/e2e01-01-persistence-codec` branch 只创建两个 owned files，实现 closed registry / strict codec / projection / child contract。
-4. 01-04 feature 通过 focused / full tests、exact-head review 与 merge 后，由 Integrator 串行运行 `graphify update .`；gate 通过前不派发 01-05/06/07。
+1. 完成 inserted Packet 01-04D Application persistence write / recovery Port closure，验证 exact base、单一 owner allowlist、threat model、codec external relation、原子 Task graph / Run finalization与 Memory 15.2映射。
+2. 使本 planning-status branch通过 Plan structure、changed-file containment、GSD health双表面、315-test regression与独立 Checker，再以 draft PR目标 `integration/e2e01-thin`。
+3. Planning PR合并后，从 `bde99ed...` 预建并执行 01-04D owner Worktree / feature branch；通过契约测试、full regression、review和 merge。
+4. 以 01-04D merge SHA为新共同 exact base，受控规划并预建 Plans 01-05 Runtime、01-06 Infra、01-07 Eval三个互斥 Worktree / branch。
 
 ## Decisions
 
@@ -67,10 +67,12 @@ Progress: `░░░░░░░░░░` 0%
 ## Blockers
 
 - `CONFIRMED / CONTRACT_ONLY`: persistence 四轴 ownership、五类版本维度与 Trace shared-structure authority 已由 01-01 / PR #12 写入 Project Direction；Memory exact-version、owner binding、graph closure、recovery readiness 与 migration runtime 行为已由 01-02 / PR #14 写入 Memory owner；这些都不表示 codec、registry、Adapter、业务表或 migration 已实现。
-- `CONFIRMED / CONTRACT_ONLY`: Thin Slice 17-item code/version、66 + 7 projection、logical envelope、closed registry / codec API 与 01-04 exact allowlist 已由 PR #16/#17 冻结；这不表示 codec 已实现。
-- `OPEN / IMPLEMENTATION_GAP`: 当前 `RestartRecoveryPort` 尚无 Memory 15.2 所要求的同一 snapshot / fence + closed-set claim 证明；01-03/01-04 只冻结并实现 logical codec primitives，完整 graph / fenced claim 留给后续 Runtime / Infra Packet，不得误报为已实现。
-- `OPEN / GRAPHIFY_SERIAL_GATE`: 01-04 feature exact merge 后由 Integrator 在 root integration checkout 执行 `graphify update .`；tracked tree 必须 clean 且 stale marker 清除，失败则阻断 01-05/06/07。
-- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 当前 planning tree 的 SDK health 为 `degraded`（0 error、5×`W006`：后续 Roadmap 目录尚未建立、1×`I001`：01-04 正在执行且尚无 Summary、0 repairable）；CJS health 为 `degraded`（0 error、12×`W017`：保留的历史审计 / 执行 Worktree、同一 `I001`、0 repairable）。两表面对象模型不同；这些已分类 warning 不触发 repair、force 或 cleanup。
+- `CONFIRMED / IMPLEMENTED_COMPONENT_BOUNDARY`: Thin Slice 17-item code/version、66 + 7 projection、logical envelope与 closed registry / codec 已由 PR #16/#17 冻结并由 PR #19 实现；这不表示 physical Adapter、Runtime、HTTP、complete graph或 recovery readiness已实现。
+- `OPEN / IMPLEMENTATION_GAP`: 当前 `RestartRecoveryPort` 尚无 Memory 15.2 所要求的同一 snapshot / fence + strict decode + complete closed-set claim证明；Packet 01-04D必须在 Application Port owner范围内冻结该边界，physical/fence实现与纵向证据分别留给 01-06 Infra / 01-08 Integration。后续 W2实现分支不得自行漂移 shared Port。
+- `CONFIRMED / PORT_CODEC_GAP / BLOCK`: `RuntimeRecordPort.save_input_binding(record)` 与 `save_observation(record)` 没有携带 01-04 codec要求的五个 external-required relation identity；Infra不得从其他 JSONB或记录顺序猜测。Packet 01-04D必须先冻结 Application-owned write context。
+- `CONFIRMED / ATOMIC_GRAPH_GAP / BLOCK`: initial accepted Task graph、Task/RequestUnit/TaskStateTransition 与 Run终态/RunTaskLink目前均跨多个独立写入；崩溃可留下无法由终态 Run recovery发现的永久不完整图。Packet 01-04D必须冻结三个原子 aggregate边界。
+- `CONFIRMED / GRAPHIFY_SERIAL_GATE_PASS`: PR #19 merge 后已完成 AST + semantic refresh；最终 3089 nodes、4822 edges，graph health error为0、stale marker清除、tracked integration tree clean。
+- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 当前 planning tree 的 SDK health 为 `degraded`（0 error、5×`W006`：后续第2–6阶段目录尚未建立、1×`I001`：01-04D正在规划且尚无 Summary、0 repairable）；CJS health 为 `degraded`（0 error、16×`W017`：保留的历史审计 / 执行 Worktree、同一`I001`、0 repairable）。两表面对象模型不同，W017计数具有时间敏感性；这些已分类 warning不触发 repair、force或cleanup。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -79,6 +81,6 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 
 ## Session
 
-Last Date: 2026-07-26
-Stopped At: Plan 01-04 planning-status independent review
-Resume File: [phases/01-cycle-1-e2e-01/01-04-PLAN.md](phases/01-cycle-1-e2e-01/01-04-PLAN.md)
+Last Date: 2026-07-27
+Stopped At: Inserted Packet 01-04D Application Port owner dependency planning
+Resume File: [phases/01-cycle-1-e2e-01/01-04D-PLAN.md](phases/01-cycle-1-e2e-01/01-04D-PLAN.md)
