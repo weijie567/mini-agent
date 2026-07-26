@@ -34,14 +34,14 @@
       "path": "evals/cases/e2e01-thin-slice.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-thin-dataset-v1",
-      "sha256": "8ec6e7756d0c904f8864e6a576f973478bc9ec340da88ec8d1baa1776b987d33"
+      "sha256": "3faa536c942db5eac90eb2bcb187e13024422a22b50a6f5fbab4213fba7bf718"
     },
     {
       "artifact_id": "e2e01-thin-model-scripts",
       "path": "evals/model_scripts/e2e01-thin-slice.v1.json",
       "version_field": "model_script_catalog_version",
       "version": "e2e01-thin-model-scripts-v1",
-      "sha256": "0706dfc7529d0a9adaaae1b08c568b27d58e54093b84552471b17bed62f9ab1d"
+      "sha256": "c71417316c5577fe5785ec886028758bc80665d339abd3f4d6e4cfe42c1997bd"
     },
     {
       "artifact_id": "e2e01-thin-lanes",

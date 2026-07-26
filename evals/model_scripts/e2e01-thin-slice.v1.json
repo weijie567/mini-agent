@@ -335,21 +335,8 @@
       ],
       "expected_control_result": {
         "run_status": "COMPLETED",
-        "stop_reason": "GATE_REJECTED",
-        "gate_decision": "REJECT",
-        "task_terminal_status": "BLOCKED",
-        "request_unit_terminal_status": "BLOCKED",
-        "task_state_version_delta": 1,
-        "request_unit_state_version_delta": 1,
-        "gate_reason_expectation": {
-          "mode": "NONEMPTY_DETERMINISTIC_AND_FAULT_MATCHED",
-          "must_be_nonempty": true,
-          "must_be_deterministic": true,
-          "must_match_injected_fault": true,
-          "canonical_reason_code": null,
-          "canonical_reason_status": "OPEN_NOT_FOUND_IN_ACTIVE_TOOL_OWNER",
-          "injected_fault_behavior": "INJECT_TRUSTED_FIELD_OVERRIDE"
-        },
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
         "user_outcome": "BLOCKED",
         "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
         "model_calls": 1,

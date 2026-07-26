@@ -872,7 +872,8 @@
             "variant": "INPUT_VALIDATION_REJECTED",
             "model_script_refs": [
               "script:fault-provider:invalid-request-understanding-schema",
-              "script:fault-provider:source-authority-mismatch"
+              "script:fault-provider:source-authority-mismatch",
+              "script:fault-provider:trusted-field-override"
             ],
             "required_events": [
               "MessageAccepted",
@@ -884,6 +885,8 @@
               "EvalCaseGraded"
             ],
             "forbidden_events": [
+              "NextMoveProposed",
+              "TaskDeltaValidated",
               "TaskDeltaAccepted",
               "InputBindingRecorded",
               "TaskStateChanged",
@@ -915,7 +918,6 @@
             "variant": "CONTROL_GATEWAY_REJECTED",
             "model_script_refs": [
               "script:fault-provider:stale-task-state-version",
-              "script:fault-provider:trusted-field-override",
               "script:fault-provider:unknown-tool-name"
             ],
             "required_events": [

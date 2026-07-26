@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
+from mini_agent.core.request_understanding import NextMove
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_PATH = REPO_ROOT / "evals/fixtures/e2e01-thin-slice.v1.json"
@@ -584,6 +589,105 @@ def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
     assert "PresentationPlanProposed" in presentation_variants[
         "PRESENTATION_PROTOCOL_REJECTED"
     ]["forbidden_events"]
+
+
+def test_trusted_field_override_fails_before_next_move_and_task_creation() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="trusted field 'customer_id'",
+    ):
+        NextMove.model_validate(
+            {
+                "kind": "CALL_TOOL",
+                "requested_tool_name": "get_order",
+                "arguments": {
+                    "order_id": "O-1001",
+                    "customer_id": "customer-B",
+                },
+                "base_task_state_version": None,
+            }
+        )
+
+    scripts = _load_json(SCRIPTS_PATH)
+    trusted_field_script = next(
+        scenario
+        for scenario in scripts["scenarios"]
+        if scenario["model_script_ref"]
+        == "script:fault-provider:trusted-field-override"
+    )
+    expected_result = trusted_field_script["expected_control_result"]
+    assert expected_result == {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0,
+    }
+    assert set(expected_result).isdisjoint(
+        {
+            "gate_decision",
+            "task_terminal_status",
+            "request_unit_terminal_status",
+            "task_state_version_delta",
+            "request_unit_state_version_delta",
+            "gate_reason_code",
+            "gate_reason_expectation",
+        }
+    )
+
+    dataset = _load_json(CASES_PATH)
+    provider_case = next(
+        case
+        for case in dataset["cases"]
+        if case["case_id"] == "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+    )
+    variants = {
+        variant["variant"]: variant
+        for variant in provider_case["expectations"][
+            "trace_expectation_variants"
+        ]
+    }
+    script_ref = trusted_field_script["model_script_ref"]
+    input_validation_variant = variants["INPUT_VALIDATION_REJECTED"]
+    gateway_variant = variants["CONTROL_GATEWAY_REJECTED"]
+
+    assert script_ref in input_validation_variant["model_script_refs"]
+    assert script_ref not in gateway_variant["model_script_refs"]
+    assert set(input_validation_variant["required_events"]) == {
+        "MessageAccepted",
+        "RunStarted",
+        "RequestUnderstandingStarted",
+        "ContextManifestRecorded",
+        "ResponseRendered",
+        "RunStopped",
+        "EvalCaseGraded",
+    }
+    assert {
+        "NextMoveProposed",
+        "TaskDeltaValidated",
+        "TaskDeltaAccepted",
+        "InputBindingRecorded",
+        "TaskStateChanged",
+        "NextMoveRevalidated",
+        "GateDecisionRecorded",
+    } <= set(input_validation_variant["forbidden_events"])
+    assert input_validation_variant["event_count_assertions"] == [
+        {
+            "event": "TaskStateChanged",
+            "operator": "EQUALS",
+            "count": 0,
+        },
+        {
+            "event": "GateDecisionRecorded",
+            "operator": "EQUALS",
+            "count": 0,
+        },
+    ]
 
 
 def test_eval_case_graded_is_required_without_inventing_event_count() -> None:
