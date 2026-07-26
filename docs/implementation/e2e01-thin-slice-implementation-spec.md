@@ -359,7 +359,7 @@ Rejection state handler
   → TaskStateChanged
 ```
 
-注入转换必须通过一个 canonical `ApplyTaskTransitionCommand` 原子更新 Task、RequestUnit 与匹配的 `TaskStateTransition`，并携带 Runtime 生成的 opaque UUID `reason_ref`。只有 `RuntimeRecordPort.apply_task_transition_if_current` 返回 `APPLIED` 才继续形成 Gateway 结果；`CONFLICT`、`NOT_APPLICABLE` 或其他非 `APPLIED` 结果必须记录为 Eval execution failure，不能伪造 `STATE_VERSION_MISMATCH`。该脚本最终 Task / RequestUnit 版本均为 `3`，相对初始版本的 delta 均为 `2`，`TaskStateChanged` 精确为 `3`（初始创建、注入转换、拒绝后阻断）。未知工具脚本不经过该 seam：Gateway 以 `TOOL_NOT_REGISTERED` 拒绝，随后 `ACTIVE/v1 → BLOCKED/v2`，版本 delta 为 `1`，`TaskStateChanged` 精确为 `2`。
+注入转换必须通过一个 canonical `ApplyTaskTransitionCommand` 原子更新 Task、RequestUnit 与匹配的 `TaskStateTransition`，并携带 Runtime 生成的 opaque UUID `reason_ref`。只有 `RuntimeRecordPort.apply_task_transition_if_current` 返回 `APPLIED` 才继续形成 Gateway 结果；`PROJECTION_CONFLICT`、`NOT_APPLICABLE` 或其他非 `APPLIED` 结果必须记录为 Eval execution failure，不能伪造 `STATE_VERSION_MISMATCH`。该脚本最终 Task / RequestUnit 版本均为 `3`，相对初始版本的 delta 均为 `2`，`TaskStateChanged` 精确为 `3`（初始创建、注入转换、拒绝后阻断）。未知工具脚本不经过该 seam：Gateway 以 `TOOL_NOT_REGISTERED` 拒绝，随后 `ACTIVE/v1 → BLOCKED/v2`，版本 delta 为 `1`，`TaskStateChanged` 精确为 `2`。
 
 ## 6. `get_order` 具体契约
 

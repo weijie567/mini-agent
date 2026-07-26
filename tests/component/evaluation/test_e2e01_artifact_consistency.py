@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from mini_agent.application.records import ConditionalWriteResult
 from mini_agent.core.presentation import PresentationPlan
 from mini_agent.core.request_understanding import (
     NextMove,
@@ -23,6 +24,7 @@ CASES_PATH = REPO_ROOT / "evals/cases/e2e01-thin-slice.v1.json"
 SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-thin-slice.v1.json"
 LANES_PATH = REPO_ROOT / "evals/lanes/e2e01-thin-slice.v1.json"
 MANIFEST_PATH = REPO_ROOT / "evals/manifests/e2e01-thin-slice.v1.json"
+SPEC_PATH = REPO_ROOT / "docs/implementation/e2e01-thin-slice-implementation-spec.md"
 
 ARTIFACT_PATHS = (
     FIXTURE_PATH,
@@ -733,6 +735,45 @@ def test_stale_state_race_is_canonical_and_script_scoped() -> None:
     } == {
         "TaskStateChanged": 3,
         "GateDecisionRecorded": 1,
+    }
+
+
+def test_stale_runtime_fault_uses_canonical_conditional_write_results() -> None:
+    canonical_results = {result.value for result in ConditionalWriteResult}
+    assert canonical_results == {
+        "APPLIED",
+        "PROJECTION_CONFLICT",
+        "NOT_APPLICABLE",
+    }
+    non_applied_results = canonical_results - {ConditionalWriteResult.APPLIED.value}
+
+    spec_paragraph = next(
+        paragraph
+        for paragraph in SPEC_PATH.read_text(encoding="utf-8").split("\n\n")
+        if paragraph.startswith("注入转换必须通过一个 canonical")
+    )
+    for result in non_applied_results:
+        assert f"`{result}`" in spec_paragraph
+    assert "`CONFLICT`" not in spec_paragraph
+    assert "其他非 `APPLIED` 结果必须记录为 Eval execution failure" in spec_paragraph
+
+    scripts = _load_json(SCRIPTS_PATH)
+    stale_scenario = next(
+        scenario
+        for scenario in scripts["scenarios"]
+        if scenario["model_script_ref"]
+        == "script:fault-runtime:state-advanced-before-gate"
+    )
+    runtime_fault = stale_scenario["runtime_fault"]
+    assert runtime_fault["conditional_write_required_result"] == (
+        ConditionalWriteResult.APPLIED.value
+    )
+    assert {
+        result: runtime_fault["non_applied_disposition"]
+        for result in non_applied_results
+    } == {
+        "PROJECTION_CONFLICT": "EVAL_EXECUTION_FAILURE",
+        "NOT_APPLICABLE": "EVAL_EXECUTION_FAILURE",
     }
 
 
