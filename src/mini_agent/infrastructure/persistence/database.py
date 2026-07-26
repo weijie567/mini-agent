@@ -8,34 +8,34 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
 DEFAULT_LOCAL_DATABASE_URL = (
-    "postgresql+psycopg://"
-    "mini_agent:mini_agent_local_only@127.0.0.1:55432/mini_agent"
+    "postgresql+psycopg://mini_agent:mini_agent_local_only@127.0.0.1:55432/mini_agent"
 )
 DEFAULT_LOCAL_TEST_DATABASE_URL = (
     "postgresql+psycopg://"
     "mini_agent:mini_agent_local_only@127.0.0.1:55433/mini_agent_test"
 )
+_DISPOSABLE_TEST_DATABASE_ERROR = (
+    "integration tests require the local disposable db-test at "
+    "127.0.0.1:55433/mini_agent_test without URL query or fragment"
+)
 
 
 def validate_test_database_url(database_url: str) -> str:
+    if not isinstance(database_url, str) or "?" in database_url or "#" in database_url:
+        raise ValueError(_DISPOSABLE_TEST_DATABASE_ERROR)
     try:
         parsed: URL = make_url(database_url)
     except (ArgumentError, TypeError) as exc:
-        raise ValueError(
-            "integration tests require the local disposable db-test at "
-            "127.0.0.1:55433/mini_agent_test"
-        ) from exc
+        raise ValueError(_DISPOSABLE_TEST_DATABASE_ERROR) from exc
     is_disposable_target = (
         parsed.drivername == "postgresql+psycopg"
         and parsed.host == "127.0.0.1"
         and parsed.port == 55433
         and parsed.database == "mini_agent_test"
+        and not parsed.query
     )
     if not is_disposable_target:
-        raise ValueError(
-            "integration tests require the local disposable db-test at "
-            "127.0.0.1:55433/mini_agent_test"
-        )
+        raise ValueError(_DISPOSABLE_TEST_DATABASE_ERROR)
     return database_url
 
 

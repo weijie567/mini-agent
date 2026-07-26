@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 from mini_agent.infrastructure.persistence.database import (
     DEFAULT_LOCAL_TEST_DATABASE_URL,
     database_url_from_environment,
+    validate_test_database_url,
 )
 from mini_agent.infrastructure.persistence.migrations import (
     upgrade_database_to_head,
@@ -77,6 +78,16 @@ def test_testing_url_defaults_to_disposable_db_test(monkeypatch) -> None:
         "postgresql+psycopg://mini_agent:local@127.0.0.1:55432/mini_agent_test",
         "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent",
         "postgresql://mini_agent:local@127.0.0.1:55433/mini_agent_test",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?host=db.example",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?port=5432",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?dbname=mini_agent",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?hostaddr=203.0.113.10",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?service=production",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test?sslmode=disable",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent_test#fragment",
+        "postgresql+psycopg://mini_agent:local?host=db.example@127.0.0.1:55433/mini_agent_test",
+        "postgresql+psycopg://mini_agent:local#fragment@127.0.0.1:55433/mini_agent_test",
     ],
 )
 def test_testing_url_rejects_non_disposable_targets(
@@ -89,6 +100,16 @@ def test_testing_url_rejects_non_disposable_targets(
         database_url_from_environment(testing=True)
 
 
+def test_encoded_password_cannot_override_test_target() -> None:
+    encoded_user_info_url = (
+        "postgresql+psycopg://mini_agent:"
+        "local%3Fhost%3Ddb.example%26port%3D5432%23fragment"
+        "@127.0.0.1:55433/mini_agent_test"
+    )
+
+    assert validate_test_database_url(encoded_user_info_url) == encoded_user_info_url
+
+
 def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
     engine = postgres_namespace.build_engine()
     try:
@@ -99,9 +120,9 @@ def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
             assert connection.scalar(text("SELECT current_schema()")) == (
                 postgres_namespace.schema
             )
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "20260726_0001"
-            )
+            assert connection.scalar(
+                text("SELECT version_num FROM alembic_version")
+            ) == ("20260726_0001")
     finally:
         engine.dispose()
 
@@ -141,16 +162,22 @@ def test_eval_run_namespaces_are_isolated(postgres_namespace_factory) -> None:
     right_engine = right.build_engine()
     try:
         with left_engine.begin() as connection:
-            connection.execute(text("CREATE TABLE namespace_probe (value text NOT NULL)"))
+            connection.execute(
+                text("CREATE TABLE namespace_probe (value text NOT NULL)")
+            )
             connection.execute(
                 text("INSERT INTO namespace_probe (value) VALUES ('left')")
             )
 
         with right_engine.connect() as connection:
-            assert connection.scalar(text("SELECT to_regclass('namespace_probe')")) is None
+            assert (
+                connection.scalar(text("SELECT to_regclass('namespace_probe')")) is None
+            )
 
         with left_engine.connect() as connection:
-            assert connection.scalar(text("SELECT value FROM namespace_probe")) == "left"
+            assert (
+                connection.scalar(text("SELECT value FROM namespace_probe")) == "left"
+            )
     finally:
         left_engine.dispose()
         right_engine.dispose()
@@ -197,8 +224,7 @@ def test_cleanup_retains_failures_and_continues_other_drops(
         assert set(factory.tracked_schemas) == failed_schemas
         assert not _schema_exists(postgres_database_url, successful.schema)
         assert all(
-            _schema_exists(postgres_database_url, schema)
-            for schema in failed_schemas
+            _schema_exists(postgres_database_url, schema) for schema in failed_schemas
         )
     finally:
         monkeypatch.setattr(factory, "_drop_schema", original_drop)

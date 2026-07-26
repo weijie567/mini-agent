@@ -98,7 +98,10 @@ def postgres_database_url() -> str:
     engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
-            if connection.scalar(text("SELECT current_database()")) != "mini_agent_test":
+            if (
+                connection.scalar(text("SELECT current_database()"))
+                != "mini_agent_test"
+            ):
                 pytest.fail("integration tests connected outside mini_agent_test")
     except Exception as exc:  # pragma: no cover - exercised only on environment failure
         pytest.fail(
