@@ -764,7 +764,114 @@ MINI_AGENT_DATABASE_URL=postgresql+psycopg://<user>:<password>@<host>:<port>/<da
 - `AcceptedTaskDelta`、`TaskStateTransition` 与 `ToolAttemptRecord` 是 logical child，不是第 18–20 个 top-level item；`CandidateValidationRecord`、Command 和 write-result enum 也不进入 registry。Child 结构变化推进父记录版本并继续服从对应 semantic owner。
 - `TraceEventRecord` 的首版 code/version 不改变 Project Direction 拥有的 shared structure；future shared / specialized migration 继续需要 shared owner 与对应 specialized owner 联合批准。
 
-#### 10.1.2 Plan 01-04 logical codec / closed registry API
+#### 10.1.2 Closed projection matrix
+
+为避免把任意 UUID / hash 猜成 top-level record relation，01-04 只使用以下封闭分类：
+
+- `DIRECT_OWNER`：从 source record 重算 direct `owner_customer_id`；只用于和可信 owner scope 比较，不授权。
+- `TOP_LEVEL_P0_REFERENCE`：从 source record 重算并写入 `P0RecordReference`。
+- `EXTERNAL_REQUIRED_P0_REFERENCE`：source DTO 没有该字段，只能由调用方按本矩阵提供；codec 校验 exact token、target 与 cardinality。
+- `CONDITIONAL_PAYLOAD_CORRELATION`：按 source owner 的状态矩阵决定 payload field required / empty；没有已冻结的单一 top-level target，不写入 `P0RecordReference`。
+- `LOGICAL_CHILD_CORRELATION`：指向同一 envelope 或 record graph 中的 logical child identity，不进入 top-level `P0RecordReference`。
+- `PARENT_FIELD_EQUALITY`：logical child field 必须与 parent field 或 parent identity 完全相等，不额外生成 reference。
+- `PARENT_LOCAL_CORRELATION`：logical child field 必须在 owner-validated parent-local collection 中唯一解析，不额外生成 top-level reference。
+- `CHILD_TOP_LEVEL_P0_REFERENCE`：从 logical child 重算 top-level reference，并作为 parent envelope reference tuple 的一部分；调用方不得提供或覆盖。
+- `PAYLOAD_CORRELATION`：保留在 owner-validated source payload，但没有已冻结的单一 top-level target；不进入 `P0RecordReference`，不参与 01-04 局部 owner graph 证明，也不得授权。
+- `RESTRICTED_DIAGNOSTIC_CORRELATION`：只指向受控诊断域；适用 `PAYLOAD_CORRELATION` 的全部限制，且不得进入 Prompt、普通 Trace、HTTP 或 integrity error。
+- `P0_FIRST_SLICE_MUST_BE_EMPTY`：当前 `E2E01-01/04` 没有对应 17-item owner；encode / decode 遇到非空值都以 `LINK_CARDINALITY_MISMATCH` 拒绝，不能静默保留或创建第 18 项。
+
+下表枚举 17 个 top-level source model 中全部需要 projection 裁决的跨记录字段。未列出的 identity、时间、enum、版本、业务值和纯 scalar 字段保留在 source payload，不形成 relation。
+
+<!-- P0-PERSISTENCE-PROJECTION:START -->
+| record | source / external field | classification | exact relation token / target | cardinality / rule |
+|---|---|---|---|---|
+| `ConversationRecord` | `owner_customer_id` | `DIRECT_OWNER` | direct owner projection | exactly one |
+| `MessageRecord` | `conversation_id` | `TOP_LEVEL_P0_REFERENCE` | `conversation_id -> conversation_record` | exactly one |
+| `RequestUnderstandingRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one；同时是本记录 identity |
+| `RequestUnderstandingRecord` | `message_ref` | `TOP_LEVEL_P0_REFERENCE` | `message_ref -> message_record` | exactly one |
+| `RequestUnderstandingRecord` | `accepted_delta_refs[]` | `LOGICAL_CHILD_CORRELATION` | child code `accepted_task_delta` | 与 children identities 一一对应且顺序无关 |
+| `RequestUnderstandingRecord` | `candidate_validation[].candidate_ref`、`next_move_candidate_ref?` | `PAYLOAD_CORRELATION` | no top-level target | owner model cardinality |
+| `TaskRecord` | `owner_customer_id` | `DIRECT_OWNER` | direct owner projection | exactly one |
+| `TaskRecord` | `last_outcome_ref?` | `PAYLOAD_CORRELATION` | no single top-level target frozen | zero or one |
+| `RequestUnitRecord` | `task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | exactly one |
+| `RequestUnitRecord` | `goal_source_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `goal_source_ref -> message_record` | one or more；unique |
+| `RequestUnitRecord` | `contextualization_ref?` | `PAYLOAD_CORRELATION` | no top-level contextualization code | zero or one |
+| `RequestUnitRecord` | `constraint_refs[]` | `PAYLOAD_CORRELATION` | target kind not frozen | zero or more；unique |
+| `RequestUnitRecord` | `dependency_refs[]` | `PAYLOAD_CORRELATION` | target kind not frozen | zero or more；unique |
+| `RequestUnitRecord` | `input_binding_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `input_binding_ref -> input_binding_record` | one or more；unique |
+| `RequestUnitRecord` | `observation_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `observation_ref -> observation_record` | zero or more；unique |
+| `RequestUnitRecord` | `evidence_binding_refs[]` | `P0_FIRST_SLICE_MUST_BE_EMPTY` | no first-slice Evidence item | empty |
+| `RequestUnitRecord` | `pending_action_ref?` | `P0_FIRST_SLICE_MUST_BE_EMPTY` | read-only slice has no Action item | empty |
+| `RequestUnitRecord` | `result_refs[]` | `PAYLOAD_CORRELATION` | result target kind not frozen | zero or more；unique |
+| `ConversationTaskLinkRecord` | `conversation_id` | `TOP_LEVEL_P0_REFERENCE` | `conversation_id -> conversation_record` | exactly one |
+| `ConversationTaskLinkRecord` | `task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | exactly one；decoded roots must have equal owners at graph gate |
+| `RunTaskLinkRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one |
+| `RunTaskLinkRecord` | `task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | exactly one |
+| `InputBindingRecord` | `source_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `source_ref -> message_record` | one or more；unique |
+| `InputBindingRecord` | `supersedes?` | `TOP_LEVEL_P0_REFERENCE` | `supersedes -> input_binding_record` | zero or one |
+| `InputBindingRecord` | external `request_unit_id` | `EXTERNAL_REQUIRED_P0_REFERENCE` | `request_unit_id -> request_unit_record` | exactly one |
+| `AgentRunRecord` | `conversation_id?` | `TOP_LEVEL_P0_REFERENCE` | `conversation_id -> conversation_record` | zero or one；null 不能建立 owner proof |
+| `GateDecisionRecord` | `context_manifest_id` | `TOP_LEVEL_P0_REFERENCE` | `context_manifest_id -> context_manifest_record` | exactly one |
+| `GateDecisionRecord` | `argument_binding_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `argument_binding_ref -> input_binding_record` | zero or more；unique |
+| `GateDecisionRecord` | `model_call_id`、`provider_tool_call_id?` | `PAYLOAD_CORRELATION` | no top-level model/provider-call code | owner model cardinality |
+| `ToolCallRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one |
+| `ToolCallRecord` | `task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | exactly one |
+| `ToolCallRecord` | `request_unit_id` | `TOP_LEVEL_P0_REFERENCE` | `request_unit_id -> request_unit_record` | exactly one |
+| `ToolCallRecord` | `context_manifest_id` | `TOP_LEVEL_P0_REFERENCE` | `context_manifest_id -> context_manifest_record` | exactly one |
+| `ToolCallRecord` | `gate_decision_id` | `TOP_LEVEL_P0_REFERENCE` | `gate_decision_id -> gate_decision_record` | exactly one |
+| `ToolCallRecord` | `argument_binding_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `argument_binding_ref -> input_binding_record` | one or more；unique |
+| `ToolCallRecord` | `model_call_id`、`provider_tool_call_id?` | `PAYLOAD_CORRELATION` | no top-level model/provider-call code | owner model cardinality |
+| `ToolCallRecord` | `result_ref?` | `PAYLOAD_CORRELATION` | Tool-result-domain target is not a 17-item record | zero or one；不得映射成 Observation |
+| `ObservationRecord` | `supersedes?` | `TOP_LEVEL_P0_REFERENCE` | `supersedes -> observation_record` | zero or one |
+| `ObservationRecord` | external `source_tool_call_id` | `EXTERNAL_REQUIRED_P0_REFERENCE` | `source_tool_call_id -> tool_call_record` | exactly one |
+| `ObservationRecord` | external `source_run_id` | `EXTERNAL_REQUIRED_P0_REFERENCE` | `source_run_id -> agent_run_record` | exactly one |
+| `ObservationRecord` | external `source_task_id` | `EXTERNAL_REQUIRED_P0_REFERENCE` | `source_task_id -> task_record` | exactly one |
+| `ObservationRecord` | external `source_request_unit_id` | `EXTERNAL_REQUIRED_P0_REFERENCE` | `source_request_unit_id -> request_unit_record` | exactly one |
+| `ObservationRecord` | `raw_result_ref?` | `RESTRICTED_DIAGNOSTIC_CORRELATION` | no top-level target | zero or one |
+| `ObservationRecord` | `source_resource_ref` | `PAYLOAD_CORRELATION` | business resource key, never owner proof | exactly one scalar |
+| `ContextManifestRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one |
+| `ContextManifestRecord` | `selected_message_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `selected_message_ref -> message_record` | zero or more；unique |
+| `ContextManifestRecord` | `task_state_ref_and_version?.task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_state_ref -> task_record` | zero or one；`state_version` remains independent |
+| `ContextManifestRecord` | `observation_refs_and_versions[].record_ref` | `TOP_LEVEL_P0_REFERENCE` | `observation_ref -> observation_record` | zero or more；unique；payload version remains independent |
+| `ContextManifestRecord` | `model_visible_toolset_hash` | `TOP_LEVEL_P0_REFERENCE` | `model_visible_toolset_hash -> model_visible_toolset_artifact` | exactly one |
+| `ContextManifestRecord` | `evidence_refs_and_versions[]`、`action_record_refs[]` | `P0_FIRST_SLICE_MUST_BE_EMPTY` | no first-slice Evidence / Action item | empty |
+| `ContextManifestRecord` | `model_call_id`、`truncation_decisions[].source_ref` | `PAYLOAD_CORRELATION` | model-call / polymorphic source target not frozen | owner model cardinality |
+| `TraceEventRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one |
+| `TraceEventRecord` | `message_ref?` | `TOP_LEVEL_P0_REFERENCE` | `message_ref -> message_record` | zero or one |
+| `TraceEventRecord` | `task_id?` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | zero or one |
+| `TraceEventRecord` | `request_unit_id?` | `TOP_LEVEL_P0_REFERENCE` | `request_unit_id -> request_unit_record` | zero or one |
+| `TraceEventRecord` | `input_binding_ref?` | `TOP_LEVEL_P0_REFERENCE` | `input_binding_ref -> input_binding_record` | zero or one |
+| `TraceEventRecord` | `context_manifest_id?` | `TOP_LEVEL_P0_REFERENCE` | `context_manifest_id -> context_manifest_record` | zero or one |
+| `TraceEventRecord` | `model_visible_toolset_hash?` | `TOP_LEVEL_P0_REFERENCE` | `model_visible_toolset_hash -> model_visible_toolset_artifact` | zero or one |
+| `TraceEventRecord` | `argument_binding_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `argument_binding_ref -> input_binding_record` | zero or more；unique |
+| `TraceEventRecord` | `tool_call_id?` | `TOP_LEVEL_P0_REFERENCE` | `tool_call_id -> tool_call_record` | zero or one |
+| `TraceEventRecord` | `observation_ref?` | `TOP_LEVEL_P0_REFERENCE` | `observation_ref -> observation_record` | zero or one |
+| `TraceEventRecord` | `accepted_delta_ref?` | `LOGICAL_CHILD_CORRELATION` | child code `accepted_task_delta` | zero or one |
+| `TraceEventRecord` | `model_call_id?`、`presentation_plan_ref?`、`case_id?` | `PAYLOAD_CORRELATION` | model / presentation / Eval target is not a top-level record | owner model cardinality |
+| `EvalResultRecord` | `trace_ref?` | `CONDITIONAL_PAYLOAD_CORRELATION` | no single Trace aggregate target frozen | exactly one for `PASS / FAIL`；empty for `SKIPPED / NOT_RUN` |
+| `EvalExecutionFailureRecord` | `trace_ref?` | `PAYLOAD_CORRELATION` | no single Trace aggregate target frozen | zero or one |
+| `EvalExecutionFailureRecord` | `diagnostic_ref?` | `RESTRICTED_DIAGNOSTIC_CORRELATION` | no top-level target | zero or one |
+<!-- P0-PERSISTENCE-PROJECTION:END -->
+
+Logical child 的内部跨记录字段继续服从下列封闭决策；不能仅验证 child identity / parent identity 后忽略其余 correlation：
+
+<!-- P0-PERSISTENCE-CHILD-PROJECTION:START -->
+| logical child | source field | classification | exact relation token / target | cardinality / rule |
+|---|---|---|---|---|
+| `AcceptedTaskDelta` | `candidate_ref` | `PARENT_LOCAL_CORRELATION` | parent `candidate_validation[].candidate_ref` | exactly one parent match，且 decision 必须为 `ACCEPT` |
+| `AcceptedTaskDelta` | `message_ref` | `PARENT_FIELD_EQUALITY` | parent `RequestUnderstandingRecord.message_ref` | exactly equal |
+| `AcceptedTaskDelta` | `input_binding_refs[]` | `CHILD_TOP_LEVEL_P0_REFERENCE` | `input_binding_ref -> input_binding_record` | one or more；unique |
+| `TaskStateTransition` | `task_id` | `PARENT_FIELD_EQUALITY` | parent `TaskRecord.task_id` | exactly equal |
+| `TaskStateTransition` | `request_unit_id` | `CHILD_TOP_LEVEL_P0_REFERENCE` | `request_unit_id -> request_unit_record` | exactly one |
+| `TaskStateTransition` | `reason_ref` | `PAYLOAD_CORRELATION` | reason target kind not frozen | exactly one scalar |
+| `ToolAttemptRecord` | `tool_call_id` | `PARENT_FIELD_EQUALITY` | parent `ToolCallRecord.tool_call_id` | exactly equal |
+<!-- P0-PERSISTENCE-CHILD-PROJECTION:END -->
+
+`ModelVisibleToolsetArtifact` 没有 record relation；其 hash 是本记录 identity。Reference tuple 必须按 `(relation, target_record_code, target_identity)` 形成唯一、确定性的排序；矩阵中标记 `unique` 的 source field 出现重复 ID、任一 cardinality 错误或调用方试图提供 source-derived / child-derived relation 时都整体拒绝。`CONDITIONAL_PAYLOAD_CORRELATION`、`PAYLOAD_CORRELATION` 与 `RESTRICTED_DIAGNOSTIC_CORRELATION` 保留在 strict owner-model validation 范围内，但不能被 01-04 返回为“已解析”“owner graph 已闭合”或“可恢复”。
+
+Top-level marker-bounded matrix 恰含 66 行、logical-child matrix 恰含 7 行 projection decision；01-04 的 Component tests 必须证明 registry spec、两张矩阵与所有可生成 `P0RecordReference` 的行精确对应，parent-local / parent-equality / payload correlation 行从不进入 reference tuple，`MUST_BE_EMPTY` 行拒绝非空值，且没有未声明 relation token。
+
+#### 10.1.3 Plan 01-04 logical codec / closed registry API
 
 Plan 01-04 在 Application integration boundary 实现以下固定 API；名称、类型职责与封闭集合不得由实现分支自行扩展：
 
@@ -774,7 +881,7 @@ Plan 01-04 在 Application integration boundary 实现以下固定 API；名称�
 - `P0LogicalChildPayload`：携带 child code、parent code / identity、child identity 与 Pydantic JSON data；child 没有独立 record version，严格继承 parent code/version。
 - `P0VersionedPayload`：内层再次携带 record code/version、Pydantic JSON data 与 typed logical children，用来检测 outer metadata、inner payload 与 child tampering。
 - `P0PersistenceEnvelope`：Runtime-private logical envelope，携带 outer code/version、logical identity、direct-owner projection 或 owner-root refs、required relation refs 与 `P0VersionedPayload`；它不是 table schema。
-- `P0RecordSchemaSpec`：frozen static spec，携带 exact code/version、直接导入的 source model class、identity projector、owner strategy、source-derived relation projector、external / conditional relation-cardinality rules、allowed child rules 与 optional specialized-version validator。
+- `P0RecordSchemaSpec`：frozen static spec，携带 exact code/version、直接导入的 source model class、identity projector、owner strategy、source-derived relation projector、external relation rules、conditional payload-cardinality rules、allowed child rules 与 optional specialized-version validator。
 - `P0_PERSISTENCE_REGISTRY`：immutable、恰含 17 项；source model 通过直接 import 绑定，不接受 module / class 字符串，不 dynamic import，不提供 `register()`、plugin extension 或 fallback-to-latest。
 - `P0_LOGICAL_CHILD_SPECS`：immutable、恰含三类 child；它是 child validation spec，不是第二个 top-level record registry。
 - `DecodedP0PersistenceRecord`：返回已验证 code/version、typed source record 与 typed logical children，但不授予 trusted scope，也不证明完整 owner graph 已闭合。
@@ -798,9 +905,9 @@ def decode_persistence_record(
 ) -> DecodedP0PersistenceRecord: ...
 ```
 
-Encode 只接受 registry 已知 code 与 exact source model；direct owner 和 source-derived refs 必须从 record 重算，调用方只能提供 registry 明列的 external-required refs。Logical children 必须匹配封闭 child spec、parent identity 与父 payload refs。
+Encode 只接受 registry 已知 code 与 exact source model；direct owner、source-derived refs 和 child-derived refs 必须从 record / logical children 重算，调用方只能提供 registry 明列的 external-required refs。Logical children 必须匹配封闭 child spec、parent equality、parent-local correlation 与父 payload refs。
 
-Decode 对 `P0PersistenceEnvelope` 或 JSON-compatible mapping 先生成 JSON bytes，对 `str` / `bytes` raw JSON 直接使用；mapping 含非 JSON 值时拒绝，禁止 `default=str` 或其他 coercion。它先分类 outer / inner code/version 与 registry，再以对应 source / child model 的 `model_validate_json(..., strict=True)` 做完整验证，随后重算并比较 identity、direct owner、source-derived / external / conditional relations、children 与七个 mirror 字段；任一失败整体 fail closed。
+Decode 对 `P0PersistenceEnvelope` 或 JSON-compatible mapping 先生成 JSON bytes，对 `str` / `bytes` raw JSON 直接使用；mapping 含非 JSON 值时拒绝，禁止 `default=str` 或其他 coercion。它先分类 outer / inner code/version 与 registry，再以对应 source / child model 的 `model_validate_json(..., strict=True)` 做完整验证，随后重算并比较 identity、direct owner、source-derived / child-derived / external refs、conditional payload cardinality、children 与七个 mirror 字段；任一失败整体 fail closed。
 
 UUID / datetime 的合法 JSON 表示是字符串，因此 strict round-trip 必须使用 Pydantic JSON validation。不得把 JSON-mode dict 交给 `model_validate(..., strict=True)`，也不得通过关闭 strict、预先构造 UUID / datetime 或宽松 coercion 使非法 payload 通过。
 
@@ -826,8 +933,8 @@ UUID / datetime 的合法 JSON 表示是字符串，因此 strict round-trip 必
 
 Logical child 规则固定为：
 
-- `AcceptedTaskDelta` 静态绑定 `RequestUnderstandingRecord`，child identity 是 `accepted_delta_id`。Parent 的 `accepted_delta_refs` 与 child identities 必须一一对应且顺序无关；closure strategy 为 `LOCAL_CLOSED`。
-- `TaskStateTransition` 静态绑定 `TaskRecord`，child identity 是 `(task_id, request_unit_id, result_state_version)`。`task_id` 必须等于 parent identity，每条 transition 继续满足 owner model 的单步 `base + 1 = result`；同一 envelope 内 identity / result version 唯一并按 result version 排序。Task parent 没有 transition refs，codec 不能证明完整历史，因此 closure strategy 为 `GRAPH_REQUIRED`；完整 cardinality / contiguous history 留给 01-05 / 01-06 record-graph gate。
+- `AcceptedTaskDelta` 静态绑定 `RequestUnderstandingRecord`，child identity 是 `accepted_delta_id`。Parent 的 `accepted_delta_refs` 与 child identities 必须一一对应且顺序无关；每个 child 的 `message_ref` 必须等于 parent，`candidate_ref` 必须唯一命中 parent 中 decision 为 `ACCEPT` 的 Candidate，`input_binding_refs` 必须重算为 child-derived top-level refs；closure strategy 为 `LOCAL_CLOSED`。
+- `TaskStateTransition` 静态绑定 `TaskRecord`，child identity 是 `(task_id, request_unit_id, result_state_version)`。`task_id` 必须等于 parent identity，`request_unit_id` 必须重算为 child-derived top-level ref，`reason_ref` 只保留为 payload correlation；每条 transition 继续满足 owner model 的单步 `base + 1 = result`，同一 envelope 内 identity / result version 唯一并按 result version 排序。Task parent 没有 transition refs，codec 不能证明完整历史，因此 closure strategy 为 `GRAPH_REQUIRED`；完整 cardinality / contiguous history 留给 01-05 / 01-06 record-graph gate。
 - `ToolAttemptRecord` 静态绑定 `ToolCallRecord`，child identity 是 `(tool_call_id, attempt_no)`，且 `tool_call_id` 必须等于 parent identity。Parent `attempt_count=N` 时 children 必须恰为唯一连续的 `attempt_no=1..N`；`N=0` 时必须为空，closure strategy 为 `LOCAL_CLOSED`。每个 attempt 的 lifecycle 继续服从 Tool owner。
 
 任何 locally provable 的 missing、extra、duplicate、wrong-parent、wrong-identity 或 child payload validation failure 均整体拒绝；`GRAPH_REQUIRED` 不能被 codec 的局部成功升级为完整 owner graph 证明。
