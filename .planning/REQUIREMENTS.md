@@ -11,12 +11,12 @@
 - Phase 2–6 只是 Coverage Matrix Cycle 的顺序映射；在 scoped implementation owner 出现前，不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
-## Phase 1｜Cycle 1：第一最薄 E2E-01（OWNER CONTRACT CLOSURE / PACKETS 01-04E–01-04G）
+## Phase 1｜Cycle 1：第一最薄 E2E-01（W2 RUNTIME / INFRA / EVAL PLANNING）
 
 - [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
 - [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
 
-当前八个 numbered Plan 中 `01-01`–`01-04` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D` 也已完成。独立 Plan Checker 另识别出 `01-04E` Memory token-count semantics、`01-04F` Thin Slice / Eval scenario alignment 与 `01-04G` recovery state + Trace atomicity 三个必须在 W2 前串行关闭的 owner contract。实际 Packet 口径为 `5/12`，但 canonical lifecycle 与本文件复选框仍保持 `0/8`；规划或组件契约完成不等于 Case 已通过。
+当前八个 numbered Plan 中 `01-01`–`01-04` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D/E/F/G` 也均已完成并合并。`01-05` Runtime、`01-06` Infra、`01-07` Eval 已从共同 exact base `c35687dafa3881bb322d91515068d8d39be79df6` 完成受控 planning 与三轮独立 Plan Checker，最终无 `BLOCKER` / `MAJOR`。实际 Packet 口径为 `8/12`，但 canonical lifecycle 与本文件复选框仍保持 `0/8`；规划或组件契约完成不等于 Case 已通过。
 
 ## Phase 2｜Cycle 2：完成 E2E-01（PLANNED MAPPING ONLY）
 
