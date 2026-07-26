@@ -71,8 +71,8 @@ class TruncationDecision(AuditOnlyModel):
 
 
 class TokenCounts(AuditOnlyModel):
-    input_tokens: Annotated[int, Field(ge=0)]
-    output_tokens: Annotated[int, Field(ge=0)] = 0
+    input_tokens: Annotated[int, Field(ge=0, strict=True)] | None = None
+    output_tokens: Annotated[int, Field(ge=0, strict=True)] | None = None
 
 
 class ContextManifest(AuditOnlyModel):
