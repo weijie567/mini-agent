@@ -24,7 +24,7 @@ from mini_agent.core.presentation import (
     PresentationPlan,
     PresentationTone,
 )
-from mini_agent.core.tool_system import ToolResultOutcome
+from mini_agent.core.tool_system import ToolCallStatus, ToolResultOutcome
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
@@ -179,6 +179,49 @@ def test_run_and_trace_require_an_explicit_safe_stop_reason() -> None:
     trace_schema = str(TraceEvent.model_json_schema())
     assert "customer_id" not in trace_schema
     assert "raw_tool_result" not in trace_schema
+
+
+@pytest.mark.parametrize(
+    ("event_type", "terminal_status"),
+    [
+        (TraceEventType.TOOL_CALL_SUCCEEDED, ToolCallStatus.SUCCEEDED),
+        (TraceEventType.TOOL_CALL_FAILED, ToolCallStatus.FAILED),
+        (TraceEventType.TOOL_CALL_TIMED_OUT, ToolCallStatus.TIMED_OUT),
+        (TraceEventType.TOOL_CALL_INTERRUPTED, ToolCallStatus.INTERRUPTED),
+    ],
+)
+def test_terminal_tool_trace_requires_id_and_matching_status(
+    event_type: TraceEventType,
+    terminal_status: ToolCallStatus,
+) -> None:
+    trace = TraceEvent(
+        trace_event_id=uuid4(),
+        event_type=event_type,
+        occurred_at=NOW,
+        run_id=uuid4(),
+        tool_call_id=uuid4(),
+        tool_call_terminal_status=terminal_status,
+    )
+    assert trace.tool_call_terminal_status is terminal_status
+
+    with pytest.raises(ValidationError, match="requires tool_call_id"):
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=event_type,
+            occurred_at=NOW,
+            run_id=uuid4(),
+            tool_call_terminal_status=terminal_status,
+        )
+
+    with pytest.raises(ValidationError, match="event and status must match"):
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=event_type,
+            occurred_at=NOW,
+            run_id=uuid4(),
+            tool_call_id=uuid4(),
+            tool_call_terminal_status=ToolCallStatus.CREATED,
+        )
 
 
 def test_presentation_plan_is_style_only_and_uses_each_field_once() -> None:

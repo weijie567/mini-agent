@@ -16,14 +16,17 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingOutput,
 )
 from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
     InputBinding,
     RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
+    TaskStateTransition,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
     ModelVisibleToolsetArtifact,
+    ToolAttemptRecord,
     ToolCallRecord,
 )
 from mini_agent.core.trace import AgentRunRecord, TraceEvent
@@ -81,17 +84,27 @@ class RuntimeRecordPort(Protocol):
         self, record: RequestUnderstandingRecord
     ) -> None: ...
 
+    async def append_accepted_task_delta(
+        self, record: AcceptedTaskDelta
+    ) -> None: ...
+
     async def save_input_binding(self, record: InputBinding) -> None: ...
 
     async def save_task(self, record: TaskRecord) -> None: ...
 
     async def save_request_unit(self, record: RequestUnitRecord) -> None: ...
 
+    async def append_task_state_transition(
+        self, record: TaskStateTransition
+    ) -> None: ...
+
     async def save_context_manifest(self, record: ContextManifest) -> None: ...
 
     async def save_gate_decision(self, record: GateDecision) -> None: ...
 
     async def save_tool_call(self, record: ToolCallRecord) -> None: ...
+
+    async def append_tool_attempt(self, record: ToolAttemptRecord) -> None: ...
 
     async def save_observation(self, record: OrderObservation) -> None: ...
 

@@ -104,6 +104,7 @@ class TraceEventType(StrEnum):
     TOOL_CALL_STARTED = "ToolCallStarted"
     TOOL_CALL_SUCCEEDED = "ToolCallSucceeded"
     TOOL_CALL_FAILED = "ToolCallFailed"
+    TOOL_CALL_TIMED_OUT = "ToolCallTimedOut"
     TOOL_CALL_INTERRUPTED = "ToolCallInterrupted"
     TOOL_RESULT_NORMALIZED = "ToolResultNormalized"
     OBSERVATION_RECORDED = "ObservationRecorded"
@@ -111,6 +112,14 @@ class TraceEventType(StrEnum):
     RESPONSE_RENDERED = "ResponseRendered"
     RUN_STOPPED = "RunStopped"
     EVAL_CASE_GRADED = "EvalCaseGraded"
+
+
+_TERMINAL_TOOL_TRACE_STATUS: dict[TraceEventType, ToolCallStatus] = {
+    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+    TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
+}
 
 
 class TimingAndUsageSummary(AuditOnlyModel):
@@ -165,4 +174,12 @@ class TraceEvent(AuditOnlyModel):
         if self.event_type is TraceEventType.RUN_STOPPED:
             if self.stop_reason is None or self.user_outcome is None:
                 raise ValueError("RunStopped requires user_outcome and stop_reason")
+        expected_tool_status = _TERMINAL_TOOL_TRACE_STATUS.get(self.event_type)
+        if expected_tool_status is not None:
+            if self.tool_call_id is None:
+                raise ValueError("terminal ToolCall Trace requires tool_call_id")
+            if self.tool_call_terminal_status is not expected_tool_status:
+                raise ValueError(
+                    "terminal ToolCall Trace event and status must match"
+                )
         return self

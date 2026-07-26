@@ -72,11 +72,20 @@ TRUSTED_ARGUMENT_FIELDS = frozenset(
 class FrozenJsonDict(dict[str, Any]):
     """JSON object that cannot be mutated after boundary validation."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_frozen_json_initialized", False):
+            self._reject_mutation()
+        dict.__init__(self, *args, **kwargs)
+        object.__setattr__(self, "_frozen_json_initialized", True)
+
     def _reject_mutation(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError("validated JSON is immutable")
 
+    __setattr__ = _reject_mutation
+    __delattr__ = _reject_mutation
     __setitem__ = _reject_mutation
     __delitem__ = _reject_mutation
+    __ior__ = _reject_mutation
     clear = _reject_mutation
     pop = _reject_mutation
     popitem = _reject_mutation
@@ -90,9 +99,17 @@ class FrozenJsonDict(dict[str, Any]):
 class FrozenJsonList(list[Any]):
     """JSON array that cannot be mutated after boundary validation."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_frozen_json_initialized", False):
+            self._reject_mutation()
+        list.__init__(self, *args, **kwargs)
+        object.__setattr__(self, "_frozen_json_initialized", True)
+
     def _reject_mutation(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError("validated JSON is immutable")
 
+    __setattr__ = _reject_mutation
+    __delattr__ = _reject_mutation
     __setitem__ = _reject_mutation
     __delitem__ = _reject_mutation
     __iadd__ = _reject_mutation
@@ -117,7 +134,7 @@ def freeze_json_value(value: Any) -> Any:
         return FrozenJsonDict(
             {key: freeze_json_value(nested) for key, nested in value.items()}
         )
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return FrozenJsonList(freeze_json_value(item) for item in value)
     return value
 

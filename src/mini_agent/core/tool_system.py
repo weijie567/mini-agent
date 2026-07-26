@@ -7,7 +7,7 @@ import json
 from copy import deepcopy
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self, Sequence
+from typing import Annotated, Literal, Self, Sequence
 from uuid import UUID
 
 from pydantic import Field, JsonValue, field_validator, model_validator
@@ -24,6 +24,7 @@ from .common import (
 NonEmptyString = Annotated[str, Field(min_length=1)]
 ToolName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 ToolsetHash = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+SafeReasonCode = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{1,127}$")]
 
 MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION = "model-visible-toolset.p0.v1"
 
@@ -124,7 +125,9 @@ def compute_model_visible_toolset_hash(tools: Sequence[ToolSpec]) -> str:
 
 
 class ModelVisibleToolsetArtifact(AuditOnlyModel):
-    artifact_schema_version: str = MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION
+    artifact_schema_version: Literal["model-visible-toolset.p0.v1"] = (
+        MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION
+    )
     model_visible_toolset_hash: ToolsetHash
     provider_visible_tool_specs: tuple[ToolSpec, ...]
 
@@ -263,6 +266,19 @@ class GateReasonCode(StrEnum):
     TRUSTED_FIELD_INJECTION = "TRUSTED_FIELD_INJECTION"
 
 
+_GATE_REASON_TO_FAILED_CHECK: dict[GateReasonCode, str] = {
+    GateReasonCode.ACTION_REQUIRES_PROPOSAL: "action_boundary_valid",
+    GateReasonCode.ARGUMENT_BINDING_MISMATCH: "argument_binding_valid",
+    GateReasonCode.BUDGET_EXCEEDED: "budget_valid",
+    GateReasonCode.NO_PROGRESS: "progress_valid",
+    GateReasonCode.SCHEMA_INVALID: "schema_valid",
+    GateReasonCode.SNAPSHOT_MISMATCH: "snapshot_match",
+    GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
+    GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
+    GateReasonCode.TRUSTED_FIELD_INJECTION: "trusted_field_valid",
+}
+
+
 class GateDecision(AuditOnlyModel):
     gate_decision_id: UUID
     model_call_id: UUID
@@ -315,8 +331,18 @@ class GateDecision(AuditOnlyModel):
                 raise ValueError("accepted GateDecision requires argument bindings")
             if self.reason_code is not None:
                 raise ValueError("accepted GateDecision cannot carry a rejection reason")
-        elif self.reason_code is None:
-            raise ValueError("rejected GateDecision requires a stable reason code")
+        else:
+            if self.reason_code is None:
+                raise ValueError("rejected GateDecision requires a stable reason code")
+            if all(checks):
+                raise ValueError(
+                    "rejected GateDecision requires at least one failed Gate check"
+                )
+            failed_check = _GATE_REASON_TO_FAILED_CHECK[self.reason_code]
+            if getattr(self, failed_check):
+                raise ValueError(
+                    "GateDecision reason_code must match its failed Gate check"
+                )
         return self
 
 
@@ -324,7 +350,7 @@ class AuthorizedToolCommand(RuntimePrivateModel):
     gate_decision_id: UUID
     canonical_tool_name: ToolName
     validated_arguments: dict[str, JsonValue]
-    argument_binding_refs: tuple[UUID, ...]
+    argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     validated_task_state_version: Annotated[int, Field(ge=1)]
     registry_snapshot_ref: NonEmptyString
     trusted_context_ref: NonEmptyString
@@ -373,15 +399,15 @@ class ToolCallRecord(AuditOnlyModel):
     canonical_tool_name: ToolName
     tool_registry_version: NonEmptyString
     validated_task_state_version: Annotated[int, Field(ge=1)]
-    argument_binding_refs: tuple[UUID, ...]
+    argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     effect: ToolEffect
     attempt_count: Annotated[int, Field(ge=0)]
     status: ToolCallStatus
     started_at: datetime
     finished_at: datetime | None = None
     failure_code: NonEmptyString | None = None
-    timeout_phase: NonEmptyString | None = None
-    interruption_reason: NonEmptyString | None = None
+    timeout_phase: SafeReasonCode | None = None
+    interruption_reason: SafeReasonCode | None = None
     result_ref: UUID | None = None
 
     @field_validator("started_at", "finished_at")
@@ -407,6 +433,20 @@ class ToolCallRecord(AuditOnlyModel):
             raise ValueError("ToolCall finished_at cannot precede started_at")
         if self.status is ToolCallStatus.SUCCEEDED and self.failure_code is not None:
             raise ValueError("succeeded ToolCall cannot carry failure_code")
+        if self.status is ToolCallStatus.TIMED_OUT:
+            if self.timeout_phase is None:
+                raise ValueError("timed-out ToolCall requires a safe timeout_phase")
+        elif self.timeout_phase is not None:
+            raise ValueError("only timed-out ToolCall can carry timeout_phase")
+        if self.status is ToolCallStatus.INTERRUPTED:
+            if self.interruption_reason is None:
+                raise ValueError(
+                    "interrupted ToolCall requires a safe interruption_reason"
+                )
+        elif self.interruption_reason is not None:
+            raise ValueError(
+                "only interrupted ToolCall can carry interruption_reason"
+            )
         return self
 
 
@@ -419,6 +459,30 @@ class ToolResultOutcome(StrEnum):
     RESULT_UNKNOWN = "RESULT_UNKNOWN"
 
 
+class ToolAttemptRecord(AuditOnlyModel):
+    tool_call_id: UUID
+    attempt_no: Annotated[int, Field(ge=1)]
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: ToolResultOutcome
+    failure_code: NonEmptyString | None = None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def attempt_timestamps_are_utc(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is None:
+            return None
+        return require_utc(value, field_name="ToolAttemptRecord timestamp")
+
+    @model_validator(mode="after")
+    def attempt_dates_are_ordered(self) -> Self:
+        if self.finished_at is not None and self.finished_at < self.started_at:
+            raise ValueError("ToolAttempt finished_at cannot precede started_at")
+        return self
+
+
 class ToolResult(RuntimePrivateModel):
     tool_call_id: UUID
     canonical_tool_name: ToolName
@@ -429,6 +493,15 @@ class ToolResult(RuntimePrivateModel):
     raw_result_ref: NonEmptyString | None = None
     observed_at: datetime | None = None
     completed_at: datetime
+
+    @field_validator("payload")
+    @classmethod
+    def payload_is_recursively_frozen(
+        cls, value: JsonValue | None
+    ) -> JsonValue | None:
+        if value is None:
+            return None
+        return freeze_json_value(deepcopy(value))
 
     @field_validator("observed_at", "completed_at")
     @classmethod

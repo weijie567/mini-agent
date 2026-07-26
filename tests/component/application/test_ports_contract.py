@@ -31,6 +31,12 @@ def test_ports_are_protocols_owned_by_application() -> None:
     assert RuntimeRecordPort._is_protocol
 
 
+def test_runtime_record_port_preserves_append_only_causality_records() -> None:
+    assert hasattr(RuntimeRecordPort, "append_accepted_task_delta")
+    assert hasattr(RuntimeRecordPort, "append_task_state_transition")
+    assert hasattr(RuntimeRecordPort, "append_tool_attempt")
+
+
 def test_core_and_application_source_have_no_framework_or_adapter_imports() -> None:
     source_root = Path(__file__).parents[3] / "src" / "mini_agent"
     source = "\n".join(
