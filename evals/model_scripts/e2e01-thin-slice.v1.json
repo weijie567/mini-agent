@@ -1,0 +1,439 @@
+{
+  "artifact_type": "SCRIPTED_SCENARIO_CATALOG",
+  "artifact_id": "e2e01-thin-model-scripts",
+  "schema_version": "e2e01-thin-model-script-schema-v1",
+  "model_script_catalog_version": "e2e01-thin-model-scripts-v1",
+  "provider": "ScriptedModelProvider",
+  "network_access": "FORBIDDEN",
+  "credential_inputs": [],
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-thin-version-manifest",
+    "path": "evals/manifests/e2e01-thin-slice.v1.json"
+  },
+  "scenarios": [
+    {
+      "model_script_ref": "script:e2e01-01:success",
+      "case_refs": [
+        "E2E01-01"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "VALID_ORDER_SUMMARY_PLAN",
+          "fact_source": "SAFE_ORDER_OBSERVATION"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GOAL_COMPLETED",
+        "user_outcome": "COMPLETED",
+        "response_policy": "DETERMINISTIC_ORDER_SUMMARY_V1",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1
+      }
+    },
+    {
+      "model_script_ref": "script:e2e01-04-a:foreign-order",
+      "case_refs": [
+        "E2E01-04-A"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-2001",
+          "next_move_order_number": "O-2001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "user_outcome": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "response_policy": "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "model_calls": 1,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:e2e01-04-b:nonexistent-order",
+      "case_refs": [
+        "E2E01-04-B"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-9999",
+          "next_move_order_number": "O-9999"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "user_outcome": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "response_policy": "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "model_calls": 1,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:sec-argument-binding:foreign-order",
+      "case_refs": [
+        "E2E01-01+SEC-ARGUMENT-BINDING"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-2001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_reason_code": "ARGUMENT_BINDING_MISMATCH",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:sec-argument-binding:nonexistent-order",
+      "case_refs": [
+        "E2E01-01+SEC-ARGUMENT-BINDING"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-9999"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_reason_code": "ARGUMENT_BINDING_MISMATCH",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:zero-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_ZERO_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:multiple-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:invalid-request-understanding-schema",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:source-authority-mismatch",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_SOURCE_AUTHORITY_MISMATCH",
+          "message_order_number": "O-1001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:stale-task-state-version",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_STALE_TASK_STATE_VERSION",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:trusted-field-override",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_TRUSTED_FIELD_OVERRIDE",
+          "message_order_number": "O-1001",
+          "attempted_customer_id": "customer-B"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:unknown-tool-name",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_UNKNOWN_TOOL_NAME",
+          "message_order_number": "O-1001",
+          "requested_tool_name": "get_any_order"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:zero-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_ZERO_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:multiple-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:invalid-schema",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_INVALID_PRESENTATION_SCHEMA"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:fact-bearing-plan",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_FACT_BEARING_PRESENTATION_PLAN"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PRESENTATION_PLAN_REJECTED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    }
+  ]
+}

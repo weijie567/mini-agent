@@ -1,0 +1,63 @@
+{
+  "artifact_type": "EVAL_VERSION_MANIFEST",
+  "artifact_id": "e2e01-thin-version-manifest",
+  "schema_version": "e2e01-thin-version-manifest-schema-v1",
+  "manifest_version": "e2e01-thin-version-manifest-v1",
+  "created_from_base_sha": "6c6d041cf20db6ff268c8bca129cc19b521cb568",
+  "versions": {
+    "fixture_version": "e2e01-thin-fixture-v1",
+    "dataset_version": "e2e01-thin-dataset-v1",
+    "prompt_version": "e2e01-thin-prompt-v1",
+    "tool_registry_version": "e2e01-thin-tools-v1",
+    "renderer_version": "order-summary-renderer-v1",
+    "redaction_policy_version": "e2e01-thin-redaction-v1",
+    "model_script_catalog_version": "e2e01-thin-model-scripts-v1",
+    "lane_manifest_version": "e2e01-thin-lanes-v1",
+    "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
+  },
+  "runtime_version_binding": {
+    "required_at_eval_run": true,
+    "source": "SOURCE_REVISION_OR_BUILD_ID",
+    "artifact_placeholder": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
+  },
+  "hash_algorithm": "SHA-256",
+  "artifacts": [
+    {
+      "artifact_id": "e2e01-thin-fixture",
+      "path": "evals/fixtures/e2e01-thin-slice.v1.json",
+      "version_field": "fixture_version",
+      "version": "e2e01-thin-fixture-v1",
+      "sha256": "cf5558794b95c073ff146ae2295937377b19349a44167dbdf30532fa784a19a5"
+    },
+    {
+      "artifact_id": "e2e01-thin-cases",
+      "path": "evals/cases/e2e01-thin-slice.v1.json",
+      "version_field": "dataset_version",
+      "version": "e2e01-thin-dataset-v1",
+      "sha256": "cff4cbd96aedf38c3ca9db7a3d94df94446e936ffde884b6bb48fb04f0ce7f6c"
+    },
+    {
+      "artifact_id": "e2e01-thin-model-scripts",
+      "path": "evals/model_scripts/e2e01-thin-slice.v1.json",
+      "version_field": "model_script_catalog_version",
+      "version": "e2e01-thin-model-scripts-v1",
+      "sha256": "52fe742c5cd086a2b5503c2459a50c6a3cd22bca1563adb15659fe435674a575"
+    },
+    {
+      "artifact_id": "e2e01-thin-lanes",
+      "path": "evals/lanes/e2e01-thin-slice.v1.json",
+      "version_field": "lane_manifest_version",
+      "version": "e2e01-thin-lanes-v1",
+      "sha256": "61e43e8a560c3b31d1444759360941bb038d41a94ee1326be7c8cce52808158d"
+    }
+  ],
+  "default_offline_artifact_refs": [
+    "e2e01-thin-fixture",
+    "e2e01-thin-cases",
+    "e2e01-thin-model-scripts",
+    "e2e01-thin-lanes"
+  ],
+  "case_lifecycle_status": "CONTRACT_DEFINED",
+  "eval_result_artifacts_created": false,
+  "baseline_result_artifacts_created": false
+}

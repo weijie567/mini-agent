@@ -1,0 +1,83 @@
+{
+  "artifact_type": "E2E_FIXTURE",
+  "artifact_id": "e2e01-thin-fixture",
+  "schema_version": "e2e01-thin-fixture-schema-v1",
+  "fixture_version": "e2e01-thin-fixture-v1",
+  "classification": "SYNTHETIC_DETERMINISTIC",
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-thin-version-manifest",
+    "path": "evals/manifests/e2e01-thin-slice.v1.json"
+  },
+  "consumers": [
+    "DATABASE_SEED",
+    "HTTP_E2E",
+    "OFFLINE_GATE",
+    "QWEN_BASELINE"
+  ],
+  "sessions": [
+    {
+      "fixture_ref": "session:alice",
+      "label": "Alice",
+      "session_id": "p0-session-alice",
+      "trusted_customer_id": "customer-A",
+      "trust_boundary": "SERVER_SIDE_FIXTURE_ONLY"
+    },
+    {
+      "fixture_ref": "session:bob",
+      "label": "Bob",
+      "session_id": "p0-session-bob",
+      "trusted_customer_id": "customer-B",
+      "trust_boundary": "SERVER_SIDE_FIXTURE_ONLY"
+    }
+  ],
+  "orders": [
+    {
+      "fixture_ref": "order:O-1001",
+      "owner_customer_id": "customer-A",
+      "safe_projection": {
+        "order_number": "O-1001",
+        "status": "SHIPPED",
+        "line_items": [
+          {
+            "product_name": "轻量跑鞋",
+            "quantity": 1
+          }
+        ],
+        "ordered_at": "2026-07-20T02:15:00Z",
+        "status_updated_at": "2026-07-24T09:30:00Z"
+      }
+    },
+    {
+      "fixture_ref": "order:O-2001",
+      "owner_customer_id": "customer-B",
+      "safe_projection": {
+        "order_number": "O-2001",
+        "status": "PROCESSING",
+        "line_items": [
+          {
+            "product_name": "合成隔离测试商品",
+            "quantity": 2
+          }
+        ],
+        "ordered_at": "2026-07-19T03:20:00Z",
+        "status_updated_at": "2026-07-23T08:10:00Z"
+      }
+    }
+  ],
+  "nonexistent_order_sentinels": [
+    {
+      "fixture_ref": "order-sentinel:O-9999",
+      "order_number": "O-9999",
+      "seed_behavior": "MUST_NOT_INSERT"
+    }
+  ],
+  "versions": {
+    "fixture_version": "e2e01-thin-fixture-v1",
+    "dataset_version": "e2e01-thin-dataset-v1",
+    "prompt_version": "e2e01-thin-prompt-v1",
+    "tool_registry_version": "e2e01-thin-tools-v1",
+    "renderer_version": "order-summary-renderer-v1",
+    "redaction_policy_version": "e2e01-thin-redaction-v1",
+    "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
+  }
+}
