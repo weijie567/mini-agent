@@ -1,0 +1,54 @@
+# macOS / editor state
+.DS_Store
+**/.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local databases and runtime state
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# GSD / planning scratch state (future planning documents remain trackable)
+.planning/tmp/
+
+# Archived Graphify analyses are reproducible historical navigation artifacts,
+# not the archived design sources themselves.
+archive/**/generated-analysis/
+
+# Graphify output is reproducible and may contain machine paths or local query
+# history. Regenerate it per checkout; do not publish it as repository source.
+graphify-out/

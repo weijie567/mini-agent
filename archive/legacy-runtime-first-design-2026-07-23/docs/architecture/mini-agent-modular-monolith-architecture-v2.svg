@@ -1,0 +1,532 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2600" height="1660" viewBox="0 0 2600 1660" role="img" aria-labelledby="title desc">
+  <title id="title">Mini Agent 模块化单体逻辑架构图 V2</title>
+  <desc id="desc">P0 目标架构。展示 Interfaces、Application、Agent Runtime Core、订单与配送 Reference Application、Infrastructure Adapters、External Systems，以及有界 Agent Run 主链路、Run Scope、Trace Evaluation 旁路和 Composition Configuration 路径。</desc>
+
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef3f8"/>
+    </linearGradient>
+    <linearGradient id="runtimeHead" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff0df"/>
+      <stop offset="1" stop-color="#fff7ed"/>
+    </linearGradient>
+    <linearGradient id="traceRail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ecfeff"/>
+      <stop offset="0.5" stop-color="#e0f2fe"/>
+      <stop offset="1" stop-color="#ecfeff"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#64748b" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="7" stdDeviation="11" flood-color="#64748b" flood-opacity="0.14"/>
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#64748b" flood-opacity="0.12"/>
+    </filter>
+
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#ea580c"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#0891b2"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#64748b"/>
+    </marker>
+
+    <style>
+      text {
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+        text-rendering: geometricPrecision;
+      }
+      .title { fill:#0f172a; font-size:34px; font-weight:760; letter-spacing:.2px; }
+      .subtitle { fill:#64748b; font-size:15px; font-weight:500; }
+      .eyebrow { font-size:11px; font-weight:760; letter-spacing:1.6px; }
+      .panel-title { fill:#0f172a; font-size:20px; font-weight:740; }
+      .panel-path { fill:#64748b; font-size:11px; font-weight:560; }
+      .card-title { fill:#172033; font-size:15px; font-weight:700; }
+      .card-title-sm { fill:#172033; font-size:13.5px; font-weight:700; }
+      .body { fill:#475569; font-size:12.5px; font-weight:470; }
+      .body-sm { fill:#526174; font-size:11.5px; font-weight:470; }
+      .micro { fill:#64748b; font-size:10.5px; font-weight:510; }
+      .tiny { fill:#64748b; font-size:9.5px; font-weight:510; }
+      .mono { font-family:"SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+      .chip { font-size:10px; font-weight:700; letter-spacing:.2px; }
+      .flow-label { font-size:10.5px; font-weight:680; }
+      .line-blue { fill:none; stroke:#2563eb; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowBlue); }
+      .line-orange { fill:none; stroke:#ea580c; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowOrange); }
+      .line-purple { fill:none; stroke:#8b5cf6; stroke-width:1.8; stroke-dasharray:7 6; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowPurple); }
+      .line-green { fill:none; stroke:#16a34a; stroke-width:1.8; stroke-dasharray:7 6; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowGreen); }
+      .line-cyan { fill:none; stroke:#0891b2; stroke-width:1.8; stroke-dasharray:5 5; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowCyan); }
+      .line-gray { fill:none; stroke:#64748b; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowGray); }
+      .hairline { vector-effect:non-scaling-stroke; }
+    </style>
+  </defs>
+
+  <!-- Canvas -->
+  <rect width="2600" height="1660" fill="url(#canvas)"/>
+  <rect width="2600" height="1660" fill="url(#grid)"/>
+
+  <!-- Header -->
+  <g aria-label="标题与图例">
+    <rect x="52" y="32" width="7" height="56" rx="3.5" fill="#2563eb"/>
+    <text class="title" x="78" y="57">Mini Agent 模块化单体逻辑架构图</text>
+    <text class="subtitle" x="79" y="83">P0 目标态 · 单进程 / 单部署单元 / 进程内同步协作 · 模块、职责、所有权与允许依赖</text>
+
+    <rect x="1045" y="30" width="365" height="55" rx="13" fill="#fff7ed" stroke="#fdba74"/>
+    <text class="eyebrow" x="1227.5" y="52" text-anchor="middle" fill="#c2410c">PROPOSED P0 TARGET</text>
+    <text class="micro" x="1227.5" y="72" text-anchor="middle" fill="#9a3412">规划目标 / 尚未实现 · 不表示当前代码状态</text>
+
+    <g transform="translate(1440 27)">
+      <rect width="1108" height="61" rx="13" fill="#ffffff" stroke="#d8e0ea"/>
+      <line x1="20" y1="20" x2="65" y2="20" stroke="#2563eb" stroke-width="2.2" marker-end="url(#arrowBlue)"/>
+      <text class="micro" x="75" y="24">Run 主链路</text>
+      <line x1="195" y1="20" x2="240" y2="20" stroke="#8b5cf6" stroke-width="1.8" stroke-dasharray="7 6" marker-end="url(#arrowPurple)"/>
+      <text class="micro" x="250" y="24">Composition / Configuration</text>
+      <line x1="475" y1="20" x2="520" y2="20" stroke="#0891b2" stroke-width="1.8" stroke-dasharray="5 5" marker-end="url(#arrowCyan)"/>
+      <text class="micro" x="530" y="24">Trace / Evaluation</text>
+      <line x1="695" y1="20" x2="740" y2="20" stroke="#16a34a" stroke-width="1.8" stroke-dasharray="7 6" marker-end="url(#arrowGreen)"/>
+      <text class="micro" x="750" y="24">Port implementation</text>
+      <rect x="920" y="11" width="42" height="18" rx="6" fill="#fff" stroke="#64748b" stroke-dasharray="5 4"/>
+      <text class="micro" x="974" y="24">可选 / 条件边界</text>
+      <text class="micro" x="20" y="48">实线只表示允许的运行期依赖；领域事实不进入 Runtime Core。</text>
+    </g>
+  </g>
+
+  <!-- Modular monolith boundary -->
+  <g id="modular-monolith" aria-label="模块化单体边界">
+    <rect x="32" y="110" width="2536" height="1200" rx="30" fill="#ffffff" stroke="#b7c3d2" stroke-width="1.5" filter="url(#shadow)"/>
+    <text class="eyebrow" x="65" y="142" fill="#334155">MINI AGENT MODULAR MONOLITH</text>
+    <text class="micro" x="310" y="142">单进程 · 单发布单元 · 模块间直接调用 · 外部依赖统一经 Adapter</text>
+
+    <!-- Bootstrap -->
+    <g id="bootstrap">
+      <rect x="75" y="163" width="2450" height="83" rx="17" fill="#eff8ff" stroke="#38a3ef" stroke-width="1.4"/>
+      <rect x="96" y="181" width="46" height="46" rx="13" fill="#dbeafe" stroke="#60a5fa"/>
+      <circle cx="119" cy="204" r="10" fill="none" stroke="#2563eb" stroke-width="1.5"/>
+      <path d="M119 190v5M119 213v5M105 204h5M128 204h5M109 194l4 4M125 210l4 4M129 194l-4 4M113 210l-4 4" stroke="#2563eb" stroke-width="1.4" stroke-linecap="round"/>
+      <text class="card-title" x="157" y="192">Bootstrap / Composition Root</text>
+      <text class="body" x="157" y="216">唯一组装点：创建具体对象、绑定 Runtime / Domain Ports、注册 CapabilitySpec / ToolDefinition / ToolHandler，管理配置与生命周期</text>
+      <rect x="2165" y="181" width="332" height="45" rx="11" fill="#ffffff" stroke="#93c5fd"/>
+      <text class="micro mono" x="2331" y="199" text-anchor="middle">src/mini_agent/bootstrap/</text>
+      <text class="tiny" x="2331" y="217" text-anchor="middle">只有 Bootstrap 认识具体实现</text>
+    </g>
+
+    <!-- Composition arrows -->
+    <path class="line-purple" d="M555 246V274"/>
+    <path class="line-purple" d="M1225 246V274"/>
+    <path class="line-purple" d="M2115 246V274"/>
+    <text class="flow-label" x="573" y="265" fill="#7c3aed">wires</text>
+    <text class="flow-label" x="1243" y="265" fill="#7c3aed">constructs</text>
+    <text class="flow-label" x="2133" y="265" fill="#7c3aed">registers domain specs</text>
+
+    <!-- Interfaces panel -->
+    <g id="interfaces">
+      <rect x="75" y="280" width="290" height="710" rx="22" fill="#f1f8ff" stroke="#3b82f6" stroke-width="1.5"/>
+      <path d="M75 314Q75 280 99 280H341Q365 280 365 304V345H75Z" fill="#e4f2ff"/>
+      <circle cx="102" cy="311" r="9" fill="#dbeafe" stroke="#3b82f6"/>
+      <path d="M97 311h10M102 306v10" stroke="#2563eb" stroke-width="1.4" stroke-linecap="round"/>
+      <text class="eyebrow" x="122" y="304" fill="#2563eb">INTERFACES</text>
+      <text class="panel-title" x="122" y="328">交互入口</text>
+      <text class="panel-path mono" x="95" y="354">src/mini_agent/interfaces/</text>
+
+      <rect x="95" y="374" width="250" height="82" rx="14" fill="#ffffff" stroke="#93c5fd"/>
+      <text class="card-title-sm" x="112" y="400">CLI / Demo Adapter</text>
+      <text class="body-sm" x="112" y="424">本地交互、教学演示与调试入口</text>
+      <text class="tiny" x="112" y="444">提交 RunRequest · 展示 RunResponse</text>
+
+      <rect x="95" y="471" width="250" height="100" rx="14" fill="#ffffff" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="6 5"/>
+      <rect x="281" y="483" width="48" height="20" rx="6" fill="#dbeafe"/>
+      <text class="tiny" x="305" y="497" text-anchor="middle" fill="#2563eb">OPTIONAL</text>
+      <text class="card-title-sm" x="112" y="499">API Adapter</text>
+      <text class="body-sm" x="112" y="523">远程调用入口 · 协议待定</text>
+      <text class="tiny" x="112" y="545">只映射输入 / 输出，不承担领域事实</text>
+      <text class="tiny mono" x="112" y="561">protocol: TBD</text>
+
+      <rect x="95" y="586" width="250" height="88" rx="14" fill="#ffffff" stroke="#93c5fd"/>
+      <text class="card-title-sm" x="112" y="612">Test &amp; Evaluation Harness</text>
+      <text class="body-sm" x="112" y="636">场景驱动、回归与质量评估入口</text>
+      <text class="tiny" x="112" y="656">消费 RunResult + TraceEvent</text>
+
+      <rect x="95" y="690" width="250" height="98" rx="14" fill="#eaf4ff" stroke="#8abbea"/>
+      <text class="card-title-sm" x="112" y="716">Message &amp; Context Mapper</text>
+      <text class="body-sm" x="112" y="740">标准化消息、会话标识和用户上下文</text>
+      <text class="tiny" x="112" y="763">被入口 Adapter 复用，不代表独立协议</text>
+
+      <rect x="95" y="807" width="250" height="146" rx="14" fill="#e8f3ff" stroke="#6aa8e8" stroke-dasharray="4 4"/>
+      <text class="card-title-sm" x="112" y="833">接口边界规则</text>
+      <circle cx="115" cy="857" r="3" fill="#2563eb"/>
+      <text class="body-sm" x="126" y="861">只依赖 Application Public API</text>
+      <circle cx="115" cy="882" r="3" fill="#2563eb"/>
+      <text class="body-sm" x="126" y="886">不解释领域事实或直接调用 Tool</text>
+      <circle cx="115" cy="907" r="3" fill="#2563eb"/>
+      <text class="body-sm" x="126" y="911">协议选择不渗入 Runtime Core</text>
+      <circle cx="115" cy="932" r="3" fill="#2563eb"/>
+      <text class="body-sm" x="126" y="936">Test Harness 与生产入口同合同</text>
+    </g>
+
+    <!-- Application panel -->
+    <g id="application">
+      <rect x="390" y="280" width="350" height="710" rx="22" fill="#f0fdf7" stroke="#10b981" stroke-width="1.5"/>
+      <path d="M390 314Q390 280 414 280H716Q740 280 740 304V345H390Z" fill="#e1faee"/>
+      <circle cx="417" cy="311" r="9" fill="#d1fae5" stroke="#10b981"/>
+      <path d="M412 311h10M417 306v10" stroke="#059669" stroke-width="1.4" stroke-linecap="round"/>
+      <text class="eyebrow" x="437" y="304" fill="#059669">APPLICATION</text>
+      <text class="panel-title" x="437" y="328">用例协调</text>
+      <text class="panel-path mono" x="410" y="354">src/mini_agent/application/</text>
+
+      <rect x="412" y="374" width="306" height="96" rx="14" fill="#ffffff" stroke="#86efac"/>
+      <text class="card-title-sm" x="430" y="401">Agent Run Service · Public API</text>
+      <text class="body-sm" x="430" y="425">接收 RunRequest，调用 Runtime Facade</text>
+      <text class="body-sm" x="430" y="447">启动 / 恢复 Run，返回 RunResponse</text>
+
+      <rect x="412" y="486" width="306" height="105" rx="14" fill="#ffffff" stroke="#86efac"/>
+      <text class="card-title-sm" x="430" y="513">Session / Task Coordinator · Internal</text>
+      <text class="body-sm" x="430" y="537">关联会话、用户上下文与未完成任务</text>
+      <text class="body-sm" x="430" y="559">持有 Run 引用；不直接访问 Runtime Store Port</text>
+      <text class="tiny" x="430" y="578">SessionContext 跨 Run · RunState 属于单次执行</text>
+
+      <rect x="412" y="607" width="306" height="98" rx="14" fill="#ffffff" stroke="#86efac"/>
+      <text class="card-title-sm" x="430" y="634">Use-case Policy &amp; Validation · Internal</text>
+      <text class="body-sm" x="430" y="658">入口合同校验、调用预算与通用授权</text>
+      <text class="body-sm" x="430" y="680">不解释订单 / 配送领域事实</text>
+
+      <rect x="412" y="722" width="306" height="172" rx="16" fill="#e7f9f0" stroke="#6ee7b7"/>
+      <text class="card-title-sm" x="430" y="749">Application API Contracts</text>
+      <text class="body-sm mono" x="430" y="776">RunRequest · RunResponse</text>
+      <text class="body-sm mono" x="430" y="800">SessionRef · UserContext</text>
+      <line x1="430" y1="816" x2="698" y2="816" stroke="#a7e7ca"/>
+      <text class="body-sm" x="430" y="839">Application 所有的 DTO / Contract</text>
+      <text class="tiny" x="430" y="861">不是 Port · 不暴露具体 Adapter</text>
+      <text class="tiny" x="430" y="879">Public API 是 Interfaces 的唯一入口</text>
+
+      <rect x="412" y="910" width="306" height="43" rx="11" fill="#dcfce7" stroke="#86efac"/>
+      <text class="tiny" x="565" y="936" text-anchor="middle" fill="#047857">Application 协调用例，但不拥有领域真相</text>
+    </g>
+
+    <!-- Runtime panel -->
+    <g id="runtime">
+      <rect x="765" y="280" width="950" height="710" rx="22" fill="#fffaf5" stroke="#f97316" stroke-width="1.6"/>
+      <path d="M765 314Q765 280 789 280H1691Q1715 280 1715 304V345H765Z" fill="url(#runtimeHead)"/>
+      <circle cx="792" cy="311" r="9" fill="#ffedd5" stroke="#f97316"/>
+      <path d="M787 311h10M792 306v10" stroke="#ea580c" stroke-width="1.4" stroke-linecap="round"/>
+      <text class="eyebrow" x="812" y="304" fill="#ea580c">AGENT RUNTIME CORE</text>
+      <text class="panel-title" x="812" y="328">通用执行内核</text>
+      <text class="panel-path mono" x="1455" y="319" text-anchor="end">src/mini_agent/runtime/</text>
+      <rect x="1470" y="295" width="220" height="31" rx="9" fill="#ffffff" stroke="#fdba74"/>
+      <text class="tiny" x="1580" y="315" text-anchor="middle" fill="#c2410c">framework-free · bounded loop</text>
+
+      <!-- Run scope -->
+      <rect x="790" y="360" width="900" height="490" rx="20" fill="#ffffff" stroke="#fb923c" stroke-width="1.3" filter="url(#softShadow)"/>
+      <path d="M790 392Q790 360 814 360H1666Q1690 360 1690 384V421H790Z" fill="#fff5e9"/>
+      <text class="eyebrow" x="812" y="384" fill="#c2410c">RUN SCOPE · 单次执行生命周期</text>
+      <text class="body-sm" x="812" y="407">RunState · runId · deadline · cancellation · retry budget · TraceContext</text>
+      <rect x="1318" y="374" width="350" height="33" rx="10" fill="#ffffff" stroke="#fdba74"/>
+      <text class="tiny mono" x="1493" y="395" text-anchor="middle" fill="#9a3412">Runtime Facade: start · resume · continue · result</text>
+
+      <text class="eyebrow" x="812" y="447" fill="#c2410c">BOUNDED AGENT RUN</text>
+      <line x1="965" y1="442" x2="1665" y2="442" stroke="#fed7aa"/>
+
+      <!-- Stage row 1 -->
+      <rect x="812" y="462" width="260" height="92" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="837" cy="487" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="837" y="491" text-anchor="middle" fill="#c2410c">1</text>
+      <text class="card-title-sm" x="860" y="491">Request Understanding</text>
+      <text class="body-sm" x="830" y="519">生成 RequestUnitCandidate[]</text>
+      <text class="tiny" x="830" y="539">模型提出候选，不直接裁决</text>
+
+      <rect x="1095" y="462" width="260" height="92" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="1120" cy="487" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="1120" y="491" text-anchor="middle" fill="#c2410c">2</text>
+      <text class="card-title-sm" x="1143" y="491">Capability Validator</text>
+      <text class="body-sm" x="1113" y="519">Closed Registry · schema · scope</text>
+      <text class="tiny" x="1113" y="539">程序计算 missing fields</text>
+
+      <rect x="1378" y="462" width="287" height="92" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="1403" cy="487" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="1403" y="491" text-anchor="middle" fill="#c2410c">3</text>
+      <text class="card-title-sm" x="1426" y="491">Context &amp; Evidence</text>
+      <text class="body-sm" x="1396" y="519">预算、去重、provenance、Envelope</text>
+      <text class="tiny" x="1396" y="539">只组织证据，不解释领域语义</text>
+
+      <!-- Stage row 2 -->
+      <rect x="812" y="592" width="260" height="98" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="837" cy="617" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="837" y="621" text-anchor="middle" fill="#c2410c">4</text>
+      <text class="card-title-sm" x="860" y="621">Controlled Agent Loop</text>
+      <text class="body-sm" x="830" y="649">显式状态机 + 有界 ReAct</text>
+      <text class="tiny" x="830" y="670">step / tool-call / stop 条件</text>
+
+      <rect x="1095" y="592" width="260" height="98" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="1120" cy="617" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="1120" y="621" text-anchor="middle" fill="#c2410c">5</text>
+      <text class="card-title-sm" x="1143" y="621">Tool Registry &amp; Executor</text>
+      <text class="body-sm" x="1113" y="649">白名单、schema、handler dispatch</text>
+      <text class="tiny" x="1113" y="670">timeout · retry · ToolResult</text>
+
+      <rect x="1378" y="592" width="287" height="98" rx="14" fill="#fff7f7" stroke="#ef4444" stroke-width="1.3"/>
+      <circle cx="1403" cy="617" r="15" fill="#fee2e2" stroke="#ef4444"/>
+      <text class="chip" x="1403" y="621" text-anchor="middle" fill="#b91c1c">6</text>
+      <text class="card-title-sm" x="1426" y="621">Guardrails &amp; Action Gate</text>
+      <text class="body-sm" x="1396" y="649">风险校验 · 确认 · 幂等协议</text>
+      <text class="tiny" x="1396" y="670" fill="#b91c1c">所有副作用必须经过此处</text>
+
+      <!-- Stage row 3 -->
+      <rect x="812" y="727" width="400" height="72" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="837" cy="752" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="837" y="756" text-anchor="middle" fill="#c2410c">7</text>
+      <text class="card-title-sm" x="860" y="755">Termination &amp; Failure Recovery</text>
+      <text class="body-sm" x="830" y="780">明确结束、降级、恢复、重试与转人工</text>
+
+      <rect x="1235" y="727" width="430" height="72" rx="14" fill="#fffaf6" stroke="#fdba74"/>
+      <circle cx="1260" cy="752" r="15" fill="#ffedd5" stroke="#fb923c"/>
+      <text class="chip" x="1260" y="756" text-anchor="middle" fill="#c2410c">8</text>
+      <text class="card-title-sm" x="1283" y="755">Trace Recorder &amp; RunResult Assembly</text>
+      <text class="body-sm" x="1253" y="780">组合 Tool / Evidence / Action / Failure 原因</text>
+
+      <!-- Runtime flow arrows -->
+      <path class="line-orange" d="M1072 508H1095"/>
+      <path class="line-orange" d="M1355 508H1378"/>
+      <path class="line-orange" d="M1521 554V571H797V641H812"/>
+      <path class="line-orange" d="M1072 641H1095"/>
+      <path class="line-orange" d="M1355 641H1378"/>
+      <path class="line-orange" d="M1521 690V709H1012V727"/>
+      <path class="line-orange" d="M1212 763H1235"/>
+
+      <!-- Trace / evaluation rail -->
+      <rect x="812" y="813" width="853" height="25" rx="8" fill="url(#traceRail)" stroke="#22b7d6" stroke-dasharray="5 4"/>
+      <circle cx="833" cy="825.5" r="4" fill="#0891b2"/>
+      <circle cx="849" cy="825.5" r="4" fill="#38bdf8"/>
+      <circle cx="865" cy="825.5" r="4" fill="#7dd3fc"/>
+      <text class="tiny" x="885" y="829" fill="#0e7490">TRACE / EVALUATION RAIL · 每个阶段 emits TraceEvent · Harness 消费 Trace + RunResult</text>
+
+      <!-- Runtime contracts / ports -->
+      <rect x="790" y="866" width="440" height="101" rx="15" fill="#fff4e8" stroke="#fdba74"/>
+      <text class="card-title-sm" x="810" y="893">Runtime &amp; Extension Contracts · Runtime 所有</text>
+      <text class="body-sm mono" x="810" y="918">RequestUnit · CapabilitySpec · RunState</text>
+      <text class="body-sm mono" x="810" y="941">ToolDefinition · ToolHandler · ToolCall / Result</text>
+      <text class="tiny" x="810" y="959">通用执行语义，不包含订单 / 配送事实</text>
+
+      <rect x="1245" y="866" width="445" height="101" rx="15" fill="#fff4e8" stroke="#fdba74"/>
+      <text class="card-title-sm" x="1265" y="893">Runtime Outbound Ports · Runtime 所有</text>
+      <text class="body-sm mono" x="1265" y="918">ModelPort · RunStateStorePort · MemoryStorePort</text>
+      <text class="body-sm mono" x="1265" y="941">TraceSink · Clock / ID · Retrieval seam</text>
+      <text class="tiny" x="1265" y="959">依赖抽象；实现由 Bootstrap 注入</text>
+    </g>
+
+    <!-- Reference application panel -->
+    <g id="reference-app">
+      <rect x="1740" y="280" width="785" height="710" rx="22" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+      <path d="M1740 314Q1740 280 1764 280H2501Q2525 280 2525 304V345H1740Z" fill="#f3e8ff"/>
+      <circle cx="1767" cy="311" r="9" fill="#ead7ff" stroke="#a855f7"/>
+      <path d="M1762 311h10M1767 306v10" stroke="#9333ea" stroke-width="1.4" stroke-linecap="round"/>
+      <text class="eyebrow" x="1787" y="304" fill="#9333ea">REFERENCE APPLICATION</text>
+      <text class="panel-title" x="1787" y="328">订单与配送支持领域</text>
+      <text class="panel-path mono" x="2050" y="352">src/mini_agent/reference_apps/delivery_support/</text>
+
+      <!-- Domain cards -->
+      <rect x="1765" y="374" width="355" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="1783" y="399">Capability Catalog Instances</text>
+      <text class="body-sm mono" x="1783" y="422">order_status_lookup · shipment_tracking</text>
+      <text class="body-sm mono" x="1783" y="442">delivery_policy_qa</text>
+      <text class="body-sm mono" x="1783" y="461">delivery_exception_resolution</text>
+
+      <rect x="2140" y="374" width="360" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="2158" y="399">Domain Evidence Requirements</text>
+      <text class="body-sm" x="2158" y="423">每种 Capability 需要哪些订单、物流、政策证据</text>
+      <text class="body-sm" x="2158" y="446">何时证据充分、冲突或需要补充</text>
+
+      <rect x="1765" y="488" width="355" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="1783" y="513">Domain State &amp; Completion Policy</text>
+      <text class="body-sm" x="1783" y="537">领域工作状态、完成条件、澄清规则</text>
+      <text class="body-sm" x="1783" y="560">会话上下文 ≠ RunState ≠ DomainState</text>
+
+      <rect x="2140" y="488" width="360" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="2158" y="513">Domain Tool Handlers &amp; Specifications</text>
+      <text class="body-sm mono" x="2158" y="537">get_order · get_shipment</text>
+      <text class="body-sm mono" x="2158" y="557">retrieve_delivery_policy</text>
+      <text class="tiny mono" x="2158" y="576">open_delivery_support_case · implements ToolHandler</text>
+
+      <rect x="1765" y="602" width="355" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="1783" y="627">Evaluation Specification &amp; Cases</text>
+      <text class="body-sm" x="1783" y="651">能力级数据集、成功判断、错误分类</text>
+      <text class="body-sm" x="1783" y="674">边界、恢复与回归用例</text>
+
+      <rect x="2140" y="602" width="360" height="99" rx="14" fill="#ffffff" stroke="#d8b4fe"/>
+      <text class="card-title-sm" x="2158" y="627">Domain Context &amp; Response Policy</text>
+      <text class="body-sm" x="2158" y="651">领域术语、提示上下文、回复规范</text>
+      <text class="body-sm" x="2158" y="674">Action Gate 所需领域前置条件</text>
+
+      <!-- Domain contracts/ports -->
+      <rect x="1765" y="719" width="355" height="117" rx="16" fill="#f3e8ff" stroke="#c084fc"/>
+      <text class="card-title-sm" x="1783" y="745">Domain Contracts &amp; Policies · Ref App 所有</text>
+      <text class="body-sm mono" x="1783" y="770">DomainState · DomainEvidence</text>
+      <text class="body-sm mono" x="1783" y="792">CompletionPolicy · ActionPolicy</text>
+      <text class="body-sm mono" x="1783" y="814">Order / Shipment / DeliveryPolicy 模型</text>
+
+      <rect x="2140" y="719" width="360" height="117" rx="16" fill="#f3e8ff" stroke="#c084fc"/>
+      <text class="card-title-sm" x="2158" y="745">Domain Outbound Ports · Ref App 所有</text>
+      <text class="body-sm mono" x="2158" y="770">OrderReaderPort · ShipmentReaderPort</text>
+      <text class="body-sm mono" x="2158" y="792">DeliveryPolicySearchPort</text>
+      <text class="body-sm mono" x="2158" y="814">SupportCaseServicePort</text>
+
+      <rect x="1765" y="853" width="735" height="100" rx="15" fill="#f6edff" stroke="#c084fc" stroke-dasharray="5 4"/>
+      <text class="card-title-sm" x="1783" y="879">领域边界规则</text>
+      <text class="body-sm" x="1783" y="903">Capability、证据需求、领域状态、Action 前置条件与 Evaluation Case 都留在 Reference App。</text>
+      <text class="body-sm" x="1783" y="927">第二个 Reference Application 将验证 Runtime 是否真正通用，而不是复制配送领域结构。</text>
+    </g>
+
+    <!-- Primary cross-module run flow -->
+    <g aria-label="主运行流">
+      <path d="M345 414H375M345 521H375V414M345 630H375V414" fill="none" stroke="#2563eb" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="375" cy="414" r="4.5" fill="#2563eb"/>
+      <path class="line-blue" d="M375 414H390"/>
+      <rect x="349" y="382" width="58" height="22" rx="7" fill="#eff6ff" stroke="#93c5fd"/>
+      <text class="flow-label" x="378" y="397" text-anchor="middle" fill="#1d4ed8">public API</text>
+
+      <path class="line-blue" d="M740 414H790"/>
+      <rect x="731" y="380" width="67" height="23" rx="7" fill="#eff6ff" stroke="#93c5fd"/>
+      <text class="flow-label" x="764.5" y="396" text-anchor="middle" fill="#1d4ed8">Runtime Facade</text>
+
+      <!-- Ref app supplies specifications through runtime contracts -->
+      <path class="line-purple" d="M1765 778H1730V916H1690"/>
+      <rect x="1678" y="839" width="79" height="24" rx="7" fill="#faf5ff" stroke="#d8b4fe"/>
+      <text class="flow-label" x="1717.5" y="855" text-anchor="middle" fill="#7e22ce">supplies specs</text>
+
+      <!-- Trace/result back to evaluation harness -->
+      <path class="line-cyan" d="M812 826H758V1002H220V674"/>
+      <rect x="446" y="986" width="172" height="25" rx="8" fill="#ecfeff" stroke="#67e8f9"/>
+      <text class="flow-label" x="532" y="1003" text-anchor="middle" fill="#0e7490">TraceEvent + RunResult</text>
+
+      <!-- Eval spec to harness -->
+      <path class="line-cyan" d="M1765 652H1730V1004H250V674"/>
+      <rect x="1030" y="989" width="142" height="25" rx="8" fill="#ecfeff" stroke="#67e8f9"/>
+      <text class="flow-label" x="1101" y="1006" text-anchor="middle" fill="#0e7490">EvaluationSpec / Cases</text>
+    </g>
+
+    <!-- Infrastructure adapters -->
+    <g id="infrastructure">
+      <rect x="75" y="1025" width="2450" height="255" rx="22" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+      <text class="eyebrow" x="103" y="1053" fill="#15803d">INFRASTRUCTURE ADAPTERS · 可替换技术实现</text>
+      <text class="panel-path mono" x="625" y="1053">src/mini_agent/infrastructure/</text>
+
+      <rect x="100" y="1073" width="1170" height="178" rx="17" fill="#ffffff" stroke="#86efac"/>
+      <text class="card-title-sm" x="120" y="1100">Runtime Adapters · 实现 Runtime Ports</text>
+      <rect x="120" y="1118" width="260" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="138" y="1144">Model Adapter</text>
+      <text class="body-sm" x="138" y="1167">implements ModelPort</text>
+      <text class="tiny" x="138" y="1189">Provider / Function Calling 映射</text>
+      <rect x="400" y="1118" width="260" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="418" y="1144">RunState Adapter</text>
+      <text class="body-sm" x="418" y="1167">implements RunStateStorePort</text>
+      <text class="tiny" x="418" y="1189">checkpoint / version / recovery</text>
+      <rect x="680" y="1118" width="260" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="698" y="1144">Memory / Retrieval Adapter</text>
+      <text class="body-sm" x="698" y="1167">MemoryStore / Retrieval seam</text>
+      <text class="tiny" x="698" y="1189">长期记忆 / 通用检索技术</text>
+      <rect x="960" y="1118" width="285" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="978" y="1144">Trace Adapter</text>
+      <text class="body-sm" x="978" y="1167">implements TraceSink</text>
+      <text class="tiny" x="978" y="1189">JSONL / OpenTelemetry（later）</text>
+
+      <rect x="1300" y="1073" width="1200" height="178" rx="17" fill="#ffffff" stroke="#86efac"/>
+      <text class="card-title-sm" x="1320" y="1100">Delivery Domain Adapters · 实现 Reference App Domain Ports</text>
+      <rect x="1320" y="1118" width="270" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="1338" y="1144">Order API Adapter</text>
+      <text class="body-sm" x="1338" y="1167">OrderReaderPort</text>
+      <text class="tiny" x="1338" y="1189">订单系统协议与错误映射</text>
+      <rect x="1610" y="1118" width="270" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="1628" y="1144">Shipment API Adapter</text>
+      <text class="body-sm" x="1628" y="1167">ShipmentReaderPort</text>
+      <text class="tiny" x="1628" y="1189">物流系统协议与错误映射</text>
+      <rect x="1900" y="1118" width="270" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="1918" y="1144">Delivery Policy Adapter</text>
+      <text class="body-sm" x="1918" y="1167">DeliveryPolicySearchPort</text>
+      <text class="tiny" x="1918" y="1189">领域语料检索实现</text>
+      <rect x="2190" y="1118" width="285" height="101" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+      <text class="card-title-sm" x="2208" y="1144">Support Case API Adapter</text>
+      <text class="body-sm" x="2208" y="1167">SupportCaseServicePort</text>
+      <text class="tiny" x="2208" y="1189">创建工单与幂等通信</text>
+
+      <text class="tiny" x="1300" y="1268" text-anchor="middle" fill="#15803d">P0 可先用内存 / SQLite concrete object；接口、数据模型与生命周期仍保持分离。</text>
+    </g>
+
+    <!-- Port implementation arrows -->
+    <path class="line-green" d="M1468 967V1007H685V1073"/>
+    <text class="flow-label" x="1076" y="1001" fill="#15803d">implements Runtime Ports</text>
+    <path class="line-green" d="M2320 836V1007H1900V1073"/>
+    <text class="flow-label" x="2055" y="1001" fill="#15803d">implements Domain Ports</text>
+  </g>
+
+  <!-- External systems -->
+  <g id="external-systems" aria-label="模块化单体外部系统">
+    <rect x="75" y="1330" width="2450" height="180" rx="22" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4" filter="url(#softShadow)"/>
+    <text class="eyebrow" x="103" y="1358" fill="#475569">EXTERNAL SYSTEMS · 模块化单体边界外</text>
+
+    <rect x="100" y="1376" width="1170" height="108" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text class="card-title-sm" x="120" y="1402">Model / Data / Observability</text>
+    <rect x="120" y="1418" width="330" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="285" y="1445" text-anchor="middle">LLM Provider</text>
+    <rect x="470" y="1418" width="360" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="650" y="1445" text-anchor="middle">SQLite / Object Store</text>
+    <rect x="850" y="1418" width="395" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="1047.5" y="1445" text-anchor="middle">Telemetry / Log Sink</text>
+
+    <rect x="1300" y="1376" width="1200" height="108" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text class="card-title-sm" x="1320" y="1402">Order &amp; Delivery Systems</text>
+    <rect x="1320" y="1418" width="270" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="1455" y="1445" text-anchor="middle">Order Service</text>
+    <rect x="1610" y="1418" width="270" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="1745" y="1445" text-anchor="middle">Shipment Service</text>
+    <rect x="1900" y="1418" width="270" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="2035" y="1445" text-anchor="middle">Delivery Policy Corpus</text>
+    <rect x="2190" y="1418" width="285" height="44" rx="11" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text class="body-sm" x="2332.5" y="1445" text-anchor="middle">Support Case Service</text>
+
+    <path class="line-gray" d="M685 1251V1330"/>
+    <rect x="614" y="1282" width="142" height="24" rx="7" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text class="flow-label" x="685" y="1298" text-anchor="middle" fill="#475569">external API / storage</text>
+    <path class="line-gray" d="M1900 1251V1330"/>
+    <rect x="1821" y="1282" width="158" height="24" rx="7" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text class="flow-label" x="1900" y="1298" text-anchor="middle" fill="#475569">external API / corpus</text>
+  </g>
+
+  <!-- Footer constraints -->
+  <g aria-label="架构约束">
+    <rect x="75" y="1540" width="2450" height="78" rx="17" fill="#ffffff" stroke="#cbd5e1"/>
+    <text class="eyebrow" x="103" y="1568" fill="#334155">ARCHITECTURE CONSTRAINTS</text>
+    <text class="body-sm" x="332" y="1568">
+      模型提出，程序校验
+      <tspan fill="#94a3b8">　·　</tspan>
+      Capability ≠ Tool ≠ Action
+      <tspan fill="#94a3b8">　·　</tspan>
+      领域真相归 Reference App
+      <tspan fill="#94a3b8">　·　</tspan>
+      所有副作用经过 Action Gate
+      <tspan fill="#94a3b8">　·　</tspan>
+      Contracts / Ports 必须有明确所有者
+    </text>
+    <text class="body-sm" x="103" y="1595">
+      只有 Bootstrap 认识具体实现
+      <tspan fill="#94a3b8">　·　</tspan>
+      Trace 与 Evaluation 从第一阶段建立
+      <tspan fill="#94a3b8">　·　</tspan>
+      当前不引入微服务、独立网关、消息总线或 Kubernetes
+      <tspan fill="#94a3b8">　·　</tspan>
+      第二 Reference App 用于验证 Runtime 通用性
+    </text>
+    <text class="micro mono" x="2525" y="1643" text-anchor="end">mini-agent modular-monolith architecture · review candidate v2 · 2026-07-23</text>
+  </g>
+</svg>

@@ -1,0 +1,209 @@
+<mxfile host="app.diagrams.net" modified="2026-07-25T00:00:00.000Z" agent="Codex" version="29.0.3">
+  <diagram id="business-application-architecture-v2" name="业务应用架构 V2">
+    <mxGraphModel dx="1950" dy="1350" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1950" pageHeight="1350" math="0" shadow="0" background="#F8FAFC">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="消费者订单与配送售后 Agent｜业务应用架构 V2" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=32;fontStyle=1;fontColor=#0F172A;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="55" y="22" width="1160" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="一条业务主线串联关键技术模块｜P0 单一自建站 · 消费者自助售后" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=17;fontColor=#475569;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="58" y="72" width="1100" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="badge_v2" value="BUSINESS + TECHNOLOGY" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0F172A;strokeColor=#0F172A;fontColor=#FFFFFF;fontSize=13;fontStyle=1;arcSize=40;" vertex="1" parent="1">
+          <mxGeometry x="1455" y="29" width="205" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="badge_p0" value="V2 · P0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E2E8F0;strokeColor=#CBD5E1;fontColor=#334155;fontSize=13;fontStyle=1;arcSize=40;" vertex="1" parent="1">
+          <mxGeometry x="1675" y="29" width="145" height="38" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="consumer" value="&lt;b&gt;已登录消费者&lt;/b&gt;&lt;br&gt;查询订单与物流 · 识别配送异常 · 判断退款资格 · 创建模拟退款 / 查询退款状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#3B82F6;strokeWidth=2;fontColor=#1E3A8A;fontSize=16;arcSize=14;spacing=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="125" width="470" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="application_boundary" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2;arcSize=4;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="180" y="235" width="1250" height="885" as="geometry"/>
+        </mxCell>
+        <mxCell id="boundary_label" value="消费者售后 Agent 应用｜模块化单体" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=17;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="210" y="245" width="510" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_abstraction" value="RequestUnit Board + Controlled ReAct + ActionPolicy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F5F9;strokeColor=#CBD5E1;fontColor=#334155;fontSize=12;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1007" y="244" width="390" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="business_app_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#60A5FA;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="220" y="280" width="1170" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="business_app_title" value="1 自建站业务应用｜消费者入口与可信身份" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#1D4ED8;" vertex="1" parent="1">
+          <mxGeometry x="245" y="292" width="620" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="web_chat" value="&lt;b&gt;Web Chat UI&lt;/b&gt;&lt;br&gt;消息与流式回复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="342" width="260" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="auth_middleware" value="&lt;b&gt;Auth Middleware&lt;/b&gt;&lt;br&gt;验证 Session / JWT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="528" y="342" width="260" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="conversation_api" value="&lt;b&gt;Conversation API&lt;/b&gt;&lt;br&gt;请求 / 响应映射" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="806" y="342" width="260" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="customer_context" value="&lt;b&gt;CustomerContext&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#047857&quot;&gt;可信身份 · Runtime 私有&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#5EEAD4;strokeWidth=1.5;fontColor=#115E59;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1084" y="342" width="260" height="58" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="application_services_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0F9FF;strokeColor=#38BDF8;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="220" y="460" width="1170" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="application_services_title" value="2 Application Services｜会话与 Agent 运行编排" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#0369A1;" vertex="1" parent="1">
+          <mxGeometry x="245" y="472" width="650" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="conversation_service" value="&lt;b&gt;ConversationService&lt;/b&gt;&lt;br&gt;创建 · 恢复 · 关闭对话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="260" y="522" width="330" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="agent_run_coordinator" value="&lt;b&gt;AgentRunCoordinator&lt;/b&gt;&lt;br&gt;绑定身份 · 启动 / 恢复 Run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="640" y="522" width="330" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_result_mapper" value="&lt;b&gt;RunResultMapper&lt;/b&gt;&lt;br&gt;用户可见结果 · 安全映射 · 最小披露" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="522" width="330" height="58" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="runtime_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#8B5CF6;strokeWidth=3;arcSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="640" width="1170" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime_title" value="3 Agent Runtime｜理解、动态决策与受控执行" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#6D28D9;" vertex="1" parent="1">
+          <mxGeometry x="245" y="653" width="620" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime_loop" value="Context → NextMove → Guard → Observation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#C4B5FD;fontColor=#6D28D9;fontSize=11;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="655" width="345" height="29" as="geometry"/>
+        </mxCell>
+        <mxCell id="request_understanding" value="&lt;b&gt;Request Understanding&lt;/b&gt;&lt;br&gt;RequestUnit Board&lt;br&gt;目标 · 参数 · 依赖 · 条件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C4B5FD;strokeWidth=1.6;fontColor=#4C1D95;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="708" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="context_reasoner" value="&lt;b&gt;Context Projector + ReAct&lt;/b&gt;&lt;br&gt;ModelVisibleContext&lt;br&gt;Structured NextMove" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#4C1D95;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="625" y="708" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="control_gateway" value="&lt;b&gt;Control Gateway&lt;/b&gt;&lt;br&gt;Schema · Scope · Budget&lt;br&gt;重复调用 · 停止条件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#4C1D95;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="708" width="360" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="tool_registry_executor" value="&lt;b&gt;Tool Registry &amp;amp; Executor&lt;/b&gt;&lt;br&gt;工具定义与 Schema 校验 · 路由执行&lt;br&gt;Observation 标准化" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C4B5FD;strokeWidth=1.6;fontColor=#4C1D95;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="797" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="action_policy" value="&lt;b&gt;ActionPolicy&lt;/b&gt;&lt;br&gt;Evidence · 精确确认 · 授权&lt;br&gt;幂等 · RESULT_UNKNOWN" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#FDBA74;strokeWidth=1.8;fontColor=#9A3412;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="625" y="797" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime_state_memory" value="&lt;b&gt;Run &amp;amp; Task State&lt;/b&gt;&lt;br&gt;RequestUnit Board · L2 Task Working Context&lt;br&gt;记录引用 · 版本 · 恢复点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#6EE7B7;strokeWidth=1.6;fontColor=#065F46;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="797" width="360" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="capabilities_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#34D399;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="220" y="930" width="1170" height="155" as="geometry"/>
+        </mxCell>
+        <mxCell id="capabilities_title" value="4 Business Capabilities｜P0 稳定业务语义" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#047857;" vertex="1" parent="1">
+          <mxGeometry x="245" y="942" width="650" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="capabilities_note" value="稳定业务语义 · 具体工具由 Tool Catalog 管理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D1FAE5;strokeColor=#6EE7B7;fontColor=#047857;fontSize=10;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="945" width="345" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="order_shipment_facts" value="&lt;b&gt;订单与物流事实&lt;/b&gt;&lt;br&gt;本人订单定位 · 订单 / Package 状态&lt;br&gt;配送异常所需可信事实" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6EE7B7;strokeWidth=1.5;fontColor=#065F46;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="990" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="policy_evidence_refund_decision" value="&lt;b&gt;政策 Evidence 与退款判断&lt;/b&gt;&lt;br&gt;政策检索 · Evidence 组装&lt;br&gt;确定性资格判断与可解释方案" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6EE7B7;strokeWidth=1.5;fontColor=#065F46;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="625" y="990" width="345" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="controlled_refund_recovery" value="&lt;b&gt;受控模拟退款与结果恢复&lt;/b&gt;&lt;br&gt;精确确认 · 动作门禁 · 幂等&lt;br&gt;PROCESSING / RESULT_UNKNOWN 恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=2;fontColor=#9A3412;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="990" width="360" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="platform_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=2;dashed=1;dashPattern=6 4;arcSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="330" width="350" height="690" as="geometry"/>
+        </mxCell>
+        <mxCell id="platform_title" value="AI 与平台支撑" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=21;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="350" width="250" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="platform_note" value="支撑 Application / Runtime，不是业务请求顺序中的一层&lt;br&gt;&lt;font color=&quot;#7C3AED&quot;&gt;紫：模型&lt;/font&gt;　·　&lt;font color=&quot;#64748B&quot;&gt;灰：状态&lt;/font&gt;　·　&lt;font color=&quot;#D97706&quot;&gt;橙：Trace / Eval&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=11;fontColor=#64748B;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="382" width="290" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="llm_provider" value="&lt;b&gt;LLM Provider&lt;/b&gt;&lt;br&gt;&lt;br&gt;语义理解与推理&lt;br&gt;返回 Structured NextMove&lt;br&gt;&lt;font color=&quot;#6D28D9&quot;&gt;仅接收 ModelVisibleContext&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=2;dashed=1;dashPattern=6 4;fontColor=#4C1D95;fontSize=13;arcSize=12;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="445" width="290" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="state_memory_store" value="&lt;b&gt;State &amp;amp; Record Stores&lt;/b&gt;&lt;br&gt;&lt;br&gt;Conversation · Run · Task&lt;br&gt;Observation · Evidence Binding · Action Ledger" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;strokeWidth=1.6;fontColor=#334155;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="625" width="290" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="trace_eval" value="&lt;b&gt;Trace &amp;amp; Agent Eval&lt;/b&gt;&lt;br&gt;&lt;br&gt;Trace Store · Context Manifest · Dataset&lt;br&gt;Component · Trajectory · E2E" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFBEB;strokeColor=#FBBF24;strokeWidth=1.6;fontColor=#92400E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="795" width="290" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="platform_privacy" value="CustomerContext 不进入模型&lt;br&gt;Trace 不保存 Token 与不必要 PII" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#6EE7B7;fontColor=#065F46;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="955" width="290" height="45" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="systems_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2;arcSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="180" y="1160" width="1250" height="145" as="geometry"/>
+        </mxCell>
+        <mxCell id="systems_title" value="5 Business Systems｜P0 模拟业务系统" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="210" y="1172" width="520" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="order_system" value="&lt;b&gt;Mock Order System&lt;/b&gt;&lt;br&gt;资源归属 · 商品 · 履约状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="220" y="1217" width="255" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="shipment_system" value="&lt;b&gt;Mock Shipment System&lt;/b&gt;&lt;br&gt;轨迹 · 承诺时效 · 异常事实" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="495" y="1217" width="255" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="policy_knowledge" value="&lt;b&gt;Policy Knowledge Base&lt;/b&gt;&lt;br&gt;版本化政策 · 引用 · 冲突 Evidence" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1217" width="280" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="refund_system" value="&lt;b&gt;Mock Refund System&lt;/b&gt;&lt;br&gt;创建 · 状态 · 幂等 · 未知结果恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#FDBA74;strokeWidth=1.5;fontColor=#9A3412;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="1217" width="320" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="systems_rule" value="customer_id 由服务端注入 · 业务 API 强制资源归属 · 退款动作使用可信幂等身份" style="text;html=1;align=right;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=11;fontColor=#64748B;" vertex="1" parent="1">
+          <mxGeometry x="710" y="1277" width="680" height="22" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="scope_bar" value="P0 范围：单一自建站 · 四个 Mock System · 无 Capability Registry · 无支付结算 / 库存仓储 / RMA / CRM / Ticket · 无多渠道 · 无确定性退款 Workflow" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F5F9;strokeColor=#CBD5E1;fontColor=#334155;fontSize=11;fontStyle=1;arcSize=30;" vertex="1" parent="1">
+          <mxGeometry x="355" y="1315" width="1190" height="28" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="edge_consumer_business_app" value="消息 / 回复" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=2.5;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=11;fontColor=#1D4ED8;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="consumer" target="business_app_panel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_business_app_application" value="trusted request / result" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0284C7;strokeWidth=2.5;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=11;fontColor=#0369A1;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="business_app_panel" target="application_services_panel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_application_runtime" value="start / resume / outcome" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7C3AED;strokeWidth=2.5;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=11;fontColor=#6D28D9;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="application_services_panel" target="runtime_panel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_runtime_capabilities" value="NextMove / Observation / Evidence" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=2.5;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=11;fontColor=#047857;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="runtime_panel" target="capabilities_panel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_capabilities_systems" value="business request / fact / evidence / result" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=2.5;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=11;fontColor=#047857;labelBackgroundColor=#F8FAFC;align=center;verticalAlign=middle;labelPosition=center;verticalLabelPosition=middle;spacing=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="capabilities_panel" target="systems_panel">
+          <mxGeometry x="0" y="0" relative="1" as="geometry">
+            <mxPoint x="0" y="12" as="offset"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_runtime_llm" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7C3AED;strokeWidth=1.8;dashed=1;dashPattern=10 6;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.28;entryX=0;entryY=0.55;" edge="1" parent="1" source="runtime_panel" target="llm_provider">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1460" y="710"/>
+              <mxPoint x="1460" y="522"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_runtime_store" value="state / record persistence" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#64748B;strokeWidth=1.6;dashed=1;dashPattern=2 4;startArrow=block;startFill=1;endArrow=block;endFill=1;fontSize=10;fontColor=#475569;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.28;entryX=0;entryY=0.5;" edge="1" parent="1" source="runtime_state_memory" target="state_memory_store">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1490" y="817"/>
+              <mxPoint x="1490" y="690"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_runtime_trace" value="TraceEvent / ContextManifest" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D97706;strokeWidth=1.7;dashed=1;dashPattern=12 6;startArrow=none;endArrow=block;endFill=1;fontSize=10;fontColor=#B45309;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.78;entryX=0;entryY=0.5;" edge="1" parent="1" source="runtime_state_memory" target="trace_eval">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1520" y="852"/>
+              <mxPoint x="1520" y="865"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

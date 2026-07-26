@@ -1,0 +1,205 @@
+<mxfile host="app.diagrams.net" modified="2026-07-25T00:00:00.000Z" agent="Codex" version="29.0.3">
+  <diagram id="code-layer-dependency-v2" name="代码分层与允许依赖 V2">
+    <mxGraphModel dx="2000" dy="1380" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1380" math="0" shadow="0" background="#F8FAFC">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="消费者订单与配送售后 Agent｜代码分层与允许依赖 V2" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=31;fontStyle=1;fontColor=#0F172A;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="55" y="22" width="1240" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="宏观分层组织 ＋ 关键外部边界采用 Ports &amp;amp; Adapters｜箭头只表示源代码依赖，不表示运行时调用顺序" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=16;fontColor=#475569;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="58" y="70" width="1380" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="badge_dependency" value="CODE DEPENDENCIES ONLY" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0F172A;strokeColor=#0F172A;fontColor=#FFFFFF;fontSize=12;fontStyle=1;arcSize=40;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="28" width="230" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="badge_p0" value="V2 · P0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E2E8F0;strokeColor=#CBD5E1;fontColor=#334155;fontSize=13;fontStyle=1;arcSize=40;" vertex="1" parent="1">
+          <mxGeometry x="1760" y="28" width="145" height="38" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="legend" value="蓝色实线：允许依赖　　绿色空心箭头：Adapter 实现 / 依赖 Application-owned / Core-owned Port　　灰色实线：Adapter 使用外部客户端　　红色虚线：禁止依赖" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;fontColor=#334155;fontSize=12;align=left;spacingLeft=16;arcSize=18;" vertex="1" parent="1">
+          <mxGeometry x="55" y="112" width="1900" height="42" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="code_boundary" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2;arcSize=5;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="55" y="175" width="1450" height="900" as="geometry"/>
+        </mxCell>
+        <mxCell id="code_boundary_label" value="模块化单体代码边界｜Reference Application ＋ Agent Runtime" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=16;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="82" y="185" width="700" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="dependency_inward_badge" value="DEPENDENCIES POINT INWARD" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F5F9;strokeColor=#CBD5E1;fontColor=#475569;fontSize=10;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="185" width="250" height="28" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="inbound_layer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#60A5FA;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="90" y="225" width="1380" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="inbound_title" value="1 接入层｜Inbound Adapters" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#1D4ED8;" vertex="1" parent="1">
+          <mxGeometry x="115" y="237" width="470" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="inbound_note" value="协议、身份和 DTO 在此终止" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DBEAFE;strokeColor=#93C5FD;fontColor=#1D4ED8;fontSize=10;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="240" width="250" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="web_conversation_adapter" value="&lt;b&gt;Web / Conversation API Adapter&lt;/b&gt;&lt;br&gt;HTTP · SSE · 消息接入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="125" y="285" width="390" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="auth_context_adapter" value="&lt;b&gt;Auth / CustomerContext Adapter&lt;/b&gt;&lt;br&gt;验证 Session / JWT · 创建可信身份" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="585" y="285" width="390" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="protocol_mapper" value="&lt;b&gt;Request / Response Mapper&lt;/b&gt;&lt;br&gt;协议 DTO ↔ Command / Result" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#93C5FD;strokeWidth=1.5;fontColor=#1E3A8A;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1045" y="285" width="390" height="58" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="application_layer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0F9FF;strokeColor=#38BDF8;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="90" y="395" width="1380" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="application_title" value="2 应用层｜Application Services" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#0369A1;" vertex="1" parent="1">
+          <mxGeometry x="115" y="407" width="560" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="inbound_ports" value="&lt;b&gt;Inbound Ports / Use Cases&lt;/b&gt;　HandleConversationTurn · ConfirmPendingAction · ResumeAgentRun" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0F2FE;strokeColor=#38BDF8;strokeWidth=1.6;fontColor=#075985;fontSize=12;arcSize=22;" vertex="1" parent="1">
+          <mxGeometry x="700" y="407" width="500" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="conversation_store_port" value="&lt;b&gt;Application-owned Port&lt;/b&gt;&lt;br&gt;ConversationStorePort" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0F2FE;strokeColor=#38BDF8;strokeWidth=1.6;fontColor=#075985;fontSize=10;arcSize=18;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="403" width="210" height="42" as="geometry"/>
+        </mxCell>
+        <mxCell id="conversation_service" value="&lt;b&gt;ConversationService&lt;/b&gt;&lt;br&gt;创建 · 恢复 · 关闭对话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="125" y="470" width="390" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="agent_run_coordinator" value="&lt;b&gt;AgentRunCoordinator&lt;/b&gt;&lt;br&gt;绑定身份 · 事务边界 · 启动 / 恢复 Run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=13;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="585" y="470" width="390" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_result_mapper" value="&lt;b&gt;RunResultMapper&lt;/b&gt;&lt;br&gt;ASK_USER · PROCESSING · COMPLETED&lt;br&gt;BLOCKED · NEED_HUMAN · NOT_FOUND_OR_NOT_ACCESSIBLE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7DD3FC;strokeWidth=1.5;fontColor=#0C4A6E;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1045" y="470" width="390" height="72" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="core_layer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#8B5CF6;strokeWidth=3;arcSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="90" y="605" width="1380" height="260" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_title" value="3 核心层｜Agent Runtime / Core" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=21;fontStyle=1;fontColor=#6D28D9;" vertex="1" parent="1">
+          <mxGeometry x="115" y="617" width="590" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_rule" value="不依赖 Web · DB · HTTP SDK · LLM SDK · 具体 Adapter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#C4B5FD;fontColor=#6D28D9;fontSize=10;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="980" y="620" width="450" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="requestunit_state" value="&lt;b&gt;RequestUnit ＋ Task Working Context&lt;/b&gt;&lt;br&gt;目标 · 参数 · 依赖 · 状态版本&lt;br&gt;ObservationRef · EvidenceBinding · ActionRef" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C4B5FD;strokeWidth=1.6;fontColor=#4C1D95;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="120" y="670" width="305" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="react_reasoner" value="&lt;b&gt;Context Projector ＋ Controlled ReAct&lt;/b&gt;&lt;br&gt;ModelVisibleContext · Structured NextMove" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#4C1D95;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="455" y="670" width="305" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="control_action" value="&lt;b&gt;Control Gateway ＋ ActionPolicy&lt;/b&gt;&lt;br&gt;Schema · Scope · Evidence · 确认 · 授权 · 幂等" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#FDBA74;strokeWidth=1.7;fontColor=#9A3412;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="790" y="670" width="305" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="tool_registry_executor" value="&lt;b&gt;Tool Registry ＋ Execution Boundary&lt;/b&gt;&lt;br&gt;Schema · 路由 · ToolResult / Failure&lt;br&gt;按 effect / ownership / outcome 分流，不自动形成 Observation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#4C1D95;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="670" width="305" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="business_ports" value="&lt;b&gt;Business Ports&lt;/b&gt;&lt;br&gt;OrderQueryPort · ShipmentQueryPort · PolicyRetrievalPort · RefundPort" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#34D399;strokeWidth=1.8;fontColor=#065F46;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="120" y="770" width="570" height="67" as="geometry"/>
+        </mxCell>
+        <mxCell id="model_port" value="&lt;b&gt;ModelPort&lt;/b&gt;&lt;br&gt;complete(ModelVisibleContext) → Structured NextMove" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#A78BFA;strokeWidth=1.8;fontColor=#5B21B6;fontSize=11;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="720" y="770" width="300" height="67" as="geometry"/>
+        </mxCell>
+        <mxCell id="state_trace_ports" value="&lt;b&gt;Core-owned State, Record &amp;amp; Observability Port Groups&lt;/b&gt;&lt;br&gt;Run Checkpoint · Task State&lt;br&gt;Observation / Evidence · Action Ledger&lt;br&gt;Trace Sink · Context Manifest" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=1.8;fontColor=#334155;fontSize=10;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="765" width="380" height="82" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="outbound_layer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#34D399;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="90" y="895" width="1380" height="145" as="geometry"/>
+        </mxCell>
+        <mxCell id="outbound_title" value="4 基础设施层｜Outbound Adapters" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#047857;" vertex="1" parent="1">
+          <mxGeometry x="115" y="907" width="600" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="outbound_note" value="实现 Application-owned / Core-owned Port；外部变化在这里终止" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D1FAE5;strokeColor=#6EE7B7;fontColor=#047857;fontSize=10;fontStyle=1;arcSize=35;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="910" width="310" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="business_tool_adapters" value="&lt;b&gt;Business Tool Adapters&lt;/b&gt;&lt;br&gt;Order · Shipment · Policy · Refund&lt;br&gt;注入 customer_id · 标准化 ToolResult / Failure" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#34D399;strokeWidth=1.6;fontColor=#065F46;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="120" y="955" width="570" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="model_adapter" value="&lt;b&gt;ModelProviderAdapter&lt;/b&gt;&lt;br&gt;模型 SDK / API 映射&lt;br&gt;只接收 ModelVisibleContext" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#5B21B6;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="720" y="955" width="300" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="state_trace_adapters" value="&lt;b&gt;Persistence ＋ Trace Adapters&lt;/b&gt;&lt;br&gt;State / Record / Trace 持久化&lt;br&gt;Relational DB / Trace Client" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.6;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="955" width="380" height="65" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="external_layer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2;arcSize=8;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="55" y="1110" width="1450" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="external_title" value="5 外部系统与技术客户端｜不属于核心代码" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=19;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="82" y="1122" width="680" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="business_systems" value="&lt;b&gt;P0 Mock Business Systems&lt;/b&gt;&lt;br&gt;Order · Shipment · Refund · Policy KB / Retriever" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="90" y="1175" width="600" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="llm_system" value="&lt;b&gt;LLM Provider / SDK&lt;/b&gt;&lt;br&gt;自建或第三方模型服务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="720" y="1175" width="300" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="storage_systems" value="&lt;b&gt;Relational DB / Trace Backend&lt;/b&gt;&lt;br&gt;权威状态 · 独立记录域 · 恢复 · 数据集与报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="1175" width="420" height="72" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rules_panel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2;dashed=1;dashPattern=8 5;arcSize=8;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="175" width="415" height="1100" as="geometry"/>
+        </mxCell>
+        <mxCell id="rules_title" value="依赖规则｜Layered ＋ Hexagonal" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="195" width="350" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="rules_subtitle" value="Application / Core 拥有契约，外部实现契约" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=12;fontColor=#64748B;" vertex="1" parent="1">
+          <mxGeometry x="1572" y="230" width="330" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="composition_root" value="&lt;b&gt;Bootstrap / Composition Root&lt;/b&gt;&lt;br&gt;&lt;br&gt;唯一允许同时引用 Port 与具体 Adapter 的位置&lt;br&gt;&lt;br&gt;创建对象 · 注入依赖 · 加载配置&lt;br&gt;选择 Mock / Real 实现" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=1.8;fontColor=#9A3412;fontSize=13;align=left;verticalAlign=top;spacing=16;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="275" width="355" height="190" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="allowed_rules" value="&lt;b&gt;✓ 允许依赖&lt;/b&gt;&lt;br&gt;&lt;br&gt;Inbound Adapter → Inbound Port&lt;br&gt;&lt;br&gt;Application → Core&lt;br&gt;&lt;br&gt;Outbound Adapter → Application-owned / Core-owned Port&lt;br&gt;&lt;br&gt;Adapter → 外部 SDK / Client" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#10B981;strokeWidth=1.8;fontColor=#065F46;fontSize=13;align=left;verticalAlign=top;spacing=16;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="495" width="355" height="245" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="forbidden_rules" value="&lt;b&gt;✕ 禁止依赖&lt;/b&gt;&lt;br&gt;&lt;br&gt;Core ⇢ Concrete Adapter / Framework&lt;br&gt;&lt;br&gt;Core ⇢ DB / HTTP / LLM SDK&lt;br&gt;&lt;br&gt;Application ⇢ 具体 DB / 外部 API&lt;br&gt;&lt;br&gt;Inbound Adapter ⇢ Runtime 内部组件&lt;br&gt;&lt;br&gt;Adapter ⇢ 另一个 Adapter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF2F2;strokeColor=#DC2626;strokeWidth=1.8;dashed=1;dashPattern=7 5;fontColor=#991B1B;fontSize=13;align=left;verticalAlign=top;spacing=16;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="770" width="355" height="285" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="tool_definition_note" value="&lt;b&gt;Tool Definition ≠ Port ≠ Adapter&lt;/b&gt;&lt;br&gt;&lt;br&gt;Tool Definition：Agent 可见的名称、描述与 Schema&lt;br&gt;Port：Application / Core 按职责定义的代码接口&lt;br&gt;Adapter：Port 的具体技术实现&lt;br&gt;&lt;br&gt;Port 按 owner、事务和测试边界拆分；不要求“一种记录＝一张表＝一个 Port”。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#A78BFA;strokeWidth=1.6;fontColor=#5B21B6;fontSize=11;align=left;verticalAlign=top;spacing=15;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="1070" width="355" height="190" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="bottom_rule" value="核心规则：所有外部变化在 Adapter 层停止；Application / Core 只看到各自拥有的 Port；运行时调用方向与源代码依赖方向可以相反。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0F172A;strokeColor=#0F172A;fontColor=#FFFFFF;fontSize=13;fontStyle=1;arcSize=24;" vertex="1" parent="1">
+          <mxGeometry x="120" y="1305" width="1770" height="44" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="edge_inbound_application" value="依赖 Inbound Port" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2563EB;strokeWidth=2.4;endArrow=block;endFill=1;fontSize=11;fontColor=#1D4ED8;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="inbound_layer" target="inbound_ports">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_application_core" value="允许：Application → Core" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2563EB;strokeWidth=2.5;endArrow=block;endFill=1;fontSize=11;fontColor=#1D4ED8;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="application_layer" target="core_layer">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="edge_business_adapter_port" value="implements / depends on Port" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#059669;strokeWidth=2.3;endArrow=block;endFill=0;fontSize=10;fontColor=#047857;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="business_tool_adapters" target="business_ports">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_model_adapter_port" value="implements" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#059669;strokeWidth=2.3;endArrow=block;endFill=0;fontSize=10;fontColor=#047857;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="model_adapter" target="model_port">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_state_adapter_port" value="implements Core Port Group" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#059669;strokeWidth=2.3;endArrow=block;endFill=0;fontSize=10;fontColor=#047857;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="state_trace_adapters" target="state_trace_ports">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_state_adapter_conversation_port" value="implements Application Port" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#059669;strokeWidth=2.1;endArrow=block;endFill=0;fontSize=10;fontColor=#047857;labelBackgroundColor=#F8FAFC;exitX=1;exitY=0.35;entryX=1;entryY=0.5;" edge="1" parent="1" source="state_trace_adapters" target="conversation_store_port">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1488" y="978"/><mxPoint x="1488" y="424"/></Array></mxGeometry>
+        </mxCell>
+
+        <mxCell id="edge_business_adapter_external" value="HTTP / repository client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.8;endArrow=block;endFill=1;fontSize=10;fontColor=#475569;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="business_tool_adapters" target="business_systems">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_model_adapter_external" value="model client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.8;endArrow=block;endFill=1;fontSize=10;fontColor=#475569;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="model_adapter" target="llm_system">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_state_adapter_external" value="DB / trace client" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#64748B;strokeWidth=1.8;endArrow=block;endFill=1;fontSize=10;fontColor=#475569;labelBackgroundColor=#F8FAFC;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="state_trace_adapters" target="storage_systems">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

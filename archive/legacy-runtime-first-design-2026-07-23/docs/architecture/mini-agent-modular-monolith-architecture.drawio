@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2026-07-23T18:35:00.000+08:00" agent="Codex" version="27.0.9" type="device" pages="1">
+  <diagram id="mini-agent-v3-restored" name="P0 Runtime 架构 v3">
+    <mxGraphModel dx="2800" dy="1900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2800" pageHeight="1900" math="0" shadow="0" background="#F8FAFC">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="Mini Agent P0 Runtime 逻辑组件与依赖架构图" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=PingFang SC;fontSize=38;fontStyle=1;fontColor=#172033;" vertex="1" parent="1">
+          <mxGeometry x="70" y="25" width="1200" height="62" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="模块化单体 · framework-free · Ports &amp; Adapters · Reference Application 位于 Runtime 核心之外" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=PingFang SC;fontSize=18;fontColor=#64748B;" vertex="1" parent="1">
+          <mxGeometry x="72" y="88" width="1220" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="status" value="PROPOSED P0 TARGET · PLANNED / NOT IMPLEMENTED" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;arcSize=12;fontFamily=PingFang SC;fontSize=14;fontStyle=1;fontColor=#C2410C;fillColor=#FFF7ED;strokeColor=#FB923C;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1332" y="52" width="500" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend" value="蓝色：运行依赖　　紫色虚线：组装 / 规格注入　　绿色虚线：Adapter implements Port　　红色：ACTION_TOOL 必经 Gate" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;arcSize=10;fontFamily=PingFang SC;fontSize=13;fontColor=#475569;fillColor=#FFFFFF;strokeColor=#D9E2EF;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1880" y="42" width="870" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="monolith" value="MODULAR MONOLITH DEPLOYMENT BOUNDARY" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=13;fontStyle=1;fontColor=#475569;fillColor=#FFFFFF;strokeColor=#64748B;strokeWidth=3;" vertex="1" parent="1">
+          <mxGeometry x="40" y="145" width="2720" height="1418" as="geometry"/>
+        </mxCell>
+        <mxCell id="bootstrap" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Bootstrap / Composition Root&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;唯一组装点：创建具体对象、绑定必要的 Runtime / Domain Ports&lt;br/&gt;注册 CapabilitySpec / ToolDefinition / ToolHandler / ActionPolicy；管理生命周期&lt;br/&gt;src/mini_agent/bootstrap/　·　只有 Bootstrap 认识具体实现&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fontColor=#1D4ED8;fillColor=#EFF6FF;strokeColor=#60A5FA;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="160" width="2660" height="126" as="geometry"/>
+        </mxCell>
+        <mxCell id="logical" value="LOGICAL MODULES · IN-PROCESS　　单进程 · 单发布单元 · 进程内同步协作 · 外部依赖统一经 Adapter" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=14;fontStyle=1;fontColor=#334155;fillColor=#FBFDFF;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="55" y="312" width="2690" height="966" as="geometry"/>
+        </mxCell>
+        <mxCell id="interfaces" value="INTERFACES&#10;入站适配层" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=22;fontStyle=1;fontColor=#1D4ED8;fillColor=#F8FBFF;strokeColor=#3B82F6;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="360" width="350" height="880" as="geometry"/>
+        </mxCell>
+        <mxCell id="iface_cli" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;CLI / API Adapters&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;协议解析 · 映射 RunRequest&lt;br/&gt;标准化 SessionRef / UserContext&lt;br/&gt;RunResponse presentation&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fontColor=#172033;fillColor=#FFFFFF;strokeColor=#BFDBFE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="94" y="486" width="302" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="iface_harness" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Test &amp; Evaluation Harness&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;场景驱动 · 回归 · 质量评估&lt;br/&gt;通过 Public API 发起 RunRequest&lt;br/&gt;按 runId 获取 RunResponse + RunEvidence&lt;br/&gt;test-only inbound client&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fontColor=#172033;fillColor=#FFFFFF;strokeColor=#BFDBFE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="94" y="660" width="302" height="168" as="geometry"/>
+        </mxCell>
+        <mxCell id="iface_rules" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;入口边界规则&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;• 只依赖 Application Public API&lt;br/&gt;• 不解释领域事实&lt;br/&gt;• 不直接调用 Tool&lt;br/&gt;• 协议选择不进入 Runtime&lt;br/&gt;• Harness 不直接读取 Trace Store&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fontColor=#172033;fillColor=#F8FBFF;strokeColor=#60A5FA;strokeWidth=2;dashed=1;dashPattern=8 7;" vertex="1" parent="1">
+          <mxGeometry x="94" y="852" width="302" height="354" as="geometry"/>
+        </mxCell>
+        <mxCell id="application" value="APPLICATION&#10;用例协调" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=22;fontStyle=1;fontColor=#047857;fillColor=#F6FFFA;strokeColor=#10B981;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="445" y="360" width="390" height="880" as="geometry"/>
+        </mxCell>
+        <mxCell id="app_service" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Agent Run Service · Public API&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;接收 RunRequest / RunEvidenceQuery&lt;br/&gt;调用 Runtime Facade&lt;br/&gt;返回 RunResponse / RunEvidence&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#BBF7D0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="469" y="486" width="342" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="app_session" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Session / Task Coordinator&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;关联会话、用户上下文与未完成任务&lt;br/&gt;仅持有 Run 引用&lt;br/&gt;SessionContext ≠ RunState&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#BBF7D0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="469" y="660" width="342" height="145" as="geometry"/>
+        </mxCell>
+        <mxCell id="app_policy" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Use-case Policy &amp; Validation&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;入口合同校验&lt;br/&gt;预算与通用授权&lt;br/&gt;不解释订单 / 配送领域事实&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#BBF7D0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="469" y="829" width="342" height="145" as="geometry"/>
+        </mxCell>
+        <mxCell id="app_contracts" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Application API Contracts&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;RunRequest · RunResponse&lt;br/&gt;RunEvidenceQuery · RunEvidence&lt;br/&gt;SessionRef · UserContext&lt;br/&gt;Public API 是 Interfaces 唯一入口&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#F4FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="469" y="998" width="342" height="208" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime" value="AGENT RUNTIME CORE&#10;通用执行内核" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=22;fontStyle=1;fontColor=#C2410C;fillColor=#FFFAF6;strokeColor=#F97316;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="860" y="360" width="1250" height="880" as="geometry"/>
+        </mxCell>
+        <mxCell id="run_scope" value="RUN SCOPE　　RunState · runId · deadline · cancellation · retry budget · TraceContext　　　　　　　　　Facade: start · resume · continue · result · evidence" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fontSize=14;fontStyle=1;fontColor=#9A3412;fillColor=#FFFAF6;strokeColor=#FED7AA;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="890" y="476" width="1190" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="orchestrator" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Run Orchestrator&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;RequestUnit 创建、状态与生命周期&lt;br/&gt;Controlled Agent Loop · 有界决策循环&lt;br/&gt;start · resume · continue · stop · ModelPort&lt;br/&gt;input · context · errors · result · execution records&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#FDBA74;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="890" y="570" width="540" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="context" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Context, Capability &amp; Tool Registry&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;Capability Registry / Resolution · Tool Registry&lt;br/&gt;Memory read / write / recovery · evidence envelope&lt;br/&gt;CapabilitySpec · ToolDefinition · MemoryStorePort&lt;br/&gt;通用 envelope / provenance；领域 Evidence 由 Ref App 组装&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#FDBA74;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="570" width="630" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="pipeline" value="Tool Execution Pipeline　　　　　　　　　　　　　　　　　所有 Tool 先校验 · ACTION_TOOL 必经 Gate" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=18;fontStyle=1;fontColor=#9A3412;fillColor=#FFFAF6;strokeColor=#F97316;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="890" y="785" width="1190" height="205" as="geometry"/>
+        </mxCell>
+        <mxCell id="validator" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Tool Registry + Validator&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;模型输出 → ToolCallCandidate&lt;br/&gt;白名单 · schema · scope / risk&lt;br/&gt;尚未执行&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#FDBA74;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="920" y="840" width="330" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="gate" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Action Gate · ACTION_TOOL&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;ActionPolicy · in-band approval&lt;br/&gt;批准 · 拒绝 · 暂停 / 恢复&lt;br/&gt;幂等审计&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFF4F4;strokeColor=#EF4444;strokeWidth=3;fontColor=#991B1B;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="840" width="330" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="executor" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Tool Executor&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;唯一允许 dispatch ToolHandler&lt;br/&gt;timeout · retry&lt;br/&gt;ToolResult / Failure&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=3;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="840" width="310" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="lifecycle" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Lifecycle &amp; Observability&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;Termination / Recovery · RunResult Assembly&lt;br/&gt;TraceEvent 从运行开始贯穿所有模块&lt;br/&gt;RequestUnit · RunState · GateDecision · RunResult&lt;br/&gt;TraceSink 输出；RunResult 经 Runtime Facade 返回&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#F0FDFF;strokeColor=#67E8F9;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="890" y="1015" width="500" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="extensions" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Runtime Extension API&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;CapabilitySpec&lt;br/&gt;ToolDefinition · ToolHandler&lt;br/&gt;ActionPolicy&lt;br/&gt;Ref App 提供；Bootstrap 注册&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FBF6FF;strokeColor=#C084FC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="1015" width="350" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime_ports" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Outbound Ports&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;ModelPort · MemoryStorePort&lt;br/&gt;RunStateStorePort · TraceSink&lt;br/&gt;TraceQueryPort&lt;br/&gt;只抽象不稳定的跨边界依赖&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFAF6;strokeColor=#FDBA74;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1780" y="1015" width="300" height="190" as="geometry"/>
+        </mxCell>
+        <mxCell id="reference" value="REFERENCE APPLICATION&#10;订单与配送支持领域" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=22;fontStyle=1;fontColor=#7E22CE;fillColor=#FCF8FF;strokeColor=#A855F7;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="2135" y="360" width="595" height="880" as="geometry"/>
+        </mxCell>
+        <mxCell id="ref_caps" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Capability Specs &amp; Domain Evidence Assembler&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;order_status_lookup · shipment_tracking&lt;br/&gt;delivery_exception_resolution · delivery_policy_qa&lt;br/&gt;领域事实 → generic Evidence envelope&lt;br/&gt;冲突与充分性规则&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#D8B4FE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2163" y="486" width="539" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="ref_tools" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Domain ToolHandlers &amp; Action Policies&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;READ_TOOL · get_order · get_shipment&lt;br/&gt;READ_TOOL · retrieve_delivery_policy&lt;br/&gt;ACTION_TOOL · open_delivery_support_case&lt;br/&gt;ActionPolicy · 领域前置条件&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#D8B4FE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2163" y="638" width="539" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="ref_state" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Domain State &amp; Response Policy&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;DomainState · CompletionPolicy · DomainEvidence&lt;br/&gt;领域术语、提示上下文与回复规范&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#D8B4FE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2163" y="790" width="539" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="ref_eval" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Evaluation Specifications &amp; Cases&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;能力级数据集 · 成功判定 · 错误分类&lt;br/&gt;边界、恢复与回归用例&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FFFFFF;strokeColor=#D8B4FE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2163" y="942" width="539" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="domain_ports" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Domain Contracts &amp; Outbound Ports · Ref App 所有&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;OrderReaderPort · ShipmentReaderPort&lt;br/&gt;DeliveryPolicySearchPort · SupportCaseServicePort&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;fillColor=#FBF6FF;strokeColor=#D8B4FE;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2163" y="1084" width="539" height="122" as="geometry"/>
+        </mxCell>
+        <mxCell id="infra" value="INFRASTRUCTURE ADAPTERS · 可替换技术实现" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#15803D;fillColor=#EFFDF5;strokeColor=#22C55E;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1302" width="2660" height="250" as="geometry"/>
+        </mxCell>
+        <mxCell id="infra_runtime" value="Runtime Adapters · implements only retained Runtime Ports" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=17;fontStyle=1;fontColor=#166534;fillColor=#FFFFFF;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="96" y="1360" width="1530" height="162" as="geometry"/>
+        </mxCell>
+        <mxCell id="model_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Model Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;ModelPort&lt;br/&gt;Function Calling → ToolCallCandidate&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="118" y="1412" width="350" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="memory_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Memory Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;MemoryStorePort&lt;br/&gt;read · write · recovery&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="486" y="1412" width="330" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="state_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;RunState Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;RunStateStorePort&lt;br/&gt;checkpoint · resume&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="834" y="1412" width="330" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="trace_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Trace Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;TraceSink · TraceQueryPort&lt;br/&gt;append · query&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1182" y="1412" width="416" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="infra_domain" value="Reference Domain Adapters · implements Domain Ports" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=17;fontStyle=1;fontColor=#166534;fillColor=#FFFFFF;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1652" y="1360" width="1052" height="162" as="geometry"/>
+        </mxCell>
+        <mxCell id="order_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Order Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;OrderReaderPort&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1674" y="1412" width="230" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="shipment_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Shipment Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;ShipmentReaderPort&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1922" y="1412" width="230" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="policy_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Policy Corpus Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;DeliveryPolicySearchPort&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2170" y="1412" width="250" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="case_adapter" value='&lt;div&gt;&lt;b style="font-size:18px"&gt;Support Case Adapter&lt;/b&gt;&lt;br/&gt;&lt;span style="font-size:13px;color:#526078;line-height:1.65"&gt;SupportCaseServicePort&lt;/span&gt;&lt;/div&gt;' style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fillColor=#F6FFF9;strokeColor=#86EFAC;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2438" y="1412" width="244" height="84" as="geometry"/>
+        </mxCell>
+        <mxCell id="external" value="EXTERNAL SYSTEMS · 模块化单体边界外" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#475569;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=2.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1582" width="2660" height="148" as="geometry"/>
+        </mxCell>
+        <mxCell id="llm" value="LLM Provider" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1636" width="300" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="memory_store" value="Memory Store" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="425" y="1636" width="300" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="checkpoint" value="Checkpoint Store" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="750" y="1636" width="300" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="trace_store" value="Trace Store" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1075" y="1636" width="510" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="order_service" value="Order Service" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1660" y="1636" width="230" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="shipment_service" value="Shipment Service" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1908" y="1636" width="230" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="policy_corpus" value="Delivery Policy Corpus" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2156" y="1636" width="250" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="case_service" value="Support Case Service" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;spacing=14;arcSize=10;fontFamily=PingFang SC;align=center;fontSize=17;fontStyle=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="2424" y="1636" width="278" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="constraints" value="ARCHITECTURE CONSTRAINTS&#10;领域事实归 Reference Application　　• Capability ≠ Tool ≠ Action　　• 所有 Tool 先校验；仅 ACTION_TOOL 必经 Gate　　• 只有 Tool Executor 可 dispatch ToolHandler　　• Port 只用于真实跨边界依赖　　• Trace 从 P0 建立" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=16;spacingLeft=22;arcSize=8;fontFamily=PingFang SC;fontSize=14;fontColor=#334155;fillColor=#FFFFFF;strokeColor=#D9E2EF;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1760" width="2660" height="104" as="geometry"/>
+        </mxCell>
+        <mxCell id="footer" value="mini-agent modular-monolith architecture · v3 · 2026-07-23" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=PingFang SC;align=right;fontSize=11;fontColor=#64748B;" vertex="1" parent="1">
+          <mxGeometry x="2180" y="1868" width="550" height="22" as="geometry"/>
+        </mxCell>
+        <mxCell id="entry" value="Run / Evidence API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="396" y="560" as="sourcePoint"/>
+            <mxPoint x="469" y="560" as="targetPoint"/>
+            <Array as="points"><mxPoint x="430" y="560"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="harness_entry" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=4;endArrow=none;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="396" y="744" as="sourcePoint"/>
+            <mxPoint x="410" y="560" as="targetPoint"/>
+            <Array as="points"><mxPoint x="410" y="744"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="app_runtime" value="Runtime Facade" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="811" y="561" as="sourcePoint"/>
+            <mxPoint x="890" y="655" as="targetPoint"/>
+            <Array as="points"><mxPoint x="846" y="561"/><mxPoint x="846" y="655"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="orch_context" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#EA580C;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1430" y="660" as="sourcePoint"/>
+            <mxPoint x="1450" y="660" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="orch_validator" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#EA580C;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1160" y="750" as="sourcePoint"/>
+            <mxPoint x="1160" y="785" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="action_to_gate" value="ACTION_TOOL" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#EA580C;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1250" y="920" as="sourcePoint"/>
+            <mxPoint x="1330" y="920" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gate_to_exec" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#EA580C;strokeWidth=4;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1660" y="920" as="sourcePoint"/>
+            <mxPoint x="1740" y="920" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="read_to_exec" value="READ_TOOL · 校验后直接执行" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=3;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1250" y="878" as="sourcePoint"/>
+            <mxPoint x="1740" y="878" as="targetPoint"/>
+            <Array as="points"><mxPoint x="1280" y="878"/><mxPoint x="1280" y="828"/><mxPoint x="1700" y="828"/><mxPoint x="1700" y="878"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tool_return" value="ToolResult / Failure → RunState / Evidence → next decision" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#EA580C;strokeWidth=3;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1895" y="840" as="sourcePoint"/>
+            <mxPoint x="1160" y="750" as="targetPoint"/>
+            <Array as="points"><mxPoint x="1895" y="770"/><mxPoint x="1160" y="770"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bootstrap_wire" value="wires modules · ports · extensions" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7C3AED;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1485" y="286" as="sourcePoint"/>
+            <mxPoint x="1485" y="342" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="extensions_supply" value="supplies Runtime extensions" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7C3AED;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2135" y="855" as="sourcePoint"/>
+            <mxPoint x="1585" y="1205" as="targetPoint"/>
+            <Array as="points"><mxPoint x="2122" y="855"/><mxPoint x="2122" y="1224"/><mxPoint x="1585" y="1224"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="runtime_impl" value="implements Runtime Ports" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#16A34A;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1930" y="1205" as="sourcePoint"/>
+            <mxPoint x="860" y="1360" as="targetPoint"/>
+            <Array as="points"><mxPoint x="1930" y="1278"/><mxPoint x="860" y="1278"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="domain_impl" value="implements Domain Ports" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#16A34A;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2432" y="1206" as="sourcePoint"/>
+            <mxPoint x="2432" y="1360" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trace_down" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0891B2;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1280" y="1205" as="sourcePoint"/>
+            <mxPoint x="1390" y="1412" as="targetPoint"/>
+            <Array as="points"><mxPoint x="1280" y="1260"/><mxPoint x="1390" y="1260"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trace_store_link" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0891B2;strokeWidth=3;endArrow=block;endFill=1;dashed=1;dashPattern=8 6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1390" y="1496" as="sourcePoint"/>
+            <mxPoint x="1390" y="1636" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="runtime_external" value="external APIs / storage" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#64748B;strokeWidth=2.5;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="860" y="1522" as="sourcePoint"/>
+            <mxPoint x="860" y="1582" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="domain_external" value="domain APIs / corpus" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#64748B;strokeWidth=2.5;endArrow=block;endFill=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2178" y="1522" as="sourcePoint"/>
+            <mxPoint x="2178" y="1582" as="targetPoint"/>
+            
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+
