@@ -97,6 +97,8 @@ Tech Lead / Integrator
 
 Required status checks 只有在仓库出现真实、可运行的 CI workflow 后才启用；当前不得用尚不存在的 lint、test 或 build 命令创建虚假门禁。只有一个 GitHub 用户时，也不预设会导致自有 PR 无法合并的 required approval 数量；先以 Codex 只读 review、PR 证据和用户合并决策模拟 review，真实协作者加入后再提高审批规则。
 
+如果目标 GitHub 套餐不支持 private repository 的 branch protection，不得静默改为 public，也不得声称 base branch 已受平台保护；必须记录 API 结果和 `OPEN` 风险。在升级套餐或用户裁决可见性之前，项目级禁止 direct push / force push 规则、draft PR、可复现验证和用户 merge 决策只能作为流程门禁，不能描述成 GitHub 已强制执行。
+
 ## 5. Single-writer ownership
 
 ### 5.1 Integrator 热点
@@ -396,7 +398,7 @@ Recommended merge order:
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 本地流程 | `LOCAL_READY / REMOTE_NOT_CONFIGURED` | PR 模板与 branch / review 规则已定义；尚无 `origin`、push 或 PR 证据 |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / DRAFT_PR_OPEN / BRANCH_PROTECTION_UNAVAILABLE` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；[PR #1](https://github.com/weijie567/mini-agent/pull/1)；保护 API 返回 HTTP 403，需 GitHub Pro 或 public repository |
 | GSD | `PROPOSED / NOT_INITIALIZED` | `.planning/STATE.md` 不存在，当前为 flat mode、0 workstreams |
 | 应用源码与工具链 | `NOT_FOUND` | 尚无 `src/`、`pyproject.toml`、`compose.yaml` |
 | Fixture / Harness / 自动化 Eval | `NOT_FOUND` | 尚无 `evals/` 和可执行测试 |
