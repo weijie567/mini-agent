@@ -75,8 +75,8 @@ Tech Lead / Integrator
 1. Agent 在自己的 feature branch 内完成 focused verification 和 allowlist 检查。
 2. Agent 提交一个可审查的原子 commit，并按第 10 节格式交接。
 3. Agent 只 push 自己的 feature branch，并创建 draft PR 到 `integration/e2e01-thin`；不得直接 push integration branch。
-4. Reviewer 依据 canonical owner、Task Packet、PR 模板和实际 diff 做只读 review；原 owner 修复发现。
-5. Integrator 一次只合并一个 PR。默认对 feature PR 使用 squash merge，并保留 PR 作为审查与交接证据。
+4. Reviewer 依据 canonical owner、Task Packet、PR 模板和实际 diff 做只读 review；Review evidence 必须记录 reviewer、被审精确 head SHA、`PASS` / `FAIL`、findings 与 resolution，原 owner 修复发现。
+5. Integrator 只在当前 head SHA 的独立 review 为 `PASS`、所有 findings 已关闭或显式裁决且 GitHub conversations 已解决后合并；一次只合并一个 PR。默认对 feature PR 使用 squash merge，并保留 PR 作为审查与交接证据。
 6. 下一个待集成分支基于最新 integration head 解决接口差异并重新验证。
 7. 完整集成门禁通过后，由 `integration/e2e01-thin` 创建 PR 到 `main`；禁止直接 push `main`。
 8. 不复制 `.env`、Cookie、API Key 或其他本机 secret 到 Worktree；真实 Qwen lane 始终是显式、非发布门禁的运行。
@@ -91,7 +91,7 @@ Tech Lead / Integrator
 - `gh auth status` 对目标 host 和 owner 有效；
 - head / base branch 与 Task Packet 一致；
 - feature branch 可 push，PR 模板可加载；
-- `main` 和 `integration/e2e01-thin` 的目标保护规则禁止直接 push 与 force push。
+- `main` 和 `integration/e2e01-thin` 的目标保护规则禁止直接 push 与 force push，并要求解决 PR conversations。
 
 如果目标是新建空 repository，Integrator 可以一次性 push 当前已确认的 `main` 与 `integration/e2e01-thin` commit 来建立 PR base；必须在 Task / bootstrap 记录中保存精确 SHA，并在基线发布后立即配置目标 repository 实际支持的保护规则。任何后续功能或文档变更都不得借用该例外。
 
@@ -324,8 +324,12 @@ uv run uvicorn mini_agent.main:app --reload
 ```yaml
 task_id: W?-ROLE-short-name
 goal: 一句话描述可验收结果
+repository: weijie567/mini-agent
+remote: origin
+head_branch: feat/e2e01-<role>-<task>
 base_branch: integration/e2e01-thin
 base_sha: <exact commit>
+worktree_id: <public logical id; runtime path is private dispatch data>
 agent_role: runtime-engineer | infra-engineer | eval-engineer | reviewer
 owned_files:
   - <exact path or narrow glob>
@@ -340,9 +344,10 @@ required_checks:
 done_when:
   - <observable acceptance condition>
 handoff_to: tech-lead
+handoff_format: docs/implementation/e2e01-thin-slice-multi-agent-plan.md#10-handoff-模板
 ```
 
-Task Packet 未给出 `owned_files`、`base_sha` 或 `required_checks` 时，不启动写入 Agent。
+Task Packet 未给出 `repository`、`remote`、`head_branch`、`base_branch`、`base_sha`、`worktree_id`、`owned_files`、`forbidden_files`、`dependencies`、`required_checks`、`done_when` 或 `handoff_format` 时，不启动写入 Agent。没有依赖或禁止文件时也必须显式填写 `NONE`，不得留空或由 Agent 猜测。
 
 ## 10. Handoff 模板
 
@@ -363,22 +368,34 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-建议采用 GSD，但只作为现有协作模型上的选择性编排层，当前状态保持 `PROPOSED / NOT_INITIALIZED`。
+GSD 只可作为现有协作模型上的选择性编排层，当前状态保持 `PROPOSED / NOT_INITIALIZED`。W1 明确不使用 GSD，直接执行本文已经批准的 Task Packet。
 
-### 11.1 推荐使用
+### 11.1 Activation Gate（`OPEN`）
+
+启用任何会写入 `.planning/` 的 GSD 流程前，Integrator 必须通过一个独立、串行的 activation PR：
+
+- 建立 active owner → GSD 派生文件的显式 mapping 和 blocker conflict review；
+- 裁决适用于既有项目的初始化命令，不默认运行 `$gsd-new-project`；
+- 给出 `.planning/` 精确 allowlist、single-writer、phase / integration branch 映射和回滚方式；
+- 在隔离 Worktree 演练初始化，证明不会覆盖 active canonical owner；
+- 记录可复现验证命令，并由独立 Reviewer 对精确 head SHA 给出 `PASS`。
+
+上述 Gate 未完成前，不运行 `$gsd-plan-phase`、`$gsd-execute-phase`、`$gsd-verify-work`、`$gsd-code-review` 或其他依赖 phase / roadmap 状态的流程，也不把它们列为 W1 required checks。
+
+### 11.2 激活后可选使用
 
 - 后续尚未规划的独立 phase 使用 `$gsd-plan-phase` 生成可验证计划，再由 canonical owner 审查。
 - 已批准 phase 使用 `$gsd-execute-phase --wave N` 分批执行；每个写入 executor 仍必须映射到独立 Worktree、feature branch 和 PR。
 - 集成后使用 `$gsd-verify-work`、`$gsd-code-review` 或安全专项技能补充 UAT、代码审查和验证证据。
 - 只有真正独立、生命周期不同的 milestone 才使用 `$gsd-workstreams`；Runtime、Infra、Eval 是同一 E2E 切片的协作模块，不为它们建立三套产品 roadmap。
 
-### 11.2 当前不使用
+### 11.3 当前不使用
 
 - 不直接运行 `$gsd-new-project`：仓库已经存在明确 canonical owner、P0 方向、Implementation Spec 和执行 Plan，重新问答生成会制造第二套项目定义。
 - 不直接以默认优先级运行 `$gsd-ingest-docs`：本项目采用“专门 owner 仅在自身范围内优先”，不能让通用 `ADR > SPEC > PRD > DOC` 规则静默覆盖跨域 owner。未来如需导入，必须使用显式 manifest、owner mapping 和 blocker conflict review。
 - 第一切片成为 `EXECUTABLE` 前不运行 `$gsd-autonomous`，也不让 GSD 自动修改 active canonical 文档或 Case 生命周期。
 
-### 11.3 GitHub 映射
+### 11.4 GitHub 映射
 
 | GSD 对象 | GitHub / Codex 对象 |
 |---|---|
@@ -398,7 +415,7 @@ Recommended merge order:
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / DRAFT_PR_OPEN / BASE_BRANCHES_PROTECTED` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；[PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有虚构 required status checks |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)，其实时 lifecycle 以 GitHub 查询为准；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有虚构 required status checks |
 | GSD | `PROPOSED / NOT_INITIALIZED` | `.planning/STATE.md` 不存在，当前为 flat mode、0 workstreams |
 | 应用源码与工具链 | `NOT_FOUND` | 尚无 `src/`、`pyproject.toml`、`compose.yaml` |
 | Fixture / Harness / 自动化 Eval | `NOT_FOUND` | 尚无 `evals/` 和可执行测试 |

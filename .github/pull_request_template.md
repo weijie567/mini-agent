@@ -10,7 +10,7 @@
 - `base_sha`：
 - Head branch：
 - Base branch：
-- Worktree：
+- Worktree ID（逻辑标识，不公开本机绝对路径）：
 - 文件 allowlist：
 - 实际变更文件：
 - 契约变化：`NONE` / 说明并链接 canonical owner
@@ -25,6 +25,14 @@
 | full offline gate（如适用） |  |  |
 
 未执行的检查及原因：
+
+## Review evidence
+
+- Reviewer：
+- Reviewed head SHA：
+- Verdict：`PASS` / `FAIL`
+- Findings：
+- Resolution：
 
 ## 安全与 Eval
 
@@ -47,3 +55,4 @@
 - [ ] 没有把 Plan、Mock 或目标命令描述为已实现 / 已通过。
 - [ ] 相关 active owner、派生文档与状态已完成 cross-file alignment。
 - [ ] 已报告所有执行、未执行和失败的检查。
+- [ ] 当前 head SHA 已取得独立 Reviewer 的 `PASS`，所有 findings 已关闭或显式裁决。
