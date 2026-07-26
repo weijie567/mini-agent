@@ -106,7 +106,7 @@ Activation merge 后不直接 import 或执行 persistence implementation，也�
 3. 01-01 exact-head PR 合并后，Integrator 才从新 integration SHA 生成单 owner 的 01-02 Memory decode/recovery/migration contract。
 4. 01-02 合并后，才生成只写 Thin Slice Spec 的 01-03 scoped 17-item minimum-persistence mapping；17 项严格派生自 Thin Slice Spec 第 10.1 节当前最低持久化集合（其中包含 `ModelVisibleToolsetArtifact`），不得把源码中的辅助模型或命令计入并误称为 20 条 Record。Tool / Eval owner 的现有语义通过引用消费，除非后续独立 owner Packet 证明必须演进。
 5. 当前唯一 `CONFIRMED` 的 scoped 要求仍是：JSON persistence projection 在写入前经过 Pydantic serialization，并保存 schema version。`RecordSchemaSpec`、registry、strict decoder、unknown-version fail-closed 和固定 record-code allowlist 在对应 owner PR 合并前均为 `OPEN / PROPOSAL_ONLY`。
-6. 只有 01-03 exact-head PR 合并后才生成 01-04 implementation；只有 01-04 合并后，才从同一个新 integration SHA 预建 01-05/06/07 Runtime / Infra / Eval 三个 ownership 不重叠的 Worktree。
+6. 只有 01-03 exact-head PR 合并后才生成 01-04 implementation；01-04 合并后还必须通过 Graphify freshness与 source / dependency audit。若 audit发现 shared contract gap，先建立单 owner dependency Packet并合并；只有 blocker关闭后，才从同一个新 integration SHA预建 Runtime / Infra / Eval三个 ownership不重叠的 Worktree。
 
 Stock `gsd-import`、`gsd-plan-phase` 与 `gsd-execute-phase` 不参与上述实现。GSD planner / checker 角色可只读提供 Plan 建议；Integrator 在预建的 dedicated planning-status Worktree / branch 中单写最终 artifact。
 
