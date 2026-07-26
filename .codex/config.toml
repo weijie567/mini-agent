@@ -1,0 +1,24 @@
+[agents]
+# Codex CLI 0.144 accepts this documented legacy alias. Replace it with
+# max_concurrent_threads_per_session only after the installed CLI validates it.
+max_threads = 3
+
+[agents.tech-lead]
+description = "Integration owner responsible for planning, delegation, contract decisions, sequential integration, and final verification."
+config_file = "agents/tech-lead.toml"
+
+[agents.infra-engineer]
+description = "Infrastructure engineer for project tooling, database, migrations, persistence adapters, and local runtime dependencies."
+config_file = "agents/infra-engineer.toml"
+
+[agents.runtime-engineer]
+description = "Runtime engineer for Core and Application behavior, controlled tool execution, state transitions, and orchestration."
+config_file = "agents/runtime-engineer.toml"
+
+[agents.eval-engineer]
+description = "Evaluation engineer for fixtures, datasets, scripted providers, graders, harnesses, and regression coverage."
+config_file = "agents/eval-engineer.toml"
+
+[agents.reviewer]
+description = "Read-only reviewer focused on correctness, security boundaries, contract drift, regressions, and missing tests."
+config_file = "agents/reviewer.toml"

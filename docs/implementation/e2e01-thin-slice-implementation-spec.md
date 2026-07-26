@@ -27,6 +27,8 @@
 3. 本文中的技术剖面、Schema、Fixture 和目标命令只约束本切片；不得反向升级为整个 P0 的唯一实现方式。第 3.1 节目录示意和第 15 节依赖提示是 `PLAN_DECISION` 输入，不是规范性文件清单或任务顺序。
 4. 本文出现而仓库尚不存在的源码、配置和命令均是 `CONTRACT_DEFINED`，不是 `CONFIRMED` 或 `EXECUTABLE`。
 
+具体任务 Wave、文件 ownership、Worktree 与交接门禁由 [Codex 多 Agent 实施计划](e2e01-thin-slice-multi-agent-plan.md) 管理。该 Plan 是 `NON_NORMATIVE` 执行消费者，不拥有或改变本文契约与 Case 生命周期。
+
 ## 2. 切片目标与完成边界
 
 ### 2.1 必须跑通
@@ -84,7 +86,7 @@
 
 ### 3.1 非规范性目录示意（`PLAN_DECISION`）
 
-以下仅展示 scoped 技术剖面能够采用的一种 Ports & Adapters 布局，帮助后续 Planner 识别边界；具体文件名、目录拆分、迁移文件和测试组织由对应 `PLAN.md` 决定，不属于本文验收条件。
+以下仅展示 scoped 技术剖面能够采用的一种 Ports & Adapters 布局，帮助后续 Planner 识别边界；具体文件名、目录拆分、迁移文件和测试组织由 [Codex 多 Agent 实施计划](e2e01-thin-slice-multi-agent-plan.md) 决定，不属于本文验收条件。
 
 ```text
 pyproject.toml
@@ -1102,7 +1104,7 @@ uv run uvicorn mini_agent.main:app --reload
 
 ## 15. Plan 输入：实现依赖约束（`NON_NORMATIVE`）
 
-本节不定义任务、文件或执行顺序。后续 `PLAN.md` 可以自由拆分 wave 和源码结构，但必须遵守以下依赖：
+本节不定义任务、文件或执行顺序。[Codex 多 Agent 实施计划](e2e01-thin-slice-multi-agent-plan.md) 可以拆分 wave 和源码结构，但必须遵守以下依赖：
 
 - 可信 Session、外部 Schema 和 Runtime-private 身份边界必须先于任何业务 Tool 执行路径可用。
 - Docker Compose PostgreSQL、healthcheck、从空库执行的 Alembic migration 和测试 namespace 隔离必须先于任何持久化 Integration / E2E Case。
@@ -1111,7 +1113,7 @@ uv run uvicorn mini_agent.main:app --reload
 - Component / Integration 断言随对应边界实现同步增长，不得等完整 E2E 后补安全测试。
 - 离线 `ScriptedModelProvider` 硬门禁通过后，才运行非发布门禁的真实 Qwen Baseline。
 
-具体源码文件、Repository、migration、Fixture 落盘、任务顺序、checkpoint 和逐任务命令全部由后续 `PLAN.md` 决定。
+具体源码文件、Repository、migration、Fixture 落盘、任务顺序、checkpoint 和逐任务命令全部由 [Codex 多 Agent 实施计划](e2e01-thin-slice-multi-agent-plan.md) 决定。
 
 ## 16. Definition of Done
 

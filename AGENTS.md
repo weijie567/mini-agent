@@ -82,6 +82,15 @@
 - 归档材料的历史正文不随 active contract 变化而重写；只有状态横幅、当前权威链接或引用边界会造成误导时才调整。
 - 项目规则保持精简；产品、架构、契约和评测细节放入对应 active 文档，不继续堆入本文件。
 
+## 8. 多 Agent 并行开发
+
+- 写入型并行工作使用不同 Git Worktree 和不同 branch；不得让多个 Agent 同时写同一个 checkout、branch 或文件。
+- 每个 Task Packet 必须包含精确 `base_sha`、文件 allowlist、禁止文件、依赖、验证命令与交接格式；同一 wave 内一个文件只有一个 writer。
+- `pyproject.toml`、lockfile、migration chain、共享测试 bootstrap、Composition Root 和 active canonical 文档属于 single-writer 热点，由明确 owner 或 Integrator 串行修改。
+- 主任务 / Integrator 负责契约裁决、逐个集成、仓库级验证和 cross-file impact scan。子 Agent 默认用于只读探索、审查和测试分析；写入任务必须具备互不重叠的 ownership。
+- Agent 交接必须报告 branch / commit、实际变更文件、执行命令与结果、allowlist 检查、契约变化和未决风险；任务完成不等于切片已实现。
+- `E2E01-01/04` 的具体 Wave、ownership 与 Task Packet 见 [`docs/implementation/e2e01-thin-slice-multi-agent-plan.md`](./docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。该 Plan 只拥有执行拆分，不覆盖任何 active canonical owner。
+
 ## graphify
 
 This project has a knowledge graph at `graphify-out/` with god nodes, community structure, and cross-file relationships.
