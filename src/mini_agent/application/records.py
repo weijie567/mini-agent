@@ -1336,9 +1336,13 @@ class ApplyRestartRecoveryCommand(_StrictRuntimePrivateRecord):
             has_only_known_fields = event.model_fields_set.issubset(
                 _TRACE_EVENT_FIELD_NAMES
             )
+            has_no_hidden_storage = (
+                event.__pydantic_extra__ is None and event.__pydantic_private__ is None
+            )
             if (
                 event_field_names != _TRACE_EVENT_FIELD_NAMES
                 or not has_only_known_fields
+                or not has_no_hidden_storage
             ):
                 raise ValueError(
                     "recovery TraceEvent records must contain only canonical fields"

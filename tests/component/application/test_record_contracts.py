@@ -2656,6 +2656,31 @@ def test_restart_recovery_rejects_hidden_nested_trace_event_fields() -> None:
 
 
 @pytest.mark.parametrize(
+    "storage_attribute",
+    ("__pydantic_extra__", "__pydantic_private__"),
+)
+def test_restart_recovery_rejects_hidden_nested_trace_event_storage(
+    storage_attribute: str,
+) -> None:
+    command = _restart_recovery_command()
+    events = _updated_recovery_trace_events(
+        command,
+        TraceEventType.RUN_STOPPED,
+    )
+    injected_event = next(
+        event for event in events if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    object.__setattr__(
+        injected_event,
+        storage_attribute,
+        {"secret": "must-not-be-silently-stripped"},
+    )
+
+    with pytest.raises(ValidationError):
+        _rebuild(command, recovery_trace_events=events)
+
+
+@pytest.mark.parametrize(
     ("missing_event_type", "error_match"),
     (
         (TraceEventType.RUN_STOPPED, "exactly one RunStopped"),
