@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；Plan 01-01 owner PR 合并后的 exact head 为 `c96dea9f9f798212227cd05ff2a7b1f029a60287`。
+- 当前 integration branch：`integration/e2e01-thin`；Plan 01-02 Memory owner PR 合并后的 exact head 为 `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- Plan 01-01 已通过 planning PR #11、owner PR #12、181 个 serial tests 与独立 exact-head review 完成 evidence index；这只完成 Project Direction owner 决策，不改变 `E2E01-01/04` lifecycle。
-- 当前 immediate gate：合并独立 01-02 planning-status PR；随后在已从 `c96dea9f9f798212227cd05ff2a7b1f029a60287` 预建的 `codex/e2e01-01-memory-persistence-contract` branch 中只修改 `docs/architecture/memory-design-reference.md`。
-- 01-03 Thin Slice scoped mapping 必须在 01-02 exact-head PR 合并后串行生成；01-04 才是被阻断的 implementation slot。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
+- Plan 01-01 与 01-02 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；这只完成 Project Direction 与 Memory owner 契约，不改变 `E2E01-01/04` lifecycle。
+- 当前 immediate gate：合并独立 01-03 planning-status PR；随后在已从 `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b` 预建的 `codex/e2e01-01-thin-slice-persistence-mapping` branch 中只修改 `docs/implementation/e2e01-thin-slice-implementation-spec.md`。
+- 01-03 只冻结 17 项 Thin Slice scoped code/version、logical envelope / closed registry 与 01-04 exact allowlist；01-04 继续 `BLOCKED_ON_01-03_EXACT_MERGE`。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -66,8 +66,8 @@
 | 一个 GSD Plan 对应一个精确 Task Packet | Packet 可以含多个原子 task，但不能跨 repository、branch、Worktree、writer 或 ownership boundary | `CONFIRMED` |
 | 持久化投影写入前经 Pydantic serialization，并保存 schema version | 这是 Thin Slice Spec 当前可确认的 scoped 要求 | `CONFIRMED` |
 | Persistence 四轴 ownership、版本维度与 Trace shared-structure authority | 已由 Plan 01-01 / PR #12 写入 `PROJECT_DIRECTION.md`；不表示 decoder、registry、业务表或 migration 已实现 | `CONFIRMED / CONTRACT_ONLY` |
-| P0 exact-version、decode / recovery / migration runtime 行为 | 等待 01-02 Memory owner 的单文件 Task Packet；不得由 Infrastructure 或 `.planning/` 预先决定 | `OPEN / PLAN_01-02_READY` |
-| Thin Slice 17-item item code、版本与实现 API | 等待 01-03 Thin Slice scoped mapping；不得在 01-02 提前定义 | `OPEN / BLOCKED_ON_01-02` |
+| P0 exact-version、decode / recovery / migration runtime 行为 | 已由 Plan 01-02 / PR #14 写入 Memory owner；不表示 codec、Adapter、业务表或 recovery 已实现 | `CONFIRMED / CONTRACT_ONLY` |
+| Thin Slice 17-item item code、版本与实现 API | 由当前 01-03 Thin Slice scoped owner Packet 冻结；不得从测试 fixture 或 Python 类名动态推断 | `OPEN / PLAN_01-03_READY` |
 
 ## 完成证据规则
 
