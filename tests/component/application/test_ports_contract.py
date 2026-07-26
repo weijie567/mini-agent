@@ -385,12 +385,22 @@ def test_restart_recovery_is_a_system_only_data_capability() -> None:
     assert "stream cutoff" in normalized_load_doc
     assert "before materializing" in normalized_load_doc
     apply_doc = RestartRecoveryPort.claim_and_apply_restart_recovery.__doc__ or ""
-    assert "exact closure fence" in apply_doc
-    assert "zero writes" in apply_doc
-    assert "RUNNING ACTION" in apply_doc
-    assert "RECONCILIATION_REQUIRED" in apply_doc
-    assert "RESULT_UNKNOWN" in apply_doc
-    assert "neither INTERRUPTED nor any Run/Task/link" in apply_doc
+    normalized_apply_doc = " ".join(apply_doc.split())
+    assert "exact closure fence" in normalized_apply_doc
+    assert "one atomic transaction" in normalized_apply_doc
+    assert "state/link projections" in normalized_apply_doc
+    assert "recovery_trace_events" in normalized_apply_doc
+    assert "Core/Runtime-produced" in normalized_apply_doc
+    assert "CLOSURE_CONFLICT" in normalized_apply_doc
+    assert "NOT_APPLICABLE" in normalized_apply_doc
+    assert "RECONCILIATION_REQUIRED" in normalized_apply_doc
+    assert "zero state writes" in normalized_apply_doc
+    assert "zero Trace writes" in normalized_apply_doc
+    assert "RuntimeRecordPort.append_trace_event" in normalized_apply_doc
+    assert "cannot substitute" in normalized_apply_doc
+    assert "RUNNING ACTION" in normalized_apply_doc
+    assert "RESULT_UNKNOWN" in normalized_apply_doc
+    assert "neither INTERRUPTED nor any Run/Task/link" in normalized_apply_doc
     assert set(RecoveryWriteResult) == {
         RecoveryWriteResult.APPLIED,
         RecoveryWriteResult.CLOSURE_CONFLICT,

@@ -425,11 +425,15 @@ class RestartRecoveryPort(Protocol):
         self,
         command: ApplyRestartRecoveryCommand,
     ) -> RecoveryWriteResult:
-        """Revalidate the exact closure fence and apply all projections atomically.
+        """Revalidate the exact closure fence and apply one atomic transaction.
 
-        Any fence or decoded projection change returns CLOSURE_CONFLICT with zero
-        writes. NOT_APPLICABLE and RECONCILIATION_REQUIRED remain distinct and
-        also guarantee zero writes. A RUNNING ACTION is always
+        APPLIED requires a compliant Adapter to commit all state/link projections
+        and every Core/Runtime-produced ``command.recovery_trace_events`` together
+        in that transaction. ``RuntimeRecordPort.append_trace_event`` remains a
+        normal Trace capability but cannot substitute for recovery atomicity.
+
+        CLOSURE_CONFLICT, NOT_APPLICABLE, and RECONCILIATION_REQUIRED guarantee
+        zero state writes and zero Trace writes. A RUNNING ACTION is always
         RECONCILIATION_REQUIRED: its candidate interruption projection may be
         carried for bijection, but neither INTERRUPTED nor any Run/Task/link
         projection may commit; Action RESULT_UNKNOWN reconciliation remains the
