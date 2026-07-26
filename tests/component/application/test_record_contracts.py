@@ -4,9 +4,15 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel, ValidationError
 
+import mini_agent.application.records as application_records_module
 from mini_agent.application.records import (
+    AgentRunCommand,
+    AgentRunResult,
+    ApplyRestartRecoveryCommand,
+    ApplyTaskTransitionCommand,
     ConversationRecord,
     ConversationTaskLinkRecord,
+    CreateInitialTaskGraphCommand,
     CreateRunCommand,
     CreateRequestUnitCommand,
     CreateRunTaskLinkCommand,
@@ -25,18 +31,46 @@ from mini_agent.application.records import (
     EvalResultStatus,
     EvalUsageSummary,
     EvalVersionManifest,
+    FinalizeRunCommand,
     FinalizeToolCallCommand,
     InterruptToolCallForRecoveryCommand,
     MarkRunIncompleteForRecoveryCommand,
     MessageDirection,
     MessageRecord,
+    ObservationWriteResult,
+    ProviderProtocolError,
+    RecoveryWriteResult,
+    RestartRecoveryClosure,
     RunTaskLinkRecord,
+    SaveInputBindingCommand,
+    SaveObservationCommand,
+    SaveRequestUnderstandingCommand,
+    TaskRecoveryAggregate,
+    ToolCallRecoveryAggregate,
     TransitionRunCommand,
     TrustedOwnerScope,
 )
 from mini_agent.core.common import ContractVisibility
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.task_state import RequestUnitRecord, TaskRecord, TaskStatus
+from mini_agent.core.memory import ObservationVisibility, OrderObservation
+from mini_agent.core.order import (
+    OrderLineSummary,
+    OrderStatus,
+    OrderSummaryProjection,
+)
+from mini_agent.core.request_understanding import InputAuthority, TaskDeltaOperation
+from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
+    CandidateValidationDecision,
+    CandidateValidationRecord,
+    InputBinding,
+    InputValidationStatus,
+    RequestUnderstandingRecord,
+    RequestUnitRecord,
+    TaskRecord,
+    TaskStateTransition,
+    TaskStatus,
+)
 from mini_agent.core.tool_system import (
     ToolAttemptRecord,
     ToolCallRecord,
@@ -198,6 +232,453 @@ def _project_tool_call(
     values = record.model_dump()
     values.update(updates)
     return ToolCallRecord(**values)
+
+
+def _customer_context(customer_id: str = "customer-A") -> CustomerContext:
+    return CustomerContext(
+        subject_ref=f"subject-{customer_id}",
+        customer_id=customer_id,
+        auth_scopes=frozenset({"orders:read"}),
+        authenticated_at=UTC_NOW,
+        session_ref_hash=f"safe-session-{customer_id}",
+    )
+
+
+def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
+    return TrustedOwnerScope.from_customer_context(_customer_context(customer_id))
+
+
+def _input_binding(**updates: object) -> InputBinding:
+    values: dict[str, object] = {
+        "binding_id": uuid4(),
+        "name": "order_id",
+        "normalized_value": "O-1001",
+        "authority": InputAuthority.USER_CLAIM,
+        "source_refs": (uuid4(),),
+        "validation_status": InputValidationStatus.ACCEPTED,
+        "confirmed_by_user": True,
+        "created_at": UTC_NOW,
+        "updated_at": UTC_NOW,
+    }
+    values.update(updates)
+    return InputBinding(**values)
+
+
+def _request_understanding(**updates: object) -> RequestUnderstandingRecord:
+    candidate_ref = uuid4()
+    accepted_delta_ref = uuid4()
+    values: dict[str, object] = {
+        "run_id": uuid4(),
+        "message_ref": uuid4(),
+        "schema_version": "request_understanding_record.p0.v1",
+        "candidate_validation": (
+            CandidateValidationRecord(
+                candidate_ref=candidate_ref,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        "accepted_delta_refs": (accepted_delta_ref,),
+        "next_move_candidate_ref": uuid4(),
+    }
+    values.update(updates)
+    return RequestUnderstandingRecord(**values)
+
+
+def _accepted_delta(**updates: object) -> AcceptedTaskDelta:
+    values: dict[str, object] = {
+        "accepted_delta_id": uuid4(),
+        "candidate_ref": uuid4(),
+        "message_ref": uuid4(),
+        "operation": TaskDeltaOperation.ADD_GOAL,
+        "goal_text": "查询订单 O-1001",
+        "input_binding_refs": (uuid4(),),
+        "accepted_at": UTC_NOW,
+    }
+    values.update(updates)
+    return AcceptedTaskDelta(**values)
+
+
+def _task_transition(**updates: object) -> TaskStateTransition:
+    values: dict[str, object] = {
+        "task_id": uuid4(),
+        "request_unit_id": uuid4(),
+        "from_status": TaskStatus.ACTIVE,
+        "to_status": TaskStatus.WAITING_USER,
+        "base_state_version": 1,
+        "result_state_version": 2,
+        "reason_ref": uuid4(),
+        "changed_at": UTC_NOW + timedelta(milliseconds=1),
+    }
+    values.update(updates)
+    return TaskStateTransition(**values)
+
+
+def _observation(**updates: object) -> OrderObservation:
+    values: dict[str, object] = {
+        "observation_id": uuid4(),
+        "source_tool": "get_order",
+        "source_resource_ref": "O-1001",
+        "source_version": "order-v1",
+        "normalized_type": "ORDER_SUMMARY",
+        "normalized_value": OrderSummaryProjection(
+            order_number="O-1001",
+            status=OrderStatus.SHIPPED,
+            line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+            ordered_at=UTC_NOW,
+            status_updated_at=UTC_NOW,
+        ),
+        "observed_at": UTC_NOW,
+        "recorded_at": UTC_NOW,
+        "visibility": ObservationVisibility.MODEL_VISIBLE,
+    }
+    values.update(updates)
+    return OrderObservation(**values)
+
+
+def _rebuild(instance: BaseModel, **updates: object) -> BaseModel:
+    values = {
+        field_name: getattr(instance, field_name)
+        for field_name in type(instance).model_fields
+    }
+    values.update(updates)
+    return type(instance)(**values)
+
+
+def _initial_graph() -> CreateInitialTaskGraphCommand:
+    conversation_id = uuid4()
+    message_id = uuid4()
+    run_id = uuid4()
+    task_id = uuid4()
+    request_unit_id = uuid4()
+    binding_id = uuid4()
+    accepted_delta_id = uuid4()
+    candidate_ref = uuid4()
+    conversation = _conversation(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=conversation_id,
+    )
+    message = _message(
+        schema_version="message_record.p0.v1",
+        message_id=message_id,
+        conversation_id=conversation_id,
+    )
+    run = _run(
+        run_id=run_id,
+        conversation_id=conversation_id,
+        status=AgentRunStatus.RUNNING,
+    )
+    binding = _input_binding(
+        binding_id=binding_id,
+        source_refs=(message_id,),
+    )
+    accepted_delta = _accepted_delta(
+        accepted_delta_id=accepted_delta_id,
+        candidate_ref=candidate_ref,
+        message_ref=message_id,
+        input_binding_refs=(binding_id,),
+    )
+    understanding = _request_understanding(
+        run_id=run_id,
+        message_ref=message_id,
+        candidate_validation=(
+            CandidateValidationRecord(
+                candidate_ref=candidate_ref,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(accepted_delta_id,),
+    )
+    task = _task(task_id=task_id)
+    request_unit = _request_unit(
+        request_unit_id=request_unit_id,
+        task_id=task_id,
+        goal_text=accepted_delta.goal_text,
+        goal_source_refs=(message_id,),
+        input_binding_refs=(binding_id,),
+    )
+    return CreateInitialTaskGraphCommand(
+        owner_scope=_owner_scope(),
+        expected_conversation_record=conversation,
+        expected_message_record=message,
+        expected_active_run_record=run,
+        request_understanding=SaveRequestUnderstandingCommand(
+            record=understanding,
+            accepted_deltas=(accepted_delta,),
+        ),
+        initial_task=CreateTaskCommand(initial_record=task),
+        initial_request_unit=CreateRequestUnitCommand(initial_record=request_unit),
+        input_bindings=(
+            SaveInputBindingCommand(
+                record=binding,
+                request_unit_id=request_unit_id,
+            ),
+        ),
+        conversation_task_link=ConversationTaskLinkRecord(
+            schema_version="conversation_task_link_record.p0.v1",
+            conversation_id=conversation_id,
+            task_id=task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=UTC_NOW,
+        ),
+        run_task_link=CreateRunTaskLinkCommand(
+            active_record=RunTaskLinkRecord(
+                schema_version="run_task_link_record.p0.v1",
+                run_id=run_id,
+                task_id=task_id,
+                base_task_state_version=None,
+                result_task_state_version=None,
+            )
+        ),
+    )
+
+
+def _task_transition_command() -> ApplyTaskTransitionCommand:
+    task_id = uuid4()
+    request_unit_id = uuid4()
+    expected_task = _task(task_id=task_id)
+    expected_request_unit = _request_unit(
+        request_unit_id=request_unit_id,
+        task_id=task_id,
+        status=TaskStatus.ACTIVE,
+        state_version=1,
+    )
+    next_task = _task(
+        task_id=task_id,
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        created_at=expected_task.created_at,
+        updated_at=UTC_NOW + timedelta(milliseconds=1),
+    )
+    next_request_unit = _request_unit(
+        request_unit_id=request_unit_id,
+        task_id=task_id,
+        goal_text=expected_request_unit.goal_text,
+        goal_source_refs=expected_request_unit.goal_source_refs,
+        input_binding_refs=expected_request_unit.input_binding_refs,
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        created_at=expected_request_unit.created_at,
+        updated_at=UTC_NOW + timedelta(milliseconds=1),
+    )
+    transition = _task_transition(
+        task_id=task_id,
+        request_unit_id=request_unit_id,
+    )
+    return ApplyTaskTransitionCommand(
+        expected_task_record=expected_task,
+        next_task_record=next_task,
+        expected_request_unit_record=expected_request_unit,
+        next_request_unit_record=next_request_unit,
+        task_state_transition=transition,
+    )
+
+
+def _restart_recovery_closure() -> RestartRecoveryClosure:
+    conversation_id = uuid4()
+    run_id = uuid4()
+    task_id = uuid4()
+    request_unit_id = uuid4()
+    tool_call_id = uuid4()
+    transition = _task_transition(
+        task_id=task_id,
+        request_unit_id=request_unit_id,
+    )
+    task = _task(
+        task_id=task_id,
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        updated_at=transition.changed_at,
+    )
+    request_unit = _request_unit(
+        request_unit_id=request_unit_id,
+        task_id=task_id,
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        updated_at=transition.changed_at,
+    )
+    tool_call = _tool_call(
+        status=ToolCallStatus.RUNNING,
+        attempt_count=1,
+        tool_call_id=tool_call_id,
+    ).model_copy(
+        update={
+            "run_id": run_id,
+            "task_id": task_id,
+            "request_unit_id": request_unit_id,
+            "validated_task_state_version": task.state_version,
+            "argument_binding_refs": request_unit.input_binding_refs,
+        }
+    )
+    return RestartRecoveryClosure(
+        closure_fence=uuid4(),
+        conversation_record=_conversation(
+            schema_version="conversation_record.p0.v1",
+            conversation_id=conversation_id,
+        ),
+        active_run_record=_run(
+            run_id=run_id,
+            conversation_id=conversation_id,
+            status=AgentRunStatus.RUNNING,
+        ),
+        conversation_task_links=(
+            ConversationTaskLinkRecord(
+                schema_version="conversation_task_link_record.p0.v1",
+                conversation_id=conversation_id,
+                task_id=task_id,
+                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+                linked_at=UTC_NOW,
+            ),
+        ),
+        run_task_links=(
+            RunTaskLinkRecord(
+                schema_version="run_task_link_record.p0.v1",
+                run_id=run_id,
+                task_id=task_id,
+                base_task_state_version=1,
+                result_task_state_version=None,
+            ),
+        ),
+        task_aggregates=(
+            TaskRecoveryAggregate(
+                task_record=task,
+                task_state_transitions=(transition,),
+            ),
+        ),
+        request_unit_records=(request_unit,),
+        tool_call_aggregates=(
+            ToolCallRecoveryAggregate(
+                tool_call_record=tool_call,
+                tool_attempt_records=(
+                    ToolAttemptRecord(
+                        tool_call_id=tool_call_id,
+                        attempt_no=1,
+                        started_at=UTC_NOW,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _created_restart_recovery_closure() -> RestartRecoveryClosure:
+    conversation_id = uuid4()
+    conversation = _conversation(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=conversation_id,
+    )
+    return RestartRecoveryClosure(
+        closure_fence=uuid4(),
+        conversation_record=conversation,
+        active_run_record=_run(
+            conversation_id=conversation_id,
+            status=AgentRunStatus.CREATED,
+        ),
+        conversation_task_links=(),
+        run_task_links=(),
+        task_aggregates=(),
+        request_unit_records=(),
+        tool_call_aggregates=(),
+    )
+
+
+def _created_restart_recovery_command() -> ApplyRestartRecoveryCommand:
+    closure = _created_restart_recovery_closure()
+    active_run = closure.active_run_record
+    return ApplyRestartRecoveryCommand(
+        expected_closure=closure,
+        run_transition=MarkRunIncompleteForRecoveryCommand(
+            expected_active_record=active_run,
+            incomplete_record=_project_run(
+                active_run,
+                status=AgentRunStatus.INCOMPLETE,
+                completed_at=UTC_NOW + timedelta(milliseconds=1),
+                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+            ),
+        ),
+        tool_call_transitions=(),
+        task_transitions=(),
+        terminal_run_task_links=(),
+    )
+
+
+def _restart_recovery_command() -> ApplyRestartRecoveryCommand:
+    closure = _restart_recovery_closure()
+    run = closure.active_run_record
+    task = closure.task_aggregates[0].task_record
+    request_unit = closure.request_unit_records[0]
+    tool_call = closure.tool_call_aggregates[0].tool_call_record
+    completed_at = UTC_NOW + timedelta(milliseconds=2)
+    task_transition = ApplyTaskTransitionCommand(
+        expected_task_record=task,
+        next_task_record=_task(
+            task_id=task.task_id,
+            owner_customer_id=task.owner_customer_id,
+            status=TaskStatus.BLOCKED,
+            state_version=3,
+            created_at=task.created_at,
+            updated_at=completed_at,
+            last_outcome_ref=task.last_outcome_ref,
+        ),
+        expected_request_unit_record=request_unit,
+        next_request_unit_record=_request_unit(
+            request_unit_id=request_unit.request_unit_id,
+            task_id=request_unit.task_id,
+            goal_text=request_unit.goal_text,
+            goal_source_refs=request_unit.goal_source_refs,
+            contextualization_ref=request_unit.contextualization_ref,
+            constraint_refs=request_unit.constraint_refs,
+            dependency_refs=request_unit.dependency_refs,
+            input_binding_refs=request_unit.input_binding_refs,
+            open_questions=request_unit.open_questions,
+            observation_refs=request_unit.observation_refs,
+            evidence_binding_refs=request_unit.evidence_binding_refs,
+            pending_action_ref=request_unit.pending_action_ref,
+            result_refs=request_unit.result_refs,
+            status=TaskStatus.BLOCKED,
+            state_version=3,
+            created_at=request_unit.created_at,
+            updated_at=completed_at,
+        ),
+        task_state_transition=_task_transition(
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            from_status=TaskStatus.WAITING_USER,
+            to_status=TaskStatus.BLOCKED,
+            base_state_version=2,
+            result_state_version=3,
+            changed_at=completed_at,
+        ),
+    )
+    return ApplyRestartRecoveryCommand(
+        expected_closure=closure,
+        run_transition=MarkRunIncompleteForRecoveryCommand(
+            expected_active_record=run,
+            incomplete_record=_project_run(
+                run,
+                status=AgentRunStatus.INCOMPLETE,
+                completed_at=completed_at,
+                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+            ),
+        ),
+        tool_call_transitions=(
+            InterruptToolCallForRecoveryCommand(
+                active_record=tool_call,
+                interrupted_record=_project_tool_call(
+                    tool_call,
+                    status=ToolCallStatus.INTERRUPTED,
+                    finished_at=completed_at,
+                    interruption_reason="PROCESS_RESTART_DETECTED",
+                ),
+            ),
+        ),
+        task_transitions=(task_transition,),
+        terminal_run_task_links=(
+            _rebuild(
+                closure.run_task_links[0],
+                result_task_state_version=3,
+            ),
+        ),
+    )
 
 
 def _valid_command_records() -> tuple[BaseModel, ...]:
@@ -426,9 +907,7 @@ def test_persisted_records_require_non_empty_schema_version(factory: object) -> 
 
 
 def test_conversation_owner_and_raw_message_are_runtime_private() -> None:
-    assert (
-        ConversationRecord.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
-    )
+    assert ConversationRecord.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
     assert MessageRecord.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
 
     for record_type in (
@@ -474,10 +953,7 @@ def test_trusted_owner_scope_is_a_minimal_application_projection() -> None:
 
     assert owner_scope.customer_id == "customer-A"
     assert set(type(owner_scope).model_fields) == {"customer_id"}
-    assert (
-        TrustedOwnerScope.contract_visibility
-        is ContractVisibility.RUNTIME_PRIVATE
-    )
+    assert TrustedOwnerScope.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
     assert TrustedOwnerScope.model_config["strict"] is True
     assert TrustedOwnerScope.model_config["frozen"] is True
     assert TrustedOwnerScope.model_config["extra"] == "forbid"
@@ -548,16 +1024,10 @@ def test_run_task_link_versions_cover_active_and_terminal_projections() -> None:
         _run_task_link(result_task_state_version=0)
 
 
-def test_run_commands_freeze_insert_normal_transition_and_recovery_claim() -> None:
+def test_run_commands_freeze_insert_exact_start_and_recovery_claim() -> None:
     created = _run()
     running = _project_run(created, status=AgentRunStatus.RUNNING)
     completed_at = UTC_NOW + timedelta(milliseconds=1)
-    completed = _project_run(
-        running,
-        status=AgentRunStatus.COMPLETED,
-        completed_at=completed_at,
-        stop_reason=StopReason.GOAL_COMPLETED,
-    )
     incomplete = _project_run(
         running,
         status=AgentRunStatus.INCOMPLETE,
@@ -568,14 +1038,13 @@ def test_run_commands_freeze_insert_normal_transition_and_recovery_claim() -> No
     assert CreateRunCommand(created_record=created).created_record.status is (
         AgentRunStatus.CREATED
     )
-    assert TransitionRunCommand(
-        expected_active_record=created,
-        next_record=running,
-    ).next_record.status is AgentRunStatus.RUNNING
-    assert TransitionRunCommand(
-        expected_active_record=running,
-        next_record=completed,
-    ).next_record.status is AgentRunStatus.COMPLETED
+    assert (
+        TransitionRunCommand(
+            expected_active_record=created,
+            next_record=running,
+        ).next_record.status
+        is AgentRunStatus.RUNNING
+    )
     recovery = MarkRunIncompleteForRecoveryCommand(
         expected_active_record=running,
         incomplete_record=incomplete,
@@ -599,23 +1068,20 @@ def test_run_commands_freeze_insert_normal_transition_and_recovery_claim() -> No
             expected_active_record=created,
             next_record=_project_run(running, provider_lane="other-lane"),
         )
-    with pytest.raises(ValidationError, match="move status forward"):
+    with pytest.raises(ValidationError, match="expects CREATED"):
         TransitionRunCommand(
             expected_active_record=running,
             next_record=running,
         )
-    with pytest.raises(ValidationError, match="cannot create CREATED or INCOMPLETE"):
+    with pytest.raises(ValidationError, match="expects CREATED"):
         TransitionRunCommand(
             expected_active_record=running,
             next_record=incomplete,
         )
-    with pytest.raises(ValidationError, match="recovery-only stop reason"):
+    with pytest.raises(ValidationError, match="requires RUNNING"):
         TransitionRunCommand(
-            expected_active_record=running,
-            next_record=_project_run(
-                completed,
-                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
-            ),
+            expected_active_record=created,
+            next_record=created,
         )
     with pytest.raises(ValidationError, match="incomplete_reason must be absent"):
         MarkRunIncompleteForRecoveryCommand(
@@ -650,9 +1116,7 @@ def test_initial_write_commands_are_insert_only_version_one_projections() -> Non
     with pytest.raises(ValidationError, match="state_version = 1"):
         CreateTaskCommand(initial_record=_task(state_version=2))
     with pytest.raises(ValidationError, match="state_version = 1"):
-        CreateRequestUnitCommand(
-            initial_record=_request_unit(state_version=2)
-        )
+        CreateRequestUnitCommand(initial_record=_request_unit(state_version=2))
     with pytest.raises(ValidationError, match="requires result_task_state_version"):
         CreateRunTaskLinkCommand(
             active_record=_run_task_link(result_task_state_version=2)
@@ -898,15 +1362,1207 @@ def test_restart_tool_command_preserves_identity_attempt_and_action_effect() -> 
         )
 
 
+def test_request_understanding_command_closes_the_exact_accepted_child_set() -> None:
+    graph = _initial_graph()
+    command = graph.request_understanding
+    child = command.accepted_deltas[0]
+
+    assert set(command.record.accepted_delta_refs) == {child.accepted_delta_id}
+    with pytest.raises(ValidationError):
+        SaveRequestUnderstandingCommand(
+            record=command.record,
+            accepted_deltas=(),
+        )
+    with pytest.raises(ValidationError):
+        SaveRequestUnderstandingCommand(
+            record=_rebuild(
+                command.record,
+                accepted_delta_refs=(
+                    child.accepted_delta_id,
+                    child.accepted_delta_id,
+                ),
+            ),
+            accepted_deltas=(child, child),
+        )
+    with pytest.raises(ValidationError, match="message_ref"):
+        SaveRequestUnderstandingCommand(
+            record=command.record,
+            accepted_deltas=(_rebuild(child, message_ref=uuid4()),),
+        )
+    with pytest.raises(ValidationError, match="accepted candidate"):
+        SaveRequestUnderstandingCommand(
+            record=command.record,
+            accepted_deltas=(_rebuild(child, candidate_ref=uuid4()),),
+        )
+
+
+def test_initial_task_graph_binds_trusted_roots_children_and_relations() -> None:
+    graph = _initial_graph()
+    task = graph.initial_task.initial_record
+    request_unit = graph.initial_request_unit.initial_record
+    binding = graph.input_bindings[0]
+
+    assert graph.owner_scope.customer_id == task.owner_customer_id
+    assert graph.expected_message_record.direction is MessageDirection.USER
+    assert graph.expected_active_run_record.status is AgentRunStatus.RUNNING
+    assert graph.request_understanding.record.run_id == (
+        graph.expected_active_run_record.run_id
+    )
+    assert binding.request_unit_id == request_unit.request_unit_id
+    assert set(request_unit.input_binding_refs) == {binding.record.binding_id}
+    assert graph.conversation_task_link.task_id == task.task_id
+    assert graph.run_task_link.active_record.task_id == task.task_id
+    assert graph.run_task_link.active_record.base_task_state_version is None
+
+    with pytest.raises(ValidationError, match="trusted owner scope"):
+        _rebuild(graph, owner_scope=_owner_scope("customer-B"))
+    with pytest.raises(ValidationError, match="USER message"):
+        _rebuild(
+            graph,
+            expected_message_record=_rebuild(
+                graph.expected_message_record,
+                direction=MessageDirection.ASSISTANT,
+            ),
+        )
+    with pytest.raises(ValidationError, match="Conversation"):
+        _rebuild(
+            graph,
+            expected_message_record=_rebuild(
+                graph.expected_message_record,
+                conversation_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RUNNING"):
+        _rebuild(
+            graph,
+            expected_active_run_record=_project_run(
+                graph.expected_active_run_record,
+                status=AgentRunStatus.CREATED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="clean active Run"):
+        _rebuild(
+            graph,
+            expected_active_run_record=_project_run(
+                graph.expected_active_run_record,
+                incomplete_reason="PROCESS_RESTART_DETECTED",
+            ),
+        )
+    with pytest.raises(ValidationError, match="Run"):
+        _rebuild(
+            graph,
+            expected_active_run_record=_project_run(
+                graph.expected_active_run_record,
+                conversation_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RequestUnderstanding"):
+        _rebuild(
+            graph,
+            request_understanding=_rebuild(
+                graph.request_understanding,
+                record=_rebuild(
+                    graph.request_understanding.record,
+                    run_id=uuid4(),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="InputBinding source"):
+        _rebuild(
+            graph,
+            input_bindings=(
+                _rebuild(
+                    binding,
+                    record=_rebuild(binding.record, source_refs=(uuid4(),)),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild(graph, input_bindings=(binding, binding))
+    with pytest.raises(ValidationError, match="RequestUnit"):
+        _rebuild(
+            graph,
+            initial_request_unit=CreateRequestUnitCommand(
+                initial_record=_rebuild(request_unit, task_id=uuid4())
+            ),
+        )
+    with pytest.raises(ValidationError, match="ConversationTaskLink"):
+        _rebuild(
+            graph,
+            conversation_task_link=_rebuild(
+                graph.conversation_task_link,
+                task_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunTaskLink"):
+        _rebuild(
+            graph,
+            run_task_link=CreateRunTaskLinkCommand(
+                active_record=_rebuild(
+                    graph.run_task_link.active_record,
+                    run_id=uuid4(),
+                )
+            ),
+        )
+
+    first_delta = graph.request_understanding.accepted_deltas[0]
+    second_candidate_ref = uuid4()
+    second_delta = _rebuild(
+        first_delta,
+        accepted_delta_id=uuid4(),
+        candidate_ref=second_candidate_ref,
+    )
+    with pytest.raises(ValidationError):
+        SaveRequestUnderstandingCommand(
+            record=_rebuild(
+                graph.request_understanding.record,
+                candidate_validation=(
+                    *graph.request_understanding.record.candidate_validation,
+                    CandidateValidationRecord(
+                        candidate_ref=second_candidate_ref,
+                        decision=CandidateValidationDecision.ACCEPT,
+                    ),
+                ),
+                accepted_delta_refs=(
+                    first_delta.accepted_delta_id,
+                    second_delta.accepted_delta_id,
+                ),
+            ),
+            accepted_deltas=(first_delta, second_delta),
+        )
+
+
+def test_task_transition_command_is_one_exact_task_request_unit_aggregate() -> None:
+    command = _task_transition_command()
+
+    assert command.task_state_transition.base_state_version == (
+        command.expected_task_record.state_version
+    )
+    assert command.task_state_transition.result_state_version == (
+        command.next_request_unit_record.state_version
+    )
+    assert command.expected_task_record.status is (
+        command.task_state_transition.from_status
+    )
+    assert command.next_request_unit_record.status is (
+        command.task_state_transition.to_status
+    )
+
+    with pytest.raises(ValidationError, match="Task identity"):
+        _rebuild(
+            command,
+            next_task_record=_rebuild(
+                command.next_task_record,
+                task_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="Task owner"):
+        _rebuild(
+            command,
+            next_task_record=_rebuild(
+                command.next_task_record,
+                owner_customer_id="customer-B",
+            ),
+        )
+    with pytest.raises(ValidationError, match="Task stable fields"):
+        _rebuild(
+            command,
+            next_task_record=_rebuild(
+                command.next_task_record,
+                created_at=UTC_NOW - timedelta(seconds=1),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RequestUnit identity"):
+        _rebuild(
+            command,
+            next_request_unit_record=_rebuild(
+                command.next_request_unit_record,
+                request_unit_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RequestUnit stable fields"):
+        _rebuild(
+            command,
+            next_request_unit_record=_rebuild(
+                command.next_request_unit_record,
+                goal_text="另一个目标",
+            ),
+        )
+    with pytest.raises(ValidationError, match="base version"):
+        _rebuild(
+            command,
+            expected_task_record=_rebuild(
+                command.expected_task_record,
+                state_version=2,
+            ),
+        )
+    with pytest.raises(ValidationError, match="status"):
+        _rebuild(
+            command,
+            next_request_unit_record=_rebuild(
+                command.next_request_unit_record,
+                status=TaskStatus.BLOCKED,
+            ),
+        )
+
+
+def test_observation_command_requires_exact_successful_read_get_order_source() -> None:
+    observation = _observation()
+    source = _tool_call(
+        status=ToolCallStatus.SUCCEEDED,
+        attempt_count=1,
+        finished_at=UTC_NOW + timedelta(milliseconds=1),
+        result_ref=uuid4(),
+    )
+    command = SaveObservationCommand(
+        owner_scope=_owner_scope(),
+        observation_record=observation,
+        source_tool_call_record=source,
+    )
+
+    assert command.source_tool_call_record.tool_call_id != (
+        command.observation_record.observation_id
+    )
+    assert command.source_tool_call_record.result_ref != (
+        command.observation_record.observation_id
+    )
+    with pytest.raises(ValidationError, match="SUCCEEDED"):
+        SaveObservationCommand(
+            owner_scope=_owner_scope(),
+            observation_record=observation,
+            source_tool_call_record=_tool_call(
+                status=ToolCallStatus.RUNNING,
+                attempt_count=1,
+            ),
+        )
+    with pytest.raises(ValidationError, match="READ"):
+        SaveObservationCommand(
+            owner_scope=_owner_scope(),
+            observation_record=observation,
+            source_tool_call_record=_tool_call(
+                status=ToolCallStatus.SUCCEEDED,
+                attempt_count=1,
+                effect=ToolEffect.ACTION,
+                finished_at=UTC_NOW + timedelta(milliseconds=1),
+            ),
+        )
+    with pytest.raises(ValidationError, match="get_order"):
+        SaveObservationCommand(
+            owner_scope=_owner_scope(),
+            observation_record=observation,
+            source_tool_call_record=_project_tool_call(
+                source,
+                canonical_tool_name="create_refund",
+            ),
+        )
+    assert set(ObservationWriteResult) == {
+        ObservationWriteResult.INSERTED,
+        ObservationWriteResult.ALREADY_APPLIED,
+        ObservationWriteResult.SOURCE_PROJECTION_CONFLICT,
+    }
+
+
+def test_run_finalization_closes_every_active_link_against_exact_tasks() -> None:
+    run_id = uuid4()
+    task_id = uuid4()
+    running = _run(run_id=run_id, status=AgentRunStatus.RUNNING)
+    terminal = _project_run(
+        running,
+        status=AgentRunStatus.COMPLETED,
+        completed_at=UTC_NOW + timedelta(milliseconds=1),
+        stop_reason=StopReason.GOAL_COMPLETED,
+    )
+    active_link = _run_task_link(run_id=run_id, task_id=task_id)
+    terminal_link = _rebuild(
+        active_link,
+        result_task_state_version=2,
+    )
+    result_task = _task(task_id=task_id, state_version=2)
+    command = FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=(active_link,),
+        terminal_links=(terminal_link,),
+        result_task_records=(result_task,),
+    )
+
+    assert command.terminal_links[0].result_task_state_version == (
+        command.result_task_records[0].state_version
+    )
+    empty = FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=(),
+        terminal_links=(),
+        result_task_records=(),
+    )
+    assert not empty.terminal_links
+
+    with pytest.raises(ValidationError, match="RUNNING"):
+        _rebuild(command, expected_active_record=terminal)
+    with pytest.raises(ValidationError, match="dirty expected active Run"):
+        _rebuild(
+            command,
+            expected_active_record=_project_run(
+                running,
+                incomplete_reason="PROCESS_RESTART_DETECTED",
+            ),
+        )
+    with pytest.raises(ValidationError, match="terminal Run"):
+        _rebuild(command, terminal_record=running)
+    with pytest.raises(ValidationError, match="recovery-only stop reason"):
+        _rebuild(
+            command,
+            terminal_record=_project_run(
+                terminal,
+                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="stable fields"):
+        _rebuild(
+            command,
+            terminal_record=_project_run(terminal, conversation_id=uuid4()),
+        )
+    with pytest.raises(ValidationError, match="active RunTaskLink"):
+        _rebuild(
+            command,
+            expected_active_links=(_rebuild(active_link, result_task_state_version=1),),
+        )
+    with pytest.raises(ValidationError, match="exact RunTaskLink set"):
+        _rebuild(command, terminal_links=())
+    with pytest.raises(ValidationError, match="result Task"):
+        _rebuild(
+            command,
+            result_task_records=(_rebuild(result_task, state_version=3),),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild(
+            command,
+            result_task_records=(result_task, result_task),
+        )
+
+
+def test_application_inbound_models_are_strict_and_visibility_bounded() -> None:
+    context = _customer_context()
+    command = AgentRunCommand(
+        customer_context=context,
+        message="订单 O-1001 状态怎么样？",
+    )
+    result = AgentRunResult(
+        run_id=uuid4(),
+        outcome=AgentOutcome.COMPLETED,
+        message="订单已发货。",
+    )
+
+    assert command.customer_context is context
+    assert result.outcome is AgentOutcome.COMPLETED
+    assert set(AgentRunCommand.model_fields) == {
+        "customer_context",
+        "message",
+    }
+    assert set(AgentRunResult.model_fields) == {"run_id", "outcome", "message"}
+    assert AgentRunCommand.contract_visibility is (ContractVisibility.RUNTIME_PRIVATE)
+    assert AgentRunResult.contract_visibility is ContractVisibility.USER_VISIBLE
+    assert AgentRunCommand.model_config["strict"] is True
+    assert AgentRunResult.model_config["strict"] is True
+
+    with pytest.raises(ValidationError, match="CustomerContext instance"):
+        AgentRunCommand(
+            customer_context=context.model_dump(),
+            message="订单 O-1001 状态怎么样？",
+        )
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AgentRunCommand(
+            customer_context=context,
+            message="订单 O-1001 状态怎么样？",
+            customer_id="customer-B",
+        )
+    with pytest.raises(ValidationError, match="UUID"):
+        AgentRunResult(
+            run_id=str(uuid4()),
+            outcome=AgentOutcome.COMPLETED,
+            message="订单已发货。",
+        )
+    with pytest.raises(ValidationError):
+        AgentRunResult(
+            run_id=uuid4(),
+            outcome=AgentOutcome.COMPLETED.value,
+            message="订单已发货。",
+        )
+
+
+def test_application_port_declaration_models_freeze_the_exact_field_surface() -> None:
+    expected_fields = {
+        SaveRequestUnderstandingCommand: {"record", "accepted_deltas"},
+        SaveInputBindingCommand: {"record", "request_unit_id"},
+        CreateInitialTaskGraphCommand: {
+            "owner_scope",
+            "expected_conversation_record",
+            "expected_message_record",
+            "expected_active_run_record",
+            "request_understanding",
+            "initial_task",
+            "initial_request_unit",
+            "input_bindings",
+            "conversation_task_link",
+            "run_task_link",
+        },
+        ApplyTaskTransitionCommand: {
+            "expected_task_record",
+            "next_task_record",
+            "expected_request_unit_record",
+            "next_request_unit_record",
+            "task_state_transition",
+        },
+        SaveObservationCommand: {
+            "owner_scope",
+            "observation_record",
+            "source_tool_call_record",
+        },
+        FinalizeRunCommand: {
+            "expected_active_record",
+            "terminal_record",
+            "expected_active_links",
+            "terminal_links",
+            "result_task_records",
+        },
+        AgentRunCommand: {"customer_context", "message"},
+        AgentRunResult: {"run_id", "outcome", "message"},
+        TaskRecoveryAggregate: {
+            "task_record",
+            "task_state_transitions",
+        },
+        ToolCallRecoveryAggregate: {
+            "tool_call_record",
+            "tool_attempt_records",
+        },
+        RestartRecoveryClosure: {
+            "closure_fence",
+            "conversation_record",
+            "active_run_record",
+            "conversation_task_links",
+            "run_task_links",
+            "task_aggregates",
+            "request_unit_records",
+            "tool_call_aggregates",
+        },
+        ApplyRestartRecoveryCommand: {
+            "expected_closure",
+            "run_transition",
+            "tool_call_transitions",
+            "task_transitions",
+            "terminal_run_task_links",
+        },
+    }
+
+    for model_type, fields in expected_fields.items():
+        assert set(model_type.model_fields) == fields
+        assert model_type.model_config["strict"] is True
+        assert model_type.model_config["frozen"] is True
+        assert model_type.model_config["extra"] == "forbid"
+        assert model_type.model_json_schema()["additionalProperties"] is False
+
+    closure = _restart_recovery_closure()
+    with pytest.raises(ValidationError, match="UUID"):
+        _rebuild(closure, closure_fence=str(closure.closure_fence))
+
+
+def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> None:
+    exact_one_fields = (
+        (SaveRequestUnderstandingCommand, "accepted_deltas"),
+        (CreateInitialTaskGraphCommand, "input_bindings"),
+    )
+    optional_one_fields = (
+        (FinalizeRunCommand, "expected_active_links"),
+        (FinalizeRunCommand, "terminal_links"),
+        (FinalizeRunCommand, "result_task_records"),
+        (TaskRecoveryAggregate, "task_state_transitions"),
+        (ToolCallRecoveryAggregate, "tool_attempt_records"),
+        (RestartRecoveryClosure, "conversation_task_links"),
+        (RestartRecoveryClosure, "run_task_links"),
+        (RestartRecoveryClosure, "task_aggregates"),
+        (RestartRecoveryClosure, "request_unit_records"),
+        (RestartRecoveryClosure, "tool_call_aggregates"),
+        (ApplyRestartRecoveryCommand, "tool_call_transitions"),
+        (ApplyRestartRecoveryCommand, "task_transitions"),
+        (ApplyRestartRecoveryCommand, "terminal_run_task_links"),
+    )
+    for model_type, field_name in exact_one_fields:
+        field_schema = model_type.model_json_schema()["properties"][field_name]
+        assert field_schema["minItems"] == 1
+        assert field_schema["maxItems"] == 1
+    for model_type, field_name in optional_one_fields:
+        field_schema = model_type.model_json_schema()["properties"][field_name]
+        assert field_schema.get("minItems", 0) == 0
+        assert field_schema["maxItems"] == 1
+
+    graph = _initial_graph()
+    child = graph.request_understanding.accepted_deltas[0]
+    binding = graph.input_bindings[0]
+    assert len(graph.request_understanding.accepted_deltas) == 1
+    assert len(graph.input_bindings) == 1
+    with pytest.raises(ValidationError):
+        _rebuild(graph.request_understanding, accepted_deltas=())
+    with pytest.raises(ValidationError):
+        _rebuild(
+            graph.request_understanding,
+            accepted_deltas=(child, child),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild(graph, input_bindings=())
+    with pytest.raises(ValidationError):
+        _rebuild(graph, input_bindings=(binding, binding))
+
+    run_id = uuid4()
+    task_id = uuid4()
+    running = _run(run_id=run_id, status=AgentRunStatus.RUNNING)
+    terminal = _project_run(
+        running,
+        status=AgentRunStatus.COMPLETED,
+        completed_at=UTC_NOW + timedelta(milliseconds=1),
+        stop_reason=StopReason.GOAL_COMPLETED,
+    )
+    active_link = _run_task_link(run_id=run_id, task_id=task_id)
+    result_task = _task(task_id=task_id, state_version=2)
+    finalization = FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=(active_link,),
+        terminal_links=(_rebuild(active_link, result_task_state_version=2),),
+        result_task_records=(result_task,),
+    )
+    empty_finalization = FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=(),
+        terminal_links=(),
+        result_task_records=(),
+    )
+
+    running_closure = _restart_recovery_closure()
+    running_recovery = _restart_recovery_command()
+    task_aggregate = running_closure.task_aggregates[0]
+    tool_aggregate = running_closure.tool_call_aggregates[0]
+    empty_task_aggregate = TaskRecoveryAggregate(
+        task_record=_task(state_version=1),
+        task_state_transitions=(),
+    )
+    empty_tool_aggregate = ToolCallRecoveryAggregate(
+        tool_call_record=_tool_call(
+            status=ToolCallStatus.CREATED,
+            attempt_count=0,
+        ),
+        tool_attempt_records=(),
+    )
+    created_closure = _created_restart_recovery_closure()
+    created_recovery = _created_restart_recovery_command()
+
+    empty_instances_and_fields = (
+        (empty_finalization, "expected_active_links"),
+        (empty_finalization, "terminal_links"),
+        (empty_finalization, "result_task_records"),
+        (empty_task_aggregate, "task_state_transitions"),
+        (empty_tool_aggregate, "tool_attempt_records"),
+        (created_closure, "conversation_task_links"),
+        (created_closure, "run_task_links"),
+        (created_closure, "task_aggregates"),
+        (created_closure, "request_unit_records"),
+        (created_closure, "tool_call_aggregates"),
+        (created_recovery, "tool_call_transitions"),
+        (created_recovery, "task_transitions"),
+        (created_recovery, "terminal_run_task_links"),
+    )
+    for instance, field_name in empty_instances_and_fields:
+        assert getattr(instance, field_name) == ()
+
+    one_instances_and_fields = (
+        (finalization, "expected_active_links"),
+        (finalization, "terminal_links"),
+        (finalization, "result_task_records"),
+        (task_aggregate, "task_state_transitions"),
+        (tool_aggregate, "tool_attempt_records"),
+        (running_closure, "conversation_task_links"),
+        (running_closure, "run_task_links"),
+        (running_closure, "task_aggregates"),
+        (running_closure, "request_unit_records"),
+        (running_closure, "tool_call_aggregates"),
+        (running_recovery, "tool_call_transitions"),
+        (running_recovery, "task_transitions"),
+        (running_recovery, "terminal_run_task_links"),
+    )
+    for instance, field_name in one_instances_and_fields:
+        value = getattr(instance, field_name)
+        assert len(value) == 1
+        with pytest.raises(ValidationError):
+            _rebuild(instance, **{field_name: (*value, value[0])})
+
+    for model_type, field_name in (
+        (RequestUnderstandingRecord, "accepted_delta_refs"),
+        (AcceptedTaskDelta, "input_binding_refs"),
+        (InputBinding, "source_refs"),
+        (RequestUnitRecord, "input_binding_refs"),
+    ):
+        source_field_schema = model_type.model_json_schema()["properties"][field_name]
+        assert "maxItems" not in source_field_schema
+
+
+def test_provider_protocol_error_is_fixed_and_adapter_discards_raw_context() -> None:
+    error = ProviderProtocolError()
+    safe_projection = " ".join((str(error), repr(error), repr(error.args)))
+
+    assert error.args == ("PROVIDER_PROTOCOL_ERROR",)
+    assert safe_projection.count("PROVIDER_PROTOCOL_ERROR") >= 3
+    with pytest.raises(TypeError):
+        ProviderProtocolError("raw provider payload")
+
+    def translate_after_discarding_raw_exception() -> None:
+        translated: ProviderProtocolError | None = None
+        try:
+            raise RuntimeError("Token VERY_SECRET Prompt private customer-A")
+        except RuntimeError:
+            translated = ProviderProtocolError()
+        raise translated
+
+    with pytest.raises(ProviderProtocolError) as raised:
+        translate_after_discarding_raw_exception()
+    translated = raised.value
+    assert translated.__cause__ is None
+    assert translated.__context__ is None
+    projection = " ".join((str(translated), repr(translated), repr(translated.args)))
+    for secret in ("VERY_SECRET", "Prompt private", "customer-A"):
+        assert secret not in projection
+
+
+def test_task_recovery_aggregate_requires_complete_contiguous_history() -> None:
+    closure = _restart_recovery_closure()
+    aggregate = closure.task_aggregates[0]
+    transition = aggregate.task_state_transitions[0]
+
+    assert transition.result_state_version == aggregate.task_record.state_version
+    assert (
+        TaskRecoveryAggregate(
+            task_record=_task(state_version=1),
+            task_state_transitions=(),
+        ).task_state_transitions
+        == ()
+    )
+
+    with pytest.raises(ValidationError, match="version 1"):
+        TaskRecoveryAggregate(
+            task_record=_task(
+                task_id=transition.task_id,
+                status=transition.to_status,
+                state_version=1,
+            ),
+            task_state_transitions=(transition,),
+        )
+    with pytest.raises(ValidationError, match="complete contiguous"):
+        TaskRecoveryAggregate(
+            task_record=_rebuild(
+                aggregate.task_record,
+                state_version=3,
+            ),
+            task_state_transitions=(transition,),
+        )
+    with pytest.raises(ValidationError, match="Task identity"):
+        TaskRecoveryAggregate(
+            task_record=aggregate.task_record,
+            task_state_transitions=(_rebuild(transition, task_id=uuid4()),),
+        )
+    with pytest.raises(ValidationError, match="terminal status"):
+        TaskRecoveryAggregate(
+            task_record=_rebuild(
+                aggregate.task_record,
+                status=TaskStatus.BLOCKED,
+            ),
+            task_state_transitions=(transition,),
+        )
+    with pytest.raises(ValidationError, match="before Task creation"):
+        TaskRecoveryAggregate(
+            task_record=_rebuild(
+                aggregate.task_record,
+                created_at=transition.changed_at + timedelta(milliseconds=1),
+                updated_at=transition.changed_at + timedelta(milliseconds=1),
+            ),
+            task_state_transitions=(transition,),
+        )
+
+
+@pytest.mark.parametrize("transition_count", (0, 1))
+def test_task_recovery_rejects_untrusted_large_version_without_range_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    transition_count: int,
+) -> None:
+    transition = _task_transition()
+    transitions = (transition,) if transition_count else ()
+    task = _task(
+        task_id=transition.task_id,
+        status=transition.to_status if transitions else TaskStatus.ACTIVE,
+        state_version=100_000,
+    )
+
+    def fail_if_materialized(*_args: object) -> None:
+        raise AssertionError(
+            "untrusted state_version must not drive range materialization"
+        )
+
+    monkeypatch.setattr(
+        application_records_module,
+        "range",
+        fail_if_materialized,
+        raising=False,
+    )
+    with pytest.raises(ValidationError, match="complete contiguous"):
+        TaskRecoveryAggregate(
+            task_record=task,
+            task_state_transitions=transitions,
+        )
+
+
+def test_tool_call_recovery_aggregate_requires_exact_attempt_history() -> None:
+    aggregate = _restart_recovery_closure().tool_call_aggregates[0]
+    call = aggregate.tool_call_record
+    attempt = aggregate.tool_attempt_records[0]
+
+    assert attempt.attempt_no == call.attempt_count == 1
+    created = _tool_call(
+        status=ToolCallStatus.CREATED,
+        attempt_count=0,
+    )
+    assert (
+        ToolCallRecoveryAggregate(
+            tool_call_record=created,
+            tool_attempt_records=(),
+        ).tool_attempt_records
+        == ()
+    )
+    with pytest.raises(ValidationError, match="exact attempt"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(),
+        )
+    with pytest.raises(ValidationError, match="ToolCall identity"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(_rebuild(attempt, tool_call_id=uuid4()),),
+        )
+    with pytest.raises(ValidationError, match="RUNNING"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(
+                ToolAttemptRecord(
+                    tool_call_id=call.tool_call_id,
+                    attempt_no=1,
+                    started_at=UTC_NOW,
+                    finished_at=UTC_NOW + timedelta(milliseconds=1),
+                    outcome=ToolResultOutcome.SUCCESS,
+                ),
+            ),
+        )
+    retry_call = _project_tool_call(call, attempt_count=2)
+    with pytest.raises(ValidationError):
+        ToolCallRecoveryAggregate(
+            tool_call_record=retry_call,
+            tool_attempt_records=(
+                ToolAttemptRecord(
+                    tool_call_id=call.tool_call_id,
+                    attempt_no=1,
+                    started_at=UTC_NOW,
+                    finished_at=UTC_NOW + timedelta(milliseconds=1),
+                    outcome=ToolResultOutcome.SYSTEM_FAILURE,
+                    failure_code="FIRST_ATTEMPT_FAILED",
+                ),
+                ToolAttemptRecord(
+                    tool_call_id=call.tool_call_id,
+                    attempt_no=2,
+                    started_at=UTC_NOW + timedelta(milliseconds=2),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="does not accept retry"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=retry_call,
+            tool_attempt_records=(attempt,),
+        )
+    for field_name, field_value in (
+        ("failure_code", "STALE_FAILURE"),
+        ("result_ref", uuid4()),
+    ):
+        with pytest.raises(
+            ValidationError,
+            match="active ToolCall cannot carry failure or result",
+        ):
+            ToolCallRecoveryAggregate(
+                tool_call_record=_project_tool_call(
+                    call,
+                    **{field_name: field_value},
+                ),
+                tool_attempt_records=(attempt,),
+            )
+        with pytest.raises(
+            ValidationError,
+            match="active ToolCall cannot carry failure or result",
+        ):
+            ToolCallRecoveryAggregate(
+                tool_call_record=_project_tool_call(
+                    created,
+                    **{field_name: field_value},
+                ),
+                tool_attempt_records=(),
+            )
+
+
+def test_tool_call_recovery_aggregate_binds_terminal_attempt_projection() -> None:
+    finished_at = UTC_NOW + timedelta(milliseconds=1)
+    call = _tool_call(
+        status=ToolCallStatus.FAILED,
+        attempt_count=1,
+        finished_at=finished_at,
+        failure_code="UPSTREAM_FAILURE",
+    )
+    attempt = ToolAttemptRecord(
+        tool_call_id=call.tool_call_id,
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=finished_at,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="UPSTREAM_FAILURE",
+    )
+
+    assert (
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(attempt,),
+        ).tool_attempt_records[0]
+        == attempt
+    )
+    with pytest.raises(ValidationError, match="timestamps must match"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(
+                _rebuild(
+                    attempt,
+                    finished_at=finished_at + timedelta(milliseconds=1),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="failure_code must match"):
+        ToolCallRecoveryAggregate(
+            tool_call_record=call,
+            tool_attempt_records=(_rebuild(attempt, failure_code="DIFFERENT_FAILURE"),),
+        )
+
+
+def test_restart_recovery_closure_rejects_cross_graph_duplicates_and_orphans() -> None:
+    closure = _restart_recovery_closure()
+    task_aggregate = closure.task_aggregates[0]
+    request_unit = closure.request_unit_records[0]
+    tool_aggregate = closure.tool_call_aggregates[0]
+
+    assert closure.active_run_record.conversation_id == (
+        closure.conversation_record.conversation_id
+    )
+    assert closure.run_task_links[0].task_id == task_aggregate.task_record.task_id
+    assert request_unit.task_id == task_aggregate.task_record.task_id
+    assert tool_aggregate.tool_call_record.request_unit_id == (
+        request_unit.request_unit_id
+    )
+    for forbidden_claim in (
+        "database_closed_set_complete",
+        "snapshot_complete",
+        "owner_scope",
+        "recovery_ready",
+    ):
+        assert not hasattr(closure, forbidden_claim)
+
+    with pytest.raises(ValidationError, match="active Run"):
+        _rebuild(
+            closure,
+            active_run_record=_project_run(
+                closure.active_run_record,
+                status=AgentRunStatus.INCOMPLETE,
+                completed_at=UTC_NOW + timedelta(seconds=1),
+                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="incomplete_reason"):
+        _rebuild(
+            closure,
+            active_run_record=_project_run(
+                closure.active_run_record,
+                incomplete_reason="PROCESS_RESTART_DETECTED",
+            ),
+        )
+    with pytest.raises(ValidationError, match="Conversation"):
+        _rebuild(
+            closure,
+            active_run_record=_project_run(
+                closure.active_run_record,
+                conversation_id=None,
+            ),
+        )
+    with pytest.raises(ValidationError, match="owner"):
+        _rebuild(
+            closure,
+            task_aggregates=(
+                TaskRecoveryAggregate(
+                    task_record=_rebuild(
+                        task_aggregate.task_record,
+                        owner_customer_id="customer-B",
+                    ),
+                    task_state_transitions=(task_aggregate.task_state_transitions),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunTaskLink"):
+        _rebuild(
+            closure,
+            run_task_links=(_rebuild(closure.run_task_links[0], run_id=uuid4()),),
+        )
+    with pytest.raises(ValidationError, match="base version"):
+        _rebuild(
+            closure,
+            run_task_links=(
+                _rebuild(
+                    closure.run_task_links[0],
+                    base_task_state_version=3,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="ConversationTaskLink"):
+        _rebuild(closure, conversation_task_links=())
+    with pytest.raises(ValidationError, match="RequestUnit closed set"):
+        _rebuild(closure, request_unit_records=())
+    with pytest.raises(ValidationError):
+        _rebuild(
+            closure,
+            request_unit_records=(request_unit, request_unit),
+        )
+    with pytest.raises(ValidationError, match="ToolCall owner graph"):
+        _rebuild(
+            closure,
+            tool_call_aggregates=(
+                ToolCallRecoveryAggregate(
+                    tool_call_record=_project_tool_call(
+                        tool_aggregate.tool_call_record,
+                        run_id=uuid4(),
+                    ),
+                    tool_attempt_records=tool_aggregate.tool_attempt_records,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="validated Task version"):
+        _rebuild(
+            closure,
+            tool_call_aggregates=(
+                ToolCallRecoveryAggregate(
+                    tool_call_record=_project_tool_call(
+                        tool_aggregate.tool_call_record,
+                        validated_task_state_version=1,
+                    ),
+                    tool_attempt_records=tool_aggregate.tool_attempt_records,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="argument bindings"):
+        _rebuild(
+            closure,
+            tool_call_aggregates=(
+                ToolCallRecoveryAggregate(
+                    tool_call_record=_project_tool_call(
+                        tool_aggregate.tool_call_record,
+                        argument_binding_refs=(uuid4(),),
+                    ),
+                    tool_attempt_records=tool_aggregate.tool_attempt_records,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "conversation_task_links",
+        "run_task_links",
+        "task_aggregates",
+        "request_unit_records",
+        "tool_call_aggregates",
+    ),
+)
+def test_created_run_recovery_accepts_only_an_empty_pre_graph(
+    field_name: str,
+) -> None:
+    created_closure = _created_restart_recovery_closure()
+    running_closure = _restart_recovery_closure()
+
+    assert created_closure.active_run_record.status is AgentRunStatus.CREATED
+    assert all(
+        getattr(created_closure, supplied_field) == ()
+        for supplied_field in (
+            "conversation_task_links",
+            "run_task_links",
+            "task_aggregates",
+            "request_unit_records",
+            "tool_call_aggregates",
+        )
+    )
+    with pytest.raises(
+        ValidationError, match="CREATED Run recovery graph must be empty"
+    ):
+        _rebuild(
+            created_closure,
+            **{field_name: getattr(running_closure, field_name)},
+        )
+
+
+def test_created_run_empty_recovery_apply_is_a_valid_total_projection() -> None:
+    command = _created_restart_recovery_command()
+
+    assert command.expected_closure.active_run_record.status is AgentRunStatus.CREATED
+    assert command.run_transition.incomplete_record.status is AgentRunStatus.INCOMPLETE
+    assert command.tool_call_transitions == ()
+    assert command.task_transitions == ()
+    assert command.terminal_run_task_links == ()
+
+
+def test_running_run_recovery_allows_zero_or_one_closed_graph() -> None:
+    created_closure = _created_restart_recovery_closure()
+    empty_running_closure = _rebuild(
+        created_closure,
+        active_run_record=_project_run(
+            created_closure.active_run_record,
+            status=AgentRunStatus.RUNNING,
+        ),
+    )
+    one_graph_closure = _restart_recovery_closure()
+
+    assert empty_running_closure.active_run_record.status is AgentRunStatus.RUNNING
+    assert all(
+        getattr(empty_running_closure, field_name) == ()
+        for field_name in (
+            "conversation_task_links",
+            "run_task_links",
+            "task_aggregates",
+            "request_unit_records",
+            "tool_call_aggregates",
+        )
+    )
+    assert all(
+        len(getattr(one_graph_closure, field_name)) == 1
+        for field_name in (
+            "conversation_task_links",
+            "run_task_links",
+            "task_aggregates",
+            "request_unit_records",
+            "tool_call_aggregates",
+        )
+    )
+
+
+def test_restart_recovery_apply_is_bijective_and_fence_bound() -> None:
+    command = _restart_recovery_command()
+    closure = command.expected_closure
+
+    assert command.run_transition.expected_active_record == (closure.active_run_record)
+    assert {
+        item.active_record.tool_call_id for item in command.tool_call_transitions
+    } == {item.tool_call_record.tool_call_id for item in closure.tool_call_aggregates}
+    assert {item.expected_task_record.task_id for item in command.task_transitions} == {
+        item.task_record.task_id for item in closure.task_aggregates
+    }
+    assert command.terminal_run_task_links[0].result_task_state_version == 3
+
+    with pytest.raises(ValidationError, match="expected closure Run"):
+        _rebuild(
+            command,
+            run_transition=MarkRunIncompleteForRecoveryCommand(
+                expected_active_record=_project_run(
+                    closure.active_run_record,
+                    provider_lane="other",
+                ),
+                incomplete_record=_project_run(
+                    command.run_transition.incomplete_record,
+                    provider_lane="other",
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="ToolCall transition set"):
+        _rebuild(command, tool_call_transitions=())
+    with pytest.raises(ValidationError, match="Task transition set"):
+        _rebuild(command, task_transitions=())
+    with pytest.raises(ValidationError, match="RunTaskLink set"):
+        _rebuild(command, terminal_run_task_links=())
+    with pytest.raises(ValidationError, match="result Task version"):
+        _rebuild(
+            command,
+            terminal_run_task_links=(
+                _rebuild(
+                    command.terminal_run_task_links[0],
+                    result_task_state_version=2,
+                ),
+            ),
+        )
+
+    assert set(RecoveryWriteResult) == {
+        RecoveryWriteResult.APPLIED,
+        RecoveryWriteResult.CLOSURE_CONFLICT,
+        RecoveryWriteResult.NOT_APPLICABLE,
+        RecoveryWriteResult.RECONCILIATION_REQUIRED,
+    }
+
+
+def test_running_action_recovery_command_preserves_reconciliation_candidate() -> None:
+    command = _restart_recovery_command()
+    closure = command.expected_closure
+    tool_aggregate = closure.tool_call_aggregates[0]
+    action_call = _project_tool_call(
+        tool_aggregate.tool_call_record,
+        effect=ToolEffect.ACTION,
+        canonical_tool_name="create_refund",
+    )
+    action_aggregate = ToolCallRecoveryAggregate(
+        tool_call_record=action_call,
+        tool_attempt_records=tool_aggregate.tool_attempt_records,
+    )
+    action_closure = _rebuild(
+        closure,
+        tool_call_aggregates=(action_aggregate,),
+    )
+    action_transition = InterruptToolCallForRecoveryCommand(
+        active_record=action_call,
+        interrupted_record=_project_tool_call(
+            action_call,
+            status=ToolCallStatus.INTERRUPTED,
+            finished_at=UTC_NOW + timedelta(milliseconds=2),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+        ),
+    )
+    action_command = ApplyRestartRecoveryCommand(
+        expected_closure=action_closure,
+        run_transition=command.run_transition,
+        tool_call_transitions=(action_transition,),
+        task_transitions=command.task_transitions,
+        terminal_run_task_links=command.terminal_run_task_links,
+    )
+
+    assert action_command.tool_call_transitions[0].active_record.effect is (
+        ToolEffect.ACTION
+    )
+    assert action_command.tool_call_transitions[0].interrupted_record.status is (
+        ToolCallStatus.INTERRUPTED
+    )
+    assert RecoveryWriteResult.RECONCILIATION_REQUIRED.value == (
+        "RECONCILIATION_REQUIRED"
+    )
+
+
 def test_eval_projection_uses_explicit_validated_details() -> None:
     result = _eval_result()
 
     assert result.version_manifest.dataset_version == "e2e01-thin-dataset-v1"
     assert result.version_manifest.candidate_version == "candidate-source-revision"
     assert result.version_manifest.baseline_version is None
-    assert result.version_manifest.fixture_versions == (
-        "e2e01-thin-fixture-v1",
-    )
+    assert result.version_manifest.fixture_versions == ("e2e01-thin-fixture-v1",)
     assert result.version_manifest.model_config_version == "scripted-provider-v1"
     with pytest.raises(ValidationError, match="Extra inputs"):
         EvalGraderResult(
@@ -962,9 +2618,7 @@ def test_eval_execution_error_catalog_covers_every_failure_phase() -> None:
         EvalExecutionFailurePhase.SYSTEM_UNDER_TEST: (
             EvalExecutionSafeErrorCode.SYSTEM_UNDER_TEST_FAILED
         ),
-        EvalExecutionFailurePhase.GRADING: (
-            EvalExecutionSafeErrorCode.GRADING_FAILED
-        ),
+        EvalExecutionFailurePhase.GRADING: (EvalExecutionSafeErrorCode.GRADING_FAILED),
         EvalExecutionFailurePhase.RESULT_PERSISTENCE: (
             EvalExecutionSafeErrorCode.RESULT_PERSISTENCE_FAILED
         ),

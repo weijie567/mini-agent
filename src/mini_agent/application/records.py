@@ -16,13 +16,29 @@ from pydantic import (
     model_validator,
 )
 
-from mini_agent.core.common import AuditOnlyModel, RuntimePrivateModel, require_utc
+from mini_agent.core.common import (
+    AuditOnlyModel,
+    RuntimePrivateModel,
+    UserVisibleModel,
+    require_utc,
+)
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.task_state import RequestUnitRecord, TaskRecord
+from mini_agent.core.memory import OrderObservation
+from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
+    CandidateValidationDecision,
+    InputBinding,
+    RequestUnderstandingRecord,
+    RequestUnitRecord,
+    TaskRecord,
+    TaskStateTransition,
+    TaskStatus,
+)
 from mini_agent.core.tool_system import (
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
+    ToolEffect,
     ToolResultOutcome,
 )
 from mini_agent.core.trace import (
@@ -47,6 +63,10 @@ class _StrictAuditOnlyRecord(AuditOnlyModel):
     model_config = ConfigDict(strict=True)
 
 
+class _StrictUserVisibleRecord(UserVisibleModel):
+    model_config = ConfigDict(strict=True)
+
+
 class TrustedOwnerScope(_StrictRuntimePrivateRecord):
     """Minimum persistence scope derived by Application from trusted auth."""
 
@@ -62,15 +82,11 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
         validation_context = info.context or {}
         customer_context = validation_context.get("customer_context")
         if not isinstance(customer_context, CustomerContext):
-            raise ValueError(
-                "TrustedOwnerScope must be derived from CustomerContext"
-            )
+            raise ValueError("TrustedOwnerScope must be derived from CustomerContext")
         if not isinstance(value, Mapping):
             raise ValueError("TrustedOwnerScope requires a mapping projection")
         if value.get("customer_id") != customer_context.customer_id:
-            raise ValueError(
-                "TrustedOwnerScope customer_id must match CustomerContext"
-            )
+            raise ValueError("TrustedOwnerScope customer_id must match CustomerContext")
         return value
 
     @classmethod
@@ -79,6 +95,40 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
             {"customer_id": context.customer_id},
             context={"customer_context": context},
         )
+
+
+class AgentRunCommand(_StrictRuntimePrivateRecord):
+    """Trusted Application input; transport DTOs must terminate before this model."""
+
+    customer_context: CustomerContext
+    message: MessageContent
+
+    @field_validator("customer_context", mode="before")
+    @classmethod
+    def context_is_an_existing_trusted_model(
+        cls,
+        value: object,
+    ) -> CustomerContext:
+        if type(value) is not CustomerContext:
+            raise ValueError("customer_context must be a CustomerContext instance")
+        return value
+
+
+class AgentRunResult(_StrictUserVisibleRecord):
+    """Approved user-visible result with no trusted identity or internal record."""
+
+    run_id: UUID
+    outcome: AgentOutcome
+    message: MessageContent
+
+
+class ProviderProtocolError(Exception):
+    """Bounded Provider contract violation with no caller-controlled diagnostic."""
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__("PROVIDER_PROTOCOL_ERROR")
 
 
 class ConversationRecord(_StrictRuntimePrivateRecord):
@@ -156,9 +206,68 @@ class RunTaskLinkRecord(_StrictAuditOnlyRecord):
             and self.result_task_state_version is not None
             and self.result_task_state_version < self.base_task_state_version
         ):
+            raise ValueError("RunTaskLink result version cannot precede base version")
+        return self
+
+
+class SaveRequestUnderstandingCommand(_StrictRuntimePrivateRecord):
+    """Persist one RequestUnderstanding with its exact accepted logical children."""
+
+    record: RequestUnderstandingRecord
+    accepted_deltas: Annotated[
+        tuple[AcceptedTaskDelta, ...],
+        Field(min_length=1, max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def accepted_children_are_exact_and_parent_bound(self) -> Self:
+        accepted_refs = self.record.accepted_delta_refs
+        child_ids = tuple(child.accepted_delta_id for child in self.accepted_deltas)
+        if len(accepted_refs) != len(set(accepted_refs)) or len(child_ids) != len(
+            set(child_ids)
+        ):
             raise ValueError(
-                "RunTaskLink result version cannot precede base version"
+                "RequestUnderstanding requires unique accepted child identities"
             )
+        if set(accepted_refs) != set(child_ids):
+            raise ValueError(
+                "RequestUnderstanding requires the exact accepted child set"
+            )
+        for child in self.accepted_deltas:
+            if child.message_ref != self.record.message_ref:
+                raise ValueError(
+                    "accepted child message_ref must match RequestUnderstanding"
+                )
+            matching_candidates = tuple(
+                candidate
+                for candidate in self.record.candidate_validation
+                if candidate.candidate_ref == child.candidate_ref
+            )
+            if (
+                len(matching_candidates) != 1
+                or matching_candidates[0].decision
+                is not CandidateValidationDecision.ACCEPT
+            ):
+                raise ValueError(
+                    "accepted child must bind exactly one accepted candidate"
+                )
+            if len(child.input_binding_refs) != len(set(child.input_binding_refs)):
+                raise ValueError(
+                    "accepted child requires unique InputBinding references"
+                )
+        return self
+
+
+class SaveInputBindingCommand(_StrictRuntimePrivateRecord):
+    """Persist an InputBinding with its external-required RequestUnit identity."""
+
+    record: InputBinding
+    request_unit_id: UUID
+
+    @model_validator(mode="after")
+    def source_references_are_unique(self) -> Self:
+        if len(self.record.source_refs) != len(set(self.record.source_refs)):
+            raise ValueError("InputBinding source references must be unique")
         return self
 
 
@@ -190,44 +299,121 @@ class CreateRunCommand(_StrictRuntimePrivateRecord):
 
 
 class TransitionRunCommand(_StrictRuntimePrivateRecord):
-    """Conditional normal transition from an exact active Run projection."""
+    """Conditional normal start from an exact CREATED Run projection."""
 
     expected_active_record: AgentRunRecord
     next_record: AgentRunRecord
 
     @model_validator(mode="after")
-    def records_form_normal_forward_transition(self) -> Self:
+    def records_form_exact_start_transition(self) -> Self:
         expected = self.expected_active_record
         next_record = self.next_record
-        if expected.status not in {AgentRunStatus.CREATED, AgentRunStatus.RUNNING}:
-            raise ValueError("normal Run transition expects an active projection")
+        if expected.status is not AgentRunStatus.CREATED:
+            raise ValueError("Run start expects CREATED status")
         if expected.incomplete_reason is not None:
             raise ValueError("active Run cannot carry incomplete_reason")
-        allowed_next = {
-            AgentRunStatus.RUNNING,
-            AgentRunStatus.COMPLETED,
-            AgentRunStatus.FAILED,
-        }
-        if next_record.status not in allowed_next:
-            raise ValueError(
-                "normal Run transition cannot create CREATED or INCOMPLETE"
-            )
-        if (
-            expected.status is AgentRunStatus.RUNNING
-            and next_record.status is AgentRunStatus.RUNNING
-        ):
-            raise ValueError("normal Run transition must move status forward")
+        if next_record.status is not AgentRunStatus.RUNNING:
+            raise ValueError("Run start requires RUNNING status")
         if next_record.incomplete_reason is not None:
-            raise ValueError("normal Run transition cannot carry incomplete_reason")
-        if next_record.stop_reason is StopReason.PROCESS_RESTART_DETECTED:
-            raise ValueError(
-                "normal Run transition cannot use recovery-only stop reason"
-            )
+            raise ValueError("Run start cannot carry incomplete_reason")
         if any(
             getattr(expected, field_name) != getattr(next_record, field_name)
             for field_name in _RUN_STABLE_FIELDS
         ):
-            raise ValueError("normal Run transition cannot change stable fields")
+            raise ValueError("Run start cannot change stable fields")
+        return self
+
+
+class FinalizeRunCommand(_StrictRuntimePrivateRecord):
+    """Atomically finalize one RUNNING Run and every active RunTaskLink."""
+
+    expected_active_record: AgentRunRecord
+    terminal_record: AgentRunRecord
+    expected_active_links: Annotated[
+        tuple[RunTaskLinkRecord, ...],
+        Field(max_length=1),
+    ]
+    terminal_links: Annotated[
+        tuple[RunTaskLinkRecord, ...],
+        Field(max_length=1),
+    ]
+    result_task_records: Annotated[
+        tuple[TaskRecord, ...],
+        Field(max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def terminal_projection_is_exact_and_graph_closed(self) -> Self:
+        expected = self.expected_active_record
+        terminal = self.terminal_record
+        if expected.status is not AgentRunStatus.RUNNING:
+            raise ValueError("Run finalization expects RUNNING status")
+        if expected.incomplete_reason is not None:
+            raise ValueError("Run finalization rejects a dirty expected active Run")
+        if terminal.status not in {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.FAILED,
+        }:
+            raise ValueError("Run finalization requires a terminal Run")
+        if terminal.stop_reason is StopReason.PROCESS_RESTART_DETECTED:
+            raise ValueError(
+                "normal Run finalization cannot use recovery-only stop reason"
+            )
+        if terminal.incomplete_reason is not None:
+            raise ValueError("normal terminal Run cannot carry incomplete_reason")
+        if any(
+            getattr(expected, field_name) != getattr(terminal, field_name)
+            for field_name in _RUN_STABLE_FIELDS
+        ):
+            raise ValueError("Run finalization cannot change stable fields")
+
+        expected_by_task: dict[UUID, RunTaskLinkRecord] = {}
+        for link in self.expected_active_links:
+            if link.run_id != expected.run_id:
+                raise ValueError("active RunTaskLink must belong to the Run")
+            if link.result_task_state_version is not None:
+                raise ValueError("active RunTaskLink must have no result Task version")
+            if link.task_id in expected_by_task:
+                raise ValueError("RunTaskLink identities must be unique")
+            expected_by_task[link.task_id] = link
+
+        terminal_by_task: dict[UUID, RunTaskLinkRecord] = {}
+        for link in self.terminal_links:
+            if link.run_id != expected.run_id:
+                raise ValueError("terminal RunTaskLink must belong to the Run")
+            if link.result_task_state_version is None:
+                raise ValueError("terminal RunTaskLink requires a result Task version")
+            if link.task_id in terminal_by_task:
+                raise ValueError("RunTaskLink identities must be unique")
+            terminal_by_task[link.task_id] = link
+        if set(expected_by_task) != set(terminal_by_task):
+            raise ValueError("Run finalization requires the exact RunTaskLink set")
+        for task_id, expected_link in expected_by_task.items():
+            terminal_link = terminal_by_task[task_id]
+            if (
+                terminal_link.schema_version != expected_link.schema_version
+                or terminal_link.base_task_state_version
+                != expected_link.base_task_state_version
+            ):
+                raise ValueError(
+                    "terminal RunTaskLink must preserve its active projection"
+                )
+
+        task_by_id: dict[UUID, TaskRecord] = {}
+        for task_record in self.result_task_records:
+            if task_record.task_id in task_by_id:
+                raise ValueError("result Task identities must be unique")
+            task_by_id[task_record.task_id] = task_record
+        if set(task_by_id) != set(terminal_by_task):
+            raise ValueError("Run finalization requires one exact result Task per link")
+        for task_id, terminal_link in terminal_by_task.items():
+            if (
+                terminal_link.result_task_state_version
+                != task_by_id[task_id].state_version
+            ):
+                raise ValueError(
+                    "RunTaskLink result Task version must match result Task"
+                )
         return self
 
 
@@ -305,6 +491,215 @@ class CreateRunTaskLinkCommand(_StrictRuntimePrivateRecord):
         return self
 
 
+class CreateInitialTaskGraphCommand(_StrictRuntimePrivateRecord):
+    """One conditional write for the accepted initial goal and all projections."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_message_record: MessageRecord
+    expected_active_run_record: AgentRunRecord
+    request_understanding: SaveRequestUnderstandingCommand
+    initial_task: CreateTaskCommand
+    initial_request_unit: CreateRequestUnitCommand
+    input_bindings: Annotated[
+        tuple[SaveInputBindingCommand, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    conversation_task_link: ConversationTaskLinkRecord
+    run_task_link: CreateRunTaskLinkCommand
+
+    @model_validator(mode="after")
+    def graph_is_owner_consistent_and_bijective(self) -> Self:
+        conversation = self.expected_conversation_record
+        message = self.expected_message_record
+        run = self.expected_active_run_record
+        understanding = self.request_understanding
+        task = self.initial_task.initial_record
+        request_unit = self.initial_request_unit.initial_record
+        conversation_link = self.conversation_task_link
+        run_link = self.run_task_link.active_record
+
+        if conversation.owner_customer_id != self.owner_scope.customer_id:
+            raise ValueError("Conversation must match the trusted owner scope")
+        if task.owner_customer_id != self.owner_scope.customer_id:
+            raise ValueError("initial Task must match the trusted owner scope")
+        if (
+            message.direction is not MessageDirection.USER
+            or message.conversation_id != conversation.conversation_id
+        ):
+            raise ValueError(
+                "initial graph requires the exact USER message in Conversation"
+            )
+        if run.status is not AgentRunStatus.RUNNING:
+            raise ValueError("initial graph requires a RUNNING Run")
+        if run.incomplete_reason is not None:
+            raise ValueError("initial graph requires a clean active Run")
+        if run.conversation_id != conversation.conversation_id:
+            raise ValueError("active Run must belong to the Conversation")
+        if (
+            understanding.record.run_id != run.run_id
+            or understanding.record.message_ref != message.message_id
+        ):
+            raise ValueError("RequestUnderstanding must bind the exact Run and Message")
+        if request_unit.task_id != task.task_id:
+            raise ValueError("initial RequestUnit must belong to initial Task")
+        if (
+            request_unit.state_version != task.state_version
+            or request_unit.status is not task.status
+        ):
+            raise ValueError(
+                "initial Task and RequestUnit must share version and status"
+            )
+        if (
+            len(request_unit.goal_source_refs) != 1
+            or request_unit.goal_source_refs[0] != message.message_id
+        ):
+            raise ValueError(
+                "initial RequestUnit goal source must be the exact USER message"
+            )
+
+        binding_by_id: dict[UUID, SaveInputBindingCommand] = {}
+        for binding in self.input_bindings:
+            binding_id = binding.record.binding_id
+            if binding_id in binding_by_id:
+                raise ValueError("InputBinding identities must be unique")
+            if binding.request_unit_id != request_unit.request_unit_id:
+                raise ValueError("InputBinding must bind the initial RequestUnit")
+            if binding.record.source_refs != (message.message_id,):
+                raise ValueError("InputBinding source must be the exact USER message")
+            binding_by_id[binding_id] = binding
+        request_unit_binding_ids = tuple(request_unit.input_binding_refs)
+        if len(request_unit_binding_ids) != len(set(request_unit_binding_ids)) or set(
+            request_unit_binding_ids
+        ) != set(binding_by_id):
+            raise ValueError("initial graph requires exact InputBinding identities")
+
+        accepted_binding_ids = {
+            binding_id
+            for delta in understanding.accepted_deltas
+            for binding_id in delta.input_binding_refs
+        }
+        if accepted_binding_ids != set(binding_by_id):
+            raise ValueError(
+                "accepted deltas and RequestUnit require the same InputBindings"
+            )
+        if (
+            len(understanding.accepted_deltas) != 1
+            or understanding.accepted_deltas[0].goal_text != request_unit.goal_text
+        ):
+            raise ValueError(
+                "initial RequestUnit must map bijectively to one accepted goal"
+            )
+
+        if (
+            conversation_link.conversation_id != conversation.conversation_id
+            or conversation_link.task_id != task.task_id
+            or conversation_link.ended_at is not None
+        ):
+            raise ValueError(
+                "ConversationTaskLink must be the active initial Task link"
+            )
+        if (
+            run_link.run_id != run.run_id
+            or run_link.task_id != task.task_id
+            or run_link.base_task_state_version is not None
+        ):
+            raise ValueError("RunTaskLink must bind the Run to its newly created Task")
+        return self
+
+
+_TASK_STABLE_FIELDS = (
+    "task_id",
+    "owner_customer_id",
+    "created_at",
+)
+
+_REQUEST_UNIT_STABLE_FIELDS = (
+    "request_unit_id",
+    "task_id",
+    "goal_text",
+    "goal_source_refs",
+    "contextualization_ref",
+    "constraint_refs",
+    "dependency_refs",
+    "input_binding_refs",
+    "created_at",
+)
+
+
+class ApplyTaskTransitionCommand(_StrictRuntimePrivateRecord):
+    """Atomically advance one Task, RequestUnit and TaskStateTransition."""
+
+    expected_task_record: TaskRecord
+    next_task_record: TaskRecord
+    expected_request_unit_record: RequestUnitRecord
+    next_request_unit_record: RequestUnitRecord
+    task_state_transition: TaskStateTransition
+
+    @model_validator(mode="after")
+    def projections_form_one_exact_transition(self) -> Self:
+        expected_task = self.expected_task_record
+        next_task = self.next_task_record
+        expected_unit = self.expected_request_unit_record
+        next_unit = self.next_request_unit_record
+        transition = self.task_state_transition
+
+        if expected_task.task_id != next_task.task_id:
+            raise ValueError("Task identity cannot change")
+        if expected_task.owner_customer_id != next_task.owner_customer_id:
+            raise ValueError("Task owner cannot change")
+        if any(
+            getattr(expected_task, field_name) != getattr(next_task, field_name)
+            for field_name in _TASK_STABLE_FIELDS
+        ):
+            raise ValueError("Task stable fields cannot change")
+        if expected_unit.request_unit_id != next_unit.request_unit_id:
+            raise ValueError("RequestUnit identity cannot change")
+        if any(
+            getattr(expected_unit, field_name) != getattr(next_unit, field_name)
+            for field_name in _REQUEST_UNIT_STABLE_FIELDS
+        ):
+            raise ValueError("RequestUnit stable fields cannot change")
+        if (
+            expected_unit.task_id != expected_task.task_id
+            or next_unit.task_id != next_task.task_id
+            or transition.task_id != expected_task.task_id
+            or transition.request_unit_id != expected_unit.request_unit_id
+        ):
+            raise ValueError("Task transition must bind one exact Task and RequestUnit")
+        if (
+            expected_task.state_version != transition.base_state_version
+            or expected_unit.state_version != transition.base_state_version
+        ):
+            raise ValueError(
+                "Task and RequestUnit must match the transition base version"
+            )
+        if (
+            next_task.state_version != transition.result_state_version
+            or next_unit.state_version != transition.result_state_version
+        ):
+            raise ValueError(
+                "Task and RequestUnit must match the transition result version"
+            )
+        if (
+            expected_task.status is not transition.from_status
+            or expected_unit.status is not transition.from_status
+            or next_task.status is not transition.to_status
+            or next_unit.status is not transition.to_status
+        ):
+            raise ValueError("Task and RequestUnit status must match the transition")
+        if (
+            next_task.updated_at < expected_task.updated_at
+            or next_unit.updated_at < expected_unit.updated_at
+            or next_task.updated_at != transition.changed_at
+            or next_unit.updated_at != transition.changed_at
+        ):
+            raise ValueError(
+                "next projections must use the transition change timestamp"
+            )
+        return self
+
+
 class CreateToolCallCommand(_StrictRuntimePrivateRecord):
     """Insert-only pre-dispatch ToolCall command."""
 
@@ -372,9 +767,7 @@ class DispatchToolCallCommand(_StrictRuntimePrivateRecord):
             getattr(expected, field_name) != getattr(record, field_name)
             for field_name in _TOOL_IMMUTABLE_FIELDS
         ):
-            raise ValueError(
-                "dispatch fence cannot change immutable ToolCall fields"
-            )
+            raise ValueError("dispatch fence cannot change immutable ToolCall fields")
         if record.tool_call_id != attempt.tool_call_id:
             raise ValueError("dispatch fence ToolCall and attempt ids must match")
         if (
@@ -440,24 +833,18 @@ class FinalizeToolCallCommand(_StrictRuntimePrivateRecord):
             expected_attempt.tool_call_id != expected.tool_call_id
             or expected_attempt.attempt_no != expected.attempt_count
         ):
-            raise ValueError(
-                "expected started attempt must match RUNNING ToolCall"
-            )
+            raise ValueError("expected started attempt must match RUNNING ToolCall")
         if (
             expected_attempt.finished_at is not None
             or expected_attempt.outcome is not None
             or expected_attempt.failure_code is not None
         ):
-            raise ValueError(
-                "expected started attempt must remain unfinished"
-            )
+            raise ValueError("expected started attempt must remain unfinished")
         if any(
             getattr(expected, field_name) != getattr(record, field_name)
             for field_name in _TOOL_IMMUTABLE_FIELDS
         ):
-            raise ValueError(
-                "ToolCall finalization cannot change immutable fields"
-            )
+            raise ValueError("ToolCall finalization cannot change immutable fields")
         if record.tool_call_id != attempt.tool_call_id:
             raise ValueError("finalized ToolCall and attempt ids must match")
         if (
@@ -481,17 +868,11 @@ class FinalizeToolCallCommand(_StrictRuntimePrivateRecord):
         if attempt.finished_at is None or attempt.outcome is None:
             raise ValueError("ToolCall finalization requires a finalized attempt")
         if attempt.outcome not in valid_outcomes:
-            raise ValueError(
-                "ToolCall terminal status and attempt outcome must agree"
-            )
+            raise ValueError("ToolCall terminal status and attempt outcome must agree")
         if record.finished_at != attempt.finished_at:
-            raise ValueError(
-                "ToolCall and attempt finalization timestamps must match"
-            )
+            raise ValueError("ToolCall and attempt finalization timestamps must match")
         if record.failure_code != attempt.failure_code:
-            raise ValueError(
-                "ToolCall and attempt failure_code projections must match"
-            )
+            raise ValueError("ToolCall and attempt failure_code projections must match")
         return self
 
 
@@ -518,9 +899,7 @@ class InterruptToolCallForRecoveryCommand(_StrictRuntimePrivateRecord):
         if interrupted.status is not ToolCallStatus.INTERRUPTED:
             raise ValueError("restart projection requires INTERRUPTED status")
         if interrupted.interruption_reason != "PROCESS_RESTART_DETECTED":
-            raise ValueError(
-                "restart interruption requires PROCESS_RESTART_DETECTED"
-            )
+            raise ValueError("restart interruption requires PROCESS_RESTART_DETECTED")
         if active.attempt_count not in {0, 1}:
             raise ValueError("P0 restart recovery does not accept retry attempts")
         if active.failure_code is not None or active.result_ref is not None:
@@ -534,6 +913,471 @@ class InterruptToolCallForRecoveryCommand(_StrictRuntimePrivateRecord):
             raise ValueError(
                 "restart interruption must preserve ToolCall identity and facts"
             )
+        return self
+
+
+class SaveObservationCommand(_StrictRuntimePrivateRecord):
+    """Persist a safe Observation against one exact successful Read ToolCall."""
+
+    owner_scope: TrustedOwnerScope
+    observation_record: OrderObservation
+    source_tool_call_record: ToolCallRecord
+
+    @model_validator(mode="after")
+    def source_is_exact_successful_get_order_read(self) -> Self:
+        source = self.source_tool_call_record
+        if source.status is not ToolCallStatus.SUCCEEDED:
+            raise ValueError("Observation source ToolCall must be SUCCEEDED")
+        if source.effect is not ToolEffect.READ:
+            raise ValueError("Observation source ToolCall must be READ")
+        if (
+            source.canonical_tool_name != "get_order"
+            or self.observation_record.source_tool != "get_order"
+        ):
+            raise ValueError("Observation source must be canonical get_order")
+        return self
+
+
+class TaskRecoveryAggregate(_StrictRuntimePrivateRecord):
+    """Strictly decoded Task plus the complete history visible in this closure."""
+
+    task_record: TaskRecord
+    task_state_transitions: Annotated[
+        tuple[TaskStateTransition, ...],
+        Field(max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def transition_history_is_complete_contiguous_and_unique(self) -> Self:
+        task = self.task_record
+        transitions = self.task_state_transitions
+        if task.state_version == 1:
+            if transitions:
+                raise ValueError("Task version 1 has no transition history")
+            return self
+
+        if task.state_version != len(transitions) + 1:
+            raise ValueError(
+                "Task recovery requires a complete contiguous transition history"
+            )
+        if any(
+            transition.result_state_version != expected_result_version
+            for expected_result_version, transition in enumerate(
+                transitions,
+                start=2,
+            )
+        ):
+            raise ValueError(
+                "Task recovery requires a complete contiguous transition history"
+            )
+        if transitions[0].changed_at < task.created_at:
+            raise ValueError("Task transition cannot occur before Task creation")
+        identities = tuple(
+            (
+                transition.task_id,
+                transition.request_unit_id,
+                transition.result_state_version,
+            )
+            for transition in transitions
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("Task transition identities must be unique")
+        if any(transition.task_id != task.task_id for transition in transitions):
+            raise ValueError("Task transition history must preserve Task identity")
+        if any(
+            current.to_status is not following.from_status
+            for current, following in zip(transitions, transitions[1:])
+        ):
+            raise ValueError(
+                "Task recovery requires a complete contiguous status chain"
+            )
+        if transitions[-1].to_status is not task.status:
+            raise ValueError(
+                "Task transition terminal status must match Task projection"
+            )
+        if any(
+            current.changed_at > following.changed_at
+            for current, following in zip(transitions, transitions[1:])
+        ):
+            raise ValueError("Task transition timestamps must be ordered")
+        if transitions[-1].changed_at > task.updated_at:
+            raise ValueError("Task projection cannot precede its terminal transition")
+        return self
+
+
+class ToolCallRecoveryAggregate(_StrictRuntimePrivateRecord):
+    """Strictly decoded ToolCall plus its exact existing attempt children."""
+
+    tool_call_record: ToolCallRecord
+    tool_attempt_records: Annotated[
+        tuple[ToolAttemptRecord, ...],
+        Field(max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def attempt_history_is_exact_and_lifecycle_consistent(self) -> Self:
+        call = self.tool_call_record
+        attempts = self.tool_attempt_records
+        if call.attempt_count > 1:
+            raise ValueError("P0 ToolCall recovery does not accept retry attempts")
+        if call.status in {ToolCallStatus.CREATED, ToolCallStatus.RUNNING} and (
+            call.failure_code is not None or call.result_ref is not None
+        ):
+            raise ValueError(
+                "active ToolCall cannot carry failure or result projection"
+            )
+        actual_numbers = tuple(attempt.attempt_no for attempt in attempts)
+        expected_numbers = tuple(range(1, call.attempt_count + 1))
+        if actual_numbers != expected_numbers:
+            raise ValueError("ToolCall recovery requires the exact attempt sequence")
+        if any(attempt.tool_call_id != call.tool_call_id for attempt in attempts):
+            raise ValueError("ToolAttempt history must preserve ToolCall identity")
+        if call.status is ToolCallStatus.CREATED:
+            return self
+        if call.status is ToolCallStatus.RUNNING:
+            if (
+                not attempts
+                or attempts[-1].finished_at is not None
+                or attempts[-1].outcome is not None
+                or any(
+                    attempt.finished_at is None or attempt.outcome is None
+                    for attempt in attempts[:-1]
+                )
+            ):
+                raise ValueError(
+                    "RUNNING ToolCall requires one active terminal attempt"
+                )
+            return self
+
+        if call.status is ToolCallStatus.INTERRUPTED:
+            if attempts and any(
+                attempt.finished_at is None or attempt.outcome is None
+                for attempt in attempts[:-1]
+            ):
+                raise ValueError("INTERRUPTED ToolCall has inconsistent prior attempts")
+            if (
+                attempts
+                and attempts[-1].finished_at is not None
+                and attempts[-1].outcome is not ToolResultOutcome.INTERRUPTED
+            ):
+                raise ValueError(
+                    "INTERRUPTED ToolCall finalized attempt must be INTERRUPTED"
+                )
+            if (
+                attempts
+                and attempts[-1].finished_at is not None
+                and call.finished_at != attempts[-1].finished_at
+            ):
+                raise ValueError("ToolCall and finalized attempt timestamps must match")
+            return self
+
+        if any(
+            attempt.finished_at is None or attempt.outcome is None
+            for attempt in attempts
+        ):
+            raise ValueError("terminal ToolCall requires finalized attempts")
+        terminal_outcomes = {
+            ToolCallStatus.SUCCEEDED: frozenset({ToolResultOutcome.SUCCESS}),
+            ToolCallStatus.FAILED: frozenset(
+                {
+                    ToolResultOutcome.BUSINESS_FAILURE,
+                    ToolResultOutcome.SYSTEM_FAILURE,
+                }
+            ),
+            ToolCallStatus.TIMED_OUT: frozenset({ToolResultOutcome.TIMEOUT}),
+        }
+        if attempts[-1].outcome not in terminal_outcomes.get(
+            call.status,
+            frozenset(),
+        ):
+            raise ValueError(
+                "ToolCall terminal status and final attempt outcome must agree"
+            )
+        if call.finished_at != attempts[-1].finished_at:
+            raise ValueError("ToolCall and final attempt timestamps must match")
+        if call.failure_code != attempts[-1].failure_code:
+            raise ValueError("ToolCall and final attempt failure_code must match")
+        return self
+
+
+_RECOVERY_ACTIVE_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.ACTIVE,
+        TaskStatus.WAITING_USER,
+        TaskStatus.PENDING_ACTION,
+        TaskStatus.ACTION_IN_PROGRESS,
+        TaskStatus.RECOVERING,
+    }
+)
+
+
+class RestartRecoveryClosure(_StrictRuntimePrivateRecord):
+    """Internally consistent decoded recovery graph guarded by an opaque fence.
+
+    This model validates only the records supplied to it. It does not prove that
+    a database returned a complete closed set; Infrastructure must establish that
+    under one transactionally consistent snapshot or an equivalent exact fence.
+    """
+
+    closure_fence: UUID
+    conversation_record: ConversationRecord
+    active_run_record: AgentRunRecord
+    conversation_task_links: Annotated[
+        tuple[ConversationTaskLinkRecord, ...],
+        Field(max_length=1),
+    ]
+    run_task_links: Annotated[
+        tuple[RunTaskLinkRecord, ...],
+        Field(max_length=1),
+    ]
+    task_aggregates: Annotated[
+        tuple[TaskRecoveryAggregate, ...],
+        Field(max_length=1),
+    ]
+    request_unit_records: Annotated[
+        tuple[RequestUnitRecord, ...],
+        Field(max_length=1),
+    ]
+    tool_call_aggregates: Annotated[
+        tuple[ToolCallRecoveryAggregate, ...],
+        Field(max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def supplied_graph_is_internally_owner_consistent(self) -> Self:
+        conversation = self.conversation_record
+        run = self.active_run_record
+        if run.status not in {
+            AgentRunStatus.CREATED,
+            AgentRunStatus.RUNNING,
+        }:
+            raise ValueError("recovery closure requires an active Run")
+        if run.incomplete_reason is not None:
+            raise ValueError("active recovery Run cannot carry incomplete_reason")
+        if (
+            run.conversation_id is None
+            or run.conversation_id != conversation.conversation_id
+        ):
+            raise ValueError("active Run must identify the recovery Conversation")
+        if run.status is AgentRunStatus.CREATED and any(
+            (
+                self.conversation_task_links,
+                self.run_task_links,
+                self.task_aggregates,
+                self.request_unit_records,
+                self.tool_call_aggregates,
+            )
+        ):
+            raise ValueError("CREATED Run recovery graph must be empty")
+
+        task_by_id: dict[UUID, TaskRecoveryAggregate] = {}
+        for aggregate in self.task_aggregates:
+            task_id = aggregate.task_record.task_id
+            if task_id in task_by_id:
+                raise ValueError("Task recovery identities must be unique")
+            if (
+                aggregate.task_record.owner_customer_id
+                != conversation.owner_customer_id
+            ):
+                raise ValueError("recovery Task owner must match Conversation owner")
+            task_by_id[task_id] = aggregate
+
+        run_link_by_task: dict[UUID, RunTaskLinkRecord] = {}
+        for link in self.run_task_links:
+            if link.run_id != run.run_id:
+                raise ValueError("RunTaskLink must belong to the active Run")
+            if link.result_task_state_version is not None:
+                raise ValueError("recovery RunTaskLink must remain active")
+            if link.task_id in run_link_by_task:
+                raise ValueError("RunTaskLink identities must be unique")
+            run_link_by_task[link.task_id] = link
+        if set(run_link_by_task) != set(task_by_id):
+            raise ValueError("RunTaskLink set must match the recovery Task set")
+        if any(
+            link.base_task_state_version is not None
+            and link.base_task_state_version
+            > task_by_id[task_id].task_record.state_version
+            for task_id, link in run_link_by_task.items()
+        ):
+            raise ValueError(
+                "RunTaskLink base version cannot exceed its current Task version"
+            )
+
+        conversation_link_tasks: set[UUID] = set()
+        for link in self.conversation_task_links:
+            if (
+                link.conversation_id != conversation.conversation_id
+                or link.ended_at is not None
+            ):
+                raise ValueError(
+                    "ConversationTaskLink must be active in the Conversation"
+                )
+            if link.task_id in conversation_link_tasks:
+                raise ValueError("ConversationTaskLink Task identities must be unique")
+            conversation_link_tasks.add(link.task_id)
+        if conversation_link_tasks != set(task_by_id):
+            raise ValueError(
+                "ConversationTaskLink set must match the recovery Task set"
+            )
+
+        unit_by_id: dict[UUID, RequestUnitRecord] = {}
+        unit_by_task: dict[UUID, RequestUnitRecord] = {}
+        for unit in self.request_unit_records:
+            if unit.request_unit_id in unit_by_id:
+                raise ValueError("RequestUnit identities must be unique")
+            if unit.task_id not in task_by_id:
+                raise ValueError("RequestUnit cannot be orphaned from a Task")
+            if unit.task_id in unit_by_task:
+                raise ValueError("recovery requires one exact RequestUnit per Task")
+            task = task_by_id[unit.task_id].task_record
+            if (
+                unit.status is not task.status
+                or unit.state_version != task.state_version
+            ):
+                raise ValueError(
+                    "RequestUnit current status/version must match its Task"
+                )
+            unit_by_id[unit.request_unit_id] = unit
+            unit_by_task[unit.task_id] = unit
+        if set(unit_by_task) != set(task_by_id):
+            raise ValueError("RequestUnit closed set must match the recovery Task set")
+        for aggregate in self.task_aggregates:
+            for transition in aggregate.task_state_transitions:
+                unit = unit_by_id.get(transition.request_unit_id)
+                if unit is None or unit.task_id != aggregate.task_record.task_id:
+                    raise ValueError(
+                        "Task transition RequestUnit must exist in its Task graph"
+                    )
+
+        tool_ids: set[UUID] = set()
+        for aggregate in self.tool_call_aggregates:
+            tool_call = aggregate.tool_call_record
+            if tool_call.tool_call_id in tool_ids:
+                raise ValueError("ToolCall identities must be unique")
+            tool_ids.add(tool_call.tool_call_id)
+            unit = unit_by_id.get(tool_call.request_unit_id)
+            task = task_by_id.get(tool_call.task_id)
+            if (
+                tool_call.status not in {ToolCallStatus.CREATED, ToolCallStatus.RUNNING}
+                or tool_call.run_id != run.run_id
+                or task is None
+                or unit is None
+                or unit.task_id != tool_call.task_id
+            ):
+                raise ValueError(
+                    "active ToolCall owner graph must match Run/Task/RequestUnit"
+                )
+            if tool_call.validated_task_state_version != task.task_record.state_version:
+                raise ValueError(
+                    "active ToolCall validated Task version must match its Task"
+                )
+            if not set(tool_call.argument_binding_refs).issubset(
+                unit.input_binding_refs
+            ):
+                raise ValueError(
+                    "active ToolCall argument bindings must belong to its RequestUnit"
+                )
+        return self
+
+
+class ApplyRestartRecoveryCommand(_StrictRuntimePrivateRecord):
+    """One fenced atomic apply for every Runtime/Core recovery projection."""
+
+    expected_closure: RestartRecoveryClosure
+    run_transition: MarkRunIncompleteForRecoveryCommand
+    tool_call_transitions: Annotated[
+        tuple[InterruptToolCallForRecoveryCommand, ...],
+        Field(max_length=1),
+    ]
+    task_transitions: Annotated[
+        tuple[ApplyTaskTransitionCommand, ...],
+        Field(max_length=1),
+    ]
+    terminal_run_task_links: Annotated[
+        tuple[RunTaskLinkRecord, ...],
+        Field(max_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def next_projections_are_bijective_with_expected_closure(self) -> Self:
+        closure = self.expected_closure
+        if self.run_transition.expected_active_record != closure.active_run_record:
+            raise ValueError("Run transition must use the expected closure Run")
+
+        expected_tool_by_id = {
+            aggregate.tool_call_record.tool_call_id: aggregate.tool_call_record
+            for aggregate in closure.tool_call_aggregates
+        }
+        actual_tool_by_id: dict[UUID, InterruptToolCallForRecoveryCommand] = {}
+        for transition in self.tool_call_transitions:
+            tool_call_id = transition.active_record.tool_call_id
+            if tool_call_id in actual_tool_by_id:
+                raise ValueError("ToolCall transition identities must be unique")
+            if expected_tool_by_id.get(tool_call_id) != transition.active_record:
+                raise ValueError(
+                    "ToolCall transition must use its exact closure projection"
+                )
+            actual_tool_by_id[tool_call_id] = transition
+        if set(actual_tool_by_id) != set(expected_tool_by_id):
+            raise ValueError("recovery requires the exact ToolCall transition set")
+
+        task_by_id = {
+            aggregate.task_record.task_id: aggregate.task_record
+            for aggregate in closure.task_aggregates
+        }
+        unit_by_task = {unit.task_id: unit for unit in closure.request_unit_records}
+        recoverable_task_ids = {
+            task_id
+            for task_id, task in task_by_id.items()
+            if task.status in _RECOVERY_ACTIVE_TASK_STATUSES
+        }
+        transition_by_task: dict[UUID, ApplyTaskTransitionCommand] = {}
+        for transition in self.task_transitions:
+            task_id = transition.expected_task_record.task_id
+            if task_id in transition_by_task:
+                raise ValueError("Task transition identities must be unique")
+            if (
+                task_by_id.get(task_id) != transition.expected_task_record
+                or unit_by_task.get(task_id) != transition.expected_request_unit_record
+            ):
+                raise ValueError("Task transition must use exact closure projections")
+            if (
+                transition.next_task_record.status is not TaskStatus.BLOCKED
+                or transition.next_request_unit_record.status is not TaskStatus.BLOCKED
+            ):
+                raise ValueError("restart recovery Task transition must end BLOCKED")
+            transition_by_task[task_id] = transition
+        if set(transition_by_task) != recoverable_task_ids:
+            raise ValueError("recovery requires the exact Task transition set")
+
+        expected_link_by_task = {link.task_id: link for link in closure.run_task_links}
+        terminal_link_by_task: dict[UUID, RunTaskLinkRecord] = {}
+        for link in self.terminal_run_task_links:
+            if link.task_id in terminal_link_by_task:
+                raise ValueError("terminal RunTaskLink identities must be unique")
+            expected_link = expected_link_by_task.get(link.task_id)
+            if (
+                expected_link is None
+                or link.run_id != expected_link.run_id
+                or link.schema_version != expected_link.schema_version
+                or link.base_task_state_version != expected_link.base_task_state_version
+                or link.result_task_state_version is None
+            ):
+                raise ValueError(
+                    "terminal RunTaskLink must preserve its closure projection"
+                )
+            expected_result_version = (
+                transition_by_task[link.task_id].next_task_record.state_version
+                if link.task_id in transition_by_task
+                else task_by_id[link.task_id].state_version
+            )
+            if link.result_task_state_version != expected_result_version:
+                raise ValueError(
+                    "RunTaskLink result Task version must match recovery result"
+                )
+            terminal_link_by_task[link.task_id] = link
+        if set(terminal_link_by_task) != set(expected_link_by_task):
+            raise ValueError("recovery requires the exact terminal RunTaskLink set")
         return self
 
 
@@ -559,6 +1403,14 @@ class ConditionalWriteResult(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class ObservationWriteResult(StrEnum):
+    """Conditional Observation insert/replay result."""
+
+    INSERTED = "INSERTED"
+    ALREADY_APPLIED = "ALREADY_APPLIED"
+    SOURCE_PROJECTION_CONFLICT = "SOURCE_PROJECTION_CONFLICT"
+
+
 class VersionedWriteResult(StrEnum):
     """Explicit compare-and-set result; never collapse conflict to ``False``."""
 
@@ -568,10 +1420,10 @@ class VersionedWriteResult(StrEnum):
 
 
 class RecoveryWriteResult(StrEnum):
-    """Conditional startup-recovery mutation result."""
+    """Exact fenced startup-recovery mutation result."""
 
     APPLIED = "APPLIED"
-    STATUS_CONFLICT = "STATUS_CONFLICT"
+    CLOSURE_CONFLICT = "CLOSURE_CONFLICT"
     NOT_APPLICABLE = "NOT_APPLICABLE"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 
@@ -655,9 +1507,7 @@ class EvalVersionManifest(_StrictAuditOnlyRecord):
 
     @field_validator("fixture_versions")
     @classmethod
-    def fixture_versions_are_unique(
-        cls, value: tuple[str, ...]
-    ) -> tuple[str, ...]:
+    def fixture_versions_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if len(value) != len(set(value)):
             raise ValueError("fixture_versions must be unique")
         return value
@@ -698,9 +1548,7 @@ _EVAL_ERROR_PHASES = {
     EvalExecutionSafeErrorCode.SYSTEM_UNDER_TEST_FAILED: (
         EvalExecutionFailurePhase.SYSTEM_UNDER_TEST
     ),
-    EvalExecutionSafeErrorCode.GRADING_FAILED: (
-        EvalExecutionFailurePhase.GRADING
-    ),
+    EvalExecutionSafeErrorCode.GRADING_FAILED: (EvalExecutionFailurePhase.GRADING),
     EvalExecutionSafeErrorCode.RESULT_PERSISTENCE_FAILED: (
         EvalExecutionFailurePhase.RESULT_PERSISTENCE
     ),
@@ -735,9 +1583,7 @@ class EvalExecutionFailureRecord(_StrictAuditOnlyRecord):
         if self.attempt is not None and self.case_id is None:
             raise ValueError("Eval failure attempt requires case_id")
         if _EVAL_ERROR_PHASES[self.safe_error_code] is not self.failure_phase:
-            raise ValueError(
-                "Eval safe_error_code must match failure_phase"
-            )
+            raise ValueError("Eval safe_error_code must match failure_phase")
         return self
 
 
@@ -773,8 +1619,7 @@ class EvalResultRecord(_StrictAuditOnlyRecord):
             raise ValueError("critical_failures must contain unique stable codes")
 
         any_grader_failed = any(
-            result.status is EvalGraderStatus.FAIL
-            for result in self.grader_results
+            result.status is EvalGraderStatus.FAIL for result in self.grader_results
         )
         if self.critical_failures and self.status is not EvalResultStatus.FAIL:
             raise ValueError("critical failure requires overall FAIL status")
@@ -801,7 +1646,5 @@ class EvalResultRecord(_StrictAuditOnlyRecord):
             or self.latency_summary is not None
             or self.usage_summary is not None
         ):
-            raise ValueError(
-                "SKIPPED/NOT_RUN cannot carry execution or grading data"
-            )
+            raise ValueError("SKIPPED/NOT_RUN cannot carry execution or grading data")
         return self
