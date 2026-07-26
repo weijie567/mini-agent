@@ -6,11 +6,12 @@
 ## 使用规则
 
 - 复选框表示 GSD 执行追踪，不等于 Case 已变为 `EXECUTABLE`、`REGRESSION_GATE` 或已经通过。
-- 只有 canonical owner 已依据可复现证据更新生命周期后，Integrator 才能同步勾选对应条目。
+- 只有 post-execution quality gate 完成、canonical owner 已依据可复现证据更新生命周期后，Integrator 才能手工同步勾选对应条目。
+- 禁止调用 `requirements.mark-complete` 或其他自动 lifecycle API；Roadmap / State progress 也只能由 Integrator 根据 Summary、PR 与硬证据手工同步。
 - Phase 2–6 只是 Coverage Matrix Cycle 的顺序映射；在 scoped implementation owner 出现前，不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
-## Phase 1｜Cycle 1：第一最薄 E2E-01（ACTIVE）
+## Phase 1｜Cycle 1：第一最薄 E2E-01（MAPPING ACTIVE / EXECUTION PAUSED）
 
 - [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
 - [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
@@ -54,8 +55,8 @@
 
 | Requirement | Phase | Canonical source | GSD 状态 |
 |---|---:|---|---|
-| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | In Progress |
-| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | In Progress |
+| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | Pending |
+| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | Pending |
 | `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 | Pending |

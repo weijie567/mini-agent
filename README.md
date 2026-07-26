@@ -61,10 +61,12 @@ Integrator 串行合并到 integration
 integration PR → main
 ```
 
-写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。每个 Task Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令和交接格式；禁止直接 push `main` 或 integration。
+写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。一个 GSD Plan 只映射一个精确 Task Packet；Packet 不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令、契约变化、安全 / Eval 影响、回滚和交接格式；禁止直接 push `main` 或 integration。
 
-`W2-CONTRACT-FREEZE` 已通过 PR #9 合并。下一步仍不是立即并行写 W2，而是先完成串行 `W2.0b Core RecordSchema` prerequisite；其 exact-head PR 合并后，三个 W2 worktree 才从同一精确 integration SHA 并行启动。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并。下一步先完成 GSD activation remediation、final exact-head review 与 PR merge；随后从 activation merge SHA 创建 `01-01 persistence schema/version canonical-owner alignment` PR。Thin Slice Spec 当前只确认 JSON persistence projection 写入前经过 Pydantic serialization 并保存 schema version；owner、API、decode 和 unknown-version 行为仍是 `OPEN / PROPOSAL_ONLY`。只有 01-01 裁决合并后才能生成 `01-02 W2.0b` 精确 Task Packet，其合并后三个 W2 Worktree 才从同一 integration SHA 并行启动。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## GSD
 
-GSD 只作为派生的规划、执行和验证层，不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。独立 activation PR 合并前，依赖 Roadmap / Phase state 的 GSD 写入流程保持暂停；合并后也必须按 [GSD Governance](.planning/GOVERNANCE.md)、[Activation Record](.planning/ACTIVATION.md) 与[当前派生 State](.planning/STATE.md) 受控使用，并继续服从 Task Packet、独立 Worktree、feature PR 与 exact-head review。
+GSD 只作为派生的规划、审查和验证层，不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。独立 activation PR 合并前，依赖 Roadmap / Phase state 的写入流程保持暂停；合并后也必须按 [GSD Governance](.planning/GOVERNANCE.md)、[Activation Record](.planning/ACTIVATION.md) 与[当前派生 State](.planning/STATE.md) 受控使用。
+
+当前明确禁用 stock `gsd-execute-phase`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 和 `gsd-ship`。`.planning/config.json` 的 `parallelization=false` 与 `workflow.use_worktrees=false` 只关闭 GSD 自管并行 / Worktree，不关闭 Codex 多 Agent：Integrator 仍在 workflow 外预建精确 Task Packet Worktree / feature branch，Agent 实现并创建 draft feature → integration PR，Integrator 串行合并，最后显式创建 integration → `main` PR。Code review、fix、validation、Eval / Security audit 与 UAT 的条件和 containment gate 以 Governance 为准。

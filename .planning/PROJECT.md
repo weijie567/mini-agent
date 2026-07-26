@@ -40,7 +40,8 @@
 - 当前 integration branch：`integration/e2e01-thin`。
 - Activation 精确基线：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- 当前 immediate gate：GSD activation PR 合并后，先导入并执行串行 `W2.0b Core RecordSchema` prerequisite；其 exact-head merge 之前不派发 W2 Runtime / Infra / Eval。
+- 当前 immediate gate：先完成 activation remediation、final exact-head review 与 PR merge；随后由 Integrator 在 workflow 外预建 01-01 专用 Worktree / feature branch，完成 persistence schema/version canonical-owner alignment。
+- `01-02 W2.0b` 只是被阻断的实现 slot；只有 01-01 exact-head PR 合并、owner 裁决和精确 Task Packet 形成后才能启动。其 merge 前不派发 W2 Runtime / Infra / Eval。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -49,6 +50,7 @@
 - 不重新定义 Core / Application DTO、Port、状态机、Evidence、Action Ledger 或 Eval 语义。
 - 不以 `$gsd-new-project` 或 `$gsd-new-milestone` 重建当前 P0。
 - 不让 GSD executor 直接写 `main`、`integration/e2e01-thin` 或共享 `.planning/STATE.md`。
+- 不运行 stock `$gsd-execute-phase`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 或 `$gsd-ship`；实现、生命周期同步与两级 PR 均由 Integrator 按 [GOVERNANCE.md](GOVERNANCE.md) 显式控制。
 - 不把计划、Review、UAT 或 GSD 报告自身当作“已实现 / 已通过”的充分证据。
 
 ## 执行决策
@@ -57,9 +59,12 @@
 |---|---|---|
 | GSD 是派生编排层，canonical owner 保持不变 | 防止 `.planning/` 成为第二套产品 / 架构 / Eval 语义 | `CONFIRMED` |
 | `git.branching_strategy=none` | 分支与 Worktree 继续由精确 Task Packet 和 GitHub PR 流程拥有 | `CONFIRMED` |
+| `parallelization=false`、`workflow.use_worktrees=false` | 只关闭 GSD 自管并行 / Worktree；Codex Agent 仍在 Integrator 预建 Worktree 中并行 | `CONFIRMED` |
 | 共享 Roadmap / State 由 Integrator 单写 | 避免多个 feature branch 推进相互冲突的执行状态 | `CONFIRMED` |
 | 当前 P0 不运行 `new-project` / `new-milestone` / `autonomous` | 既有项目已有明确 owner、Spec 与执行基线 | `CONFIRMED` |
-| W2 并行前增加 `W2.0b RecordSchema` 串行 prerequisite | 防止 Infra 自行发明持久化 Schema registry / codec | `OPEN / PENDING_TASK_PACKET` |
+| 一个 GSD Plan 对应一个精确 Task Packet | Packet 可以含多个原子 task，但不能跨 repository、branch、Worktree、writer 或 ownership boundary | `CONFIRMED` |
+| 持久化投影写入前经 Pydantic serialization，并保存 schema version | 这是 Thin Slice Spec 当前可确认的 scoped 要求 | `CONFIRMED` |
+| Record schema/version owner、API、decode 与 unknown-version 行为 | 尚无 active canonical owner 裁决；必须先走 01-01 alignment PR，不能由 activation 预先决定 | `OPEN / PROPOSAL_ONLY` |
 
 ## 完成证据规则
 
