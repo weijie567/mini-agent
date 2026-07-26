@@ -1,13 +1,13 @@
 # Mini Agent｜GSD Activation Record
 
 > **DERIVED / NON_NORMATIVE**
-> 本记录只描述 GSD 派生层的激活边界与证据，不拥有产品、架构、契约、Eval 语义或 Case 生命周期。Activation 只有在独立 PR 的精确 head review 为 `PASS` 且合并到 `integration/e2e01-thin` 后才生效。
+> 本记录只描述 GSD 派生层的激活边界与证据，不拥有产品、架构、契约、Eval 语义或 Case 生命周期。Activation 已在独立 PR 的精确 head review 为 `PASS` 且合并到 `integration/e2e01-thin` 后生效。
 
 ## 1. Activation Identity
 
 | 项目 | 值 |
 |---|---|
-| 状态 | `BLOCKED_REVIEW_SCOPE_REMEDIATION / PAUSED / NOT_EFFECTIVE` |
+| 状态 | `COMPLETE / EFFECTIVE` |
 | GSD version | `1.38.3` |
 | GSD SDK version | `gsd-sdk v0.1.0` |
 | Activation branch | `codex/gsd-activation` |
@@ -15,7 +15,9 @@
 | Exact base SHA | `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
 | Branch relation | activation branch **forked from** exact base SHA；该 base 不是当前 activation head |
 | Rejected candidate / review heads | `1e6999cbc60caa8f57d065ff4536dd238d48a911`, `f7408129b46f5a5bcaa0d4959e7b1cfe07b5e72d`, `b659c33d0670c57c1fc987e9487f6bd6165eb72c`, `f48461c9912d8240a8dba537087bffda08041f52`, `9565275ab24673350758d3d145e1f71b0450cd9c` |
-| Current candidate head | 由 `git rev-parse HEAD` / GitHub PR head 在外部审查证据中解析；不在同一 commit 内容内自引用硬编码 |
+| Reviewed feature head | `957cabd6b31dd2156848acd515d2e8dc3d19bd50` |
+| Reviewed feature tree | `90b5d8db4d90dd8452660f5317c745d15103cbc4` |
+| Activation PR / merge | [PR #10](https://github.com/weijie567/mini-agent/pull/10)；squash merge `624475681847be5a8e463e32dafd28a0483b213b` |
 | Base evidence | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 的 W2.0 contract-freeze merge |
 | Governance | [GOVERNANCE.md](GOVERNANCE.md) |
 
@@ -71,8 +73,8 @@
 | GSD 自管并行 / Worktree | `CONFIRMED: DISABLED` | `parallelization=false`、`workflow.use_worktrees=false`；不影响 Integrator 预建 Worktree 的 Codex 多 Agent 并行 |
 | 自动推进 / UI 生成 | `CONFIRMED: DISABLED` | `auto_advance=false`、`ui_phase=false` |
 | stock planning / execute / verify / lifecycle / ship | `CONFIRMED: DISABLED` | 不运行 `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 或 `gsd-ship` |
-| persistence schema/version contract | `OPEN / PROPOSAL_ONLY` | Thin Slice Spec 只确认写入前经 Pydantic serialization 并保存 schema version；owner、API、decode 与 unknown-version 行为等待 01-01 alignment PR |
-| Cross-file consumer alignment | `CONFIRMED_ON_COMPAT_REMEDIATION_WORKTREE` | [README.md](../README.md)、AGENTS 与实施计划已统一 parser syntax、stock workflow、owner decision、Task Packet 与 lifecycle 边界；commit 后仍需 final exact-head review |
+| persistence schema/version contract | `OPEN / PROPOSAL_ONLY` | Thin Slice Spec 只确认写入前经 Pydantic serialization 并保存 schema version；完整 owner、API、decode 与 unknown-version 行为等待 01-01 Project Direction → 01-02 Memory → 01-03 Thin Slice owner chain |
+| Cross-file consumer alignment | `CONFIRMED_ON_REVIEWED_FEATURE_TREE` | [README.md](../README.md)、AGENTS 与实施计划在 reviewed feature tree 上统一 parser syntax、stock workflow、owner decision、Task Packet 与 lifecycle 边界 |
 
 ## 5. 隔离 Rehearsal 与实际证据
 
@@ -83,28 +85,28 @@
 | Worktree / branch / exact base | `CONFIRMED` | `codex/gsd-activation` 从 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` fork；`1e6999c...`、`f740812...`、`b659c33...`、`f48461c...` 为 blocked review heads，`9565275...` 因 time-sensitive W017 证据漂移在 review 前被本地 validation 拒绝 |
 | GSD installed version | `CONFIRMED` | `/Users/ming/.codex/get-shit-done/VERSION` 为 `1.38.3` |
 | GSD SDK version | `CONFIRMED` | `gsd-sdk --version` → `gsd-sdk v0.1.0` |
-| Evidence captured at | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE` | `2026-07-26T10:42:09Z` UTC；commit 后仍须对 exact head 重跑 |
+| Evidence capture | `HISTORICAL_CAPTURE + FINAL_EXACT_HEAD_CONFIRMED` | remediation tree capture 为 `2026-07-26T10:42:09Z` UTC；随后在 reviewed feature head `957cabd6...` 重跑 final checks |
 | CJS health surface | `DEGRADED / TIME_SENSITIVE_COUNT` | `node /Users/ming/.codex/get-shit-done/bin/gsd-tools.cjs validate health --raw` → 本次 7×`W017`（6 个既有 W1 / W2 audit Worktree + 正在工作的 activation Worktree 被目录 mtime heuristic 判为 stale）、`errors=[]`、`repairable=0`；数量随时间变化，不作为稳定 gate |
 | SDK health surface | `DEGRADED` | `gsd-sdk query validate.health` → 6×`W006`（Phase 1–6 directory 尚未创建）、`errors=[]`、`repairable=0` |
 | SDK Phase 1 init surface | `OPEN / ADAPTER_SURFACE_DIFFERENCE` | `gsd-sdk query init.phase-op 1` 可解析 Phase 1 / State / Roadmap，但 `phase_dir=null`（import 前预期）且本地 agent-file 探测为 false；conditional workflow 还必须独立确认所需 Codex collaboration role 可用 |
 | Dual-surface disposition | `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_FOR_ACTIVATION_WITH_CONTROLS` | warning code / object surface 不一致；未来创建 Phase 1 artifact directory 预计只减少一个 `W006`，不得声称整体 healthy |
 | Repair / force | `NOT_RUN` | 未运行 `--repair` 或 `--force`；health 输出不构成 Worktree 删除授权 |
-| JSON / supported keys / State / parser / review-scope / shape / links / diff / allowlist | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE / EXACT_HEAD_REVIEW_PENDING` | `jq` 通过；32 leaf keys / 0 unknown；State milestone=`v0.1`、status=`paused`；6 个 Phase 的 Requirements 均为非空 clean ID，Success Criteria 数量为 4/3/3/3/3/3；2-file literal review-scope rehearsal 为 requested=accepted=unique=`2`、scope rehearsal occurrence=`1`、simulated GSD 1.38.3 transcript occurrence=`2`、两类 skip=`0`；valid path 通过，duplicate / outside / directory / literal-glob 均被阻断；6 Phase / 6 Phase-1 Plans / 16 requirements；82 个本地链接 / 0 missing；84-line State；相对 base 精确 10-file allowlist 与 `git diff --check` 通过。未调用 paused 的 stock workflow；commit 后须对 exact head 重跑 |
-| Independent exact-head review | `BLOCKED_ON_1e6999c_f740812_b659c33_f48461c / FINAL_PENDING` | `f48461c...` 的 owner review 因 non-literal tracked check、不可执行 transcript assertion 与 trace drift 而 `BLOCK`，compatibility review 也因 trace drift `BLOCK`；新 remediation head 必须重新取得双 `PASS` |
-| GitHub PR merge | `PENDING` | review 与 checks 通过后由 Integrator 执行 |
+| JSON / supported keys / State / parser / review-scope / shape / links / diff / allowlist | `CONFIRMED_ON_REVIEWED_FEATURE_HEAD` | `957cabd6...` 上 `jq`、32 leaf keys / 0 unknown、6 个 Phase requirements、Success Criteria 4/3/3/3/3/3、literal review-scope requested=accepted=unique、valid/invalid path cases、6 Phase / 6 Phase-1 slots / 16 requirements、82 local links / 0 missing、84-line State、精确 10-file allowlist 与 `git diff --check` 均通过；未调用 paused stock workflow |
+| Independent exact-head review | `PASS` | owner review 与 GSD compatibility review 均对 `957cabd6...` 给出 `PASS`，无 `CRITICAL / HIGH / MEDIUM` finding |
+| GitHub PR merge | `CONFIRMED` | [PR #10](https://github.com/weijie567/mini-agent/pull/10) 已 squash merge；merge commit `624475681847be5a8e463e32dafd28a0483b213b` 的 tree 与 reviewed feature tree `90b5d8...` 完全相同 |
 
-任何 `PENDING` 项不得提前描述为通过。
+上述 activation 证据只证明派生治理层已生效，不证明 Phase 1 或任何运行时功能已经实现。
 
 ## 6. Activation 后第一个串行 Decision Gate
 
-Activation merge 后不直接 import 或执行 W2.0b，也不启动 W2 三路并行。首个 Plan slot 是 `01-01 persistence schema/version canonical-owner decision`：
+Activation merge 后不直接 import 或执行 persistence implementation，也不启动 W2 三路并行。独立 Plan Checker 进一步确认：一个 Task Packet 不得同时写 Project Direction、Memory、Tool、Eval 与 Thin Slice 多个 ownership boundary。因此首个串行 owner chain 是 01-01 → 01-02 → 01-03：
 
-1. Integrator 在 GSD workflow 外，从 activation merge SHA 预建一个精确 Task Packet Worktree / feature branch。
-2. 该 PR 对照 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md)、[PROJECT_DIRECTION.md](../PROJECT_DIRECTION.md) 与相关 active owner，裁决 Core / Application / Infra ownership、API 命名、decode / migration 责任以及 unknown-version 行为。
-3. 当前唯一 `CONFIRMED` 的 scoped 要求是：JSON persistence projection 在写入前经过 Pydantic serialization，并保存 schema version。
-4. `RecordSchemaSpec`、registry、strict decoder、unknown-version fail-closed 和固定 record-code allowlist 都是 `OPEN / PROPOSAL_ONLY`；activation 不得把它们描述成已决定 contract。
-5. 只有 01-01 exact-head review、验证与 merge 完成后，Integrator 才能按裁决生成一对一的 `01-02 W2.0b` Task Packet / Plan。
-6. 只有 01-02 exact-head PR 合并后，才从同一个新 integration SHA 预建 W2 Runtime / Infra / Eval 三个 ownership 不重叠的 Worktree。
+1. `CONFIRMED`：Integrator 已在 GSD workflow 外，从 activation merge SHA `6244756...` 预建 01-01 Worktree / feature branch `codex/e2e01-01-schema-owner-alignment`；其唯一 owned file 是 `PROJECT_DIRECTION.md`。
+2. 01-01 只裁决 project-wide semantic/source/Port/adapter ownership、版本维度与 TraceEvent shared structure owner；不改其他 canonical owner。
+3. 01-01 exact-head PR 合并后，Integrator 才从新 integration SHA 生成单 owner 的 01-02 Memory decode/recovery/migration contract。
+4. 01-02 合并后，才生成只写 Thin Slice Spec 的 01-03 scoped 17-item minimum-persistence mapping；17 项严格派生自 Thin Slice Spec 第 10.1 节当前最低持久化集合（其中包含 `ModelVisibleToolsetArtifact`），不得把源码中的辅助模型或命令计入并误称为 20 条 Record。Tool / Eval owner 的现有语义通过引用消费，除非后续独立 owner Packet 证明必须演进。
+5. 当前唯一 `CONFIRMED` 的 scoped 要求仍是：JSON persistence projection 在写入前经过 Pydantic serialization，并保存 schema version。`RecordSchemaSpec`、registry、strict decoder、unknown-version fail-closed 和固定 record-code allowlist 在对应 owner PR 合并前均为 `OPEN / PROPOSAL_ONLY`。
+6. 只有 01-03 exact-head PR 合并后才生成 01-04 implementation；只有 01-04 合并后，才从同一个新 integration SHA 预建 01-05/06/07 Runtime / Infra / Eval 三个 ownership 不重叠的 Worktree。
 
 Stock `gsd-import`、`gsd-plan-phase` 与 `gsd-execute-phase` 不参与上述实现。GSD planner / checker 角色可只读提供 Plan 建议；Integrator 在预建的 dedicated planning-status Worktree / branch 中单写最终 artifact。
 
@@ -117,9 +119,9 @@ Stock `gsd-import`、`gsd-plan-phase` 与 `gsd-execute-phase` 不参与上述实
 
 ## 8. Exit Criteria
 
-- [ ] 从 Git ref / GitHub PR head 解析的 final remediation exact head，其 JSON、32-key、State load、Roadmap parser、双 health、路径、术语、diff 与精确 allowlist 检查全部有实际通过证据。
-- [ ] 独立 Reviewer 对 activation 精确 head SHA 给出 `PASS`。
-- [ ] Activation PR 合并到 `integration/e2e01-thin`。
-- [ ] Integrator 使用 activation merge SHA 创建 01-01 persistence schema/version canonical-owner alignment Task Packet。
+- [x] 从 Git ref / GitHub PR head 解析的 final remediation exact head，其 JSON、32-key、State load、Roadmap parser、双 health、路径、术语、diff 与精确 allowlist检查全部有实际通过证据。
+- [x] 独立 Reviewer 对 activation 精确 head SHA 给出 `PASS`。
+- [x] Activation PR 合并到 `integration/e2e01-thin`。
+- [x] Integrator 使用 activation merge SHA 创建 01-01 Project Direction owner Task Packet Worktree / branch；最终 Task Packet 由本次独立 planning-status PR 建立。
 
-Exit Criteria 未全部满足前，依赖 Roadmap / Phase state 的 GSD 写入 workflow 保持暂停。
+Activation Exit Criteria 已全部满足。后续 GSD 写入仍只允许通过 [GOVERNANCE.md](GOVERNANCE.md) 定义的受控 adapter 与独立 PR；这不解除 stock workflow 禁令。

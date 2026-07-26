@@ -38,10 +38,10 @@
 ## 当前执行边界
 
 - 当前 integration branch：`integration/e2e01-thin`。
-- Activation 精确基线：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`。
+- Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- 当前 immediate gate：先完成 activation remediation、final exact-head review 与 PR merge；随后由 Integrator 在 workflow 外预建 01-01 专用 Worktree / feature branch，完成 persistence schema/version canonical-owner alignment。
-- `01-02 W2.0b` 只是被阻断的实现 slot；只有 01-01 exact-head PR 合并、owner 裁决和精确 Task Packet 形成后才能启动。其 merge 前不派发 W2 Runtime / Infra / Eval。
+- 当前 immediate gate：合并独立 01-01 planning-status PR；随后在已从 activation merge SHA 预建的 `codex/e2e01-01-schema-owner-alignment` branch 只修改 `PROJECT_DIRECTION.md`，完成 project-wide persistence ownership / Trace structure owner 裁决。
+- 01-02 Memory owner 与 01-03 Thin Slice scoped mapping 必须在各自前序 exact-head PR 合并后串行生成；01-04 才是被阻断的 implementation slot。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -64,7 +64,7 @@
 | 当前 P0 不运行 `new-project` / `new-milestone` / `autonomous` | 既有项目已有明确 owner、Spec 与执行基线 | `CONFIRMED` |
 | 一个 GSD Plan 对应一个精确 Task Packet | Packet 可以含多个原子 task，但不能跨 repository、branch、Worktree、writer 或 ownership boundary | `CONFIRMED` |
 | 持久化投影写入前经 Pydantic serialization，并保存 schema version | 这是 Thin Slice Spec 当前可确认的 scoped 要求 | `CONFIRMED` |
-| Record schema/version owner、API、decode 与 unknown-version 行为 | 尚无 active canonical owner 裁决；必须先走 01-01 alignment PR，不能由 activation 预先决定 | `OPEN / PROPOSAL_ONLY` |
+| Record schema/version owner、API、decode 与 unknown-version 行为 | 尚无完整 active canonical owner 裁决；必须按 01-01 Project Direction → 01-02 Memory → 01-03 Thin Slice scoped mapping 串行完成，不能由 activation 或单个跨-owner Packet 预先决定 | `OPEN / PROPOSAL_ONLY` |
 
 ## 完成证据规则
 

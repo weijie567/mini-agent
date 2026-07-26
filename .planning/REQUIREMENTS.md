@@ -11,7 +11,7 @@
 - Phase 2–6 只是 Coverage Matrix Cycle 的顺序映射；在 scoped implementation owner 出现前，不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
-## Phase 1｜Cycle 1：第一最薄 E2E-01（MAPPING ACTIVE / EXECUTION PAUSED）
+## Phase 1｜Cycle 1：第一最薄 E2E-01（MAPPING ACTIVE / PLAN 01-01 READY）
 
 - [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
 - [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
