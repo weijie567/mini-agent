@@ -2,7 +2,7 @@
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
 scope: 01-05-01-07
-status: approved_for_execution_planning
+status: pending_exact_head_review
 nyquist_compliant: true
 wave_0_complete: false
 created: "2026-07-27"
@@ -56,8 +56,8 @@ created: "2026-07-27"
 | 01-07-02 | 01-07 | 1 | E2E01-01/04 | EV-S01/EV-I01 | strict script cursor；无network；raw error丢弃 | Component | `uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py -x` | ❌ W0 | ⬜ pending |
 | 01-07-03 | 01-07 | 1 | E2E01-01/04 | EV-S02/EV-I03 | Qwen request allowlist、exact one target call、mock transport与raw error丢弃 | Component | `uv run pytest tests/component/model/test_qwen_responses_adapter.py -x` | ❌ W0 | ⬜ pending |
 | 01-07-04 | 01-07 | 1 | E2E01-01/04 | EV-T02/EV-I02 | 13 graders均有pass与tamper-fail；CF强制FAIL | Component | `uv run pytest tests/component/evaluation/test_e2e01_graders.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-05 | 01-07 | 1 | E2E01-01/04 | EV-R01/EV-R02 | Result/Failure矩阵、append-only、paired completeness | Integration | `uv run pytest tests/integration/evaluation/test_e2e01_offline_harness.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-06 | 01-07 | 1 | E2E01-01/04 | EV-I04 | marker与missing-input / real-SUT-not-wired preflight；canonical SKIPPED/NOT_RUN且零network | Baseline preflight | `env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x` | ❌ W0 | ⬜ pending |
+| 01-07-05 | 01-07 | 1 | E2E01-01/04 | EV-R01/EV-R02 | Result/Failure矩阵、run/case/lane/attempt append-only、cross-lane distinctness、paired completeness | Integration | `uv run pytest tests/integration/evaluation/test_e2e01_offline_harness.py -x` | ❌ W0 | ⬜ pending |
+| 01-07-06 | 01-07 | 1 | E2E01-01/04 | EV-I04 | marker与missing-input / real-SUT-not-wired preflight；canonical SKIPPED/NOT_RUN且零network | Baseline preflight | `env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；`DASHSCOPE_API_KEY=not-a-real-key DASHSCOPE_BASE_URL=https://example.invalid uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -77,6 +77,11 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 ### 01-05 Runtime
 
 ```bash
+uv sync --all-groups
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  --profile test up --wait -d db-test
+uv run pytest tests/integration/test_database_migrations.py -x
 uv run pytest \
   tests/component/core/test_request_processing.py \
   tests/component/core/test_control_gateway.py \
@@ -92,9 +97,14 @@ uv run pytest
 
 ```bash
 uv sync --all-groups
-docker compose up --wait -d db
-docker compose --profile test up --wait -d db-test
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  up --wait -d db
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  --profile test up --wait -d db-test
 uv run alembic upgrade head
+uv run pytest tests/integration/test_database_migrations.py -x
 uv run pytest \
   tests/integration/test_database_migrations.py \
   tests/integration/test_http_session_adapter.py \
@@ -110,6 +120,11 @@ Migration tests必须包含upgrade → downgrade → upgrade；禁止对共享�
 ### 01-07 Eval
 
 ```bash
+uv sync --all-groups
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  --profile test up --wait -d db-test
+uv run pytest tests/integration/test_database_migrations.py -x
 uv run pytest \
   tests/component/evaluation/test_e2e01_versioned_artifact_loader.py \
   tests/component/evaluation/test_e2e01_scripted_model_provider.py \
@@ -129,6 +144,10 @@ uv run pytest
 
 ```bash
 env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL \
+  uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
+
+DASHSCOPE_API_KEY=not-a-real-key \
+DASHSCOPE_BASE_URL=https://example.invalid \
   uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 
 # W4 only, after 01-08 real SUT wiring:
@@ -155,9 +174,11 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] 无watch-mode flag。
 - [x] `nyquist_compliant: true`。
 - [x] 01-05/06/07 每个 task 均有 exact automated command 与 allowlisted Wave 0 test。
-- [x] Plan Checker revision loop 3/3 `PASS`，无 `BLOCKER` / `MAJOR`。
+- [x] 初始 Plan Checker loop 3/3 `PASS` 已被 PR #26 首个 exact-head review 的 canonical/security findings 明确 supersede，不再作为 approval。
+- [x] 超出三轮 cap 后的只读 checker audit 识别出两项 `MAJOR`；对应 approval 声明与第二条零网络命令已修正，不再启动第 5 个 planner loop。
+- [ ] 当前 published exact head 已取得两路独立 Reviewer `PASS`，所有 findings 已关闭。
 - [ ] 三个 Packet Wave 0 RED证据已提交。
 - [ ] 三个 Packet focused / full gate均green。
 - [ ] 三个 exact-head review与latest-integration compatibility均PASS。
 
-**Approval:** 2026-07-27 Plan Checker revision loop 3/3 `PASS`；approved for execution planning，execution evidence pending
+**Approval:** `PENDING_EXACT_HEAD_REVIEW`。只有当前 published exact head 的两路独立 Reviewer 均为 `PASS` 且 planning PR 合并后，才能进入三个 execution Worktree 的创建门禁；execution evidence仍待产生。
