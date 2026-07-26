@@ -4,7 +4,7 @@
 状态：P0 规范性评测覆盖契约  
 适用范围：两条 P0 E2E、跨组件风险、首批 Eval Case family 与激活顺序
 
-> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库没有可运行源码、Fixture、Eval Harness、Baseline 或结果报告；下列 Case 当前均为 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
+> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 W1 contract 源码、versioned Fixture / Dataset artifacts 与 consistency tests，但没有 Eval Harness、HTTP / Trajectory E2E、Baseline 或结果报告；下列 Case 当前均为 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
 
 ## 1. Owner 与使用规则
 
@@ -266,17 +266,17 @@ grading:
     - T
 ```
 
-通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义目标编码，但尚不可执行；`E2E01-05` 等待 Cycle 2 的 scoped contract。
+通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义目标编码，W1 artifacts 已落盘但因缺少 Harness / HTTP 纵向链仍不可执行；`E2E01-05` 等待 Cycle 2 的 scoped contract。
 
 ## 9. 当前验证状态
 
 | 项目 | 状态 |
 |---|---|
 | Strategy 与 Case contract | `CONFIRMED`：已由 active 文档定义 |
-| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED`：已定义编码与目标命令，无运行证据 |
-| `G-RAG-INFRA` | `CONTRACT_DEFINED`：已定义激活义务，Compose、migration、能力探测与 Gate Result 均未出现 |
+| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED`：W1 contract / artifact 源码与测试已出现，但尚无 Harness、HTTP / Trajectory E2E 或结构化 Eval Result 运行证据 |
+| `G-RAG-INFRA` | `CONTRACT_DEFINED / PARTIAL_PREREQUISITE`：固定 pgvector Compose 与基础 migration 已出现；RAG capability probe、Corpus / Index 和 Gate Result 均未出现，不能宣称 RAG 基础设施 Gate 已激活 |
 | 15 个 Case family | `CONTRACT_DEFINED` |
-| 可执行 Dataset | `NOT_FOUND` |
+| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / ARTIFACT_PRESENT`：尚无 Harness，因此不是可执行 Dataset |
 | Eval Harness / Grader 实现 | `NOT_FOUND` |
 | Baseline / Regression Report | `NOT_FOUND` |
 | 普通质量、延迟和成本阈值 | `OPEN` |

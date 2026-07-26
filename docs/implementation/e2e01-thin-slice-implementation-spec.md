@@ -4,7 +4,7 @@
 状态：`ACTIVE / CONTRACT_DEFINED`  
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
-> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文不表示源码、项目配置、测试或 Baseline 已经存在；在可复现 Harness 建立前，相关 Case 仍为 `CONTRACT_DEFINED`。
+> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划和 `AGENTS.md`。在可复现 Harness 建立前，相关 Case 仍为 `CONTRACT_DEFINED`。
 
 ## 1. 权威边界
 
@@ -332,7 +332,7 @@ RevalidatedNextMove
 2. `validated_task_state_version=1` 是 Reducer 写入后的当前版本。
 3. 规范化后的 `NextMove.arguments.order_id` 与 `InputBinding.normalized_value` 精确相等。
 
-任一条件失败都以 `GATE_REJECTED` 安全停止；参数不一致时记录 `ARGUMENT_BINDING_MISMATCH`，不创建 ToolCall。模型不得输出 `customer_id`；若输出，Pydantic 或 Control Gateway 必须拒绝，且不得创建 ToolCall。
+任一 Gateway 条件失败都以 `GATE_REJECTED` 安全停止；参数不一致时记录 `ARGUMENT_BINDING_MISMATCH`，不创建 ToolCall。模型不得输出 `customer_id`：正常 Provider 路径必须在 canonical `NextMove` 的 Pydantic 构造阶段 fail-early，以 `INPUT_INVALID` 停止且不创建 Task / RequestUnit / GateDecision / ToolCall。Control Gateway 仍保留 defense-in-depth 校验；只有非正常 Adapter 绕过 canonical Pydantic 边界而让可信字段到达 Gateway 时，才按 `GATE_REJECTED` 处理，且该路径不能作为 `ScriptedModelProvider` 的正常返回契约。
 
 ## 6. `get_order` 具体契约
 
@@ -638,9 +638,9 @@ accepted_parallel_tool_calls = 0
 默认测试使用确定性 Provider：
 
 - 根据 Eval Fixture 中的 `model_script_ref` 返回完整、已知的候选。
-- 可以注入非法 Schema、source / authority 不一致、NextMove 参数替换、旧状态版本、可信字段覆盖、多 ToolCall、错误工具名和非法 PresentationPlan。
+- 可以注入非法 raw envelope / Schema、source / authority 不一致、NextMove 参数替换、旧状态版本、可信字段覆盖、多 ToolCall、错误工具名和非法 PresentationPlan。
 - 不读取 API Key，不访问网络。
-- 与真实 Adapter 返回完全相同的 canonical Pydantic 类型。
+- 对成功候选与通过 Pydantic 后的 Gateway fault，返回与真实 Adapter 相同的 canonical Pydantic 类型；非法 raw envelope 在相同 Pydantic 边界失败，不得伪造一个无法由 canonical DTO 构造的对象。可信字段覆盖因此属于 `INPUT_INVALID`，不是正常 scripted Gateway candidate。
 - 是身份、ToolCall、Observation、最小披露、Renderer 和 Trace 的离线硬门禁。
 
 它不是关键词路由的产品实现，也不能被描述为真实模型能力。
@@ -796,8 +796,8 @@ PROCESS_RESTART_DETECTED
 |---|---|---|---|---|
 | HTTP 请求 Schema 不合法 | 不创建 Run | 不创建 | `422`，无 `AgentRunResponse` | 沿用第 4.2 节 |
 | Request Understanding Provider 协议错误、零个 / 多个目标 Function Call | `COMPLETED / PROVIDER_PROTOCOL_ERROR` | 不创建新的 Task / RequestUnit | `200 + BLOCKED` + 统一安全文案 | 不重试，不创建 GateDecision 或 ToolCall |
-| Request Understanding Pydantic、source、authority 或 InputBinding 校验失败 | `COMPLETED / INPUT_INVALID` | 不创建新的 Task / RequestUnit | `200 + BLOCKED` + 统一安全文案 | 不把无效 Candidate 写入权威 Task 状态 |
-| Control Gateway 拒绝，包括 `ARGUMENT_BINDING_MISMATCH`、旧版本、未知工具或可信字段注入 | `COMPLETED / GATE_REJECTED` | 已创建的 Task / RequestUnit 转为 `BLOCKED` 并增加版本 | `200 + BLOCKED` + 统一安全文案 | 不生成 `tool_call_id`，不调用 Handler |
+| Request Understanding Pydantic、source、authority 或 InputBinding 校验失败，包括模型候选输出 `customer_id` 等可信字段 | `COMPLETED / INPUT_INVALID` | 不创建新的 Task / RequestUnit | `200 + BLOCKED` + 统一安全文案 | 不把无效 Candidate 写入权威 Task 状态；不创建 GateDecision |
+| Control Gateway 拒绝，包括 `ARGUMENT_BINDING_MISMATCH`、旧版本、未知工具，或 defense-in-depth 发现非正常 Adapter 绕过 Pydantic 后残留的可信字段 | `COMPLETED / GATE_REJECTED` | 已创建的 Task / RequestUnit 转为 `BLOCKED` 并增加版本 | `200 + BLOCKED` + 统一安全文案 | 不生成 `tool_call_id`，不调用 Handler；正常 Provider / Scripted 路径的可信字段覆盖不得到达此阶段 |
 | `get_order` 系统失败 | `COMPLETED / ORDER_SERVICE_UNAVAILABLE` | Task / RequestUnit 转为 `BLOCKED` 并绑定安全结果引用 | `200 + BLOCKED` + 第 7.4 节订单服务文案 | 不形成业务 Observation |
 | Presentation Provider / Pydantic 协议错误 | `COMPLETED / PROVIDER_PROTOCOL_ERROR` | Task / RequestUnit 转为 `BLOCKED`；既有安全 Observation 保留 | `200 + BLOCKED` + 统一安全文案 | 不进入 Renderer |
 | PresentationPlan Gate 拒绝 | `COMPLETED / PRESENTATION_PLAN_REJECTED` | Task / RequestUnit 转为 `BLOCKED`；既有安全 Observation 保留 | `200 + BLOCKED` + 统一安全文案 | 不“尽量解析”，不进入 Renderer |
@@ -1041,7 +1041,7 @@ completed_at
 
 ## 14. 目标命令契约
 
-以下命令只有在 `compose.yaml`、`pyproject.toml`、`uv.lock`、migration、源码、Fixture 和测试真实出现并通过验证后，才可以同步进 `AGENTS.md` 的 canonical 命令清单。
+以下是本切片的目标命令契约。只有对应配置、源码和测试真实出现并通过验证的子集，才可以同步进 `AGENTS.md` 的唯一 canonical 命令清单；本节不维护第二份实时命令状态。
 
 安装：
 
@@ -1100,7 +1100,7 @@ uv run pytest -m qwen_baseline
 uv run uvicorn mini_agent.main:app --reload
 ```
 
-当前仓库尚无这些配置和实现，因此本文创建时不得宣称任何命令已经运行成功。
+W1 已建立依赖、Compose PostgreSQL / pgvector、空业务 migration、Core / Application contract 与 Eval artifact consistency，并已将相应可复现子集登记到 `AGENTS.md`。这不使本节的 `uvicorn`、HTTP / Trajectory / E2E 或 Qwen Baseline 命令自动变为可执行；它们仍须等待后续实现与独立验证。
 
 ## 15. Plan 输入：实现依赖约束（`NON_NORMATIVE`）
 

@@ -4,7 +4,7 @@
 文档状态：P0 目标业务范围  
 适用读者：业务、产品、研发、测试及项目评审人员
 
-> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。当前目录中未发现可运行源码，现有材料主要是设计文档与架构图，因此本文描述的是 **P0 目标能力与验收边界**，不代表功能已经开发完成或接入生产系统。
+> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。仓库当前已有 W1 工具链、Core / Application contract、基础 PostgreSQL migration 和 versioned Eval artifacts，但尚无可运行的 HTTP 纵向切片、Harness 或 Eval Result。因此本文描述的仍是 **P0 目标能力与验收边界**，不代表功能已经开发完成或接入生产系统；实时实现证据见[多 Agent 实施计划](implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## 1. P0 目标与定位
 
