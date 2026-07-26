@@ -714,6 +714,8 @@ Context Manifest 记录“模型实际看到了哪些输入”，用于：
 - `tool_registry_version` 标识本次模型调用使用的完整 Runtime 工具注册配置版本。
 - `model_visible_toolset_hash` 标识经过 Provider 名称与 Schema 适配后，模型实际看到的 ToolSpec 集合；它必须能解析到不可变的安全 Toolset Artifact。
 - `task_state_ref_and_version` 只有在模型调用实际加载了既有目标 Task 时才存在。当前消息尚未绑定既有 Task 的首次 Request Understanding 调用可以为空；Reducer 创建 Task 后，后续 Gate、Trace 和模型调用必须引用真实的 Task state version，不得使用伪造的 `0` 版本。
+- `token_counts` 对象本身必须存在；其中 `input_tokens` 与 `output_tokens` 只在对应方向由批准来源精确测量时记录。`None` 表示未知或未精确测量，整数 `0` 表示已观测到的精确零，正整数表示对应的精确计数，三者不得互相替代。
+- 当前第一薄切片的 `ModelProvider` 不暴露 exact usage 来源，因此 Core 必须使用字段均为 `None` 的必填 `TokenCounts` 对象诚实表达未知。后续 Runtime / Adapter 只能写入实际精确测量的值；不得从字符数、字节数或序列化 JSON 长度估算 Token，不得为补齐 Schema 填充占位 `0`，也不得用其他 fallback 伪造使用量证据。
 - Tool Calling 系统负责生成、冻结和校验工具集；Context Manifest 负责保存本次模型调用对该工具集的引用。具体 Hash、Artifact 和同快照校验规则以 [Tool Calling Design Reference](tool-calling-design-reference.md) 为准。
 - Context Manifest 不保存 Handler、Provider 密钥、可信 `customer_id`、授权范围或其他 Runtime 私有注册内容。
 

@@ -47,6 +47,19 @@ def _summary() -> OrderSummaryProjection:
     )
 
 
+def _context_manifest_payload() -> dict[str, object]:
+    return {
+        "context_manifest_id": uuid4(),
+        "run_id": uuid4(),
+        "model_call_id": uuid4(),
+        "tool_registry_version": "runtime-tools-v1",
+        "model_visible_toolset_hash": f"sha256:{'a' * 64}",
+        "selected_message_refs": (uuid4(),),
+        "redaction_policy_version": "redaction-v1",
+        "assembled_at": NOW,
+    }
+
+
 def test_order_projection_forbids_private_and_unapproved_fields() -> None:
     summary = _summary()
     assert set(summary.model_dump()) == {
@@ -138,6 +151,95 @@ def test_context_manifest_contains_only_refs_and_toolset_identity() -> None:
             {
                 **manifest.model_dump(),
                 "auth_scopes": ["orders:read"],
+            }
+        )
+
+
+def test_context_manifest_requires_a_token_counts_object() -> None:
+    with pytest.raises(ValidationError, match="token_counts"):
+        ContextManifest.model_validate(_context_manifest_payload())
+
+    with pytest.raises(ValidationError, match="token_counts"):
+        ContextManifest.model_validate(
+            {
+                **_context_manifest_payload(),
+                "token_counts": None,
+            }
+        )
+
+
+def test_token_counts_default_to_unknown_for_both_directions() -> None:
+    counts = TokenCounts()
+    manifest = ContextManifest.model_validate(
+        {
+            **_context_manifest_payload(),
+            "token_counts": counts,
+        }
+    )
+
+    assert counts.model_dump() == {
+        "input_tokens": None,
+        "output_tokens": None,
+    }
+    assert manifest.token_counts == counts
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    [
+        (0, 0),
+        (123, 45),
+    ],
+)
+def test_token_counts_preserve_exact_non_negative_values(
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    counts = TokenCounts(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+    assert counts.input_tokens == input_tokens
+    assert counts.output_tokens == output_tokens
+    assert type(counts.input_tokens) is int
+    assert type(counts.output_tokens) is int
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("input_tokens", -1),
+        ("input_tokens", 1.0),
+        ("input_tokens", "1"),
+        ("input_tokens", True),
+        ("output_tokens", -1),
+        ("output_tokens", 1.0),
+        ("output_tokens", "1"),
+        ("output_tokens", True),
+    ],
+)
+def test_token_counts_reject_invalid_or_coercible_values(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+    payload[field_name] = invalid_value
+
+    with pytest.raises(ValidationError):
+        TokenCounts.model_validate(payload)
+
+
+def test_token_counts_forbid_extra_fields() -> None:
+    with pytest.raises(ValidationError, match="extra"):
+        TokenCounts.model_validate(
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "estimated": False,
             }
         )
 
