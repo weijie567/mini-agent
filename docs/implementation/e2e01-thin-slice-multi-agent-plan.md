@@ -398,7 +398,7 @@ Recommended merge order:
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / DRAFT_PR_OPEN / BRANCH_PROTECTION_UNAVAILABLE` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；[PR #1](https://github.com/weijie567/mini-agent/pull/1)；保护 API 返回 HTTP 403，需 GitHub Pro 或 public repository |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / DRAFT_PR_OPEN / BASE_BRANCHES_PROTECTED` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；[PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有虚构 required status checks |
 | GSD | `PROPOSED / NOT_INITIALIZED` | `.planning/STATE.md` 不存在，当前为 flat mode、0 workstreams |
 | 应用源码与工具链 | `NOT_FOUND` | 尚无 `src/`、`pyproject.toml`、`compose.yaml` |
 | Fixture / Harness / 自动化 Eval | `NOT_FOUND` | 尚无 `evals/` 和可执行测试 |
