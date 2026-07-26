@@ -114,7 +114,9 @@ class TraceEventType(StrEnum):
     EVAL_CASE_GRADED = "EvalCaseGraded"
 
 
-_TERMINAL_TOOL_TRACE_STATUS: dict[TraceEventType, ToolCallStatus] = {
+_TOOL_TRACE_STATUS: dict[TraceEventType, ToolCallStatus] = {
+    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
     TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
     TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
     TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
@@ -174,12 +176,16 @@ class TraceEvent(AuditOnlyModel):
         if self.event_type is TraceEventType.RUN_STOPPED:
             if self.stop_reason is None or self.user_outcome is None:
                 raise ValueError("RunStopped requires user_outcome and stop_reason")
-        expected_tool_status = _TERMINAL_TOOL_TRACE_STATUS.get(self.event_type)
+        expected_tool_status = _TOOL_TRACE_STATUS.get(self.event_type)
         if expected_tool_status is not None:
             if self.tool_call_id is None:
-                raise ValueError("terminal ToolCall Trace requires tool_call_id")
+                raise ValueError("ToolCall lifecycle Trace requires tool_call_id")
             if self.tool_call_terminal_status is not expected_tool_status:
                 raise ValueError(
-                    "terminal ToolCall Trace event and status must match"
+                    "ToolCall lifecycle Trace event and status must match"
                 )
+        elif self.tool_call_terminal_status is not None:
+            raise ValueError(
+                "ToolCall status requires a matching lifecycle Trace event"
+            )
         return self

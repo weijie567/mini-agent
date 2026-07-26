@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from .common import (
     ModelVisibleModel,
     find_trusted_argument_field,
     freeze_json_value,
+    thaw_json_value,
 )
 from .tool_system import (
     ToolSpec,
@@ -122,14 +130,14 @@ class NextMove(ModelVisibleModel):
 
     kind: NextMoveKind
     requested_tool_name: NonEmptyString | None = None
-    arguments: dict[str, JsonValue] | None = None
+    arguments: Mapping[str, JsonValue] | None = None
     base_task_state_version: PositiveStateVersion | None = None
 
     @field_validator("arguments")
     @classmethod
     def arguments_exclude_trusted_fields(
-        cls, value: dict[str, JsonValue] | None
-    ) -> dict[str, JsonValue] | None:
+        cls, value: Mapping[str, JsonValue] | None
+    ) -> Mapping[str, JsonValue] | None:
         if value is None:
             return None
         copied = deepcopy(value)
@@ -139,6 +147,14 @@ class NextMove(ModelVisibleModel):
                 f"model candidate cannot supply trusted field {forbidden!r}"
             )
         return freeze_json_value(copied)
+
+    @field_serializer("arguments")
+    def serialize_arguments(
+        self, value: Mapping[str, JsonValue] | None
+    ) -> dict[str, JsonValue] | None:
+        if value is None:
+            return None
+        return thaw_json_value(value)
 
     @model_validator(mode="after")
     def candidate_shape_matches_kind(self) -> Self:

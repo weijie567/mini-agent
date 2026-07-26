@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from mini_agent.core.tool_system import (
     ToolResult,
     ToolResultOutcome,
     ToolSpec,
+    ToolTimeoutPhase,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -134,7 +136,7 @@ def test_registry_snapshot_excludes_private_registration_changes_from_hash() -> 
     with pytest.raises(ValidationError, match="frozen"):
         first.tool_registry_version = "mutated"
 
-    with pytest.raises(TypeError, match="immutable"):
+    with pytest.raises(TypeError):
         first.provider_visible_toolset[0].input_schema["properties"][
             "injected"
         ] = {"type": "string"}
@@ -161,58 +163,37 @@ def test_toolset_json_blocks_mutation_aliases_and_preserves_hash() -> None:
         ),
     )
     original_hash = snapshot.model_visible_toolset_hash
-    injected_property = {"customer_id": {"type": "string"}}
-
-    with pytest.raises(TypeError, match="immutable"):
-        tool_spec.input_schema |= {
-            "properties": injected_property,
-        }
-
     snapshot_schema = snapshot.provider_visible_toolset[0].input_schema
     snapshot_properties = snapshot_schema["properties"]
     snapshot_required = snapshot_schema["required"]
 
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_properties |= injected_property
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_properties.update(injected_property)
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_properties.setdefault("customer_id", {"type": "string"})
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_properties.__init__(injected_property)
-    dict_mutation_aliases = (
-        lambda: snapshot_properties.__setitem__(
-            "customer_id", {"type": "string"}
-        ),
-        lambda: snapshot_properties.__delitem__("resource_ref"),
-        snapshot_properties.clear,
-        lambda: snapshot_properties.pop("resource_ref"),
-        snapshot_properties.popitem,
-    )
-    for mutate in dict_mutation_aliases:
-        with pytest.raises(TypeError, match="immutable"):
-            mutate()
+    assert isinstance(tool_spec.input_schema, Mapping)
+    assert not isinstance(tool_spec.input_schema, dict)
+    assert "properties" in snapshot_schema
+    assert isinstance(snapshot_properties, Mapping)
+    assert not isinstance(snapshot_properties, dict)
+    assert isinstance(snapshot_required, Sequence)
+    assert not isinstance(snapshot_required, list)
 
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_required.append("customer_id")
-    with pytest.raises(TypeError, match="immutable"):
-        snapshot_required += ["customer_id"]
-    list_mutation_aliases = (
-        lambda: snapshot_required.__setitem__(0, "customer_id"),
-        lambda: snapshot_required.__delitem__(0),
-        snapshot_required.clear,
-        lambda: snapshot_required.extend(["customer_id"]),
-        lambda: snapshot_required.insert(0, "customer_id"),
-        snapshot_required.pop,
-        lambda: snapshot_required.remove("resource_ref"),
-        snapshot_required.reverse,
-        snapshot_required.sort,
-        lambda: snapshot_required.__imul__(2),
-        lambda: snapshot_required.__init__(["customer_id"]),
-    )
-    for mutate in list_mutation_aliases:
-        with pytest.raises(TypeError, match="immutable"):
-            mutate()
+    with pytest.raises(TypeError):
+        dict.__setitem__(
+            tool_spec.input_schema,
+            "customer_id",
+            {"type": "string"},
+        )
+    with pytest.raises(TypeError):
+        dict.__setitem__(
+            snapshot_properties,
+            "customer_id",
+            {"type": "string"},
+        )
+    with pytest.raises(TypeError):
+        dict.__ior__(
+            snapshot_properties,
+            {"customer_id": {"type": "string"}},
+        )
+    with pytest.raises(TypeError):
+        list.append(snapshot_required, "customer_id")
 
     assert "customer_id" not in str(tool_spec.model_dump())
     assert "customer_id" not in str(snapshot.model_dump())
@@ -298,6 +279,17 @@ def test_argument_binding_mismatch_is_a_gate_rejection_not_a_toolcall() -> None:
     assert rejected.decision is GateDecisionValue.REJECT
     assert "tool_call_id" not in GateDecision.model_fields
 
+    with pytest.raises(
+        ValidationError,
+        match="ARGUMENT_BINDING_MISMATCH requires argument_binding_refs",
+    ):
+        GateDecision.model_validate(
+            {
+                **rejected.model_dump(),
+                "argument_binding_refs": (),
+            }
+        )
+
 
 def test_gate_rejection_requires_a_failed_check_matching_the_reason() -> None:
     base: dict[str, object] = {
@@ -375,12 +367,19 @@ def test_tool_result_payload_is_recursively_immutable_after_validation() -> None
     order_summary = payload["order_summary"]
     line_items = order_summary["line_items"]
 
-    with pytest.raises(TypeError, match="immutable"):
-        payload |= {"customer_id": "late-injection"}
-    with pytest.raises(TypeError, match="immutable"):
-        order_summary.update({"customer_id": "late-injection"})
-    with pytest.raises(TypeError, match="immutable"):
-        line_items.append({"customer_id": "late-injection"})
+    assert isinstance(payload, Mapping)
+    assert not isinstance(payload, dict)
+    assert isinstance(order_summary, Mapping)
+    assert not isinstance(order_summary, dict)
+    assert isinstance(line_items, Sequence)
+    assert not isinstance(line_items, list)
+
+    with pytest.raises(TypeError):
+        dict.__setitem__(payload, "customer_id", "late-injection")
+    with pytest.raises(TypeError):
+        dict.__ior__(order_summary, {"customer_id": "late-injection"})
+    with pytest.raises(TypeError):
+        list.append(line_items, {"customer_id": "late-injection"})
 
     assert "customer_id" not in str(result.model_dump())
     assert result.model_dump(mode="json")["payload"] == expected_payload
@@ -424,9 +423,17 @@ def test_toolcall_requires_binding_chain_and_status_specific_safe_codes() -> Non
         **base,
         status=ToolCallStatus.TIMED_OUT,
         finished_at=NOW,
-        timeout_phase="POST_DISPATCH",
+        timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
     )
-    assert timed_out.timeout_phase == "POST_DISPATCH"
+    assert timed_out.timeout_phase is ToolTimeoutPhase.AFTER_DISPATCH
+
+    with pytest.raises(ValidationError, match="Input should be"):
+        ToolCallRecord(
+            **base,
+            status=ToolCallStatus.TIMED_OUT,
+            finished_at=NOW,
+            timeout_phase="UPSTREAM_WAIT",
+        )
 
     with pytest.raises(ValidationError, match="interruption_reason"):
         ToolCallRecord(
@@ -450,6 +457,55 @@ def test_toolcall_requires_binding_chain_and_status_specific_safe_codes() -> Non
         interruption_reason="PROCESS_RESTART_DETECTED",
     )
     assert interrupted.interruption_reason == "PROCESS_RESTART_DETECTED"
+
+
+@pytest.mark.parametrize(
+    ("status", "lifecycle_values"),
+    [
+        (ToolCallStatus.RUNNING, {}),
+        (ToolCallStatus.SUCCEEDED, {"finished_at": NOW}),
+        (
+            ToolCallStatus.FAILED,
+            {"finished_at": NOW, "failure_code": "UPSTREAM_FAILURE"},
+        ),
+        (
+            ToolCallStatus.TIMED_OUT,
+            {
+                "finished_at": NOW,
+                "timeout_phase": ToolTimeoutPhase.UNKNOWN,
+            },
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            {
+                "finished_at": NOW,
+                "interruption_reason": "PROCESS_RESTART_DETECTED",
+            },
+        ),
+    ],
+)
+def test_initiated_toolcall_requires_at_least_one_attempt(
+    status: ToolCallStatus,
+    lifecycle_values: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="attempt_count >= 1"):
+        ToolCallRecord(
+            **{
+                **_tool_call_values(),
+                "attempt_count": 0,
+                **lifecycle_values,
+            },
+            status=status,
+        )
+
+    created = ToolCallRecord(
+        **{
+            **_tool_call_values(),
+            "attempt_count": 0,
+        },
+        status=ToolCallStatus.CREATED,
+    )
+    assert created.attempt_count == 0
 
 
 def test_tool_attempt_record_has_append_only_attempt_identity_and_utc_order() -> None:

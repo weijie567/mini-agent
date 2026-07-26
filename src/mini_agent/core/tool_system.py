@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self, Sequence
 from uuid import UUID
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from .common import (
     AuditOnlyModel,
@@ -19,6 +26,7 @@ from .common import (
     find_trusted_argument_field,
     freeze_json_value,
     require_utc,
+    thaw_json_value,
 )
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
@@ -40,14 +48,14 @@ class ToolSpec(ModelVisibleModel):
 
     name: ToolName
     description: NonEmptyString
-    input_schema: dict[str, JsonValue]
-    output_schema: dict[str, JsonValue]
+    input_schema: Mapping[str, JsonValue]
+    output_schema: Mapping[str, JsonValue]
 
     @field_validator("input_schema", "output_schema")
     @classmethod
     def schema_is_closed_json_object(
-        cls, value: dict[str, JsonValue]
-    ) -> dict[str, JsonValue]:
+        cls, value: Mapping[str, JsonValue]
+    ) -> Mapping[str, JsonValue]:
         copied = deepcopy(value)
         if copied.get("type") != "object":
             raise ValueError("tool schemas must declare type=object")
@@ -58,14 +66,20 @@ class ToolSpec(ModelVisibleModel):
     @field_validator("input_schema", "output_schema")
     @classmethod
     def model_schema_excludes_trusted_fields(
-        cls, value: dict[str, JsonValue]
-    ) -> dict[str, JsonValue]:
+        cls, value: Mapping[str, JsonValue]
+    ) -> Mapping[str, JsonValue]:
         forbidden = find_trusted_argument_field(value)
         if forbidden is not None:
             raise ValueError(
                 f"model-visible ToolSpec cannot declare trusted field {forbidden!r}"
             )
         return value
+
+    @field_serializer("input_schema", "output_schema")
+    def serialize_schema(
+        self, value: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        return thaw_json_value(value)
 
 
 class ExecutionPolicy(RuntimePrivateModel):
@@ -177,8 +191,10 @@ class RegistrySnapshot(RuntimePrivateModel):
             ToolSpec(
                 name=registration.provider_visible_name,
                 description=registration.tool_spec.description,
-                input_schema=registration.tool_spec.input_schema,
-                output_schema=registration.tool_spec.output_schema,
+                input_schema=thaw_json_value(registration.tool_spec.input_schema),
+                output_schema=thaw_json_value(
+                    registration.tool_spec.output_schema
+                ),
             )
             for registration in sorted(
                 frozen_registrations,
@@ -343,13 +359,20 @@ class GateDecision(AuditOnlyModel):
                 raise ValueError(
                     "GateDecision reason_code must match its failed Gate check"
                 )
+            if (
+                self.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+                and not self.argument_binding_refs
+            ):
+                raise ValueError(
+                    "ARGUMENT_BINDING_MISMATCH requires argument_binding_refs"
+                )
         return self
 
 
 class AuthorizedToolCommand(RuntimePrivateModel):
     gate_decision_id: UUID
     canonical_tool_name: ToolName
-    validated_arguments: dict[str, JsonValue]
+    validated_arguments: Mapping[str, JsonValue]
     argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     validated_task_state_version: Annotated[int, Field(ge=1)]
     registry_snapshot_ref: NonEmptyString
@@ -358,8 +381,8 @@ class AuthorizedToolCommand(RuntimePrivateModel):
     @field_validator("validated_arguments")
     @classmethod
     def validated_arguments_exclude_trusted_fields(
-        cls, value: dict[str, JsonValue]
-    ) -> dict[str, JsonValue]:
+        cls, value: Mapping[str, JsonValue]
+    ) -> Mapping[str, JsonValue]:
         copied = deepcopy(value)
         forbidden = find_trusted_argument_field(copied)
         if forbidden is not None:
@@ -367,6 +390,12 @@ class AuthorizedToolCommand(RuntimePrivateModel):
                 f"validated business arguments cannot include {forbidden!r}"
             )
         return freeze_json_value(copied)
+
+    @field_serializer("validated_arguments")
+    def serialize_validated_arguments(
+        self, value: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        return thaw_json_value(value)
 
     @field_validator("argument_binding_refs")
     @classmethod
@@ -385,6 +414,12 @@ class ToolCallStatus(StrEnum):
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
     INTERRUPTED = "INTERRUPTED"
+
+
+class ToolTimeoutPhase(StrEnum):
+    BEFORE_DISPATCH = "BEFORE_DISPATCH"
+    AFTER_DISPATCH = "AFTER_DISPATCH"
+    UNKNOWN = "UNKNOWN"
 
 
 class ToolCallRecord(AuditOnlyModel):
@@ -406,7 +441,7 @@ class ToolCallRecord(AuditOnlyModel):
     started_at: datetime
     finished_at: datetime | None = None
     failure_code: NonEmptyString | None = None
-    timeout_phase: SafeReasonCode | None = None
+    timeout_phase: ToolTimeoutPhase | None = None
     interruption_reason: SafeReasonCode | None = None
     result_ref: UUID | None = None
 
@@ -425,6 +460,11 @@ class ToolCallRecord(AuditOnlyModel):
             ToolCallStatus.TIMED_OUT,
             ToolCallStatus.INTERRUPTED,
         }
+        if (
+            self.status is not ToolCallStatus.CREATED
+            and self.attempt_count < 1
+        ):
+            raise ValueError("initiated ToolCall requires attempt_count >= 1")
         if self.status in terminal and self.finished_at is None:
             raise ValueError("terminal ToolCall requires finished_at")
         if self.status not in terminal and self.finished_at is not None:
@@ -502,6 +542,10 @@ class ToolResult(RuntimePrivateModel):
         if value is None:
             return None
         return freeze_json_value(deepcopy(value))
+
+    @field_serializer("payload")
+    def serialize_payload(self, value: JsonValue | None) -> JsonValue | None:
+        return thaw_json_value(value)
 
     @field_validator("observed_at", "completed_at")
     @classmethod

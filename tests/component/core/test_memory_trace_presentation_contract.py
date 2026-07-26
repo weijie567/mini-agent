@@ -184,13 +184,15 @@ def test_run_and_trace_require_an_explicit_safe_stop_reason() -> None:
 @pytest.mark.parametrize(
     ("event_type", "terminal_status"),
     [
+        (TraceEventType.TOOL_CALL_CREATED, ToolCallStatus.CREATED),
+        (TraceEventType.TOOL_CALL_STARTED, ToolCallStatus.RUNNING),
         (TraceEventType.TOOL_CALL_SUCCEEDED, ToolCallStatus.SUCCEEDED),
         (TraceEventType.TOOL_CALL_FAILED, ToolCallStatus.FAILED),
         (TraceEventType.TOOL_CALL_TIMED_OUT, ToolCallStatus.TIMED_OUT),
         (TraceEventType.TOOL_CALL_INTERRUPTED, ToolCallStatus.INTERRUPTED),
     ],
 )
-def test_terminal_tool_trace_requires_id_and_matching_status(
+def test_tool_lifecycle_trace_requires_id_and_matching_status(
     event_type: TraceEventType,
     terminal_status: ToolCallStatus,
 ) -> None:
@@ -213,6 +215,11 @@ def test_terminal_tool_trace_requires_id_and_matching_status(
             tool_call_terminal_status=terminal_status,
         )
 
+    mismatched_status = (
+        ToolCallStatus.SUCCEEDED
+        if terminal_status is not ToolCallStatus.SUCCEEDED
+        else ToolCallStatus.FAILED
+    )
     with pytest.raises(ValidationError, match="event and status must match"):
         TraceEvent(
             trace_event_id=uuid4(),
@@ -220,7 +227,19 @@ def test_terminal_tool_trace_requires_id_and_matching_status(
             occurred_at=NOW,
             run_id=uuid4(),
             tool_call_id=uuid4(),
-            tool_call_terminal_status=ToolCallStatus.CREATED,
+            tool_call_terminal_status=mismatched_status,
+        )
+
+
+def test_tool_status_cannot_be_attached_to_non_lifecycle_trace_event() -> None:
+    with pytest.raises(ValidationError, match="matching lifecycle Trace event"):
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.MESSAGE_ACCEPTED,
+            occurred_at=NOW,
+            run_id=uuid4(),
+            tool_call_id=uuid4(),
+            tool_call_terminal_status=ToolCallStatus.SUCCEEDED,
         )
 
 

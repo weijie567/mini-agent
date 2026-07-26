@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -69,80 +70,103 @@ TRUSTED_ARGUMENT_FIELDS = frozenset(
 )
 
 
-class FrozenJsonDict(dict[str, Any]):
-    """JSON object that cannot be mutated after boundary validation."""
+class FrozenJsonDict(tuple[tuple[str, Any], ...], Mapping[str, Any]):
+    """Tuple-backed JSON object with no mutable-builtin storage alias."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if getattr(self, "_frozen_json_initialized", False):
-            self._reject_mutation()
-        dict.__init__(self, *args, **kwargs)
-        object.__setattr__(self, "_frozen_json_initialized", True)
+    __slots__ = ()
 
-    def _reject_mutation(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("validated JSON is immutable")
+    def __new__(
+        cls,
+        value: Mapping[str, Any] | Iterable[tuple[str, Any]],
+    ) -> FrozenJsonDict:
+        items = value.items() if isinstance(value, Mapping) else value
+        return tuple.__new__(cls, tuple(items))
 
-    __setattr__ = _reject_mutation
-    __delattr__ = _reject_mutation
-    __setitem__ = _reject_mutation
-    __delitem__ = _reject_mutation
-    __ior__ = _reject_mutation
-    clear = _reject_mutation
-    pop = _reject_mutation
-    popitem = _reject_mutation
-    setdefault = _reject_mutation
-    update = _reject_mutation
+    def __getitem__(self, key: str) -> Any:
+        for item_key, item_value in tuple.__iter__(self):
+            if item_key == key:
+                return item_value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _ in tuple.__iter__(self))
+
+    def __contains__(self, key: object) -> bool:
+        return any(item_key == key for item_key, _ in tuple.__iter__(self))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({dict(self.items())!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return False
+        return dict(self.items()) == dict(other.items())
+
+    __hash__ = None
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> FrozenJsonDict:
         return self
 
 
-class FrozenJsonList(list[Any]):
-    """JSON array that cannot be mutated after boundary validation."""
+class FrozenJsonList(tuple[Any, ...]):
+    """Tuple-backed JSON array with no mutable-builtin storage alias."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if getattr(self, "_frozen_json_initialized", False):
-            self._reject_mutation()
-        list.__init__(self, *args, **kwargs)
-        object.__setattr__(self, "_frozen_json_initialized", True)
+    __slots__ = ()
 
-    def _reject_mutation(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("validated JSON is immutable")
+    def __new__(cls, value: Iterable[Any]) -> FrozenJsonList:
+        return tuple.__new__(cls, tuple(value))
 
-    __setattr__ = _reject_mutation
-    __delattr__ = _reject_mutation
-    __setitem__ = _reject_mutation
-    __delitem__ = _reject_mutation
-    __iadd__ = _reject_mutation
-    __imul__ = _reject_mutation
-    append = _reject_mutation
-    clear = _reject_mutation
-    extend = _reject_mutation
-    insert = _reject_mutation
-    pop = _reject_mutation
-    remove = _reject_mutation
-    reverse = _reject_mutation
-    sort = _reject_mutation
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({list(self)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence) or isinstance(
+            other, (str, bytes, bytearray)
+        ):
+            return False
+        return tuple.__eq__(self, tuple(other))
+
+    __hash__ = None
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> FrozenJsonList:
         return self
 
 
 def freeze_json_value(value: Any) -> Any:
-    """Recursively copy JSON into mutation-rejecting dict/list subclasses."""
+    """Recursively copy JSON into tuple-backed Mapping/Sequence values."""
 
-    if isinstance(value, dict):
+    if isinstance(value, (FrozenJsonDict, FrozenJsonList)):
+        return value
+    if isinstance(value, Mapping):
         return FrozenJsonDict(
-            {key: freeze_json_value(nested) for key, nested in value.items()}
+            (key, freeze_json_value(nested)) for key, nested in value.items()
         )
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         return FrozenJsonList(freeze_json_value(item) for item in value)
+    return value
+
+
+def thaw_json_value(value: Any) -> Any:
+    """Project immutable JSON containers back to native serialization values."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: thaw_json_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return [thaw_json_value(item) for item in value]
     return value
 
 
 def find_trusted_argument_field(value: Any) -> str | None:
     """Return the first Runtime-private field found in model-proposed JSON."""
 
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, nested_value in value.items():
             normalized_key = str(key).casefold()
             if normalized_key in TRUSTED_ARGUMENT_FIELDS:
@@ -150,7 +174,9 @@ def find_trusted_argument_field(value: Any) -> str | None:
             found = find_trusted_argument_field(nested_value)
             if found is not None:
                 return found
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         for item in value:
             found = find_trusted_argument_field(item)
             if found is not None:
