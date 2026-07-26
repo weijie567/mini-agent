@@ -137,9 +137,11 @@ review_repo_root=$(realpath "$review_repo_root") || exit 1
 review_requested_count=${#review_paths[@]}
 review_accepted_count=0
 review_absolute_paths=()
+review_relative_paths=()
 
 for review_input in "${review_paths[@]}"; do
   review_abs=$(realpath "$review_input") || exit 1
+  test -f "$review_abs" || exit 1
   case "$review_abs" in
     *','*|*$'\n'*) exit 1 ;;
   esac
@@ -148,8 +150,13 @@ for review_input in "${review_paths[@]}"; do
     *) exit 1 ;;
   esac
   review_rel=${review_abs#"$review_repo_root"/}
-  git -C "$review_repo_root" ls-files --error-unmatch -- "$review_rel" >/dev/null || exit 1
+  review_tracked_output=$(
+    git --literal-pathspecs -C "$review_repo_root" \
+      ls-files --error-unmatch -- "$review_rel"
+  ) || exit 1
+  test "$review_tracked_output" = "$review_rel" || exit 1
   review_absolute_paths+=("$review_abs")
+  review_relative_paths+=("$review_rel")
   review_accepted_count=$((review_accepted_count + 1))
 done
 
@@ -159,14 +166,66 @@ test "$review_accepted_count" -eq "$review_requested_count"
 test "$review_unique_count" -eq "$review_requested_count"
 ```
 
-调用时只传上述已接受绝对路径。Integrator 在 captured workflow transcript 中断言精确出现 `File scope: ${review_requested_count} files from --files override`，并对以下两个 stock 真实前缀做零匹配检查：
+用 canonical accepted list 生成 stock 参数，并以 GSD 1.38.3 相同的 scope 逻辑完成机械 rehearsal：
 
-```text
-Error: File path outside repository, skipping:
-Warning: File not found, skipping:
+```bash
+review_files_arg=$(IFS=,; printf '%s' "${review_absolute_paths[*]}")
+test -n "$review_files_arg"
+
+review_scope_output=$(
+  review_stock_files=()
+  IFS=',' read -ra review_stock_inputs <<< "$review_files_arg"
+  for review_stock_input in "${review_stock_inputs[@]}"; do
+    review_stock_abs=$(
+      realpath -m "$review_stock_input" 2>/dev/null || echo "$review_stock_input"
+    )
+    if [[ "$review_stock_abs" != "$review_repo_root"* ]]; then
+      echo "Error: File path outside repository, skipping: $review_stock_input"
+      continue
+    fi
+    if [ -f "$review_repo_root/$review_stock_input" ] || [ -f "$review_stock_input" ]; then
+      review_stock_files+=("$review_stock_input")
+    else
+      echo "Warning: File not found, skipping: $review_stock_input"
+    fi
+  done
+  echo "File scope: ${#review_stock_files[@]} files from --files override"
+)
+
+review_expected_scope="File scope: $review_requested_count files from --files override"
+
+review_assert_scope() {
+  local review_assert_text=$1
+  local review_expected_occurrences=$2
+  local review_scope_occurrences
+  local review_outside_occurrences
+  local review_missing_occurrences
+  review_scope_occurrences=$(
+    printf '%s\n' "$review_assert_text" |
+      rg -Fxc "$review_expected_scope" || true
+  )
+  review_outside_occurrences=$(
+    printf '%s\n' "$review_assert_text" |
+      rg -Fc 'Error: File path outside repository, skipping:' || true
+  )
+  review_missing_occurrences=$(
+    printf '%s\n' "$review_assert_text" |
+      rg -Fc 'Warning: File not found, skipping:' || true
+  )
+  review_scope_occurrences=${review_scope_occurrences:-0}
+  review_outside_occurrences=${review_outside_occurrences:-0}
+  review_missing_occurrences=${review_missing_occurrences:-0}
+  test "$review_scope_occurrences" -eq "$review_expected_occurrences" || return 1
+  test "$review_outside_occurrences" -eq 0 || return 1
+  test "$review_missing_occurrences" -eq 0 || return 1
+}
+
+review_assert_scope "$review_scope_output" 1
 ```
 
-任一计数不一致、任一路径无权威 tracked-file 证据、任一 skip 前缀出现或最终 review artifact 未覆盖全部 requested files，均为 `BLOCK`。
+随后以 Codex command `$gsd-code-review <phase> --files="<review_files_arg>"` 传入同一字节串。GSD 1.38.3 会在 scope 初始化与 post-processing 各打印一次相同 scope；Integrator 必须把未改写的 workflow transcript 放入 `review_workflow_transcript`，运行 `review_assert_scope "$review_workflow_transcript" 2`，并确认 `REVIEW.md` 的 reviewed-file 清单与 `review_rel` 集合精确相等。
+
+任一计数不一致、literal tracked 输出不等于单个 `review_rel`、任一 skip 前缀出现、transcript 未捕获或最终 review artifact 未覆盖全部 requested files，均为 `BLOCK`。
 
 ### 6.2 受控 Planning Adapter
 
@@ -211,7 +270,7 @@ GSD 健康必须同时读取两个表面，并保留原始分类：
 | Safe read-only | `gsd-progress` | 只读查看；关闭 / 拒绝任何自动 next-route |
 | Safe read-only | `gsd-health` | 同时读取 CJS 与 SDK surface；不运行 `--repair` / `--force` |
 | Safe planning advisory | GSD planner / checker roles | 只读 canonical inputs 与目标 slot；输出建议，不写共享 State。Integrator 在 dedicated planning-status Worktree 中创建一对一 Plan / Task Packet 并通过 PR 合并 |
-| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + normalized absolute exact `--files`；requested=accepted=transcript scope，且 stock 两种真实 skip 输出均为零；只写 Phase `REVIEW.md` |
+| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + normalized absolute exact `--files`；literal tracked exact-match，requested=accepted=unique=transcript scope，且 stock 两种真实 skip 输出均为零；只写 Phase `REVIEW.md` |
 | Conditional fix | `gsd-code-review-fix` | 预建 dedicated fix Worktree / branch；精确 Task Packet 与 containment check |
 | Conditional validation | `gsd-validate-phase` | 预建 dedicated validation Worktree / branch；补缺走独立 PR |
 | Conditional Eval audit | `gsd-eval-review` | 先有引用 canonical Eval owner 的派生 mapping；否则不构成 gate |

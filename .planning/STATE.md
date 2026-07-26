@@ -7,8 +7,8 @@ current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "0"
 status: "paused"
 paused_at: "Activation code-review scope remediation; not effective until exact-head PASS and merge"
-last_updated: "2026-07-26T10:33:33Z"
-last_activity: "2026-07-26 — b659c33 compatibility PASS; owner review BLOCK on path-skip token"
+last_updated: "2026-07-26T10:40:44Z"
+last_activity: "2026-07-26 — f48461c blocked on literal tracked/transcript/trace gates"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -39,7 +39,7 @@ Total Phases: 6
 Total Plans in Phase: 6
 Status: Activation paused / not effective
 Last Activity: 2026-07-26
-Last Activity Description: exact head `b659c33` 的 compatibility review 为 `PASS`、owner review 因 path-skip token 与 stock 输出不一致而 `BLOCK`
+Last Activity Description: exact head `f48461c` 因 non-literal tracked check、不可执行 transcript assertion 与 trace drift 被 `BLOCK`
 Progress: 0%
 Paused At: final exact-head review `PASS` 且 activation PR merge 前
 
@@ -48,7 +48,7 @@ Paused At: final exact-head review `PASS` 且 activation PR merge 前
 Phase: 1 of 6（第一最薄 E2E-01）
 Plan: 0 of 6
 Status: `ACTIVATION_REVIEW_SCOPE_REMEDIATION / PAUSED / NOT_EFFECTIVE`
-Last activity: 2026-07-26 — `b659c33` owner review blocked；当前候选 exact head 由 Git ref 外部解析并等待双 review
+Last activity: 2026-07-26 — `f48461c` exact-head reviews blocked；当前候选 exact head 由 Git ref 外部解析并等待双 review
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
@@ -68,7 +68,7 @@ Progress: `░░░░░░░░░░` 0%
 
 ## Blockers
 
-- `BLOCK`: `b659c33...` 的 owner review 因 path-skip token 与 stock 实际输出不一致而未通过；新 remediation exact-head 双 review 与 PR merge 仍为 `PENDING`。
+- `BLOCK`: `f48461c...` 因 non-literal tracked check、不可执行 transcript assertion 与 trace drift 未通过；新 remediation exact-head 双 review 与 PR merge 仍为 `PENDING`。
 - `OPEN / PROPOSAL_ONLY`: persistence schema/version 的 owner、API 名称、decode 与 unknown-version 行为尚待 01-01 canonical-owner alignment；当前没有已批准的 RecordSchema implementation contract。
 - `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_FOR_ACTIVATION_WITH_CONTROLS`: CJS health 为 6×`W017`，SDK health 为 6×`W006`；errors 均为空，repairable 均为 0，禁止 `--repair` / `--force`。
 - `OPEN`: Phase 2–6 尚无 scoped implementation owner；不得生成实现细节。

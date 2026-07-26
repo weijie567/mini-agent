@@ -14,7 +14,7 @@
 | Base branch | `integration/e2e01-thin` |
 | Exact base SHA | `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
 | Branch relation | activation branch **forked from** exact base SHA；该 base 不是当前 activation head |
-| Blocked review heads | `1e6999cbc60caa8f57d065ff4536dd238d48a911`, `f7408129b46f5a5bcaa0d4959e7b1cfe07b5e72d`, `b659c33d0670c57c1fc987e9487f6bd6165eb72c` |
+| Blocked review heads | `1e6999cbc60caa8f57d065ff4536dd238d48a911`, `f7408129b46f5a5bcaa0d4959e7b1cfe07b5e72d`, `b659c33d0670c57c1fc987e9487f6bd6165eb72c`, `f48461c9912d8240a8dba537087bffda08041f52` |
 | Current candidate head | 由 `git rev-parse HEAD` / GitHub PR head 在外部审查证据中解析；不在同一 commit 内容内自引用硬编码 |
 | Base evidence | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 的 W2.0 contract-freeze merge |
 | Governance | [GOVERNANCE.md](GOVERNANCE.md) |
@@ -80,17 +80,17 @@
 
 | 检查 | 状态 | 实际结果 |
 |---|---|---|
-| Worktree / branch / exact base | `CONFIRMED` | `codex/gsd-activation` 从 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` fork；blocked review heads 为 `1e6999c...` 与 `f740812...` |
+| Worktree / branch / exact base | `CONFIRMED` | `codex/gsd-activation` 从 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` fork；blocked review heads 为 `1e6999c...`、`f740812...`、`b659c33...` 与 `f48461c...` |
 | GSD installed version | `CONFIRMED` | `/Users/ming/.codex/get-shit-done/VERSION` 为 `1.38.3` |
 | GSD SDK version | `CONFIRMED` | `gsd-sdk --version` → `gsd-sdk v0.1.0` |
-| Evidence captured at | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE` | `2026-07-26T10:33:33Z` UTC；commit 后仍须对 exact head 重跑 |
+| Evidence captured at | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE` | `2026-07-26T10:40:44Z` UTC；commit 后仍须对 exact head 重跑 |
 | CJS health surface | `DEGRADED` | `node /Users/ming/.codex/get-shit-done/bin/gsd-tools.cjs validate health --raw` → 6×`W017`（既有 W1 / W2 audit Worktree）、`errors=[]`、`repairable=0` |
 | SDK health surface | `DEGRADED` | `gsd-sdk query validate.health` → 6×`W006`（Phase 1–6 directory 尚未创建）、`errors=[]`、`repairable=0` |
 | SDK Phase 1 init surface | `OPEN / ADAPTER_SURFACE_DIFFERENCE` | `gsd-sdk query init.phase-op 1` 可解析 Phase 1 / State / Roadmap，但 `phase_dir=null`（import 前预期）且本地 agent-file 探测为 false；conditional workflow 还必须独立确认所需 Codex collaboration role 可用 |
 | Dual-surface disposition | `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_FOR_ACTIVATION_WITH_CONTROLS` | warning code / object surface 不一致；未来创建 Phase 1 artifact directory 预计只减少一个 `W006`，不得声称整体 healthy |
 | Repair / force | `NOT_RUN` | 未运行 `--repair` 或 `--force`；health 输出不构成 Worktree 删除授权 |
-| JSON / supported keys / State / parser / review-scope / shape / links / diff / allowlist | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE / EXACT_HEAD_REVIEW_PENDING` | `jq` 通过；32 leaf keys / 0 unknown；State milestone=`v0.1`、status=`paused`；6 个 Phase 的 Requirements 均为非空 clean ID，Success Criteria 数量为 4/3/3/3/3/3；2-file review-scope rehearsal 为 requested=accepted=unique=transcript scope=`2`，无 skip 输出；6 Phase / 6 Phase-1 Plans / 16 requirements；82 个本地链接 / 0 missing；84-line State；相对 base 精确 10-file allowlist 与 `git diff --check` 通过。commit 后须对 exact head 重跑 |
-| Independent exact-head review | `BLOCKED_ON_1e6999c_f740812_b659c33 / FINAL_PENDING` | `b659c33...` 的 compatibility review 为 `PASS`，owner review 因 path-skip token 与 stock 实际输出不一致而 `BLOCK`；新 remediation head 必须重新取得双 `PASS` |
+| JSON / supported keys / State / parser / review-scope / shape / links / diff / allowlist | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE / EXACT_HEAD_REVIEW_PENDING` | `jq` 通过；32 leaf keys / 0 unknown；State milestone=`v0.1`、status=`paused`；6 个 Phase 的 Requirements 均为非空 clean ID，Success Criteria 数量为 4/3/3/3/3/3；2-file literal review-scope rehearsal 为 requested=accepted=unique=`2`、scope rehearsal occurrence=`1`、simulated GSD 1.38.3 transcript occurrence=`2`、两类 skip=`0`；valid path 通过，duplicate / outside / directory / literal-glob 均被阻断；6 Phase / 6 Phase-1 Plans / 16 requirements；82 个本地链接 / 0 missing；84-line State；相对 base 精确 10-file allowlist 与 `git diff --check` 通过。未调用 paused 的 stock workflow；commit 后须对 exact head 重跑 |
+| Independent exact-head review | `BLOCKED_ON_1e6999c_f740812_b659c33_f48461c / FINAL_PENDING` | `f48461c...` 的 owner review 因 non-literal tracked check、不可执行 transcript assertion 与 trace drift 而 `BLOCK`，compatibility review 也因 trace drift `BLOCK`；新 remediation head 必须重新取得双 `PASS` |
 | GitHub PR merge | `PENDING` | review 与 checks 通过后由 Integrator 执行 |
 
 任何 `PENDING` 项不得提前描述为通过。
