@@ -6,9 +6,9 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "0"
 status: "paused"
-paused_at: "Activation blocked review remediation; not effective until exact-head PASS and merge"
-last_updated: "2026-07-26T09:59:47Z"
-last_activity: "2026-07-26 — activation exact head 1e6999c blocked by two reviewers"
+paused_at: "Activation compatibility review remediation; not effective until exact-head PASS and merge"
+last_updated: "2026-07-26T10:24:04Z"
+last_activity: "2026-07-26 — f740812 owner review PASS; compatibility review BLOCK"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -39,7 +39,7 @@ Total Phases: 6
 Total Plans in Phase: 6
 Status: Activation paused / not effective
 Last Activity: 2026-07-26
-Last Activity Description: exact head `1e6999c` 被两名只读 Reviewer BLOCK，正在原 branch remediation
+Last Activity Description: exact head `f740812` 的 owner review 为 `PASS`、compatibility review 为 `BLOCK`，正在原 branch remediation
 Progress: 0%
 Paused At: final exact-head review `PASS` 且 activation PR merge 前
 
@@ -47,8 +47,8 @@ Paused At: final exact-head review `PASS` 且 activation PR merge 前
 
 Phase: 1 of 6（第一最薄 E2E-01）
 Plan: 0 of 6
-Status: `ACTIVATION_REMEDIATION / PAUSED / NOT_EFFECTIVE`
-Last activity: 2026-07-26 — blocked review remediation；尚未形成 final exact head
+Status: `ACTIVATION_COMPAT_REMEDIATION / PAUSED / NOT_EFFECTIVE`
+Last activity: 2026-07-26 — `f740812` compatibility review blocked；当前候选 exact head 由 Git ref 外部解析并等待双 review
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
@@ -62,13 +62,13 @@ Progress: `░░░░░░░░░░` 0%
 
 - `.planning/` 是派生执行层；canonical owner 保持在 active docs。
 - `parallelization=false` 与 `workflow.use_worktrees=false` 只禁用 GSD 自管并行 / Worktree，不禁用 Integrator 预建 Worktree 的 Codex 多 Agent 并行。
-- Stock `gsd-execute-phase`、`gsd-ship` 与自动 lifecycle mutation 当前禁用。
+- Stock `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`gsd-ship` 与自动 lifecycle mutation 当前禁用。
 - GSD Plan 与精确 Task Packet 一一对应；一个 Packet 不跨 repository、branch、Worktree、writer 或 ownership boundary。
 - Roadmap / Requirements / State 只在 post-execution quality gate 与 canonical lifecycle owner 更新后由 Integrator 手工同步。
 
 ## Blockers
 
-- `BLOCK`: activation final exact-head review 与 PR merge 仍为 `PENDING`。
+- `BLOCK`: `f740812...` 的 compatibility review 未通过；新 remediation exact-head 双 review 与 PR merge 仍为 `PENDING`。
 - `OPEN / PROPOSAL_ONLY`: persistence schema/version 的 owner、API 名称、decode 与 unknown-version 行为尚待 01-01 canonical-owner alignment；当前没有已批准的 RecordSchema implementation contract。
 - `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_FOR_ACTIVATION_WITH_CONTROLS`: CJS health 为 6×`W017`，SDK health 为 6×`W006`；errors 均为空，repairable 均为 0，禁止 `--repair` / `--force`。
 - `OPEN`: Phase 2–6 尚无 scoped implementation owner；不得生成实现细节。
@@ -80,5 +80,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-26
-Stopped At: activation blocked review remediation
+Stopped At: activation compatibility review remediation
 Resume File: [ACTIVATION.md](ACTIVATION.md)

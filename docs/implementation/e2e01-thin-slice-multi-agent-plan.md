@@ -432,7 +432,7 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；当前在独立 `codex/gsd-activation` branch 上修复 blocked review findings，状态为 `BLOCKED_REVIEW_REMEDIATION / PAUSED / NOT_EFFECTIVE`，final exact head 尚未形成。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；当前在独立 `codex/gsd-activation` branch 上修复第二轮 compatibility review findings，状态为 `BLOCKED_COMPAT_REMEDIATION / PAUSED / NOT_EFFECTIVE`。精确候选 head 从 Git ref / GitHub PR head 读取，不在同一 commit 内容中自引用硬编码。
 
 ### 11.1 Activation Gate（`IN_PROGRESS`）
 
@@ -444,17 +444,17 @@ GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 
 - 在隔离 Worktree 演练初始化，证明不会覆盖 active canonical owner；
 - 记录可复现验证命令，并由独立 Reviewer 对精确 head SHA 给出 `PASS`。
 
-Activation 的派生文件与规则见 [`.planning/GOVERNANCE.md`](../../.planning/GOVERNANCE.md) 和 [`.planning/ACTIVATION.md`](../../.planning/ACTIVATION.md)。上述 Gate 未完成并合并前，不运行 `$gsd-import`、`$gsd-plan-phase`、`$gsd-verify-work`、`$gsd-code-review` 或其他依赖 phase / roadmap 状态的写入流程；只读 `$gsd-progress` 必须禁止自动 route，`$gsd-health` 必须同时读取 CJS / SDK surface 且不运行 `--repair` / `--force`。Stock `$gsd-execute-phase` 与 `$gsd-ship` 即使 activation 生效后也保持禁用。
+Activation 的派生文件与规则见 [`.planning/GOVERNANCE.md`](../../.planning/GOVERNANCE.md) 和 [`.planning/ACTIVATION.md`](../../.planning/ACTIVATION.md)。上述 Gate 未完成并合并前，不运行 `$gsd-code-review` 或其他依赖 phase / roadmap 状态的写入流程；只读 `$gsd-progress` 必须禁止自动 route，`$gsd-health` 必须同时读取 CJS / SDK surface 且不运行 `--repair` / `--force`。Stock `$gsd-import`、`$gsd-plan-phase`、`$gsd-execute-phase`、`$gsd-verify-work` 与 `$gsd-ship` 即使 activation 生效后也保持禁用。
 
 ### 11.2 激活后受控使用
 
-- `$gsd-import` / `$gsd-plan-phase` 只可在 Integrator 预建的 dedicated planning-artifact Worktree / feature branch 中条件运行；必须有显式 owner mapping、精确 Task Packet 和零未裁决 blocker / warning。`$gsd-import` 出现 warning 时必须停止，只有用户显式批准后才能继续，不得自动批准。一个 Plan 只映射一个 Packet。
+- GSD planner / checker 角色只读 canonical inputs 与目标 slot 后提供建议；Integrator 在预建的 dedicated planning-status Worktree / feature branch 中单写最终 Plan / Task Packet。一个 Plan 只映射一个 Packet；不运行会自动更新共享 State 的 stock `$gsd-import` / `$gsd-plan-phase`。
 - Activation merge 后首个工作不是直接导入 W2.0b，而是由 Integrator 预建 `01-01 persistence schema/version canonical-owner alignment` Worktree / branch。01-01 exact-head merge 前，01-02 仍为 `BLOCKED`。
 - 实际实现由 Integrator 在 workflow 外预建 exact Task Packet Worktree / feature branch，再交给 Codex Agent。多个 Agent 只在 ownership 不重叠时并行；feature PR 指向 integration，Integrator 串行合并。
-- `$gsd-code-review` 只在 exact-integration-SHA review-artifact Worktree 中以 exact `--files` 运行，唯一写入为 Phase `REVIEW.md`。
+- `$gsd-code-review` 只在 exact-integration-SHA review-artifact Worktree 中以规范化绝对路径的 exact `--files` 运行；preflight 与 workflow 输出必须证明 non-zero reviewed files 且无 `SKIP_OUTSIDE_REPOSITORY`，唯一写入为 Phase `REVIEW.md`。
 - `$gsd-code-review-fix` 与 `$gsd-validate-phase` 只在 Integrator 预建的 dedicated fix / validation Worktree / branch 中条件运行；precheck exact base/head/allowlist，postcheck 全部 changed files / commits，scope drift 即 `BLOCK` 且不 push。
 - `$gsd-eval-review` 只有派生 AI / Eval mapping 明确引用 canonical Eval owner 后才构成 gate；`$gsd-secure-phase` 必须有映射项目安全不变量的完整 `<threat_model>`，zero-threat 不构成通过。
-- `$gsd-verify-work` 只产 UAT artifact，并必须在 gap / transition / execute route 前停止。
+- 会话式验收使用受控 UAT adapter，只产 UAT artifact 且不包含 gap / transition / execute route；stock `$gsd-verify-work` 因没有 `--no-transition` 且会调用禁用的 `phase.complete` 而不运行。
 - post-execution quality gate 通过后，先更新 canonical Coverage Matrix lifecycle，再由 Integrator 根据 Summary、PR 和硬证据手工同步 derived Requirements / Roadmap / State。
 - Feature → integration 和 integration → `main` 均通过显式 GitHub repository / head / base 创建 PR；不调用 `$gsd-ship`。
 - 只有真正独立、生命周期不同的 milestone 才使用 `$gsd-workstreams`；Runtime、Infra、Eval 是同一 E2E 切片的协作模块，不为它们建立三套产品 roadmap。
@@ -465,6 +465,8 @@ Activation 的派生文件与规则见 [`.planning/GOVERNANCE.md`](../../.planni
 - 不直接以默认优先级运行 `$gsd-ingest-docs`：本项目采用“专门 owner 仅在自身范围内优先”，不能让通用 `ADR > SPEC > PRD > DOC` 规则静默覆盖跨域 owner。未来如需导入，必须使用显式 manifest、owner mapping 和 blocker conflict review。
 - 当前 P0 不运行 `$gsd-new-milestone`、`$gsd-autonomous` 或 `$gsd-phase-autopilot`，也不让 GSD 自动修改 active canonical 文档或 Case 生命周期。
 - Stock GSD 1.38.3 的 `$gsd-execute-phase`、`phase.complete`、`requirements.mark-complete` 与 `roadmap.update-plan-progress` 禁用。Execute 会枚举、合并并可能以 `--force` 清理全部非当前 Worktree，还会提前推进 phase lifecycle，与项目 Integrator-owned Worktree / quality gate 冲突。
+- Stock `$gsd-import` / `$gsd-plan-phase` 禁用；它们会在 artifact 生成路径写共享 State，且 import 不能在写入前机械保证只替换既有 Roadmap slot。规划时只使用 GSD planner / checker 角色的只读建议，由 Integrator 单写最终 artifact。
+- Stock `$gsd-verify-work` 禁用；当前版本没有 `--no-transition`，验收通过路径会进入 transition 并调用 `phase.complete`。UAT 使用无 lifecycle mutation 的受控 adapter。
 - `$gsd-ship` 禁用；其单一 base 模型不能表达 feature → integration 与 integration → `main` 两级 PR。
 - `.planning/config.json` 的 `parallelization=false` 与 `workflow.use_worktrees=false` 只关闭 GSD 自管并行 / Worktree，不关闭 Integrator 预建 Worktree 的 Codex 多 Agent 并行。
 
@@ -489,7 +491,7 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
 | GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；`main=5d668f71b565dff9ecf353d215c41affe86cb637`，当前 integration head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `BLOCKED_REVIEW_REMEDIATION / PAUSED / NOT_EFFECTIVE` | activation branch 从 integration exact base `85eb2a7...` fork；blocked review head `1e6999c...` 被两名只读 Reviewer 阻断；remediation final exact head、review 与 PR merge 仍为 `PENDING` |
+| GSD | `BLOCKED_COMPAT_REMEDIATION / PAUSED / NOT_EFFECTIVE` | activation branch 从 integration exact base `85eb2a7...` fork；`1e6999c...` 被两名 Reviewer 阻断，`f740812...` 的 owner review 已 `PASS`、compatibility review 仍 `BLOCK`；新候选 head 的双 review 与 PR merge 为 `PENDING` |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / CONTRACT_DEFINED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并；5 个 versioned JSON artifacts、20 个 focused consistency tests；尚无 Provider Adapter、Harness、Eval Result 或 Baseline |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |

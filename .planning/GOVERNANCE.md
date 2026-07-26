@@ -111,21 +111,36 @@ exact-integration-SHA code review artifact
 → dedicated fix PR（有 finding 时，修复后重复 review）
 → dedicated validation PR（需要补缺时）
 → Eval / Security audit（满足前置 contract 时）
-→ UAT artifact
+→ controlled UAT artifact
 → canonical lifecycle owner update
 → Integrator 手工同步 derived Requirements / Roadmap / State
 → 显式 integration → main GitHub PR
 ```
 
-- `gsd-code-review` 只能在以 exact integration SHA 创建的只读 review-artifact Worktree 中，以 `--files=<exact list>` 运行；唯一允许写入的是对应 Phase 的 `REVIEW.md`。它不得修改源码、共享状态或其他 artifact。
+- `gsd-code-review` 只能在以 exact integration SHA 创建的只读 review-artifact Worktree 中，以 `--files=<normalized absolute exact list>` 运行；相对路径禁止使用，因为当前 macOS 的 `realpath` 不支持 workflow 使用的 GNU `-m` 选项。Preflight 必须用 repository root 与 tracked-file 检查确认每个绝对路径均在仓库内；workflow 输出必须证明至少一个文件实际进入 review 且没有 `SKIP_OUTSIDE_REPOSITORY`。唯一允许写入的是对应 Phase 的 `REVIEW.md`；它不得修改源码、共享状态或其他 artifact。
 - `gsd-code-review-fix` 仅在 Integrator 预建的 dedicated fix Worktree / feature branch 中条件使用，并服从第 3 节 precheck / postcheck；发现 scope drift 时 `BLOCK` 且不 push。
 - `gsd-validate-phase` 仅在 Integrator 预建的 dedicated validation Worktree / feature branch 中条件使用；测试或验证补缺必须作为独立 Task Packet / PR，不能直接修改 integration。
 - `gsd-eval-review` 只有在派生 AI / Eval mapping 明确引用 [canonical Eval owner](../docs/evaluation/agent-evaluation-strategy.md) 后才构成 gate；该 mapping 必须是 `DERIVED / NON_NORMATIVE`，不得创造第二套 Eval 语义。
 - `gsd-secure-phase` 必须以完整 `<threat_model>` 映射 [AGENTS.md](../AGENTS.md) 的身份、资源归属、最小披露、Evidence、确认、ActionPolicy、幂等与 `RESULT_UNKNOWN` 等安全不变量。零条 threat 不构成通过。
-- `gsd-verify-work` 只生成会话式 UAT artifact；必须在任何 gap、transition 或 execute 路由前停止。它不能替代 canonical 自动化命令、Trajectory / E2E Eval 或 GitHub review。
+- Stock `gsd-verify-work` 禁用：GSD 1.38.3 没有 `--no-transition` 模式，Security gate 满足后会自动进入 transition 并调用禁用的 `phase.complete`。会话式验收改由受控 UAT adapter 生成 artifact；adapter 只读取 exact integration evidence、记录用户验收结果，不运行 gap / transition / execute route，也不能替代 canonical 自动化命令、Trajectory / E2E Eval 或 GitHub review。
 - 质量门禁完成后，先由 [Coverage Matrix](../docs/evaluation/p0-eval-coverage-matrix.md) canonical owner 根据硬证据更新 Case lifecycle；随后 Integrator 手工同步派生 Requirements / Roadmap / State。
 - 禁止 `phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 及其他自动 lifecycle mutation。
 - release 只使用显式 GitHub head / base PR；不调用 `gsd-ship`。
+
+### 6.1 受控 Planning Adapter
+
+1. Integrator 从 exact integration SHA 预建 dedicated planning-status Worktree / feature branch，并定义只允许一个目标 Plan、对应 Task Packet、必要共享派生索引的精确 allowlist。
+2. GSD planner / checker 角色只读 canonical inputs、目标 Roadmap slot 与 Task Packet 模板；只在 handoff 中返回建议，不写文件、不调用 stock `gsd-import` / `gsd-plan-phase`。
+3. Integrator 逐项裁决建议，在该 Worktree 中单写最终 Plan / Task Packet；precheck 必须证明目标 slot 唯一且不存在同名 Plan，postcheck 必须证明没有重复 slot、无 scope drift、无未授权 lifecycle mutation。
+4. Planning artifact 经独立 exact-head review 和 PR 合并后才可作为下游执行输入；Plan 本身仍不证明实现完成。
+
+### 6.2 受控 UAT Adapter
+
+1. Integrator 从 exact integration SHA 预建 UAT-artifact Worktree / feature branch，allowlist 只含对应 Phase 的 UAT artifact。
+2. Adapter 复用 `gsd-verify-work` 的用户可观察验收点选择与逐项记录方法，但不调用 stock workflow entrypoint 或任何 GSD state mutation。
+3. 每个验收项只记录 `PASS`、`ISSUE` 或 `SKIPPED`、用户输入、可复现证据引用与未决风险；不得由模型根据自动化测试替用户宣告通过。
+4. 结束时只生成 / 更新 UAT artifact 并执行 changed-file containment check；不创建 gap plan、不调用 transition / execute route、不更新 Roadmap / Requirements / State。
+5. UAT artifact 通过独立 PR 交由用户 / Integrator 裁决；发现 issue 时另建精确 Task Packet，不在 UAT branch 直接修源码。
 
 ## 7. Evidence 与工具健康纪律
 
@@ -154,14 +169,15 @@ GSD 健康必须同时读取两个表面，并保留原始分类：
 |---|---|---|
 | Safe read-only | `gsd-progress` | 只读查看；关闭 / 拒绝任何自动 next-route |
 | Safe read-only | `gsd-health` | 同时读取 CJS 与 SDK surface；不运行 `--repair` / `--force` |
-| Conditional planning artifact | `gsd-import` | 只在 Integrator 预建 planning-artifact Worktree / branch；显式 manifest、owner mapping、零未裁决 blocker / warning；任何 warning 必须由用户显式批准；一个 Plan = 一个 Task Packet；postcheck 必须证明只更新一个既有 Roadmap slot、无重复 Plan、无未授权 lifecycle 变化 |
-| Conditional planning artifact | `gsd-plan-phase` | 只在 scoped canonical contract 已存在时，于预建 planning-artifact Worktree / branch 生成；独立 review 后再合并 |
-| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + exact `--files`；只写 Phase `REVIEW.md` |
+| Safe planning advisory | GSD planner / checker roles | 只读 canonical inputs 与目标 slot；输出建议，不写共享 State。Integrator 在 dedicated planning-status Worktree 中创建一对一 Plan / Task Packet 并通过 PR 合并 |
+| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + normalized absolute exact `--files`；preflight / output 证明 non-zero reviewed files 且无 path skip；只写 Phase `REVIEW.md` |
 | Conditional fix | `gsd-code-review-fix` | 预建 dedicated fix Worktree / branch；精确 Task Packet 与 containment check |
 | Conditional validation | `gsd-validate-phase` | 预建 dedicated validation Worktree / branch；补缺走独立 PR |
 | Conditional Eval audit | `gsd-eval-review` | 先有引用 canonical Eval owner 的派生 mapping；否则不构成 gate |
 | Conditional security audit | `gsd-secure-phase` | 完整 `<threat_model>` 映射安全不变量；zero-threat 不通过 |
-| Conditional UAT | `gsd-verify-work` | 只产 UAT artifact；在 gap / transition / execute route 前停止 |
+| Conditional UAT | controlled UAT adapter | 只产 UAT artifact；不调用 stock `gsd-verify-work`，不进入 gap / transition / execute route |
+| Disabled | `gsd-import`, `gsd-plan-phase` | 不运行 stock entrypoint；两者会写共享 State，import 对既有 Roadmap slot 的 replacement 也没有可机械保证的 pre-write contract |
+| Disabled | `gsd-verify-work` | 不运行；当前版本没有 `--no-transition`，可达路径会调用 `phase.complete` |
 | Disabled | `gsd-execute-phase` | 不运行；stock workflow 会枚举、合并并可能以 `--force` 清理所有非当前 Worktree，还会提前推进 phase lifecycle |
 | Disabled | `phase.complete` | 不运行；Phase 完成必须等待 post-execution quality gate 与 canonical lifecycle owner |
 | Disabled | `requirements.mark-complete` | 不运行；canonical Case lifecycle 不能由派生 checkbox 改写 |
@@ -173,13 +189,17 @@ GSD 健康必须同时读取两个表面，并保留原始分类：
 
 通用 `gsd-ingest-docs` 也保持禁用，除非另有显式 owner manifest、blocker conflict review 与独立批准；不得用通用文档优先级覆盖 specialized owner。
 
-## 9. 为什么 stock Execute / Ship 被禁用
+## 9. 为什么部分 stock lifecycle workflow 被禁用
 
 GSD 1.38.3 的 stock `gsd-execute-phase` 会管理其视野内的非当前 Worktree，包括枚举、合并、清理以及在路径上使用 `--force`；同时会调用 `roadmap.update-plan-progress` 和 `phase.complete`。这与本项目“每个 Task Packet 一个预建 Worktree、Integrator 串行合并、质量 gate 后才更新 lifecycle”的规则冲突。
 
 因此 `parallelization=false` 与 `workflow.use_worktrees=false` 是防误触控制，而不是执行授权。实际写入由 Codex Agent 在 Integrator 预建 Worktree 中完成；GSD 只提供受控 planning / review / validation artifact。
 
 Stock `gsd-ship` 只有单一 base 概念，不能同时表达 feature → integration 和 integration → `main`。所有 feature / release PR 必须显式给出 GitHub repository、head 与 base。
+
+Stock `gsd-plan-phase` 会在 artifact 生成路径中执行 `state.planned-phase`，stock `gsd-import` finalizer 会更新 Plans / State，且不能在写入前机械保证“替换一个既有 slot、绝不重复”。因此两者不作为本项目写入入口；GSD planner / checker 角色只提供只读建议，最终 Plan 由 Integrator 在 dedicated planning-status Worktree 中单写并通过 PR 合并。
+
+Stock `gsd-verify-work` 在验收通过路径上会自动进入 transition，而 transition 会调用本项目禁用的 `phase.complete`。当前版本没有 `--no-transition`，因此改用不包含 lifecycle route 的受控 UAT adapter。
 
 ## 10. Rollback
 
