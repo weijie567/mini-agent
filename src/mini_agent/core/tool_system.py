@@ -81,9 +81,7 @@ class ToolSpec(ModelVisibleModel):
         return value
 
     @field_serializer("input_schema", "output_schema")
-    def serialize_schema(
-        self, value: Mapping[str, JsonValue]
-    ) -> dict[str, JsonValue]:
+    def serialize_schema(self, value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
         return thaw_json_value(value)
 
 
@@ -136,6 +134,7 @@ def compute_model_visible_toolset_hash(tools: Sequence[ToolSpec]) -> str:
     }
     canonical_json = json.dumps(
         payload,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -152,11 +151,11 @@ class ModelVisibleToolsetArtifact(AuditOnlyModel):
 
     @model_validator(mode="after")
     def hash_matches_projection(self) -> Self:
-        expected = compute_model_visible_toolset_hash(
-            self.provider_visible_tool_specs
-        )
+        expected = compute_model_visible_toolset_hash(self.provider_visible_tool_specs)
         if self.model_visible_toolset_hash != expected:
-            raise ValueError("model_visible_toolset_hash does not match ToolSpec payload")
+            raise ValueError(
+                "model_visible_toolset_hash does not match ToolSpec payload"
+            )
         return self
 
 
@@ -184,8 +183,7 @@ class RegistrySnapshot(RuntimePrivateModel):
             registration.tool_spec.name for registration in frozen_registrations
         ]
         provider_names = [
-            registration.provider_visible_name
-            for registration in frozen_registrations
+            registration.provider_visible_name for registration in frozen_registrations
         ]
         if len(canonical_names) != len(set(canonical_names)):
             raise ValueError("canonical tool names must be unique")
@@ -197,9 +195,7 @@ class RegistrySnapshot(RuntimePrivateModel):
                 name=registration.provider_visible_name,
                 description=registration.tool_spec.description,
                 input_schema=thaw_json_value(registration.tool_spec.input_schema),
-                output_schema=thaw_json_value(
-                    registration.tool_spec.output_schema
-                ),
+                output_schema=thaw_json_value(registration.tool_spec.output_schema),
             )
             for registration in sorted(
                 frozen_registrations,
@@ -235,8 +231,7 @@ class RegistrySnapshot(RuntimePrivateModel):
             raise ValueError("registry snapshot ToolSpec hash mismatch")
 
         canonical_names = [
-            registration.tool_spec.name
-            for registration in self.canonical_registrations
+            registration.tool_spec.name for registration in self.canonical_registrations
         ]
         provider_names = [
             registration.provider_visible_name
@@ -347,11 +342,15 @@ class GateDecision(AuditOnlyModel):
             if self.resolved_canonical_tool_name is None:
                 raise ValueError("accepted GateDecision requires a canonical tool")
             if self.validated_task_state_version is None:
-                raise ValueError("accepted GateDecision requires a validated state version")
+                raise ValueError(
+                    "accepted GateDecision requires a validated state version"
+                )
             if not self.argument_binding_refs:
                 raise ValueError("accepted GateDecision requires argument bindings")
             if self.reason_code is not None:
-                raise ValueError("accepted GateDecision cannot carry a rejection reason")
+                raise ValueError(
+                    "accepted GateDecision cannot carry a rejection reason"
+                )
         else:
             if self.reason_code is None:
                 raise ValueError("rejected GateDecision requires a stable reason code")
@@ -409,9 +408,7 @@ class AuthorizedToolCommand(RuntimePrivateModel):
 
     @field_validator("argument_binding_refs")
     @classmethod
-    def argument_bindings_are_present(
-        cls, value: tuple[UUID, ...]
-    ) -> tuple[UUID, ...]:
+    def argument_bindings_are_present(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
         if not value:
             raise ValueError("AuthorizedToolCommand requires argument bindings")
         return value
@@ -470,10 +467,7 @@ class ToolCallRecord(AuditOnlyModel):
             ToolCallStatus.TIMED_OUT,
             ToolCallStatus.INTERRUPTED,
         }
-        if (
-            self.status is not ToolCallStatus.CREATED
-            and self.attempt_count < 1
-        ):
+        if self.status is not ToolCallStatus.CREATED and self.attempt_count < 1:
             raise ValueError("initiated ToolCall requires attempt_count >= 1")
         if self.status in terminal and self.finished_at is None:
             raise ValueError("terminal ToolCall requires finished_at")
@@ -494,9 +488,7 @@ class ToolCallRecord(AuditOnlyModel):
                     "interrupted ToolCall requires a safe interruption_reason"
                 )
         elif self.interruption_reason is not None:
-            raise ValueError(
-                "only interrupted ToolCall can carry interruption_reason"
-            )
+            raise ValueError("only interrupted ToolCall can carry interruption_reason")
         return self
 
 
@@ -519,9 +511,7 @@ class ToolAttemptRecord(AuditOnlyModel):
 
     @field_validator("started_at", "finished_at")
     @classmethod
-    def attempt_timestamps_are_utc(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def attempt_timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         return require_utc(value, field_name="ToolAttemptRecord timestamp")
@@ -551,9 +541,7 @@ class ToolResult(RuntimePrivateModel):
 
     @field_validator("payload")
     @classmethod
-    def payload_is_recursively_frozen(
-        cls, value: JsonValue | None
-    ) -> JsonValue | None:
+    def payload_is_recursively_frozen(cls, value: JsonValue | None) -> JsonValue | None:
         if value is None:
             return None
         return freeze_json_value(deepcopy(value))
@@ -564,9 +552,7 @@ class ToolResult(RuntimePrivateModel):
 
     @field_validator("observed_at", "completed_at")
     @classmethod
-    def result_timestamps_are_utc(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def result_timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         return require_utc(value, field_name="ToolResult timestamp")

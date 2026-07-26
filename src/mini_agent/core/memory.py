@@ -41,9 +41,7 @@ class OrderObservation(AuditOnlyModel):
 
     @field_validator("observed_at", "recorded_at", "valid_until")
     @classmethod
-    def observation_timestamps_are_utc(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def observation_timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         return require_utc(value, field_name="OrderObservation timestamp")

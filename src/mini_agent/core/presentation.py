@@ -51,9 +51,7 @@ class ClosingVariant(StrEnum):
 class PresentationPlan(ModelVisibleModel):
     """Style-only model output; all factual values stay in the safe projection."""
 
-    schema_version: Literal["presentation-plan-v1"] = (
-        PRESENTATION_PLAN_SCHEMA_VERSION
-    )
+    schema_version: Literal["presentation-plan-v1"] = PRESENTATION_PLAN_SCHEMA_VERSION
     template_id: Literal["ORDER_STATUS_SUMMARY_V1"]
     tone: PresentationTone
     opening_variant: OpeningVariant

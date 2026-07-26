@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
+from math import isfinite
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
@@ -22,15 +23,18 @@ class ContractVisibility(StrEnum):
 class ContractModel(BaseModel):
     """Strict, immutable base for deterministic boundary objects."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        validate_default=True,
+    )
 
 
 class ModelVisibleModel(ContractModel):
     """Marker base for data that may cross the model boundary."""
 
-    contract_visibility: ClassVar[ContractVisibility] = (
-        ContractVisibility.MODEL_VISIBLE
-    )
+    contract_visibility: ClassVar[ContractVisibility] = ContractVisibility.MODEL_VISIBLE
 
 
 class RuntimePrivateModel(ContractModel):
@@ -175,8 +179,7 @@ def _freeze_json_sequence(
     active_container_ids.add(container_id)
     try:
         frozen_items = tuple(
-            _freeze_json_value(item, active_container_ids)
-            for item in value
+            _freeze_json_value(item, active_container_ids) for item in value
         )
     finally:
         active_container_ids.remove(container_id)
@@ -184,15 +187,15 @@ def _freeze_json_sequence(
 
 
 def _freeze_json_value(value: Any, active_container_ids: set[int]) -> Any:
+    if isinstance(value, float) and not isfinite(value):
+        raise ValueError("JSON numbers must be finite")
     if isinstance(value, Mapping):
         return _freeze_json_mapping(
             value,
             frozen_type=FrozenJsonDict,
             active_container_ids=active_container_ids,
         )
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return _freeze_json_sequence(
             value,
             frozen_type=FrozenJsonList,
@@ -208,6 +211,8 @@ def freeze_json_value(value: Any) -> Any:
 
 
 def _thaw_json_value(value: Any, active_container_ids: set[int]) -> Any:
+    if isinstance(value, float) and not isfinite(value):
+        raise ValueError("JSON numbers must be finite")
     if isinstance(value, Mapping):
         container_id = id(value)
         if container_id in active_container_ids:
@@ -220,18 +225,13 @@ def _thaw_json_value(value: Any, active_container_ids: set[int]) -> Any:
             }
         finally:
             active_container_ids.remove(container_id)
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         container_id = id(value)
         if container_id in active_container_ids:
             raise ValueError("cyclic JSON container is not supported")
         active_container_ids.add(container_id)
         try:
-            return [
-                _thaw_json_value(item, active_container_ids)
-                for item in value
-            ]
+            return [_thaw_json_value(item, active_container_ids) for item in value]
         finally:
             active_container_ids.remove(container_id)
     return value
@@ -254,9 +254,7 @@ def find_trusted_argument_field(value: Any) -> str | None:
             found = find_trusted_argument_field(nested_value)
             if found is not None:
                 return found
-    elif isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for item in value:
             found = find_trusted_argument_field(item)
             if found is not None:

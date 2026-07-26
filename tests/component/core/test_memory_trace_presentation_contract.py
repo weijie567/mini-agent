@@ -41,9 +41,7 @@ def _summary() -> OrderSummaryProjection:
     return OrderSummaryProjection(
         order_number="O-4242",
         status=OrderStatus.SHIPPED,
-        line_items=(
-            OrderLineSummary(product_name="示例商品", quantity=2),
-        ),
+        line_items=(OrderLineSummary(product_name="示例商品", quantity=2),),
         ordered_at=NOW,
         status_updated_at=NOW + timedelta(hours=1),
     )
@@ -77,9 +75,7 @@ def test_order_projection_forbids_private_and_unapproved_fields() -> None:
 
 
 def test_not_found_result_cannot_disclose_payload_or_failure_difference() -> None:
-    safe_result = GetOrderResult(
-        outcome=GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
-    )
+    safe_result = GetOrderResult(outcome=GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE)
     assert safe_result.order_summary is None
     assert safe_result.failure_code is None
 

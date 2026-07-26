@@ -181,9 +181,7 @@ class TraceEvent(AuditOnlyModel):
             if self.tool_call_id is None:
                 raise ValueError("ToolCall lifecycle Trace requires tool_call_id")
             if self.tool_call_terminal_status is not expected_tool_status:
-                raise ValueError(
-                    "ToolCall lifecycle Trace event and status must match"
-                )
+                raise ValueError("ToolCall lifecycle Trace event and status must match")
         elif self.tool_call_terminal_status is not None:
             raise ValueError(
                 "ToolCall status requires a matching lifecycle Trace event"

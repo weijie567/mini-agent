@@ -4,12 +4,14 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 from mini_agent.core.common import (
     FrozenJsonDict,
     FrozenJsonList,
     freeze_json_value,
 )
+from mini_agent.core.request_understanding import NextMove, NextMoveKind
 from mini_agent.core.tool_system import (
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     AuthorizedToolCommand,
@@ -122,15 +124,11 @@ def test_model_visible_hash_is_order_independent_and_content_sensitive() -> None
 def test_registry_snapshot_excludes_private_registration_changes_from_hash() -> None:
     first = RegistrySnapshot.build(
         tool_registry_version="runtime-tools-v1",
-        registrations=(
-            _registration("first_read", handler_ref="handlers.first"),
-        ),
+        registrations=(_registration("first_read", handler_ref="handlers.first"),),
     )
     second = RegistrySnapshot.build(
         tool_registry_version="runtime-tools-v2",
-        registrations=(
-            _registration("first_read", handler_ref="handlers.replaced"),
-        ),
+        registrations=(_registration("first_read", handler_ref="handlers.replaced"),),
     )
 
     assert first.model_visible_toolset_hash == second.model_visible_toolset_hash
@@ -142,9 +140,9 @@ def test_registry_snapshot_excludes_private_registration_changes_from_hash() -> 
         first.tool_registry_version = "mutated"
 
     with pytest.raises(TypeError):
-        first.provider_visible_toolset[0].input_schema["properties"][
-            "injected"
-        ] = {"type": "string"}
+        first.provider_visible_toolset[0].input_schema["properties"]["injected"] = {
+            "type": "string"
+        }
 
 
 def test_toolset_json_blocks_mutation_aliases_and_preserves_hash() -> None:
@@ -202,9 +200,10 @@ def test_toolset_json_blocks_mutation_aliases_and_preserves_hash() -> None:
 
     assert "customer_id" not in str(tool_spec.model_dump())
     assert "customer_id" not in str(snapshot.model_dump())
-    assert compute_model_visible_toolset_hash(
-        snapshot.provider_visible_toolset
-    ) == original_hash
+    assert (
+        compute_model_visible_toolset_hash(snapshot.provider_visible_toolset)
+        == original_hash
+    )
 
 
 def test_direct_frozen_dict_constructor_copies_aliases_before_dtos() -> None:
@@ -314,6 +313,208 @@ def test_frozen_json_constructors_reject_cyclic_containers() -> None:
         FrozenJsonDict(cyclic_object)
     with pytest.raises(ValueError, match="cyclic JSON container"):
         FrozenJsonList(cyclic_array)
+
+
+@pytest.mark.parametrize(
+    "non_finite",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_frozen_json_constructors_reject_non_finite_numbers(
+    non_finite: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        FrozenJsonDict({"nested": [non_finite]})
+    with pytest.raises(ValueError, match="finite"):
+        FrozenJsonList(({"nested": non_finite},))
+
+
+@pytest.mark.parametrize(
+    "non_finite",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_json_contract_boundaries_reject_non_finite_numbers(
+    non_finite: float,
+) -> None:
+    unsafe_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "measurement": {
+                "type": "number",
+                "example": non_finite,
+            }
+        },
+    }
+    with pytest.raises(ValidationError, match="finite"):
+        ToolSpec(
+            name="unsafe_number_read",
+            description="Unsafe non-finite schema.",
+            input_schema=unsafe_schema,
+            output_schema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"nested": [non_finite]},
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        AuthorizedToolCommand(
+            gate_decision_id=uuid4(),
+            canonical_tool_name="get_order",
+            validated_arguments={
+                "order_id": "O-4242",
+                "metadata": {"measurement": non_finite},
+            },
+            argument_binding_refs=(uuid4(),),
+            validated_task_state_version=1,
+            registry_snapshot_ref="snapshot-safe-ref",
+            trusted_context_ref="private-context-safe-ref",
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        ToolResult(
+            tool_call_id=uuid4(),
+            canonical_tool_name="get_order",
+            outcome=ToolResultOutcome.SUCCESS,
+            payload={"nested": [non_finite]},
+            retryable=False,
+            observed_at=NOW,
+            completed_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "non_finite",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_toolset_hash_and_artifact_serialization_fail_closed_for_bypass(
+    non_finite: float,
+) -> None:
+    bypassed_spec = ToolSpec.model_construct(
+        name="bypassed_number_read",
+        description="Bypassed unsafe schema.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "measurement": {
+                    "type": "number",
+                    "example": non_finite,
+                }
+            },
+        },
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    )
+
+    with pytest.raises((ValueError, PydanticSerializationError)):
+        compute_model_visible_toolset_hash((bypassed_spec,))
+
+    bypassed_artifact = ModelVisibleToolsetArtifact.model_construct(
+        model_visible_toolset_hash=f"sha256:{'0' * 64}",
+        provider_visible_tool_specs=(bypassed_spec,),
+    )
+    with pytest.raises(PydanticSerializationError, match="finite"):
+        bypassed_artifact.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "non_finite",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+    ],
+)
+def test_tool_result_serialization_fails_closed_for_bypass(
+    non_finite: float,
+) -> None:
+    bypassed_result = ToolResult.model_construct(
+        tool_call_id=uuid4(),
+        canonical_tool_name="get_order",
+        outcome=ToolResultOutcome.SUCCESS,
+        payload={"nested": [non_finite]},
+        retryable=False,
+        observed_at=NOW,
+        completed_at=NOW,
+    )
+
+    with pytest.raises(PydanticSerializationError, match="finite"):
+        bypassed_result.model_dump_json()
+
+
+def test_finite_numbers_round_trip_through_artifact_and_tool_result() -> None:
+    tool_spec = ToolSpec(
+        name="finite_number_read",
+        description="Finite number schema.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "measurement": {
+                    "type": "number",
+                    "example": 1.25,
+                }
+            },
+        },
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    )
+    toolset_hash = compute_model_visible_toolset_hash((tool_spec,))
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=toolset_hash,
+        provider_visible_tool_specs=(tool_spec,),
+    )
+    restored_artifact = ModelVisibleToolsetArtifact.model_validate_json(
+        artifact.model_dump_json()
+    )
+
+    assert FrozenJsonDict({"measurement": 1.25})["measurement"] == 1.25
+    assert FrozenJsonList((-1.5, 0.0, 2.5)) == [-1.5, 0.0, 2.5]
+    assert restored_artifact.model_visible_toolset_hash == toolset_hash
+    assert (
+        compute_model_visible_toolset_hash(
+            restored_artifact.provider_visible_tool_specs
+        )
+        == toolset_hash
+    )
+
+    result = ToolResult(
+        tool_call_id=uuid4(),
+        canonical_tool_name="get_order",
+        outcome=ToolResultOutcome.SUCCESS,
+        payload={"measurements": [-1.5, 0.0, 2.5]},
+        retryable=False,
+        observed_at=NOW,
+        completed_at=NOW,
+    )
+    restored_result = ToolResult.model_validate_json(result.model_dump_json())
+
+    assert restored_result.model_dump(mode="json")["payload"] == {
+        "measurements": [-1.5, 0.0, 2.5]
+    }
 
 
 def test_toolset_artifact_rejects_noncanonical_schema_version() -> None:

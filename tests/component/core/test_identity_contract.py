@@ -24,9 +24,10 @@ def test_customer_context_is_runtime_private_and_requires_utc() -> None:
     )
 
     assert context.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
-    assert RuntimePrivateContext(
-        run_id=uuid4(), customer_context=context
-    ).customer_context is context
+    assert (
+        RuntimePrivateContext(run_id=uuid4(), customer_context=context).customer_context
+        is context
+    )
 
     with pytest.raises(ValidationError, match="UTC"):
         CustomerContext(
@@ -42,9 +43,7 @@ def test_customer_context_is_runtime_private_and_requires_utc() -> None:
             subject_ref="subject-safe-ref",
             customer_id="customer-private",
             auth_scopes=frozenset({"orders:read"}),
-            authenticated_at=datetime(
-                2030, 1, 1, tzinfo=timezone(timedelta(hours=8))
-            ),
+            authenticated_at=datetime(2030, 1, 1, tzinfo=timezone(timedelta(hours=8))),
             session_ref_hash="sha256:opaque-session-ref",
         )
 

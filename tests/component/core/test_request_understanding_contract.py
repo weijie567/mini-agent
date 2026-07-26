@@ -162,9 +162,7 @@ def test_output_rejects_non_current_source_and_fake_zero_version() -> None:
                     candidate_id=uuid4(),
                     operation="ADD_GOAL",
                     goal_patch="查询订单状态",
-                    input_candidates=(
-                        _candidate(message_ref=other_message_ref),
-                    ),
+                    input_candidates=(_candidate(message_ref=other_message_ref),),
                     confidence=0.9,
                 ),
             ),

@@ -179,7 +179,9 @@ class TaskStateTransition(AuditOnlyModel):
     @model_validator(mode="after")
     def transition_increments_version_once(self) -> Self:
         if self.result_state_version != self.base_state_version + 1:
-            raise ValueError("Task transition must increment state_version exactly once")
+            raise ValueError(
+                "Task transition must increment state_version exactly once"
+            )
         if self.from_status is self.to_status:
             raise ValueError("Task transition must change status")
         return self

@@ -36,9 +36,7 @@ from mini_agent.core.trace import AgentRunRecord, TraceEvent
 class SessionAuthPort(Protocol):
     """Resolve an opaque session through trusted server-side authentication."""
 
-    async def authenticate(
-        self, opaque_session_id: str
-    ) -> CustomerContext | None: ...
+    async def authenticate(self, opaque_session_id: str) -> CustomerContext | None: ...
 
 
 @runtime_checkable
@@ -84,9 +82,7 @@ class RuntimeRecordPort(Protocol):
         self, record: RequestUnderstandingRecord
     ) -> None: ...
 
-    async def append_accepted_task_delta(
-        self, record: AcceptedTaskDelta
-    ) -> None: ...
+    async def append_accepted_task_delta(self, record: AcceptedTaskDelta) -> None: ...
 
     async def save_input_binding(self, record: InputBinding) -> None: ...
 
