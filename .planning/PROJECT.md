@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；Plan 01-02 Memory owner PR 合并后的 exact head 为 `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`。
+- 当前 integration branch：`integration/e2e01-thin`；Plan 01-03 mapping 与 projection clarification 串行合并后的 exact head 为 `9602fc18148b19c841889a8041daf10ccc5b8f1c`。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- Plan 01-01 与 01-02 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；这只完成 Project Direction 与 Memory owner 契约，不改变 `E2E01-01/04` lifecycle。
-- 当前 immediate gate：合并独立 01-03 planning-status PR；随后在已从 `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b` 预建的 `codex/e2e01-01-thin-slice-persistence-mapping` branch 中只修改 `docs/implementation/e2e01-thin-slice-implementation-spec.md`。
-- 01-03 只冻结 17 项 Thin Slice scoped code/version、logical envelope / closed registry 与 01-04 exact allowlist；01-04 继续 `BLOCKED_ON_01-03_EXACT_MERGE`。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
+- Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；这只完成 Project Direction、Memory 与 Thin Slice scoped contract，不改变 `E2E01-01/04` lifecycle。
+- 当前 immediate gate：合并独立 01-04 planning-status PR；随后在已从 `9602fc18148b19c841889a8041daf10ccc5b8f1c` 预建的 `codex/e2e01-01-persistence-codec` branch 中只创建 `src/mini_agent/application/persistence.py` 与 `tests/component/application/test_persistence_contract.py`。
+- 01-03 与 clarification 已冻结 17-item registry、66 条 top-level / 7 条 child projection、strict logical codec API 与 01-04 exact allowlist；01-04 只实现该契约。01-04 merge 与 Integrator graph maintenance gate 前不派发 01-05/06/07 Runtime / Infra / Eval。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -67,7 +67,8 @@
 | 持久化投影写入前经 Pydantic serialization，并保存 schema version | 这是 Thin Slice Spec 当前可确认的 scoped 要求 | `CONFIRMED` |
 | Persistence 四轴 ownership、版本维度与 Trace shared-structure authority | 已由 Plan 01-01 / PR #12 写入 `PROJECT_DIRECTION.md`；不表示 decoder、registry、业务表或 migration 已实现 | `CONFIRMED / CONTRACT_ONLY` |
 | P0 exact-version、decode / recovery / migration runtime 行为 | 已由 Plan 01-02 / PR #14 写入 Memory owner；不表示 codec、Adapter、业务表或 recovery 已实现 | `CONFIRMED / CONTRACT_ONLY` |
-| Thin Slice 17-item item code、版本与实现 API | 由当前 01-03 Thin Slice scoped owner Packet 冻结；不得从测试 fixture 或 Python 类名动态推断 | `OPEN / PLAN_01-03_READY` |
+| Thin Slice 17-item item code、版本、projection 与实现 API | 已由 Plan 01-03 / PR #16 与 clarification PR #17 写入 Thin Slice scoped owner；不得从测试 fixture 或 Python 类名动态推断 | `CONFIRMED / CONTRACT_ONLY` |
+| 01-04 Application logical persistence codec | 只实现已批准的 closed registry / projection / child contract；不拥有授权、complete graph、physical persistence 或 migration | `READY / PLAN_01-04` |
 
 ## 完成证据规则
 
