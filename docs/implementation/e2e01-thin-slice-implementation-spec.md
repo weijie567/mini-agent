@@ -744,9 +744,20 @@ MINI_AGENT_DATABASE_URL=postgresql+psycopg://<user>:<password>@<host>:<port>/<da
 | `ObservationRecord` | Memory owner 定义的来源、类型、最小值、时间、visibility |
 | `ContextManifestRecord` | 模型调用、消息 / Task / Observation 引用、Toolset hash、redaction policy version |
 | `TraceEventRecord` | 事件类型、关联 ID、安全字段、时间 |
-| `EvalResultRecord` | Case、lane、版本 manifest、grader 结果、critical failure、trace ref |
+| `EvalResultRecord` | Schema 版本、Case、lane、attempt、状态、版本 manifest、grader 结果、critical failure、observed outcome、trace ref |
+| `EvalExecutionFailureRecord` | Schema 版本、Eval Run / Case?、lane、attempt?、failure phase、安全错误码、受限诊断 / Trace 引用、版本 manifest、发生时间 |
 
 这些是逻辑记录与行为要求，不要求一项对应一张表。物理表、Repository 数量、事务拆分和 JSON / 关系列选择属于后续 Plan 与实现决策。
+
+第一切片共享记录与 Port 冻结还必须遵守：
+
+- `RunTaskLinkRecord.base_task_state_version` 在本 Run 创建新 Task 时为 `null`，引用既有 Task 时必须为真实的 `state_version>=1`；不得用 `0` 代替不存在的版本。
+- `RunTaskLinkRecord.result_task_state_version` 在 Run 活动期间可以为 `null`，Run 进入终态时必须通过条件更新固定为该 Run 实际产生或确认的 `state_version>=1`。旧 Run 不得覆盖新 Run 的结果版本。
+- Application use case 接收完整的服务端可信 `CustomerContext`，并派生只含 `customer_id` 的不可变 Runtime-private `TrustedOwnerScope`；面向用户请求的 Conversation、Message、Task、RequestUnit、Run、Observation 与关联 Persistence Port 读取必须接收该非可选 scope，且不存在与无权访问返回相同的安全结果。
+- `TrustedOwnerScope` 只能由 Application 从认证 Adapter 提供的 `CustomerContext` 派生，不能由 HTTP body、用户消息、模型输出或普通持久化 DTO 构造；Persistence Port / Adapter 不接收 `subject_ref`、`auth_scopes`、`authenticated_at` 或 `session_ref_hash`。
+- 进程启动恢复使用独立的内部 recovery authority / claim，不复用用户请求读取接口，也不把关联记录当成授权证据。
+- Task / RequestUnit 状态更新和恢复 claim 必须携带预期状态 / 版本或使用等效 CAS，并返回明确的 applied / conflict / not-applicable 结果；Infrastructure 不能通过“先列出、再无条件覆盖”自行发明状态迁移。
+- Application 负责协调恢复事务，Core 产生合法状态迁移；Port 和 Adapter 不得复制第二套 Task、RequestUnit、Run 或 ToolCall 状态 DTO。
 
 写入顺序必须保证：
 
@@ -809,14 +820,16 @@ PROCESS_RESTART_DETECTED
 
 Application 启动时：
 
-1. 查找上一个进程留下的 `RUNNING` Run。
-2. 将其标记为 `INCOMPLETE`，`stop_reason=PROCESS_RESTART_DETECTED`。
-3. 将仍为 `CREATED/RUNNING` 的 ToolCall 标记为 `INTERRUPTED`。
-4. 将该 Run 中仍为活动状态的 Task / RequestUnit 转为 `BLOCKED`，增加状态版本并记录 `PROCESS_RESTART_DETECTED` 引用。
-5. 不重新调用模型、Tool 或 Renderer。
-6. 用户再次发送消息时创建全新 `run_id`；不从旧 step 自动继续。
+1. 通过独立内部 recovery authority 和条件 claim 查找、认领上一个进程留下的活动 `CREATED/RUNNING` Run；多个启动实例竞争时只能有一个成功认领。
+2. 将成功认领的 Run 标记为 `INCOMPLETE`，`stop_reason=PROCESS_RESTART_DETECTED`。
+3. 对仍为 `CREATED` 的 ToolCall，只有在 Tool owner 的 durable dispatch fence 已得到实现和验证时，才按 pre-dispatch 规则直接标记为 `INTERRUPTED`，保留 `attempt_count=0`，且不得伪造 `ToolAttemptRecord`。
+4. 对仍为 `RUNNING` 的 ToolCall 标记为 `INTERRUPTED`，保留既有 `attempt_count>=1` 与两阶段 attempt 记录；未完成 attempt 的 `outcome` 保持为空，不能倒填未观察到的结果。Action 已 dispatch 或无法确定是否 dispatch 时，Action Ledger 仍进入 `RESULT_UNKNOWN`。
+5. 将该 Run 中仍为活动状态的 Task / RequestUnit 以版本条件更新为 `BLOCKED`，增加状态版本并记录 `PROCESS_RESTART_DETECTED` 引用。
+6. 任一 claim 或状态条件不再匹配时返回 conflict / not-applicable，不覆盖新 Run 或其他恢复实例已经推进的状态。
+7. 不重新调用模型、Tool 或 Renderer。
+8. 用户再次发送消息时创建全新 `run_id`；不从旧 step 自动继续。
 
-这只是首切片恢复边界，不替代 Memory owner 对完整 P0 Run / Task 恢复的目标契约。
+`CREATED` Run 通常还没有下游 ToolCall 或 Task 状态需要处理，但仍必须结束为 `INCOMPLETE / PROCESS_RESTART_DETECTED`，不能永久遗留为 active。上述恢复只是首切片边界，不替代 Memory owner 对完整 P0 Run / Task 恢复的目标契约。
 
 ## 11. Trace 与隐私投影
 
@@ -992,7 +1005,7 @@ qwen_baseline
 - 普通 Trace 和 Context Manifest 不包含 RuntimePrivateContext 或原始 ToolResult。
 - 每个 Run 都有明确 stop reason。
 - Context Manifest 的 `model_visible_toolset_hash` 能解析到持久化 Toolset Artifact。
-- Eval Result 持久化并关联 `trace_ref` 和版本 manifest。
+- 每个实际执行并形成 Case `PASS / FAIL` 的 Eval Result 持久化并关联 `trace_ref` 和版本 manifest；`SKIPPED / NOT_RUN` 只关联版本 manifest，不伪造 Trace。
 
 ### 13.3 Grader 与结果
 
@@ -1017,6 +1030,7 @@ ToolsetReplayGrader
 `EvalResultRecord`：
 
 ```text
+schema_version
 eval_run_id
 case_id
 lane
@@ -1024,8 +1038,18 @@ attempt
 status: PASS | FAIL | SKIPPED | NOT_RUN
 grader_results[]
 critical_failures[]
+observed_outcome?
 trace_ref?
 version_manifest
+  dataset_version
+  candidate_version
+  baseline_version?
+  fixture_versions[]
+  model_config_version?
+  prompt_version?
+  tool_registry_version?
+  corpus_version?
+  runtime_version?
 latency_summary?
 usage_summary?
 completed_at
@@ -1034,10 +1058,15 @@ completed_at
 规则：
 
 - 离线 lane 任一断言失败即命令失败。
-- Qwen lane 不设置普通通过率门槛，但每个 Case 仍记录 PASS / FAIL。
+- Qwen lane 不设置普通通过率门槛，但每个实际执行的 Case 仍记录 PASS / FAIL。
 - 任一 Critical failure 仍使该 Case 和该 Eval Run 为 FAIL，不能被平均分抵消。
 - Qwen 波动通过重复 attempt 分开记录，不覆盖历史结果。
 - 缺少凭据或 Base URL 时，Qwen Case 必须为 `SKIPPED` 或整次 lane 为 `NOT_RUN`，不得生成 PASS。
+- `version_manifest` 是单一版本快照，至少包含真实的 `dataset_version` 与不可变 `candidate_version`；若绑定 Baseline 则记录 `baseline_version`，不得在顶层维护一套可能漂移的重复版本字段。
+- `PASS / FAIL` 必须同时具有 `observed_outcome`、`trace_ref` 和至少一个 grader result；`PASS` 不得包含 Critical failure。
+- `SKIPPED / NOT_RUN` 的 `observed_outcome`、`trace_ref`、grader results、Critical failures、latency summary 和 usage summary 必须为空；一旦形成可评价的受测结果，不得再用这两个状态掩盖执行失败。
+- 在合法的 Outcome、Trace 和 Grader 结果形成前发生的 Harness / Trace / 受测系统 / Grader 故障，追加 Eval owner 第 8.2 节定义的 `EvalExecutionFailureRecord`，使命令和 Eval Run 失败；不得伪造不完整的 Case `FAIL`。
+- 本节结果语义服从 Eval canonical owner 的第 8.2 节；具体 grader / failure 子投影由 W2 contract freeze 以 typed DTO 固定，不使用任意未校验字典。
 
 ## 14. 目标命令契约
 

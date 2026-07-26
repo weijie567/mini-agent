@@ -392,22 +392,78 @@ Trace：
 可运行 Harness 建立后，每次结果至少需要：
 
 ```text
+schema_version
 eval_run_id
 case_id
 lane
-dataset_version
-candidate_version
-baseline_version?
 attempt
 status: PASS | FAIL | SKIPPED | NOT_RUN
 grader_results[]
 critical_failures[]
-observed_outcome
-trace_ref
+observed_outcome?
+trace_ref?
+version_manifest
+  dataset_version
+  candidate_version
+  baseline_version?
+  fixture_versions[]
+  model_config_version?
+  prompt_version?
+  tool_registry_version?
+  corpus_version?
+  runtime_version?
 latency_summary?
 usage_summary?
 completed_at
 ```
+
+`version_manifest` 是该结果的单一版本快照，不再在记录顶层复制 `dataset_version`、`candidate_version` 或 `baseline_version`。其中：
+
+- `candidate_version` 标识被评价的源码 revision、build 或等价不可变候选版本，始终必填。
+- `baseline_version` 只在本次结果实际绑定或比较某个 Baseline 时存在。
+- `runtime_version` 标识 Runtime 自身版本；它可以与首版 `candidate_version` 使用同一个 revision，但两者语义不得混为一个字段。
+- Manifest 必须固定本次实际使用的 Case / Dataset、Fixture、Provider / Model 配置、Prompt、Tool Registry、Corpus 和 Runtime 的适用版本；某维度不适用时明确为空，不得填入猜测值。
+
+状态与可空字段的确定性规则：
+
+| `status` | `observed_outcome` | `trace_ref` | `grader_results[]` | `critical_failures[]` | latency / usage |
+|---|---|---|---|---|---|
+| `PASS` | 必填 | 必填 | 至少一项 | 必须为空 | 可选 |
+| `FAIL` | 必填 | 必填 | 至少一项 | 可为空；若非空仍为 `FAIL` | 可选 |
+| `SKIPPED` | 必须为空 | 必须为空 | 必须为空 | 必须为空 | 必须为空 |
+| `NOT_RUN` | 必须为空 | 必须为空 | 必须为空 | 必须为空 | 必须为空 |
+
+- `SKIPPED` 表示 Case 已被当前 lane 选择，但在任何受测执行开始前因明确的 `credential_policy` 或其他已声明前置条件而跳过。
+- `NOT_RUN` 表示整条 lane 未启动，或该 Case 没有进入本次执行；不得用它表示已经开始后发生的失败。
+- 一旦产生了可评价的受测结果，Case 结果只能是 `PASS` 或 `FAIL`；执行中断、Harness 错误或缺少预期 Case 结果不得降级为 `SKIPPED / NOT_RUN`。
+- 任一 Critical failure 强制对应 Case 与 Eval Run 为 `FAIL`；普通断言失败也可以在没有 Critical failure 时产生 `FAIL`。
+- 同一 `eval_run_id / case_id / lane` 的重复执行通过递增 `attempt` 追加记录，不能覆盖历史结果。
+
+如果 Harness、Trace Store、受测系统或 Grader 在形成合法的 `observed_outcome + trace_ref + grader_results` 前失败，不得伪造 Case `FAIL`。此时不创建不完整的 `EvalResultRecord`，而是追加：
+
+```text
+EvalExecutionFailureRecord
+  schema_version
+  eval_run_id
+  case_id?
+  lane
+  attempt?
+  failure_phase:
+    HARNESS_SETUP
+    CASE_SETUP
+    TRACE_PERSISTENCE
+    SYSTEM_UNDER_TEST
+    GRADING
+    RESULT_PERSISTENCE
+    RESULT_COMPLETENESS
+  safe_error_code
+  diagnostic_ref?
+  trace_ref?
+  version_manifest
+  occurred_at
+```
+
+该记录使对应命令和 Eval Run 失败，但不把基础设施 / Harness 故障误报成 Case 业务断言结果，也不计入 `PASS / FAIL / SKIPPED / NOT_RUN`。如果失败前已经形成满足上表的安全 Trace、Outcome 和至少一个 Grader 结果，则可以正常落盘 `FAIL`；否则 expected Case result 缺失本身由 `RESULT_COMPLETENESS` failure 记录并使命令失败。Failure Record 只保存安全 reason code 和受限诊断引用，不保存 secret、原始 Token、完整 Prompt 或不必要 PII。
 
 当前仓库没有该结果结构的实现或持久化技术选择。
 
