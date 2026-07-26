@@ -21,6 +21,7 @@ from mini_agent.application.persistence import (
     encode_persistence_record,
 )
 from mini_agent.application.records import (
+    ApplyTaskTransitionCommand,
     ConversationRecord,
     ConversationTaskLinkRecord,
     EvalExecutionFailurePhase,
@@ -34,8 +35,13 @@ from mini_agent.application.records import (
     MessageDirection,
     MessageRecord,
     RunTaskLinkRecord,
+    SaveInputBindingCommand,
+    SaveObservationCommand,
+    SaveRequestUnderstandingCommand,
+    TrustedOwnerScope,
 )
 from mini_agent.core.common import freeze_json_value
+from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
@@ -562,6 +568,216 @@ def _record_cases() -> tuple[RecordCase, ...]:
 
 def _case(record_code: P0RecordCode) -> RecordCase:
     return next(item for item in _record_cases() if item.code is record_code)
+
+
+def test_relation_aware_commands_supply_all_five_external_codec_relations() -> None:
+    binding_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
+    binding_command = SaveInputBindingCommand(
+        record=binding_case.record,
+        request_unit_id=_uuid(5),
+    )
+    binding_references = (
+        _reference(
+            "request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "request_unit_id",
+            binding_command.request_unit_id,
+        ),
+    )
+    binding_envelope = encode_persistence_record(
+        P0RecordCode.INPUT_BINDING_RECORD,
+        binding_command.record,
+        external_references=binding_references,
+    )
+
+    observation_case = _case(P0RecordCode.OBSERVATION_RECORD)
+    source_case = _case(P0RecordCode.TOOL_CALL_RECORD)
+    source_values = source_case.record.model_dump()
+    source_values.update(
+        {
+            "status": ToolCallStatus.SUCCEEDED,
+            "finished_at": UTC_NOW + timedelta(minutes=1),
+            "result_ref": _uuid(80),
+        }
+    )
+    source_tool_call = ToolCallRecord(**source_values)
+    observation_command = SaveObservationCommand(
+        owner_scope=TrustedOwnerScope.from_customer_context(
+            CustomerContext(
+                subject_ref="subject-A",
+                customer_id="customer-A",
+                auth_scopes=frozenset({"orders:read"}),
+                authenticated_at=UTC_NOW,
+                session_ref_hash="safe-session-A",
+            )
+        ),
+        observation_record=observation_case.record,
+        source_tool_call_record=source_tool_call,
+    )
+    observation_references = (
+        _reference(
+            "source_tool_call_id",
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_id",
+            observation_command.source_tool_call_record.tool_call_id,
+        ),
+        _reference(
+            "source_run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+            "run_id",
+            observation_command.source_tool_call_record.run_id,
+        ),
+        _reference(
+            "source_task_id",
+            P0RecordCode.TASK_RECORD,
+            "task_id",
+            observation_command.source_tool_call_record.task_id,
+        ),
+        _reference(
+            "source_request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "request_unit_id",
+            observation_command.source_tool_call_record.request_unit_id,
+        ),
+    )
+    observation_envelope = encode_persistence_record(
+        P0RecordCode.OBSERVATION_RECORD,
+        observation_command.observation_record,
+        external_references=observation_references,
+    )
+
+    external = (
+        *binding_envelope.record_references,
+        *observation_envelope.record_references,
+    )
+    external_relations = tuple(
+        reference
+        for reference in external
+        if (reference.relation, reference.target_record_code)
+        in {
+            ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+            ("source_tool_call_id", P0RecordCode.TOOL_CALL_RECORD),
+            ("source_run_id", P0RecordCode.AGENT_RUN_RECORD),
+            ("source_task_id", P0RecordCode.TASK_RECORD),
+            ("source_request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+        }
+    )
+    assert {
+        (reference.relation, reference.target_record_code)
+        for reference in external_relations
+    } == {
+        ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+        ("source_tool_call_id", P0RecordCode.TOOL_CALL_RECORD),
+        ("source_run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("source_task_id", P0RecordCode.TASK_RECORD),
+        ("source_request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+    }
+    assert len(external_relations) == 5
+    assert all(
+        reference.target_logical_identity[0][1]
+        != str(observation_command.source_tool_call_record.result_ref)
+        for reference in observation_references
+    )
+    assert all(
+        reference.target_logical_identity[0][1]
+        != str(observation_command.observation_record.observation_id)
+        for reference in observation_references
+    )
+
+
+def test_logical_child_commands_are_sufficient_for_the_existing_codec() -> None:
+    understanding_case = _case(P0RecordCode.REQUEST_UNDERSTANDING_RECORD)
+    understanding_command = SaveRequestUnderstandingCommand(
+        record=understanding_case.record,
+        accepted_deltas=understanding_case.logical_children,
+    )
+    understanding_envelope = encode_persistence_record(
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        understanding_command.record,
+        logical_children=understanding_command.accepted_deltas,
+    )
+    assert len(understanding_envelope.payload.logical_children) == 1
+    assert (
+        understanding_envelope.payload.logical_children[0].child_code
+        is P0LogicalChildCode.ACCEPTED_TASK_DELTA
+    )
+
+    task_case = _case(P0RecordCode.TASK_RECORD)
+    request_unit_case = _case(P0RecordCode.REQUEST_UNIT_RECORD)
+    transition = task_case.logical_children[0]
+    next_task = task_case.record
+    next_request_unit = request_unit_case.record
+    expected_task = TaskRecord(
+        **{
+            **next_task.model_dump(),
+            "status": transition.from_status,
+            "state_version": transition.base_state_version,
+            "updated_at": UTC_NOW,
+        }
+    )
+    expected_request_unit = RequestUnitRecord(
+        **{
+            **next_request_unit.model_dump(),
+            "status": transition.from_status,
+            "state_version": transition.base_state_version,
+            "observation_refs": (),
+            "updated_at": UTC_NOW,
+        }
+    )
+    transition_command = ApplyTaskTransitionCommand(
+        expected_task_record=expected_task,
+        next_task_record=next_task,
+        expected_request_unit_record=expected_request_unit,
+        next_request_unit_record=next_request_unit,
+        task_state_transition=transition,
+    )
+    task_envelope = encode_persistence_record(
+        P0RecordCode.TASK_RECORD,
+        transition_command.next_task_record,
+        logical_children=(transition_command.task_state_transition,),
+    )
+    request_unit_envelope = encode_persistence_record(
+        P0RecordCode.REQUEST_UNIT_RECORD,
+        transition_command.next_request_unit_record,
+    )
+    assert (
+        task_envelope.payload.logical_children[0].child_code
+        is P0LogicalChildCode.TASK_STATE_TRANSITION
+    )
+    assert request_unit_envelope.logical_identity == _identity(
+        "request_unit_id",
+        transition_command.next_request_unit_record.request_unit_id,
+    )
+
+
+def test_command_derived_external_relations_still_fail_closed_when_swapped() -> None:
+    observation_case = _case(P0RecordCode.OBSERVATION_RECORD)
+    references = list(observation_case.external_references)
+    run_index = next(
+        index
+        for index, reference in enumerate(references)
+        if reference.relation == "source_run_id"
+    )
+    task_index = next(
+        index
+        for index, reference in enumerate(references)
+        if reference.relation == "source_task_id"
+    )
+    references[run_index] = references[run_index].model_copy(
+        update={
+            "target_logical_identity": references[task_index].target_logical_identity
+        }
+    )
+
+    with pytest.raises(P0PersistenceIntegrityError) as raised:
+        encode_persistence_record(
+            observation_case.code,
+            observation_case.record,
+            external_references=tuple(references),
+        )
+    assert (
+        raised.value.category is P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+    )
 
 
 def test_registry_is_exact_immutable_and_closed() -> None:

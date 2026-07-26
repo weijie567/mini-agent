@@ -4,6 +4,7 @@ from typing import get_type_hints
 from uuid import UUID
 
 from mini_agent.application.ports import (
+    AgentRunHandler,
     ConversationRecordPort,
     EvalResultPort,
     GetOrderPort,
@@ -13,32 +14,31 @@ from mini_agent.application.ports import (
     SessionAuthPort,
 )
 from mini_agent.application.records import (
+    AgentRunCommand,
+    AgentRunResult,
+    ApplyRestartRecoveryCommand,
+    ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    CreateRequestUnitCommand,
+    CreateInitialTaskGraphCommand,
     CreateRunCommand,
-    CreateRunTaskLinkCommand,
-    CreateTaskCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
+    FinalizeRunCommand,
     FinalizeToolCallCommand,
     InsertOnlyWriteResult,
-    InterruptToolCallForRecoveryCommand,
-    MarkRunIncompleteForRecoveryCommand,
     NonEmptyString,
+    ObservationWriteResult,
     PositiveAttempt,
-    PositiveStateVersion,
+    ProviderProtocolError,
     RecoveryWriteResult,
-    RunTaskLinkRecord,
+    RestartRecoveryClosure,
+    SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
-    VersionedWriteResult,
 )
-from mini_agent.core.task_state import RequestUnitRecord, TaskRecord
-from mini_agent.core.tool_system import ToolCallRecord
-from mini_agent.core.trace import AgentRunRecord
 
 
 class CandidateOnlyProvider:
@@ -68,8 +68,28 @@ def test_model_provider_surface_only_proposes_validated_candidates() -> None:
     assert not hasattr(provider, "save_task")
 
 
+def test_application_inbound_handler_and_provider_failure_surface_are_exact() -> None:
+    _assert_signature(
+        AgentRunHandler.handle,
+        parameters=("command",),
+        type_hints={
+            "command": AgentRunCommand,
+            "return": AgentRunResult,
+        },
+    )
+    assert "trusted" in (AgentRunHandler.__doc__ or "").casefold()
+    provider_doc = ModelProvider.__doc__ or ""
+    assert "ProviderProtocolError" in provider_doc
+    assert "from None" in provider_doc
+    assert "__cause__" in provider_doc
+    assert "__context__" in provider_doc
+    assert "after discarding the raw exception" in provider_doc
+    assert inspect.signature(ProviderProtocolError).parameters == {}
+
+
 def test_ports_are_protocols_owned_by_application() -> None:
     assert ModelProvider._is_protocol
+    assert AgentRunHandler._is_protocol
     assert SessionAuthPort._is_protocol
     assert GetOrderPort._is_protocol
     assert ConversationRecordPort._is_protocol
@@ -78,39 +98,36 @@ def test_ports_are_protocols_owned_by_application() -> None:
     assert RestartRecoveryPort._is_protocol
 
 
-def test_runtime_record_port_preserves_append_only_causality_records() -> None:
-    assert hasattr(RuntimeRecordPort, "append_accepted_task_delta")
-    assert hasattr(RuntimeRecordPort, "append_task_state_transition")
+def test_runtime_record_port_preserves_only_safe_append_causality_records() -> None:
     assert hasattr(RuntimeRecordPort, "append_trace_event")
     assert hasattr(ConversationRecordPort, "append_message")
-    assert hasattr(RuntimeRecordPort, "compare_and_set_run_task_link")
     for bypass in (
         "save_run",
         "save_task",
         "save_request_unit",
         "save_tool_call",
         "append_tool_attempt",
+        "save_request_understanding",
+        "append_accepted_task_delta",
+        "save_input_binding",
+        "insert_task",
+        "insert_request_unit",
+        "create_run_task_link",
+        "append_task_state_transition",
+        "compare_and_set_task",
+        "compare_and_set_request_unit",
+        "transition_run_if_active",
+        "compare_and_set_run_task_link",
     ):
         assert not hasattr(RuntimeRecordPort, bypass)
+    assert not hasattr(ConversationRecordPort, "save_conversation_task_link")
 
 
-def test_initial_inserts_use_validated_commands_and_explicit_results() -> None:
+def test_independent_inserts_are_limited_to_run_and_tool_call_roots() -> None:
     insert_methods = (
         (
             RuntimeRecordPort.insert_run,
             CreateRunCommand,
-        ),
-        (
-            RuntimeRecordPort.insert_task,
-            CreateTaskCommand,
-        ),
-        (
-            RuntimeRecordPort.insert_request_unit,
-            CreateRequestUnitCommand,
-        ),
-        (
-            RuntimeRecordPort.create_run_task_link,
-            CreateRunTaskLinkCommand,
         ),
         (
             RuntimeRecordPort.insert_tool_call,
@@ -137,20 +154,64 @@ def test_initial_inserts_use_validated_commands_and_explicit_results() -> None:
         )
 
 
-def test_normal_run_transition_is_an_exact_projection_cas() -> None:
+def test_run_start_and_atomic_finalization_are_separate_exact_projection_cas() -> None:
     _assert_signature(
-        RuntimeRecordPort.transition_run_if_active,
+        RuntimeRecordPort.start_run_if_created,
         parameters=("command",),
         type_hints={
             "command": TransitionRunCommand,
             "return": ConditionalWriteResult,
         },
     )
+    _assert_signature(
+        RuntimeRecordPort.finalize_run_if_active,
+        parameters=("command",),
+        type_hints={
+            "command": FinalizeRunCommand,
+            "return": ConditionalWriteResult,
+        },
+    )
+    assert "CREATED" in (RuntimeRecordPort.start_run_if_created.__doc__ or "")
+    finalize_doc = RuntimeRecordPort.finalize_run_if_active.__doc__ or ""
+    assert "RunTaskLink" in finalize_doc
+    assert "atomically" in finalize_doc
     assert set(ConditionalWriteResult) == {
         ConditionalWriteResult.APPLIED,
         ConditionalWriteResult.PROJECTION_CONFLICT,
         ConditionalWriteResult.NOT_APPLICABLE,
     }
+
+
+def test_initial_graph_task_transition_and_observation_use_aggregate_commands() -> None:
+    contracts = (
+        (
+            RuntimeRecordPort.create_initial_task_graph_if_current,
+            CreateInitialTaskGraphCommand,
+            ConditionalWriteResult,
+        ),
+        (
+            RuntimeRecordPort.apply_task_transition_if_current,
+            ApplyTaskTransitionCommand,
+            ConditionalWriteResult,
+        ),
+        (
+            RuntimeRecordPort.save_observation,
+            SaveObservationCommand,
+            ObservationWriteResult,
+        ),
+    )
+    for method, command_type, result_type in contracts:
+        _assert_signature(
+            method,
+            parameters=("command",),
+            type_hints={
+                "command": command_type,
+                "return": result_type,
+            },
+        )
+    observation_doc = RuntimeRecordPort.save_observation.__doc__ or ""
+    assert "owner graph" in observation_doc
+    assert "owner_scope" in observation_doc
 
 
 def test_owner_scoped_reads_require_minimal_trusted_owner_scope() -> None:
@@ -207,57 +268,14 @@ def test_owner_scoped_read_shapes_hide_absent_vs_foreign_resources() -> None:
         assert "tuple[" in str(inspect.signature(method).return_annotation)
 
 
-def test_state_writes_expose_explicit_version_conflict_semantics() -> None:
-    assert set(VersionedWriteResult) == {
-        VersionedWriteResult.APPLIED,
-        VersionedWriteResult.VERSION_CONFLICT,
-        VersionedWriteResult.NOT_APPLICABLE,
+def test_split_state_and_link_writes_are_not_exposed() -> None:
+    removed = {
+        "append_task_state_transition",
+        "compare_and_set_task",
+        "compare_and_set_request_unit",
+        "compare_and_set_run_task_link",
     }
-    state_methods = (
-        (
-            RuntimeRecordPort.compare_and_set_task,
-            TaskRecord,
-        ),
-        (
-            RuntimeRecordPort.compare_and_set_request_unit,
-            RequestUnitRecord,
-        ),
-        (
-            RestartRecoveryPort.compare_and_set_task_for_restart,
-            TaskRecord,
-        ),
-        (
-            RestartRecoveryPort.compare_and_set_request_unit_for_restart,
-            RequestUnitRecord,
-        ),
-    )
-    for method, record_type in state_methods:
-        _assert_signature(
-            method,
-            parameters=("record", "expected_state_version"),
-            type_hints={
-                "record": record_type,
-                "expected_state_version": PositiveStateVersion,
-                "return": VersionedWriteResult,
-            },
-        )
-
-    link_methods = (
-        RuntimeRecordPort.compare_and_set_run_task_link,
-        RestartRecoveryPort.compare_and_set_run_task_link_for_restart,
-    )
-    for method in link_methods:
-        _assert_signature(
-            method,
-            parameters=("record", "expected_result_task_state_version"),
-            type_hints={
-                "record": RunTaskLinkRecord,
-                "expected_result_task_state_version": (
-                    PositiveStateVersion | None
-                ),
-                "return": VersionedWriteResult,
-            },
-        )
+    assert all(not hasattr(RuntimeRecordPort, name) for name in removed)
 
 
 def test_tool_dispatch_requires_an_explicit_durable_fence_result() -> None:
@@ -309,65 +327,38 @@ def test_restart_recovery_is_a_system_only_data_capability() -> None:
         )
         if not name.startswith("_")
     }
-    assert "claim_and_mark_run_incomplete_if_active" in method_names
-    assert "interrupt_tool_call_if_active" in method_names
-    assert {
+    assert method_names == {
+        "load_next_restart_recovery_closure",
+        "claim_and_apply_restart_recovery",
+    }
+    removed = {
         "list_runs_pending_restart_recovery",
         "list_tool_calls_pending_restart_recovery",
         "list_run_task_links_pending_restart_recovery",
         "list_tasks_pending_restart_recovery",
         "list_request_units_pending_restart_recovery",
-    }.issubset(method_names)
+        "claim_and_mark_run_incomplete_if_active",
+        "interrupt_tool_call_if_active",
+        "compare_and_set_run_task_link_for_restart",
+        "compare_and_set_task_for_restart",
+        "compare_and_set_request_unit_for_restart",
+    }
+    assert method_names.isdisjoint(removed)
     assert not any(
         forbidden in name
         for name in method_names
         for forbidden in ("execute", "resume", "invoke", "callback")
     )
     _assert_signature(
-        RestartRecoveryPort.list_runs_pending_restart_recovery,
+        RestartRecoveryPort.load_next_restart_recovery_closure,
         parameters=(),
-        type_hints={"return": tuple[AgentRunRecord, ...]},
-    )
-    recovery_lists = (
-        (
-            RestartRecoveryPort.list_tool_calls_pending_restart_recovery,
-            tuple[ToolCallRecord, ...],
-        ),
-        (
-            RestartRecoveryPort.list_run_task_links_pending_restart_recovery,
-            tuple[RunTaskLinkRecord, ...],
-        ),
-        (
-            RestartRecoveryPort.list_tasks_pending_restart_recovery,
-            tuple[TaskRecord, ...],
-        ),
-        (
-            RestartRecoveryPort.list_request_units_pending_restart_recovery,
-            tuple[RequestUnitRecord, ...],
-        ),
-    )
-    for method, return_type in recovery_lists:
-        _assert_signature(
-            method,
-            parameters=("run_id",),
-            type_hints={
-                "run_id": UUID,
-                "return": return_type,
-            },
-        )
-    _assert_signature(
-        RestartRecoveryPort.claim_and_mark_run_incomplete_if_active,
-        parameters=("command",),
-        type_hints={
-            "command": MarkRunIncompleteForRecoveryCommand,
-            "return": RecoveryWriteResult,
-        },
+        type_hints={"return": RestartRecoveryClosure | None},
     )
     _assert_signature(
-        RestartRecoveryPort.interrupt_tool_call_if_active,
+        RestartRecoveryPort.claim_and_apply_restart_recovery,
         parameters=("command",),
         type_hints={
-            "command": InterruptToolCallForRecoveryCommand,
+            "command": ApplyRestartRecoveryCommand,
             "return": RecoveryWriteResult,
         },
     )
@@ -384,12 +375,25 @@ def test_restart_recovery_is_a_system_only_data_capability() -> None:
         "Callable",
     ):
         assert forbidden_type not in annotations
-    assert "CREATED or RUNNING" in (
-        RestartRecoveryPort.list_runs_pending_restart_recovery.__doc__ or ""
-    )
+    load_doc = RestartRecoveryPort.load_next_restart_recovery_closure.__doc__ or ""
+    normalized_load_doc = " ".join(load_doc.split())
+    assert "None only" in normalized_load_doc
+    assert "P0PersistenceIntegrityError" in normalized_load_doc
+    assert "snapshot" in normalized_load_doc
+    assert "closed-set completeness" in normalized_load_doc
+    assert "LIMIT 2" in normalized_load_doc
+    assert "stream cutoff" in normalized_load_doc
+    assert "before materializing" in normalized_load_doc
+    apply_doc = RestartRecoveryPort.claim_and_apply_restart_recovery.__doc__ or ""
+    assert "exact closure fence" in apply_doc
+    assert "zero writes" in apply_doc
+    assert "RUNNING ACTION" in apply_doc
+    assert "RECONCILIATION_REQUIRED" in apply_doc
+    assert "RESULT_UNKNOWN" in apply_doc
+    assert "neither INTERRUPTED nor any Run/Task/link" in apply_doc
     assert set(RecoveryWriteResult) == {
         RecoveryWriteResult.APPLIED,
-        RecoveryWriteResult.STATUS_CONFLICT,
+        RecoveryWriteResult.CLOSURE_CONFLICT,
         RecoveryWriteResult.NOT_APPLICABLE,
         RecoveryWriteResult.RECONCILIATION_REQUIRED,
     }

@@ -6,31 +6,33 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from mini_agent.application.records import (
+    AgentRunCommand,
+    AgentRunResult,
+    ApplyRestartRecoveryCommand,
+    ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    CreateRequestUnitCommand,
+    CreateInitialTaskGraphCommand,
     CreateRunCommand,
-    CreateRunTaskLinkCommand,
-    CreateTaskCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
+    FinalizeRunCommand,
     FinalizeToolCallCommand,
     InsertOnlyWriteResult,
-    InterruptToolCallForRecoveryCommand,
-    MarkRunIncompleteForRecoveryCommand,
     MessageRecord,
     NonEmptyString,
+    ObservationWriteResult,
     PositiveAttempt,
-    PositiveStateVersion,
     RecoveryWriteResult,
+    RestartRecoveryClosure,
     RunTaskLinkRecord,
+    SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
-    VersionedWriteResult,
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, OrderObservation
@@ -49,7 +51,6 @@ from mini_agent.core.task_state import (
     RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
-    TaskStateTransition,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
@@ -67,8 +68,21 @@ class SessionAuthPort(Protocol):
 
 
 @runtime_checkable
+class AgentRunHandler(Protocol):
+    """Application use case accepting only trusted identity plus bounded message."""
+
+    async def handle(self, command: AgentRunCommand) -> AgentRunResult: ...
+
+
+@runtime_checkable
 class ModelProvider(Protocol):
-    """Return candidates only; implementations cannot mutate state or run Tools."""
+    """Return candidates only; implementations cannot mutate state or run Tools.
+
+    An Adapter maps an untrusted response violation to a fresh parameterless
+    ``ProviderProtocolError`` only after discarding the raw exception. The raised
+    bounded signal must have ``__cause__`` and ``__context__`` set to ``None``;
+    suppressing display with ``raise ... from None`` alone does not erase context.
+    """
 
     async def propose_next_move(
         self, request: RequestUnderstandingInput
@@ -106,10 +120,6 @@ class ConversationRecordPort(Protocol):
     async def save_conversation(self, record: ConversationRecord) -> None: ...
 
     async def append_message(self, record: MessageRecord) -> None: ...
-
-    async def save_conversation_task_link(
-        self, record: ConversationTaskLinkRecord
-    ) -> None: ...
 
     async def load_conversation_for_owner(
         self,
@@ -151,38 +161,33 @@ class RuntimeRecordPort(Protocol):
         """Insert a validated CREATED Run; never overwrite its identity."""
         ...
 
-    async def transition_run_if_active(
+    async def start_run_if_created(
         self,
         command: TransitionRunCommand,
     ) -> ConditionalWriteResult:
-        """CAS an exact active Run projection through a normal transition."""
+        """CAS exactly CREATED to RUNNING without changing stable fields."""
         ...
 
-    async def save_request_understanding(
-        self, record: RequestUnderstandingRecord
-    ) -> None: ...
-
-    async def append_accepted_task_delta(self, record: AcceptedTaskDelta) -> None: ...
-
-    async def save_input_binding(self, record: InputBinding) -> None: ...
-
-    async def insert_task(
+    async def finalize_run_if_active(
         self,
-        command: CreateTaskCommand,
-    ) -> InsertOnlyWriteResult:
-        """Insert only a validated state-version-1 Task; never upsert."""
+        command: FinalizeRunCommand,
+    ) -> ConditionalWriteResult:
+        """Finalize RUNNING Run and every RunTaskLink atomically against Tasks."""
         ...
 
-    async def insert_request_unit(
+    async def create_initial_task_graph_if_current(
         self,
-        command: CreateRequestUnitCommand,
-    ) -> InsertOnlyWriteResult:
-        """Insert only a validated state-version-1 RequestUnit; never upsert."""
+        command: CreateInitialTaskGraphCommand,
+    ) -> ConditionalWriteResult:
+        """Conditionally insert the complete owner-bound initial graph atomically."""
         ...
 
-    async def append_task_state_transition(
-        self, record: TaskStateTransition
-    ) -> None: ...
+    async def apply_task_transition_if_current(
+        self,
+        command: ApplyTaskTransitionCommand,
+    ) -> ConditionalWriteResult:
+        """Conditionally advance Task, RequestUnit and transition atomically."""
+        ...
 
     async def save_context_manifest(self, record: ContextManifest) -> None: ...
 
@@ -217,43 +222,25 @@ class RuntimeRecordPort(Protocol):
         """CAS expected RUNNING/started-attempt projections and finalize together."""
         ...
 
-    async def save_observation(self, record: OrderObservation) -> None: ...
+    async def save_observation(
+        self,
+        command: SaveObservationCommand,
+    ) -> ObservationWriteResult:
+        """Insert/replay only against the exact successful source ToolCall.
+
+        The Adapter must revalidate the persisted ToolCall/Run/Task/RequestUnit
+        owner graph against ``command.owner_scope``; persisted identifiers alone
+        never authorize the write.
+
+        An identical complete envelope and source projection returns
+        ALREADY_APPLIED. Source drift returns SOURCE_PROJECTION_CONFLICT with
+        zero writes. A reused Observation identity with different facts,
+        envelope metadata, or source references raises
+        ``P0PersistenceIntegrityError`` rather than returning a result value.
+        """
+        ...
 
     async def append_trace_event(self, record: TraceEvent) -> None: ...
-
-    async def create_run_task_link(
-        self,
-        command: CreateRunTaskLinkCommand,
-    ) -> InsertOnlyWriteResult:
-        """Insert only a validated active link; never overwrite its identity."""
-        ...
-
-    async def compare_and_set_run_task_link(
-        self,
-        record: RunTaskLinkRecord,
-        *,
-        expected_result_task_state_version: PositiveStateVersion | None,
-    ) -> VersionedWriteResult:
-        """Finalize a terminal Run link only from its expected projection."""
-        ...
-
-    async def compare_and_set_task(
-        self,
-        record: TaskRecord,
-        *,
-        expected_state_version: PositiveStateVersion,
-    ) -> VersionedWriteResult:
-        """Apply only from the expected Task version."""
-        ...
-
-    async def compare_and_set_request_unit(
-        self,
-        record: RequestUnitRecord,
-        *,
-        expected_state_version: PositiveStateVersion,
-    ) -> VersionedWriteResult:
-        """Apply only from the expected RequestUnit version."""
-        ...
 
     async def load_run_for_owner(
         self,
@@ -410,87 +397,42 @@ class EvalResultPort(Protocol):
 
 @runtime_checkable
 class RestartRecoveryPort(Protocol):
-    """Recovery boundary; this Protocol alone does not verify an Adapter."""
+    """Recovery boundary; this Protocol alone does not verify an Adapter.
 
-    async def list_runs_pending_restart_recovery(
+    Infrastructure owns database closed-set completeness. It must strict-decode
+    the complete owner-root graph under one transactionally consistent snapshot
+    or equivalent fence; the Application closure validates only the supplied
+    graph and never proves that no row was omitted.
+    """
+
+    async def load_next_restart_recovery_closure(
         self,
-    ) -> tuple[AgentRunRecord, ...]:
-        """Return only active Runs left CREATED or RUNNING."""
-        ...
+    ) -> RestartRecoveryClosure | None:
+        """Return None only when no active candidate exists.
 
-    async def list_tool_calls_pending_restart_recovery(
-        self,
-        *,
-        run_id: UUID,
-    ) -> tuple[ToolCallRecord, ...]:
-        """Return only CREATED/RUNNING ToolCalls for the Run."""
-        ...
-
-    async def list_run_task_links_pending_restart_recovery(
-        self,
-        *,
-        run_id: UUID,
-    ) -> tuple[RunTaskLinkRecord, ...]:
-        """Return only the Run-to-Task version projections needed for recovery."""
-        ...
-
-    async def list_tasks_pending_restart_recovery(
-        self,
-        *,
-        run_id: UUID,
-    ) -> tuple[TaskRecord, ...]:
-        """Return only still-active Tasks linked to the interrupted Run."""
-        ...
-
-    async def list_request_units_pending_restart_recovery(
-        self,
-        *,
-        run_id: UUID,
-    ) -> tuple[RequestUnitRecord, ...]:
-        """Return only still-active RequestUnits linked to the interrupted Run."""
-        ...
-
-    async def claim_and_mark_run_incomplete_if_active(
-        self,
-        command: MarkRunIncompleteForRecoveryCommand,
-    ) -> RecoveryWriteResult:
-        """Atomically claim and close a Run only while CREATED or RUNNING."""
-        ...
-
-    async def interrupt_tool_call_if_active(
-        self,
-        command: InterruptToolCallForRecoveryCommand,
-    ) -> RecoveryWriteResult:
-        """CAS a safely interruptible call without changing its attempt count.
-
-        A CREATED pre-dispatch call retains attempt_count=0. A dispatched ACTION
-        returns RECONCILIATION_REQUIRED and stays on its RESULT_UNKNOWN path.
+        Decode, owner-graph, cardinality, or database closed-set completeness
+        failure raises ``P0PersistenceIntegrityError`` and keeps readiness failed;
+        it never returns a partial closure or skips the corrupt candidate.
+        Infrastructure proves that completeness in one consistent snapshot/fence.
+        For every capped closure family it must use ``LIMIT 2`` or an equivalent
+        stream cutoff in that same snapshot/fence and detect a second row before
+        materializing the tuple. Cap overflow is a bounded integrity failure that
+        keeps readiness failed; an Adapter must not first load an unbounded set.
         """
         ...
 
-    async def compare_and_set_run_task_link_for_restart(
+    async def claim_and_apply_restart_recovery(
         self,
-        record: RunTaskLinkRecord,
-        *,
-        expected_result_task_state_version: PositiveStateVersion | None,
-    ) -> VersionedWriteResult:
-        """Finalize a recovery link only from its expected projection."""
-        ...
+        command: ApplyRestartRecoveryCommand,
+    ) -> RecoveryWriteResult:
+        """Revalidate the exact closure fence and apply all projections atomically.
 
-    async def compare_and_set_task_for_restart(
-        self,
-        record: TaskRecord,
-        *,
-        expected_state_version: PositiveStateVersion,
-    ) -> VersionedWriteResult:
-        """Block a Task only from the recovery scan's expected version."""
-        ...
-
-    async def compare_and_set_request_unit_for_restart(
-        self,
-        record: RequestUnitRecord,
-        *,
-        expected_state_version: PositiveStateVersion,
-    ) -> VersionedWriteResult:
-        """Block a RequestUnit only from the recovery scan's expected version."""
+        Any fence or decoded projection change returns CLOSURE_CONFLICT with zero
+        writes. NOT_APPLICABLE and RECONCILIATION_REQUIRED remain distinct and
+        also guarantee zero writes. A RUNNING ACTION is always
+        RECONCILIATION_REQUIRED: its candidate interruption projection may be
+        carried for bijection, but neither INTERRUPTED nor any Run/Task/link
+        projection may commit; Action RESULT_UNKNOWN reconciliation remains the
+        Tool/Action owner path. Integrity failure raises instead of returning.
+        """
         ...
