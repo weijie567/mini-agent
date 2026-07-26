@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "2"
+current_plan: "3"
 status: "in_progress"
-last_updated: "2026-07-26T12:26:28Z"
-last_activity: "2026-07-26 — Plan 01-01 evidence indexed; Plan 01-02 passed controlled GSD Planner/Checker with 0 issues"
+last_updated: "2026-07-26T13:59:11Z"
+last_activity: "2026-07-26 — Plan 01-03 controlled planning adapter passed independent Checker review with 0 unresolved findings"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,28 +33,28 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 2
+Current Plan: 3
 Total Phases: 6
 Total Plans in Phase: 8
-Status: Plan 01-02 ready / in progress
+Status: Plan 01-03 ready / in progress
 Last Activity: 2026-07-26
-Last Activity Description: Plan 01-01 planning PR #11 与 owner PR #12 已合并；01-02 单 owner Task Packet 经受控 GSD Planner 修订并由 Plan Checker 以 0 issues 通过
+Last Activity Description: Plan 01-03 初审发现的 4 HIGH / 2 MEDIUM 及后续 lifecycle、logical child 与 correlation 问题均已修复；独立 Checker 复审为 PASS（0 unresolved）
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 2 of 8
-Status: `ACTIVE / PLAN_01-02_READY`
-Last activity: 2026-07-26 — 01-01 exact owner merge 已建立 Summary；01-02 planning-status 与 Memory execution 使用隔离 branch
+Plan: 3 of 8
+Status: `ACTIVE / PLAN_01-03_READY`
+Last activity: 2026-07-26 — 01-03 planning-status 已通过独立 Checker；等待 exact-head 提交、PR 与合并
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 合并 01-02 planning-status PR，使 `.planning/phases/01-cycle-1-e2e-01/01-02-PLAN.md` 成为唯一派生 Plan / Task Packet。
-2. 从 planning-status merge 解析并记录 exact merge SHA / Plan blob，证明其只含声明的 planning-status 文件且 Memory owner 相对 `c96dea9...` byte-unchanged。
-3. 在已从 `c96dea9...` 预建的 `codex/e2e01-01-memory-persistence-contract` branch 只修改 `docs/architecture/memory-design-reference.md`，通过 exact-head review 与 PR 后再生成 01-03。
-4. 只有 01-03 合并后才生成 01-04 implementation Task Packet；01-04 合并前不派发 01-05/06/07 Runtime / Infra / Eval。
+1. 合并 01-03 planning-status PR，使 `.planning/phases/01-cycle-1-e2e-01/01-03-PLAN.md` 与 `01-02-SUMMARY.md` 成为唯一派生 Task Packet / evidence index。
+2. 从 planning-status merge 捕获 exact merge SHA / Plan blob / Summary blob，证明它只含声明的八个 planning-status 文件，且 Thin Slice Spec 相对 `af5afd2...` byte-unchanged。
+3. 在已从 `af5afd2...` 预建的 `codex/e2e01-01-thin-slice-persistence-mapping` branch 只修改 `docs/implementation/e2e01-thin-slice-implementation-spec.md`，冻结 exact 17-item mapping、closed codec / registry 与 01-04 two-file allowlist。
+4. 只有 01-03 exact-head PR 合并后才生成 01-04 implementation Task Packet；01-04 合并前不派发 01-05/06/07 Runtime / Infra / Eval。
 
 ## Decisions
 
@@ -66,9 +66,10 @@ Progress: `░░░░░░░░░░` 0%
 
 ## Blockers
 
-- `CONFIRMED / CONTRACT_ONLY`: persistence 四轴 ownership、五类版本维度与 Trace shared-structure authority 已由 01-01 / PR #12 写入 Project Direction；这不表示 codec、registry、业务表或 migration 已实现。
-- `OPEN / PLAN_01-02_READY`: Memory exact-version、decode / integrity failure、startup recovery readiness 与 migration runtime 边界等待 01-02 owner PR；Thin Slice 17-item code/version/API 继续等待 01-03。
-- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 本 planning tree 的 SDK health 为 5×`W006`（后续 Phase 目录按治理规则尚未创建）和 1×`I001`（01-02 正在执行且尚无 Summary）；CJS health 为时间敏感的 8×`W017`（已完成、保留作审计的旧 Worktree）和同一 1×`I001`。两者均为 `errors=[]`、`repairable=0`；禁止按工具建议运行 `--repair`、`--force` 或清理项目 Worktree。
+- `CONFIRMED / CONTRACT_ONLY`: persistence 四轴 ownership、五类版本维度与 Trace shared-structure authority 已由 01-01 / PR #12 写入 Project Direction；Memory exact-version、owner binding、graph closure、recovery readiness 与 migration runtime 行为已由 01-02 / PR #14 写入 Memory owner；这些都不表示 codec、registry、Adapter、业务表或 migration 已实现。
+- `OPEN / PLAN_01-03_READY`: Thin Slice 17-item code/version、logical envelope、closed registry / codec API 与 01-04 exact allowlist 等待 01-03 owner PR；现有测试 fixture 的 version 字符串不能升级为 canonical。
+- `OPEN / IMPLEMENTATION_GAP`: 当前 `RestartRecoveryPort` 尚无 Memory 15.2 所要求的同一 snapshot / fence + closed-set claim 证明；01-03/01-04 只冻结并实现 logical codec primitives，完整 graph / fenced claim 留给后续 Runtime / Infra Packet，不得误报为已实现。
+- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: final planning tree 的 SDK health 为 `degraded`（0 error、5×`W006`：Phase 2–6 尚无目录、1×`I001`：01-03 尚无 Summary、0 repairable）；CJS health 为 `degraded`（0 error、11×`W017`：保留的审计 / 执行 Worktree、同一 `I001`、0 repairable）。两表面对象模型不同；这些是已分类的非阻断状态，不运行 `--repair`、`--force` 或 Worktree 清理。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -78,5 +79,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-26
-Stopped At: Plan 01-02 planning-status preparation
-Resume File: [phases/01-cycle-1-e2e-01/01-02-PLAN.md](phases/01-cycle-1-e2e-01/01-02-PLAN.md)
+Stopped At: Plan 01-03 planning-status exact-head publication
+Resume File: [phases/01-cycle-1-e2e-01/01-03-PLAN.md](phases/01-cycle-1-e2e-01/01-03-PLAN.md)
