@@ -5,11 +5,17 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from mini_agent.core.request_understanding import NextMove
+from mini_agent.application.records import ConditionalWriteResult
+from mini_agent.core.presentation import PresentationPlan
+from mini_agent.core.request_understanding import (
+    NextMove,
+    RequestUnderstandingOutput,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -18,6 +24,7 @@ CASES_PATH = REPO_ROOT / "evals/cases/e2e01-thin-slice.v1.json"
 SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-thin-slice.v1.json"
 LANES_PATH = REPO_ROOT / "evals/lanes/e2e01-thin-slice.v1.json"
 MANIFEST_PATH = REPO_ROOT / "evals/manifests/e2e01-thin-slice.v1.json"
+SPEC_PATH = REPO_ROOT / "docs/implementation/e2e01-thin-slice-implementation-spec.md"
 
 ARTIFACT_PATHS = (
     FIXTURE_PATH,
@@ -267,16 +274,10 @@ def _all_string_values(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     if isinstance(value, list):
-        return [
-            nested
-            for item in value
-            for nested in _all_string_values(item)
-        ]
+        return [nested for item in value for nested in _all_string_values(item)]
     if isinstance(value, dict):
         return [
-            nested
-            for item in value.values()
-            for nested in _all_string_values(item)
+            nested for item in value.values() for nested in _all_string_values(item)
         ]
     return []
 
@@ -331,26 +332,20 @@ def test_fixture_is_the_single_synthetic_source_for_all_consumers() -> None:
         )
     }
 
-    sessions = {
-        session["session_id"]: session
-        for session in fixture["sessions"]
-    }
+    sessions = {session["session_id"]: session for session in fixture["sessions"]}
     assert set(sessions) == {"p0-session-alice", "p0-session-bob"}
     assert sessions["p0-session-alice"]["trusted_customer_id"] == "customer-A"
     assert sessions["p0-session-bob"]["trusted_customer_id"] == "customer-B"
-    assert {
-        session["trust_boundary"]
-        for session in sessions.values()
-    } == {"SERVER_SIDE_FIXTURE_ONLY"}
+    assert {session["trust_boundary"] for session in sessions.values()} == {
+        "SERVER_SIDE_FIXTURE_ONLY"
+    }
 
     orders = {
-        order["safe_projection"]["order_number"]: order
-        for order in fixture["orders"]
+        order["safe_projection"]["order_number"]: order for order in fixture["orders"]
     }
     assert set(orders) == {"O-1001", "O-2001"}
     assert {
-        order["safe_projection"]["status"]
-        for order in fixture["orders"]
+        order["safe_projection"]["status"] for order in fixture["orders"]
     } <= ALLOWED_ORDER_STATUSES
     assert orders["O-1001"] == {
         "fixture_ref": "order:O-1001",
@@ -399,8 +394,7 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
     assert len(case_ids) == len(set(case_ids))
 
     shared_expectation_ids = {
-        expectation["expectation_id"]
-        for expectation in dataset["shared_expectations"]
+        expectation["expectation_id"] for expectation in dataset["shared_expectations"]
     }
     assert len(shared_expectation_ids) == len(dataset["shared_expectations"])
     assert all(
@@ -413,8 +407,7 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
         assert case["lifecycle_status"] == "CONTRACT_DEFINED"
         assert len(case["requirement_refs"]) >= 3
         assert all(
-            requirement_ref.startswith("docs/")
-            and "::" in requirement_ref
+            requirement_ref.startswith("docs/") and "::" in requirement_ref
             for requirement_ref in case["requirement_refs"]
         )
         assert set(case["scope_levels"]) == {
@@ -424,36 +417,24 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
         }
         assert case["quality_dimensions"]
         assert case["input"]["messages"]
-        assert (
-            case["input"]["trusted_context_fixture_ref"]
-            in fixture_refs
-        )
+        assert case["input"]["trusted_context_fixture_ref"] in fixture_refs
         assert set(case["input"]["environment_fixture_refs"]) <= fixture_refs
         assert case["input"]["model_script_refs"]
         required_events = set(case["expectations"]["required_events"])
         forbidden_events = set(case["expectations"]["forbidden_events"])
-        assert (
-            MANDATORY_REQUIRED_EVENTS_BY_CASE[case["case_id"]]
-            <= required_events
-        )
-        assert (
-            MANDATORY_FORBIDDEN_EVENTS_BY_CASE[case["case_id"]]
-            <= forbidden_events
-        )
+        assert MANDATORY_REQUIRED_EVENTS_BY_CASE[case["case_id"]] <= required_events
+        assert MANDATORY_FORBIDDEN_EVENTS_BY_CASE[case["case_id"]] <= forbidden_events
         assert required_events.isdisjoint(forbidden_events)
         assert required_events | forbidden_events <= TRACE_EVENT_VOCABULARY
 
-        event_count_assertions = case["expectations"][
-            "event_count_assertions"
-        ]
+        event_count_assertions = case["expectations"]["event_count_assertions"]
         event_counts = {
             assertion["event"]: assertion["count"]
             for assertion in event_count_assertions
         }
         assert len(event_counts) == len(event_count_assertions)
         assert all(
-            assertion["operator"] == "EQUALS"
-            for assertion in event_count_assertions
+            assertion["operator"] == "EQUALS" for assertion in event_count_assertions
         )
         assert (
             EXPECTED_EVENT_COUNTS_BY_CASE[case["case_id"]].items()
@@ -462,36 +443,23 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
         assert case["expectations"]["state_assertions"]
         assert case["expectations"]["disclosure_assertions"]
         assert case["expectations"]["critical_failure_refs"]
-        assert (
-            set(case["shared_expectation_refs"])
-            == shared_expectation_ids
-        )
+        assert set(case["shared_expectation_refs"]) == shared_expectation_ids
         assert set(case["grading"]["graders"]) <= ALLOWED_GRADERS
         assert case["grading"]["graders"]
         assert case["version_manifest"] == {
             "dataset_version": manifest["versions"]["dataset_version"],
-            "fixture_versions": [
-                manifest["versions"]["fixture_version"]
-            ],
+            "fixture_versions": [manifest["versions"]["fixture_version"]],
             "model_config_version": (
                 "scripted-model-provider-config-v1"
-                if (
-                    "SEC-" in case["case_id"]
-                    or "FAULT-" in case["case_id"]
-                )
+                if ("SEC-" in case["case_id"] or "FAULT-" in case["case_id"])
                 else "BOUND_BY_LANE"
             ),
             "prompt_version": manifest["versions"]["prompt_version"],
-            "tool_registry_version": manifest["versions"][
-                "tool_registry_version"
-            ],
+            "tool_registry_version": manifest["versions"]["tool_registry_version"],
             "runtime_version": manifest["versions"]["runtime_version"],
         }
 
-    assert {
-        case["lifecycle_status"]
-        for case in cases
-    } == {"CONTRACT_DEFINED"}
+    assert {case["lifecycle_status"] for case in cases} == {"CONTRACT_DEFINED"}
     assert manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
     assert manifest["eval_result_artifacts_created"] is False
     assert manifest["baseline_result_artifacts_created"] is False
@@ -499,10 +467,7 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
 
 def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
     dataset = _load_json(CASES_PATH)
-    cases = {
-        case["case_id"]: case
-        for case in dataset["cases"]
-    }
+    cases = {case["case_id"]: case for case in dataset["cases"]}
 
     assert {
         case_id
@@ -514,9 +479,7 @@ def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
     }
 
     for case in cases.values():
-        variants = case["expectations"].get(
-            "trace_expectation_variants"
-        )
+        variants = case["expectations"].get("trace_expectation_variants")
         if variants is None:
             continue
 
@@ -531,64 +494,340 @@ def test_parameterized_cases_define_complete_trace_variant_coverage() -> None:
             forbidden_events = set(variant["forbidden_events"])
             assert case_required <= required_events
             assert required_events.isdisjoint(forbidden_events)
-            assert (
-                required_events | forbidden_events
-                <= TRACE_EVENT_VOCABULARY
-            )
+            assert required_events | forbidden_events <= TRACE_EVENT_VOCABULARY
 
-            event_count_assertions = variant[
-                "event_count_assertions"
-            ]
+            event_count_assertions = variant["event_count_assertions"]
             assert len(event_count_assertions) == len(
-                {
-                    assertion["event"]
-                    for assertion in event_count_assertions
-                }
+                {assertion["event"] for assertion in event_count_assertions}
             )
             assert all(
-                assertion["operator"] == "EQUALS"
-                and assertion["count"] >= 0
+                assertion["operator"] == "EQUALS" and assertion["count"] >= 0
                 for assertion in event_count_assertions
             )
 
         assert len(variant_names) == len(set(variant_names))
         assert len(covered_script_refs) == len(set(covered_script_refs))
-        assert set(covered_script_refs) == set(
-            case["input"]["model_script_refs"]
-        )
+        assert set(covered_script_refs) == set(case["input"]["model_script_refs"])
 
     provider_case = cases["E2E01-01+FAULT-PROVIDER-PROTOCOL"]
     provider_variants = {
         variant["variant"]: variant
-        for variant in provider_case["expectations"][
-            "trace_expectation_variants"
-        ]
+        for variant in provider_case["expectations"]["trace_expectation_variants"]
     }
     gateway_variant = provider_variants["CONTROL_GATEWAY_REJECTED"]
-    assert TASK_GATE_TRACE_EVENTS <= set(
-        gateway_variant["required_events"]
-    )
+    assert TASK_GATE_TRACE_EVENTS <= set(gateway_variant["required_events"])
     assert {
         "ToolCallCreated",
         "ObservationRecorded",
         "PresentationPlanProposed",
     } <= set(gateway_variant["forbidden_events"])
 
-    presentation_case = cases[
-        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
-    ]
+    presentation_case = cases["E2E01-01+FAULT-PRESENTATION-PROTOCOL"]
     presentation_variants = {
         variant["variant"]: variant
-        for variant in presentation_case["expectations"][
-            "trace_expectation_variants"
-        ]
+        for variant in presentation_case["expectations"]["trace_expectation_variants"]
     }
-    assert "PresentationPlanProposed" in presentation_variants[
-        "PRESENTATION_PLAN_GATE_REJECTED"
-    ]["required_events"]
-    assert "PresentationPlanProposed" in presentation_variants[
-        "PRESENTATION_PROTOCOL_REJECTED"
-    ]["forbidden_events"]
+    assert set(presentation_variants) == {"PRESENTATION_PROTOCOL_REJECTED"}
+    assert (
+        "PresentationPlanProposed"
+        in presentation_variants["PRESENTATION_PROTOCOL_REJECTED"]["forbidden_events"]
+    )
+
+
+def test_frozen_dtos_reject_noncanonical_stale_and_fact_bearing_returns() -> None:
+    message_ref = "00000000-0000-4000-8000-000000000101"
+
+    with pytest.raises(
+        ValidationError,
+        match="new-goal thin-slice candidate must use a null base Task version",
+    ):
+        RequestUnderstandingOutput.model_validate(
+            {
+                "schema_version": "e2e01-thin-v1",
+                "message_ref": message_ref,
+                "task_delta_candidates": [
+                    {
+                        "candidate_id": ("00000000-0000-4000-8000-000000000102"),
+                        "operation": "ADD_GOAL",
+                        "goal_patch": "查询订单 O-1001",
+                        "input_candidates": [
+                            {
+                                "name": "order_id",
+                                "candidate_value": "O-1001",
+                                "semantic_role": ("TARGET_RESOURCE_IDENTIFIER"),
+                                "authority": "USER_CLAIM",
+                                "source_kind": "CURRENT_MESSAGE",
+                                "source_ref": message_ref,
+                                "source_quote": "O-1001",
+                                "confidence": 1.0,
+                            }
+                        ],
+                        "confidence": 1.0,
+                    }
+                ],
+                "next_move_candidate": {
+                    "kind": "CALL_TOOL",
+                    "requested_tool_name": "get_order",
+                    "arguments": {"order_id": "O-1001"},
+                    "base_task_state_version": 1,
+                },
+            }
+        )
+
+    with pytest.raises(ValidationError, match="free_text"):
+        PresentationPlan.model_validate(
+            {
+                "schema_version": "presentation-plan-v1",
+                "template_id": "ORDER_STATUS_SUMMARY_V1",
+                "tone": "NEUTRAL",
+                "opening_variant": "DIRECT",
+                "field_order": [
+                    "ORDER_NUMBER",
+                    "STATUS",
+                    "ITEMS",
+                    "ORDERED_AT",
+                    "STATUS_UPDATED_AT",
+                ],
+                "closing_variant": "NONE",
+                "free_text": "订单 O-1001 已发货",
+            }
+        )
+
+
+def test_stale_state_race_is_canonical_and_script_scoped() -> None:
+    dataset = _load_json(CASES_PATH)
+    scripts = _load_json(SCRIPTS_PATH)
+    script_by_ref = {
+        scenario["model_script_ref"]: scenario for scenario in scripts["scenarios"]
+    }
+    stale_ref = "script:fault-runtime:state-advanced-before-gate"
+    unknown_ref = "script:fault-provider:unknown-tool-name"
+
+    assert "script:fault-provider:stale-task-state-version" not in script_by_ref
+    stale_scenario = script_by_ref[stale_ref]
+    assert stale_scenario["steps"] == [
+        {
+            "purpose": "REQUEST_UNDERSTANDING",
+            "behavior": "VALID_ORDER_LOOKUP",
+            "message_order_number": "O-1001",
+            "next_move_order_number": "O-1001",
+            "base_task_state_version": None,
+        }
+    ]
+
+    runtime_fault = stale_scenario["runtime_fault"]
+    assert runtime_fault == {
+        "behavior": "ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE",
+        "boundary": "AFTER_REVALIDATION_BEFORE_GATE",
+        "transition_command": "ApplyTaskTransitionCommand",
+        "transition_port": ("RuntimeRecordPort.apply_task_transition_if_current"),
+        "atomic_scope": "TASK_REQUEST_UNIT_AND_TASK_STATE_TRANSITION",
+        "from_status": "ACTIVE",
+        "to_status": "WAITING_USER",
+        "base_task_state_version": 1,
+        "result_task_state_version": 2,
+        "base_request_unit_state_version": 1,
+        "result_request_unit_state_version": 2,
+        "validated_task_state_version": 1,
+        "current_task_state_version": 2,
+        "reason_ref": "00000000-0000-4000-8000-000000000401",
+        "conditional_write_required_result": "APPLIED",
+        "non_applied_disposition": "EVAL_EXECUTION_FAILURE",
+    }
+    UUID(runtime_fault["reason_ref"])
+
+    stale_result = stale_scenario["expected_control_result"]
+    assert stale_result["stop_reason"] == "GATE_REJECTED"
+    assert stale_result["gate_decision"] == "REJECT"
+    assert stale_result["task_terminal_status"] == "BLOCKED"
+    assert stale_result["request_unit_terminal_status"] == "BLOCKED"
+    assert stale_result["validated_task_state_version"] == 1
+    assert stale_result["current_task_state_version"] == 2
+    assert stale_result["terminal_task_state_version"] == 3
+    assert stale_result["terminal_request_unit_state_version"] == 3
+    assert stale_result["task_state_version_delta"] == 2
+    assert stale_result["request_unit_state_version_delta"] == 2
+    assert stale_result["tool_calls"] == 0
+    assert stale_result["order_reads"] == 0
+    assert stale_result["observation_records"] == 0
+    assert stale_result["gate_reason_expectation"] == {
+        "mode": "EXACT_CANONICAL",
+        "must_be_nonempty": True,
+        "must_be_deterministic": True,
+        "must_match_injected_fault": True,
+        "canonical_reason_code": "STATE_VERSION_MISMATCH",
+        "canonical_reason_status": "CONFIRMED",
+        "injected_fault_behavior": (
+            "ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE"
+        ),
+    }
+
+    provider_case = next(
+        case
+        for case in dataset["cases"]
+        if case["case_id"] == "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+    )
+    assert stale_ref in provider_case["input"]["model_script_refs"]
+    assert (
+        "script:fault-provider:stale-task-state-version"
+        not in provider_case["input"]["model_script_refs"]
+    )
+
+    state_assertions = provider_case["expectations"]["state_assertions"]
+    obsolete_global_assertion = "".join(
+        ("GATEWAY_FAULTS_INCREMENT_", "STATE_VERSION_BY_1")
+    )
+    assert obsolete_global_assertion not in state_assertions
+    assertion_scopes = {
+        scope["state_assertion_id"]: scope
+        for scope in provider_case["expectations"]["state_assertion_scopes"]
+    }
+    assert assertion_scopes == {
+        (
+            "UNKNOWN_TOOL_GATEWAY_REJECTION_INCREMENTS_TASK_AND_"
+            "REQUEST_UNIT_STATE_VERSION_BY_1"
+        ): {
+            "state_assertion_id": (
+                "UNKNOWN_TOOL_GATEWAY_REJECTION_INCREMENTS_TASK_AND_"
+                "REQUEST_UNIT_STATE_VERSION_BY_1"
+            ),
+            "model_script_ref": unknown_ref,
+            "trace_variant": "CONTROL_GATEWAY_REJECTED",
+            "task_state_version_delta": 1,
+            "request_unit_state_version_delta": 1,
+        },
+        (
+            "STALE_STATE_GATEWAY_REJECTION_INCREMENTS_TASK_AND_"
+            "REQUEST_UNIT_STATE_VERSION_BY_2"
+        ): {
+            "state_assertion_id": (
+                "STALE_STATE_GATEWAY_REJECTION_INCREMENTS_TASK_AND_"
+                "REQUEST_UNIT_STATE_VERSION_BY_2"
+            ),
+            "model_script_ref": stale_ref,
+            "trace_variant": "CONTROL_GATEWAY_STALE_STATE_REJECTED",
+            "task_state_version_delta": 2,
+            "request_unit_state_version_delta": 2,
+        },
+    }
+    assert set(assertion_scopes) <= set(state_assertions)
+
+    variants = {
+        variant["variant"]: variant
+        for variant in provider_case["expectations"]["trace_expectation_variants"]
+    }
+    assert variants["CONTROL_GATEWAY_REJECTED"]["model_script_refs"] == [unknown_ref]
+    assert variants["CONTROL_GATEWAY_STALE_STATE_REJECTED"]["model_script_refs"] == [
+        stale_ref
+    ]
+    assert {
+        assertion["event"]: assertion["count"]
+        for assertion in variants["CONTROL_GATEWAY_REJECTED"]["event_count_assertions"]
+    } == {
+        "TaskStateChanged": 2,
+        "GateDecisionRecorded": 1,
+    }
+    assert {
+        assertion["event"]: assertion["count"]
+        for assertion in variants["CONTROL_GATEWAY_STALE_STATE_REJECTED"][
+            "event_count_assertions"
+        ]
+    } == {
+        "TaskStateChanged": 3,
+        "GateDecisionRecorded": 1,
+    }
+
+
+def test_stale_runtime_fault_uses_canonical_conditional_write_results() -> None:
+    canonical_results = {result.value for result in ConditionalWriteResult}
+    assert canonical_results == {
+        "APPLIED",
+        "PROJECTION_CONFLICT",
+        "NOT_APPLICABLE",
+    }
+    non_applied_results = canonical_results - {ConditionalWriteResult.APPLIED.value}
+
+    spec_paragraph = next(
+        paragraph
+        for paragraph in SPEC_PATH.read_text(encoding="utf-8").split("\n\n")
+        if paragraph.startswith("注入转换必须通过一个 canonical")
+    )
+    for result in non_applied_results:
+        assert f"`{result}`" in spec_paragraph
+    assert "`CONFLICT`" not in spec_paragraph
+    assert "其他非 `APPLIED` 结果必须记录为 Eval execution failure" in spec_paragraph
+
+    scripts = _load_json(SCRIPTS_PATH)
+    stale_scenario = next(
+        scenario
+        for scenario in scripts["scenarios"]
+        if scenario["model_script_ref"]
+        == "script:fault-runtime:state-advanced-before-gate"
+    )
+    runtime_fault = stale_scenario["runtime_fault"]
+    assert runtime_fault["conditional_write_required_result"] == (
+        ConditionalWriteResult.APPLIED.value
+    )
+    assert {
+        result: runtime_fault["non_applied_disposition"]
+        for result in non_applied_results
+    } == {
+        "PROJECTION_CONFLICT": "EVAL_EXECUTION_FAILURE",
+        "NOT_APPLICABLE": "EVAL_EXECUTION_FAILURE",
+    }
+
+
+def test_fact_bearing_presentation_is_a_raw_protocol_violation() -> None:
+    dataset = _load_json(CASES_PATH)
+    scripts = _load_json(SCRIPTS_PATH)
+    script_by_ref = {
+        scenario["model_script_ref"]: scenario for scenario in scripts["scenarios"]
+    }
+    fact_bearing_ref = "script:fault-presentation:fact-bearing-envelope"
+
+    assert "script:fault-presentation:fact-bearing-plan" not in script_by_ref
+    scenario = script_by_ref[fact_bearing_ref]
+    presentation_step = next(
+        step for step in scenario["steps"] if step["purpose"] == "PRESENTATION"
+    )
+    assert presentation_step == {
+        "purpose": "PRESENTATION",
+        "behavior": "INJECT_FACT_BEARING_PRESENTATION_ENVELOPE",
+        "raw_function_arguments": {
+            "free_text": "订单 O-1001 已发货",
+        },
+        "validation_model": "PresentationPlan",
+        "raw_envelope_disposition": "DISCARD",
+    }
+    expected_result = scenario["expected_control_result"]
+    assert expected_result["stop_reason"] == "PROVIDER_PROTOCOL_ERROR"
+    assert expected_result["presentation_plan_proposed_events"] == 0
+    assert expected_result["renderer_calls"] == 0
+    assert expected_result["provider_failure"] == {
+        "error_type": "ProviderProtocolError",
+        "constructor_arguments": [],
+        "cause": None,
+        "context": None,
+    }
+
+    presentation_case = next(
+        case
+        for case in dataset["cases"]
+        if case["case_id"] == "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+    )
+    assert fact_bearing_ref in presentation_case["input"]["model_script_refs"]
+    variants = {
+        variant["variant"]: variant
+        for variant in presentation_case["expectations"]["trace_expectation_variants"]
+    }
+    assert "PRESENTATION_PLAN_GATE_REJECTED" not in variants
+    protocol_variant = variants["PRESENTATION_PROTOCOL_REJECTED"]
+    assert fact_bearing_ref in protocol_variant["model_script_refs"]
+    assert {
+        assertion["event"]: assertion["count"]
+        for assertion in protocol_variant["event_count_assertions"]
+    } == {"PresentationPlanProposed": 0}
+    assert "PresentationPlanProposed" in protocol_variant["forbidden_events"]
 
 
 def test_trusted_field_override_fails_before_next_move_and_task_creation() -> None:
@@ -648,9 +887,7 @@ def test_trusted_field_override_fails_before_next_move_and_task_creation() -> No
     )
     variants = {
         variant["variant"]: variant
-        for variant in provider_case["expectations"][
-            "trace_expectation_variants"
-        ]
+        for variant in provider_case["expectations"]["trace_expectation_variants"]
     }
     script_ref = trusted_field_script["model_script_ref"]
     input_validation_variant = variants["INPUT_VALIDATION_REJECTED"]
@@ -697,8 +934,7 @@ def test_eval_case_graded_is_required_without_inventing_event_count() -> None:
         expectations = case["expectations"]
         assert "EvalCaseGraded" in expectations["required_events"]
         assert "EvalCaseGraded" not in {
-            assertion["event"]
-            for assertion in expectations["event_count_assertions"]
+            assertion["event"] for assertion in expectations["event_count_assertions"]
         }
 
         for variant in expectations.get(
@@ -707,8 +943,7 @@ def test_eval_case_graded_is_required_without_inventing_event_count() -> None:
         ):
             assert "EvalCaseGraded" in variant["required_events"]
             assert "EvalCaseGraded" not in {
-                assertion["event"]
-                for assertion in variant["event_count_assertions"]
+                assertion["event"] for assertion in variant["event_count_assertions"]
             }
 
 
@@ -733,9 +968,7 @@ def test_case_fixture_script_lane_and_manifest_refs_resolve() -> None:
     }
     assert dataset["model_script_catalog_ref"] == {
         "artifact_id": scripts["artifact_id"],
-        "model_script_catalog_version": scripts[
-            "model_script_catalog_version"
-        ],
+        "model_script_catalog_version": scripts["model_script_catalog_version"],
         "path": "evals/model_scripts/e2e01-thin-slice.v1.json",
     }
     assert lanes["dataset_ref"] == {
@@ -746,12 +979,11 @@ def test_case_fixture_script_lane_and_manifest_refs_resolve() -> None:
     assert lanes["fixture_ref"] == dataset["fixture_ref"]
 
     offline_lane = next(
-        lane
-        for lane in lanes["lanes"]
-        if lane["lane"] == "offline_gate"
+        lane for lane in lanes["lanes"] if lane["lane"] == "offline_gate"
     )
-    assert offline_lane["model_script_catalog_ref"] == (
-        dataset["model_script_catalog_ref"]
+    assert (
+        offline_lane["model_script_catalog_ref"]
+        == (dataset["model_script_catalog_ref"])
     )
     assert set(offline_lane["case_refs"]) == EXPECTED_CASE_IDS
 
@@ -775,10 +1007,7 @@ def test_manifest_versions_and_sha256_hashes_match_artifact_bytes() -> None:
         "evals/model_scripts/e2e01-thin-slice.v1.json",
         "evals/lanes/e2e01-thin-slice.v1.json",
     }
-    assert {
-        artifact_ref["path"]
-        for artifact_ref in artifact_refs
-    } == expected_paths
+    assert {artifact_ref["path"] for artifact_ref in artifact_refs} == expected_paths
 
     for artifact_ref in artifact_refs:
         relative_path = Path(artifact_ref["path"])
@@ -790,24 +1019,17 @@ def test_manifest_versions_and_sha256_hashes_match_artifact_bytes() -> None:
         actual_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
 
         assert artifact["artifact_id"] == artifact_ref["artifact_id"]
-        assert (
-            artifact[artifact_ref["version_field"]]
-            == artifact_ref["version"]
-        )
+        assert artifact[artifact_ref["version_field"]] == artifact_ref["version"]
         assert actual_sha256 == artifact_ref["sha256"]
 
     assert set(manifest["default_offline_artifact_refs"]) == {
-        artifact_ref["artifact_id"]
-        for artifact_ref in artifact_refs
+        artifact_ref["artifact_id"] for artifact_ref in artifact_refs
     }
 
 
 def test_default_offline_lane_requires_no_credentials_or_network() -> None:
     lanes = _load_json(LANES_PATH)
-    lane_by_name = {
-        lane["lane"]: lane
-        for lane in lanes["lanes"]
-    }
+    lane_by_name = {lane["lane"]: lane for lane in lanes["lanes"]}
 
     assert set(lane_by_name) == {"offline_gate", "qwen_baseline"}
     assert lanes["default_lane"] == "offline_gate"
@@ -827,9 +1049,7 @@ def test_default_offline_lane_requires_no_credentials_or_network() -> None:
     assert qwen_lane["model_snapshot"] == "qwen3.7-plus-2026-05-26"
     assert qwen_lane["deterministic"] is False
     assert qwen_lane["release_gate"] is False
-    assert qwen_lane["network_access"] == (
-        "REQUIRED_WHEN_EXPLICITLY_ENABLED"
-    )
+    assert qwen_lane["network_access"] == ("REQUIRED_WHEN_EXPLICITLY_ENABLED")
     assert qwen_lane["credential_policy"] == {
         "required_env": [
             "DASHSCOPE_API_KEY",
@@ -848,14 +1068,11 @@ def test_artifacts_contain_only_declared_synthetic_data_and_no_secrets() -> None
     scripts = _load_json(SCRIPTS_PATH)
 
     assert fixture["classification"] == "SYNTHETIC_DETERMINISTIC"
-    assert {
-        session["trusted_customer_id"]
-        for session in fixture["sessions"]
-    } == {"customer-A", "customer-B"}
-    assert {
-        session["label"]
-        for session in fixture["sessions"]
-    } == {"Alice", "Bob"}
+    assert {session["trusted_customer_id"] for session in fixture["sessions"]} == {
+        "customer-A",
+        "customer-B",
+    }
+    assert {session["label"] for session in fixture["sessions"]} == {"Alice", "Bob"}
 
     fixture_keys = {
         key.casefold()
@@ -879,7 +1096,6 @@ def test_artifacts_contain_only_declared_synthetic_data_and_no_secrets() -> None
         artifact = _load_json(path)
         for string_value in _all_string_values(artifact):
             assert not any(
-                pattern.search(string_value)
-                for pattern in SECRET_VALUE_PATTERNS
+                pattern.search(string_value) for pattern in SECRET_VALUE_PATTERNS
             )
             assert not string_value.startswith(("http://", "https://"))
