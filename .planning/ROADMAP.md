@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / PLAN_01-03_READY`
+**Status**: `ACTIVE / PLAN_01-04_READY`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`，以及 Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`（均已满足）。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping merge `9632c18532baa2f4cd6ab7526d0e6db30328ea65` 与 projection clarification merge `9602fc18148b19c841889a8041daf10ccc5b8f1c`（均已满足）。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -47,14 +47,14 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 8 plans（01-01/01-02 已形成 Summary 与 exact merge 证据；当前 01-03 具备 exact Task Packet，其余只是依赖有序的 execution / planning slots。每个 PLAN 文件均由 GSD planner / checker 角色提供只读建议，再由 Integrator 在 dedicated planning-status Worktree 中写入并通过 PR 创建；不运行 stock import / plan-phase）
+**Plans**: 8 plans（01-01/01-02/01-03 已形成 Summary 与 exact merge 证据；当前 01-04 具备 exact two-file Task Packet，其余只是依赖有序的 execution / planning slots。每个 PLAN 文件均由 GSD planner / checker 角色提供只读建议，再由 Integrator 在 dedicated planning-status Worktree 中写入并通过 PR 创建；不运行 stock import / plan-phase）
 
 Plans:
 
 - [ ] 01-01: Project Direction persistence ownership / Trace structure decision（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #12 merged；依据 Lifecycle Control，checkbox 保持未勾选，不提前推进 Phase / Case progress）
 - [ ] 01-02: Memory persistence decode / recovery / migration contract（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #14 merged；security finding 已修复复审；checkbox 保持未勾选）
-- [ ] 01-03: Thin Slice 17-item minimum-persistence schema/version scoped mapping（`READY`；17 项派生自 Thin Slice Spec 第 10.1 节；只写 Thin Slice scoped owner）
-- [ ] 01-04: persistence schema/version implementation（`BLOCKED_ON_01-03_EXACT_MERGE`；只允许 01-03 冻结的 two-file Application mapping / codec Packet）
+- [ ] 01-03: Thin Slice 17-item minimum-persistence schema/version scoped mapping（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #16 与 clarification PR #17 merged；checkbox 保持未勾选）
+- [ ] 01-04: persistence schema/version implementation（`READY`；base `9602fc1...`，只允许 owner 冻结的 two-file Application mapping / codec Packet）
 - [ ] 01-05: W2 Runtime（依赖 01-04 merge）
 - [ ] 01-06: W2 Infra（依赖 01-04 merge）
 - [ ] 01-07: W2 Eval（依赖 01-04 merge）
@@ -67,8 +67,8 @@ Plans:
 | Activation | activation remediation / review / merge | `PASS / MERGED`：reviewed feature head `957cabd6...`，PR #10 merge `6244756...` |
 | 01-01 | Project Direction owner PR | `COMPLETE / EVIDENCE_INDEXED`：PR #12 merge `c96dea9...`，181 tests，independent exact-head `PASS` |
 | 01-02 | Memory owner PR | `COMPLETE / EVIDENCE_INDEXED`：PR #14 merge `af5afd2...`，181 tests，初始 HIGH 已修复并经 current-remote exact-head review `PASS` |
-| 01-03 | Thin Slice scoped mapping PR | `READY`：execution Worktree / branch 已从 `af5afd2...` 预建；先合并本 Plan 的 planning-status PR；只写 Thin Slice Spec |
-| 01-04 | schema/version implementation | 01-03 exact-head PR 已合并；Task Packet 只实现已裁决 contract |
+| 01-03 | Thin Slice scoped mapping PR | `COMPLETE / EVIDENCE_INDEXED`：PR #16 merge `9632c18...`；projection clarification PR #17 merge `9602fc1...`；181 tests；双 reviewer final `PASS` |
+| 01-04 | schema/version implementation | `READY`：execution Worktree / branch 已从 `9602fc1...` 预建；先合并本 Plan 的 planning-status PR；只实现已裁决 two-file contract |
 | 01-05/06/07 | Runtime / Infra / Eval 并行 | Integrator 从同一 01-04 merge SHA 预建三个 ownership 不重叠的 Worktree；不调用 stock execute |
 | 01-08 | W3 串行集成 | 三个 W2 feature PR 逐个审查、重验并合并 |
 | Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
@@ -178,7 +178,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Plan 01-03 ready；01-01/01-02 Task Packet evidence indexed` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Plan 01-04 ready；01-01/01-02/01-03 Task Packet evidence indexed` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |

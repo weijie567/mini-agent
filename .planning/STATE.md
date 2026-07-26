@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "3"
+current_plan: "4"
 status: "in_progress"
-last_updated: "2026-07-26T13:59:11Z"
-last_activity: "2026-07-26 — Plan 01-03 controlled planning adapter passed independent Checker review with 0 unresolved findings"
+last_updated: "2026-07-26T15:05:52Z"
+last_activity: "2026-07-26 — Plan 01-04 controlled planning adapter passed independent Checker review with 0 unresolved findings"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,28 +33,28 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 3
+Current Plan: 4
 Total Phases: 6
 Total Plans in Phase: 8
-Status: Plan 01-03 ready / in progress
+Status: Plan 01-04 ready / in progress
 Last Activity: 2026-07-26
-Last Activity Description: Plan 01-03 初审发现的 4 HIGH / 2 MEDIUM 及后续 lifecycle、logical child 与 correlation 问题均已修复；独立 Checker 复审为 PASS（0 unresolved）
+Last Activity Description: Plan 01-03 mapping PR #16 与 projection clarification PR #17 已合并；01-04 exact two-file Task Packet 已通过独立 Checker，最终 findings 为 0/0/0/0
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 3 of 8
-Status: `ACTIVE / PLAN_01-03_READY`
-Last activity: 2026-07-26 — 01-03 planning-status 已通过独立 Checker；等待 exact-head 提交、PR 与合并
+Plan: 4 of 8
+Status: `ACTIVE / PLAN_01-04_READY`
+Last activity: 2026-07-26 — 01-03 owner chain 已到 exact integration `9602fc1...`；01-04 planning-status 已通过独立 Checker，等待 exact-head publication
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 合并 01-03 planning-status PR，使 `.planning/phases/01-cycle-1-e2e-01/01-03-PLAN.md` 与 `01-02-SUMMARY.md` 成为唯一派生 Task Packet / evidence index。
-2. 从 planning-status merge 捕获 exact merge SHA / Plan blob / Summary blob，证明它只含声明的八个 planning-status 文件，且 Thin Slice Spec 相对 `af5afd2...` byte-unchanged。
-3. 在已从 `af5afd2...` 预建的 `codex/e2e01-01-thin-slice-persistence-mapping` branch 只修改 `docs/implementation/e2e01-thin-slice-implementation-spec.md`，冻结 exact 17-item mapping、closed codec / registry 与 01-04 two-file allowlist。
-4. 只有 01-03 exact-head PR 合并后才生成 01-04 implementation Task Packet；01-04 合并前不派发 01-05/06/07 Runtime / Infra / Eval。
+1. 使 01-04 planning-status branch 通过 Plan structure、八文件 containment、GSD health 双表面、181-test regression 与独立 Checker。
+2. 通过 draft PR 合并 `.planning/phases/01-cycle-1-e2e-01/01-04-PLAN.md` 与 `01-03-SUMMARY.md`，捕获 exact planning merge SHA / Plan blob / Summary blob。
+3. 在已从 `9602fc1...` 预建的 `codex/e2e01-01-persistence-codec` branch 只创建两个 owned files，实现 closed registry / strict codec / projection / child contract。
+4. 01-04 feature 通过 focused / full tests、exact-head review 与 merge 后，由 Integrator 串行运行 `graphify update .`；gate 通过前不派发 01-05/06/07。
 
 ## Decisions
 
@@ -67,9 +67,10 @@ Progress: `░░░░░░░░░░` 0%
 ## Blockers
 
 - `CONFIRMED / CONTRACT_ONLY`: persistence 四轴 ownership、五类版本维度与 Trace shared-structure authority 已由 01-01 / PR #12 写入 Project Direction；Memory exact-version、owner binding、graph closure、recovery readiness 与 migration runtime 行为已由 01-02 / PR #14 写入 Memory owner；这些都不表示 codec、registry、Adapter、业务表或 migration 已实现。
-- `OPEN / PLAN_01-03_READY`: Thin Slice 17-item code/version、logical envelope、closed registry / codec API 与 01-04 exact allowlist 等待 01-03 owner PR；现有测试 fixture 的 version 字符串不能升级为 canonical。
+- `CONFIRMED / CONTRACT_ONLY`: Thin Slice 17-item code/version、66 + 7 projection、logical envelope、closed registry / codec API 与 01-04 exact allowlist 已由 PR #16/#17 冻结；这不表示 codec 已实现。
 - `OPEN / IMPLEMENTATION_GAP`: 当前 `RestartRecoveryPort` 尚无 Memory 15.2 所要求的同一 snapshot / fence + closed-set claim 证明；01-03/01-04 只冻结并实现 logical codec primitives，完整 graph / fenced claim 留给后续 Runtime / Infra Packet，不得误报为已实现。
-- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: final planning tree 的 SDK health 为 `degraded`（0 error、5×`W006`：Phase 2–6 尚无目录、1×`I001`：01-03 尚无 Summary、0 repairable）；CJS health 为 `degraded`（0 error、11×`W017`：保留的审计 / 执行 Worktree、同一 `I001`、0 repairable）。两表面对象模型不同；这些是已分类的非阻断状态，不运行 `--repair`、`--force` 或 Worktree 清理。
+- `OPEN / GRAPHIFY_SERIAL_GATE`: 01-04 feature exact merge 后由 Integrator 在 root integration checkout 执行 `graphify update .`；tracked tree 必须 clean 且 stale marker 清除，失败则阻断 01-05/06/07。
+- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 当前 planning tree 的 SDK health 为 `degraded`（0 error、5×`W006`：后续 Roadmap 目录尚未建立、1×`I001`：01-04 正在执行且尚无 Summary、0 repairable）；CJS health 为 `degraded`（0 error、12×`W017`：保留的历史审计 / 执行 Worktree、同一 `I001`、0 repairable）。两表面对象模型不同；这些已分类 warning 不触发 repair、force 或 cleanup。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -79,5 +80,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-26
-Stopped At: Plan 01-03 planning-status exact-head publication
-Resume File: [phases/01-cycle-1-e2e-01/01-03-PLAN.md](phases/01-cycle-1-e2e-01/01-03-PLAN.md)
+Stopped At: Plan 01-04 planning-status independent review
+Resume File: [phases/01-cycle-1-e2e-01/01-04-PLAN.md](phases/01-cycle-1-e2e-01/01-04-PLAN.md)
