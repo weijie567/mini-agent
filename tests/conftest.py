@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.schema import DropSchema
 
 from mini_agent.infrastructure.persistence.database import (
@@ -40,6 +39,10 @@ class PostgresNamespaceFactory:
         self._counter = 0
         self._schemas: list[str] = []
 
+    @property
+    def tracked_schemas(self) -> tuple[str, ...]:
+        return tuple(self._schemas)
+
     def create(self, eval_run_id: str = "worker") -> PostgresTestNamespace:
         self._counter += 1
         label = _LABEL_PATTERN.sub("_", eval_run_id.lower()).strip("_") or "run"
@@ -52,46 +55,56 @@ class PostgresNamespaceFactory:
         upgrade_database_to_head(self.database_url, schema=schema)
         return PostgresTestNamespace(self.database_url, schema)
 
+    def _drop_schema(self, schema: str) -> None:
+        engine = create_engine(self.database_url, pool_pre_ping=True)
+        try:
+            with engine.begin() as connection:
+                connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        finally:
+            engine.dispose()
+
     def drop(self, namespace: PostgresTestNamespace) -> None:
         if namespace.schema not in self._schemas:
             return
-        engine = create_engine(self.database_url, pool_pre_ping=True)
-        try:
-            with engine.begin() as connection:
-                connection.execute(
-                    DropSchema(namespace.schema, cascade=True, if_exists=True)
-                )
-        finally:
-            engine.dispose()
-            self._schemas.remove(namespace.schema)
+        self._drop_schema(namespace.schema)
+        self._schemas.remove(namespace.schema)
 
     def cleanup(self) -> None:
-        if not self._schemas:
-            return
-        engine = create_engine(self.database_url, pool_pre_ping=True)
-        try:
-            with engine.begin() as connection:
-                for schema in reversed(self._schemas):
-                    connection.execute(DropSchema(schema, cascade=True, if_exists=True))
-        finally:
-            engine.dispose()
-            self._schemas.clear()
+        failures: list[Exception] = []
+        for schema in reversed(tuple(self._schemas)):
+            try:
+                self._drop_schema(schema)
+            except Exception as exc:
+                failures.append(
+                    RuntimeError(f"failed to drop PostgreSQL schema {schema}: {exc}")
+                )
+            else:
+                self._schemas.remove(schema)
+
+        if failures:
+            raise ExceptionGroup(
+                "failed to clean one or more PostgreSQL test schemas",
+                failures,
+            )
 
 
 @pytest.fixture(scope="session")
 def postgres_database_url() -> str:
-    database_url = database_url_from_environment(testing=True)
-    if make_url(database_url).get_backend_name() != "postgresql":
-        pytest.fail("integration tests require PostgreSQL; SQLite is not supported")
+    try:
+        database_url = database_url_from_environment(testing=True)
+    except ValueError as exc:
+        pytest.fail(str(exc))
 
     engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+            if connection.scalar(text("SELECT current_database()")) != "mini_agent_test":
+                pytest.fail("integration tests connected outside mini_agent_test")
     except Exception as exc:  # pragma: no cover - exercised only on environment failure
         pytest.fail(
-            "PostgreSQL is unavailable; start it with `docker compose up -d db` "
-            f"before running integration tests: {exc}"
+            "disposable PostgreSQL is unavailable; start it with "
+            "`docker compose --profile test up -d db-test` before running "
+            f"integration tests: {exc}"
         )
     finally:
         engine.dispose()

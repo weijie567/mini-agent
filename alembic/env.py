@@ -19,7 +19,22 @@ target_metadata = Base.metadata
 _SCHEMA_PATTERN = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
+def _include_object(
+    _object: object,
+    name: str | None,
+    type_: str,
+    _reflected: bool,
+    _compare_to: object | None,
+) -> bool:
+    return not (type_ == "table" and name == "alembic_version")
+
+
 def _database_url() -> str:
+    configured = config.attributes.get("database_url")
+    if configured is not None:
+        if not isinstance(configured, str):
+            raise TypeError("database URL must be a string")
+        return configured
     return os.environ.get(
         "MINI_AGENT_DATABASE_URL",
         config.get_main_option("sqlalchemy.url"),
@@ -45,6 +60,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=_include_object,
         version_table_schema=schema,
     )
 
@@ -73,6 +89,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_object=_include_object,
             version_table_schema=schema,
         )
 

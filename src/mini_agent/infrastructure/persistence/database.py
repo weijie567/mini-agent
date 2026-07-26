@@ -3,23 +3,51 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import Engine, create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
 DEFAULT_LOCAL_DATABASE_URL = (
     "postgresql+psycopg://"
-    "mini_agent:mini_agent_local_only@localhost:55432/mini_agent"
+    "mini_agent:mini_agent_local_only@127.0.0.1:55432/mini_agent"
+)
+DEFAULT_LOCAL_TEST_DATABASE_URL = (
+    "postgresql+psycopg://"
+    "mini_agent:mini_agent_local_only@127.0.0.1:55433/mini_agent_test"
 )
 
 
-def database_url_from_environment(*, testing: bool = False) -> str:
-    variable = "MINI_AGENT_TEST_DATABASE_URL" if testing else "MINI_AGENT_DATABASE_URL"
-    if testing:
-        return os.environ.get(
-            variable,
-            os.environ.get("MINI_AGENT_DATABASE_URL", DEFAULT_LOCAL_DATABASE_URL),
+def validate_test_database_url(database_url: str) -> str:
+    try:
+        parsed: URL = make_url(database_url)
+    except (ArgumentError, TypeError) as exc:
+        raise ValueError(
+            "integration tests require the local disposable db-test at "
+            "127.0.0.1:55433/mini_agent_test"
+        ) from exc
+    is_disposable_target = (
+        parsed.drivername == "postgresql+psycopg"
+        and parsed.host == "127.0.0.1"
+        and parsed.port == 55433
+        and parsed.database == "mini_agent_test"
+    )
+    if not is_disposable_target:
+        raise ValueError(
+            "integration tests require the local disposable db-test at "
+            "127.0.0.1:55433/mini_agent_test"
         )
-    return os.environ.get(variable, DEFAULT_LOCAL_DATABASE_URL)
+    return database_url
+
+
+def database_url_from_environment(*, testing: bool = False) -> str:
+    if testing:
+        return validate_test_database_url(
+            os.environ.get(
+                "MINI_AGENT_TEST_DATABASE_URL",
+                DEFAULT_LOCAL_TEST_DATABASE_URL,
+            )
+        )
+    return os.environ.get("MINI_AGENT_DATABASE_URL", DEFAULT_LOCAL_DATABASE_URL)
 
 
 def build_engine(

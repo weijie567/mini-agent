@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${MINI_AGENT_POSTGRES_USER:-mini_agent}
       POSTGRES_PASSWORD: ${MINI_AGENT_POSTGRES_PASSWORD:-mini_agent_local_only}
     ports:
-      - "${MINI_AGENT_DB_PORT:-55432}:5432"
+      - "127.0.0.1:${MINI_AGENT_DB_PORT:-55432}:5432"
     volumes:
       - mini_agent_db_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,11 +24,11 @@ services:
     image: pgvector/pgvector:0.8.2-pg16
     profiles: ["test"]
     environment:
-      POSTGRES_DB: ${MINI_AGENT_TEST_POSTGRES_DB:-mini_agent_test}
+      POSTGRES_DB: mini_agent_test
       POSTGRES_USER: ${MINI_AGENT_POSTGRES_USER:-mini_agent}
       POSTGRES_PASSWORD: ${MINI_AGENT_POSTGRES_PASSWORD:-mini_agent_local_only}
     ports:
-      - "${MINI_AGENT_TEST_DB_PORT:-55433}:5432"
+      - "127.0.0.1:55433:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:

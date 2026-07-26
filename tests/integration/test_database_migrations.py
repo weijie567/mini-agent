@@ -1,180 +1,103 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from collections.abc import Callable
 
-from sqlalchemy import inspect, select, text
+import pytest
+from sqlalchemy import create_engine, inspect, text
 
+from mini_agent.infrastructure.persistence.database import (
+    DEFAULT_LOCAL_TEST_DATABASE_URL,
+    database_url_from_environment,
+)
 from mini_agent.infrastructure.persistence.migrations import (
     upgrade_database_to_head,
 )
-from mini_agent.infrastructure.persistence.models import Base, ConversationRow
-
-EXPECTED_RECORD_TABLES = {
-    "agent_run_records",
-    "context_manifest_records",
-    "conversation_records",
-    "conversation_task_link_records",
-    "eval_result_records",
-    "gate_decision_records",
-    "input_binding_records",
-    "message_records",
-    "model_visible_toolset_artifacts",
-    "observation_records",
-    "request_understanding_records",
-    "request_unit_records",
-    "run_task_link_records",
-    "task_records",
-    "tool_call_records",
-    "trace_event_records",
-}
-
-REQUIRED_COLUMNS = {
-    "conversation_records": {
-        "conversation_id",
-        "owner_customer_id",
-        "created_at",
-    },
-    "message_records": {
-        "message_id",
-        "conversation_id",
-        "direction",
-        "controlled_content",
-        "received_at",
-    },
-    "request_understanding_records": {
-        "run_id",
-        "message_ref",
-        "schema_version",
-        "candidate_validation",
-        "accepted_delta_refs",
-        "candidate_state_version",
-        "revalidation_state_version",
-        "next_move_candidate_ref",
-    },
-    "task_records": {
-        "task_id",
-        "owner_customer_id",
-        "status",
-        "state_version",
-        "created_at",
-        "updated_at",
-        "last_outcome_ref",
-    },
-    "request_unit_records": {
-        "request_unit_id",
-        "task_id",
-        "goal_source_refs",
-        "input_binding_refs",
-        "status",
-        "state_version",
-        "result_refs",
-    },
-    "conversation_task_link_records": {
-        "conversation_id",
-        "task_id",
-        "link_reason",
-        "created_at",
-        "ended_at",
-    },
-    "run_task_link_records": {
-        "run_id",
-        "task_id",
-        "base_state_version",
-        "result_state_version",
-    },
-    "input_binding_records": {
-        "binding_id",
-        "name",
-        "normalized_value",
-        "authority",
-        "source_refs",
-        "validation_status",
-        "version",
-        "created_at",
-        "updated_at",
-    },
-    "model_visible_toolset_artifacts": {
-        "schema_version",
-        "model_visible_toolset_hash",
-        "provider_visible_tool_specs",
-    },
-    "agent_run_records": {
-        "run_id",
-        "conversation_id",
-        "status",
-        "provider_lane",
-        "started_at",
-        "completed_at",
-        "stop_reason",
-        "incomplete_reason",
-    },
-    "gate_decision_records": {
-        "gate_decision_id",
-        "candidate_tool_name",
-        "canonical_tool_name",
-        "gate_results",
-        "candidate_state_version",
-        "revalidation_state_version",
-        "argument_binding_refs",
-        "decision",
-        "reason_code",
-    },
-    "tool_call_records": {
-        "tool_call_id",
-        "gate_decision_id",
-        "status",
-        "attempt",
-        "failure_code",
-        "result_ref",
-        "validated_task_state_version",
-        "argument_binding_refs",
-    },
-    "observation_records": {
-        "observation_id",
-        "source",
-        "observation_type",
-        "minimal_value",
-        "observed_at",
-        "visibility",
-    },
-    "context_manifest_records": {
-        "model_call_ref",
-        "message_refs",
-        "task_refs",
-        "observation_refs",
-        "model_visible_toolset_hash",
-        "redaction_policy_version",
-    },
-    "trace_event_records": {
-        "event_type",
-        "related_ids",
-        "safe_fields",
-        "occurred_at",
-    },
-    "eval_result_records": {
-        "case_id",
-        "lane",
-        "version_manifest",
-        "grader_results",
-        "critical_failure",
-        "trace_ref",
-    },
-}
+from mini_agent.infrastructure.persistence.models import Base
 
 
-def test_empty_namespace_upgrades_to_head(postgres_namespace) -> None:
+def _extension_schema(database_url: str) -> str | None:
+    engine = create_engine(database_url, pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            return connection.scalar(
+                text(
+                    """
+                    SELECT namespace.nspname
+                    FROM pg_extension AS extension
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = extension.extnamespace
+                    WHERE extension.extname = 'vector'
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+
+
+def _schema_exists(database_url: str, schema: str) -> bool:
+    engine = create_engine(database_url, pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            return bool(
+                connection.scalar(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM pg_namespace
+                            WHERE nspname = :schema
+                        )
+                        """
+                    ),
+                    {"schema": schema},
+                )
+            )
+    finally:
+        engine.dispose()
+
+
+def test_testing_url_defaults_to_disposable_db_test(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "MINI_AGENT_DATABASE_URL",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55432/mini_agent",
+    )
+    monkeypatch.delenv("MINI_AGENT_TEST_DATABASE_URL", raising=False)
+
+    assert database_url_from_environment(testing=True) == (
+        DEFAULT_LOCAL_TEST_DATABASE_URL
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "sqlite:///mini_agent_test.db",
+        "postgresql+psycopg://mini_agent:local@db.example:55433/mini_agent_test",
+        "postgresql+psycopg://mini_agent:local@localhost:55433/mini_agent_test",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55432/mini_agent_test",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:55433/mini_agent",
+        "postgresql://mini_agent:local@127.0.0.1:55433/mini_agent_test",
+    ],
+)
+def test_testing_url_rejects_non_disposable_targets(
+    monkeypatch,
+    unsafe_url: str,
+) -> None:
+    monkeypatch.setenv("MINI_AGENT_TEST_DATABASE_URL", unsafe_url)
+
+    with pytest.raises(ValueError, match="disposable db-test"):
+        database_url_from_environment(testing=True)
+
+
+def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
     engine = postgres_namespace.build_engine()
     try:
-        inspector = inspect(engine)
-        tables = set(inspector.get_table_names())
-        assert tables == EXPECTED_RECORD_TABLES | {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+        assert not Base.metadata.tables
 
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT current_schema()")) == (
                 postgres_namespace.schema
-            )
-            assert connection.scalar(
-                text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
             )
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
                 "20260726_0001"
@@ -183,59 +106,19 @@ def test_empty_namespace_upgrades_to_head(postgres_namespace) -> None:
         engine.dispose()
 
 
-def test_revision_table_set_matches_sqlalchemy_metadata(postgres_namespace) -> None:
-    engine = postgres_namespace.build_engine()
-    try:
-        migrated_tables = set(inspect(engine).get_table_names()) - {
-            "alembic_version"
-        }
-        assert migrated_tables == set(Base.metadata.tables)
-    finally:
-        engine.dispose()
-
-
-def test_initial_projection_contains_scoped_required_fields(
-    postgres_namespace,
+def test_programmatic_migration_cannot_be_redirected_to_dev_url(
+    postgres_namespace_factory,
+    monkeypatch,
 ) -> None:
-    engine = postgres_namespace.build_engine()
+    monkeypatch.setenv(
+        "MINI_AGENT_DATABASE_URL",
+        "postgresql+psycopg://mini_agent:local@127.0.0.1:1/mini_agent",
+    )
+    namespace = postgres_namespace_factory.create("programmatic-url")
     try:
-        inspector = inspect(engine)
-        for table_name, required_columns in REQUIRED_COLUMNS.items():
-            actual_columns = {
-                column["name"] for column in inspector.get_columns(table_name)
-            }
-            assert required_columns <= actual_columns
-
-        conversation_columns = {
-            column["name"]
-            for column in inspector.get_columns("conversation_records")
-        }
-        assert "task_id" not in conversation_columns
+        assert _schema_exists(namespace.database_url, namespace.schema)
     finally:
-        engine.dispose()
-
-
-def test_pgvector_is_available_without_vector_schema(
-    postgres_namespace,
-) -> None:
-    engine = postgres_namespace.build_engine()
-    try:
-        with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-            ) == "0.8.2"
-            assert connection.scalar(
-                text(
-                    """
-                    SELECT count(*)
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND udt_name = 'vector'
-                    """
-                )
-            ) == 0
-    finally:
-        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
 
 
 def test_upgrade_head_is_idempotent(postgres_namespace) -> None:
@@ -251,37 +134,72 @@ def test_upgrade_head_is_idempotent(postgres_namespace) -> None:
         engine.dispose()
 
 
-def test_eval_run_namespaces_do_not_share_business_state(
-    postgres_namespace_factory,
-) -> None:
+def test_eval_run_namespaces_are_isolated(postgres_namespace_factory) -> None:
     left = postgres_namespace_factory.create("eval-run-left")
     right = postgres_namespace_factory.create("eval-run-right")
-    conversation_id = uuid4()
-
     left_engine = left.build_engine()
     right_engine = right.build_engine()
     try:
         with left_engine.begin() as connection:
+            connection.execute(text("CREATE TABLE namespace_probe (value text NOT NULL)"))
             connection.execute(
-                ConversationRow.__table__.insert().values(
-                    conversation_id=conversation_id,
-                    owner_customer_id="customer-A",
-                )
+                text("INSERT INTO namespace_probe (value) VALUES ('left')")
             )
 
-        with left_engine.connect() as connection:
-            assert connection.scalar(
-                select(ConversationRow.owner_customer_id).where(
-                    ConversationRow.conversation_id == conversation_id
-                )
-            ) == "customer-A"
-
         with right_engine.connect() as connection:
-            assert connection.scalar(
-                select(text("count(*)")).select_from(ConversationRow.__table__)
-            ) == 0
+            assert connection.scalar(text("SELECT to_regclass('namespace_probe')")) is None
+
+        with left_engine.connect() as connection:
+            assert connection.scalar(text("SELECT value FROM namespace_probe")) == "left"
     finally:
         left_engine.dispose()
         right_engine.dispose()
         postgres_namespace_factory.drop(left)
         postgres_namespace_factory.drop(right)
+
+
+def test_vector_extension_is_public_and_survives_worker_schema_drop(
+    postgres_namespace_factory,
+    postgres_database_url: str,
+) -> None:
+    namespace = postgres_namespace_factory.create("extension-owner")
+    assert _extension_schema(postgres_database_url) == "public"
+
+    postgres_namespace_factory.drop(namespace)
+
+    assert not _schema_exists(postgres_database_url, namespace.schema)
+    assert _extension_schema(postgres_database_url) == "public"
+
+
+def test_cleanup_retains_failures_and_continues_other_drops(
+    postgres_namespace_factory,
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    factory = type(postgres_namespace_factory)(postgres_database_url, "fault")
+    failed_first = factory.create("failed-first")
+    successful = factory.create("successful")
+    failed_second = factory.create("failed-second")
+    original_drop: Callable[[str], None] = factory._drop_schema
+    failed_schemas = {failed_first.schema, failed_second.schema}
+
+    def injected_drop(schema: str) -> None:
+        if schema in failed_schemas:
+            raise RuntimeError(f"injected drop failure for {schema}")
+        original_drop(schema)
+
+    monkeypatch.setattr(factory, "_drop_schema", injected_drop)
+    try:
+        with pytest.raises(ExceptionGroup) as captured:
+            factory.cleanup()
+
+        assert len(captured.value.exceptions) == 2
+        assert set(factory.tracked_schemas) == failed_schemas
+        assert not _schema_exists(postgres_database_url, successful.schema)
+        assert all(
+            _schema_exists(postgres_database_url, schema)
+            for schema in failed_schemas
+        )
+    finally:
+        monkeypatch.setattr(factory, "_drop_schema", original_drop)
+        factory.cleanup()

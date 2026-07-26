@@ -24,6 +24,7 @@ def alembic_config(
     config = Config(str(_PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(_PROJECT_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+    config.attributes["database_url"] = database_url
     if schema is not None:
         config.attributes["schema"] = validate_schema_name(schema)
     return config
