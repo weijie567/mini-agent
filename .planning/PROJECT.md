@@ -37,11 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`。
+- 当前 integration branch：`integration/e2e01-thin`；Plan 01-01 owner PR 合并后的 exact head 为 `c96dea9f9f798212227cd05ff2a7b1f029a60287`。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- 当前 immediate gate：合并独立 01-01 planning-status PR；随后在已从 activation merge SHA 预建的 `codex/e2e01-01-schema-owner-alignment` branch 只修改 `PROJECT_DIRECTION.md`，完成 project-wide persistence ownership / Trace structure owner 裁决。
-- 01-02 Memory owner 与 01-03 Thin Slice scoped mapping 必须在各自前序 exact-head PR 合并后串行生成；01-04 才是被阻断的 implementation slot。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
+- Plan 01-01 已通过 planning PR #11、owner PR #12、181 个 serial tests 与独立 exact-head review 完成 evidence index；这只完成 Project Direction owner 决策，不改变 `E2E01-01/04` lifecycle。
+- 当前 immediate gate：合并独立 01-02 planning-status PR；随后在已从 `c96dea9f9f798212227cd05ff2a7b1f029a60287` 预建的 `codex/e2e01-01-memory-persistence-contract` branch 中只修改 `docs/architecture/memory-design-reference.md`。
+- 01-03 Thin Slice scoped mapping 必须在 01-02 exact-head PR 合并后串行生成；01-04 才是被阻断的 implementation slot。01-04 merge 前不派发 01-05/06/07 Runtime / Infra / Eval。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -64,7 +65,9 @@
 | 当前 P0 不运行 `new-project` / `new-milestone` / `autonomous` | 既有项目已有明确 owner、Spec 与执行基线 | `CONFIRMED` |
 | 一个 GSD Plan 对应一个精确 Task Packet | Packet 可以含多个原子 task，但不能跨 repository、branch、Worktree、writer 或 ownership boundary | `CONFIRMED` |
 | 持久化投影写入前经 Pydantic serialization，并保存 schema version | 这是 Thin Slice Spec 当前可确认的 scoped 要求 | `CONFIRMED` |
-| Record schema/version owner、API、decode 与 unknown-version 行为 | 尚无完整 active canonical owner 裁决；必须按 01-01 Project Direction → 01-02 Memory → 01-03 Thin Slice scoped mapping 串行完成，不能由 activation 或单个跨-owner Packet 预先决定 | `OPEN / PROPOSAL_ONLY` |
+| Persistence 四轴 ownership、版本维度与 Trace shared-structure authority | 已由 Plan 01-01 / PR #12 写入 `PROJECT_DIRECTION.md`；不表示 decoder、registry、业务表或 migration 已实现 | `CONFIRMED / CONTRACT_ONLY` |
+| P0 exact-version、decode / recovery / migration runtime 行为 | 等待 01-02 Memory owner 的单文件 Task Packet；不得由 Infrastructure 或 `.planning/` 预先决定 | `OPEN / PLAN_01-02_READY` |
+| Thin Slice 17-item item code、版本与实现 API | 等待 01-03 Thin Slice scoped mapping；不得在 01-02 提前定义 | `OPEN / BLOCKED_ON_01-02` |
 
 ## 完成证据规则
 

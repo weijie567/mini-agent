@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "1"
+current_plan: "2"
 status: "in_progress"
-last_updated: "2026-07-26T11:33:15Z"
-last_activity: "2026-07-26 — Plan Checker split cross-owner draft into 8-plan single-owner roadmap; Plan 01-01 revised"
+last_updated: "2026-07-26T12:26:28Z"
+last_activity: "2026-07-26 — Plan 01-01 evidence indexed; Plan 01-02 passed controlled GSD Planner/Checker with 0 issues"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,27 +33,27 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 1
+Current Plan: 2
 Total Phases: 6
 Total Plans in Phase: 8
-Status: Plan 01-01 ready / in progress
+Status: Plan 01-02 ready / in progress
 Last Activity: 2026-07-26
-Last Activity Description: activation PR #10 已合并；Plan Checker 阻断跨-owner草案后，Phase 1 改为 8 个单-owner / 隔离 execution slots，01-01 已修订
+Last Activity Description: Plan 01-01 planning PR #11 与 owner PR #12 已合并；01-02 单 owner Task Packet 经受控 GSD Planner 修订并由 Plan Checker 以 0 issues 通过
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 1 of 8
-Status: `ACTIVE / PLAN_01-01_READY`
-Last activity: 2026-07-26 — 01-01 改为只写 `PROJECT_DIRECTION.md`；planning-status 与 execution 使用隔离 branch
+Plan: 2 of 8
+Status: `ACTIVE / PLAN_01-02_READY`
+Last activity: 2026-07-26 — 01-01 exact owner merge 已建立 Summary；01-02 planning-status 与 Memory execution 使用隔离 branch
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 合并 01-01 planning-status PR，使 `.planning/phases/01-cycle-1-e2e-01/01-01-PLAN.md` 成为唯一派生 Plan / Task Packet。
-2. 从 planning-status merge 解析并记录 exact merge SHA / Plan blob，证明其只含 8 个声明文件且 `PROJECT_DIRECTION.md` 未变化；随后在已从 activation merge SHA 预建的 `codex/e2e01-01-schema-owner-alignment` branch 只修改 `PROJECT_DIRECTION.md`，该 branch 不写 `.planning/**` 或其他 owner。
-3. 01-01 exact-head PR 合并后，依次生成单 owner 的 01-02 Memory contract 与 01-03 Thin Slice scoped mapping；二者均不得预填未知 base SHA。
+1. 合并 01-02 planning-status PR，使 `.planning/phases/01-cycle-1-e2e-01/01-02-PLAN.md` 成为唯一派生 Plan / Task Packet。
+2. 从 planning-status merge 解析并记录 exact merge SHA / Plan blob，证明其只含声明的 planning-status 文件且 Memory owner 相对 `c96dea9...` byte-unchanged。
+3. 在已从 `c96dea9...` 预建的 `codex/e2e01-01-memory-persistence-contract` branch 只修改 `docs/architecture/memory-design-reference.md`，通过 exact-head review 与 PR 后再生成 01-03。
 4. 只有 01-03 合并后才生成 01-04 implementation Task Packet；01-04 合并前不派发 01-05/06/07 Runtime / Infra / Eval。
 
 ## Decisions
@@ -66,8 +66,9 @@ Progress: `░░░░░░░░░░` 0%
 
 ## Blockers
 
-- `OPEN / PROPOSAL_ONLY`: persistence schema/version 的 project-wide owner 轴、Memory decode/recovery 和 Thin Slice 17-item minimum-persistence mapping 将按 01-01 → 01-02 → 01-03 串行裁决；17 项严格派生自 Thin Slice Spec 第 10.1 节当前表格，当前没有已批准的 RecordSchema implementation contract。
-- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 本 planning tree 的 CJS health 为 7×`W017`（mtime heuristic，数量随时间变化），SDK health 为 5×`W006`（后续阶段目录按治理规则尚未创建）；两者另有 1×`I001`，表示 01-01 Plan 正在执行且尚无 Summary。`errors=[]`、`repairable=0`，禁止 `--repair` / `--force`。
+- `CONFIRMED / CONTRACT_ONLY`: persistence 四轴 ownership、五类版本维度与 Trace shared-structure authority 已由 01-01 / PR #12 写入 Project Direction；这不表示 codec、registry、业务表或 migration 已实现。
+- `OPEN / PLAN_01-02_READY`: Memory exact-version、decode / integrity failure、startup recovery readiness 与 migration runtime 边界等待 01-02 owner PR；Thin Slice 17-item code/version/API 继续等待 01-03。
+- `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: 本 planning tree 的 SDK health 为 5×`W006`（后续 Phase 目录按治理规则尚未创建）和 1×`I001`（01-02 正在执行且尚无 Summary）；CJS health 为时间敏感的 8×`W017`（已完成、保留作审计的旧 Worktree）和同一 1×`I001`。两者均为 `errors=[]`、`repairable=0`；禁止按工具建议运行 `--repair`、`--force` 或清理项目 Worktree。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -77,5 +78,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-26
-Stopped At: Plan 01-01 planning-status preparation
-Resume File: [phases/01-cycle-1-e2e-01/01-01-PLAN.md](phases/01-cycle-1-e2e-01/01-01-PLAN.md)
+Stopped At: Plan 01-02 planning-status preparation
+Resume File: [phases/01-cycle-1-e2e-01/01-02-PLAN.md](phases/01-cycle-1-e2e-01/01-02-PLAN.md)
