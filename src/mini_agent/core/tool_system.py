@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self, Sequence
+from typing import Annotated, Any, Literal, Self, Sequence
 from uuid import UUID
 
 from pydantic import (
@@ -50,6 +50,11 @@ class ToolSpec(ModelVisibleModel):
     description: NonEmptyString
     input_schema: Mapping[str, JsonValue]
     output_schema: Mapping[str, JsonValue]
+
+    @field_validator("input_schema", "output_schema", mode="before")
+    @classmethod
+    def schema_input_is_native_json(cls, value: Any) -> Any:
+        return thaw_json_value(value)
 
     @field_validator("input_schema", "output_schema")
     @classmethod
@@ -378,6 +383,11 @@ class AuthorizedToolCommand(RuntimePrivateModel):
     registry_snapshot_ref: NonEmptyString
     trusted_context_ref: NonEmptyString
 
+    @field_validator("validated_arguments", mode="before")
+    @classmethod
+    def validated_argument_input_is_native_json(cls, value: Any) -> Any:
+        return thaw_json_value(value)
+
     @field_validator("validated_arguments")
     @classmethod
     def validated_arguments_exclude_trusted_fields(
@@ -533,6 +543,11 @@ class ToolResult(RuntimePrivateModel):
     raw_result_ref: NonEmptyString | None = None
     observed_at: datetime | None = None
     completed_at: datetime
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def payload_input_is_native_json(cls, value: Any) -> Any:
+        return thaw_json_value(value)
 
     @field_validator("payload")
     @classmethod

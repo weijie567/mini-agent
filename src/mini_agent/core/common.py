@@ -79,8 +79,11 @@ class FrozenJsonDict(tuple[tuple[str, Any], ...], Mapping[str, Any]):
         cls,
         value: Mapping[str, Any] | Iterable[tuple[str, Any]],
     ) -> FrozenJsonDict:
-        items = value.items() if isinstance(value, Mapping) else value
-        return tuple.__new__(cls, tuple(items))
+        return _freeze_json_mapping(
+            value,
+            frozen_type=cls,
+            active_container_ids=set(),
+        )
 
     def __getitem__(self, key: str) -> Any:
         for item_key, item_value in tuple.__iter__(self):
@@ -114,7 +117,11 @@ class FrozenJsonList(tuple[Any, ...]):
     __slots__ = ()
 
     def __new__(cls, value: Iterable[Any]) -> FrozenJsonList:
-        return tuple.__new__(cls, tuple(value))
+        return _freeze_json_sequence(
+            value,
+            frozen_type=cls,
+            active_container_ids=set(),
+        )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({list(self)!r})"
@@ -132,35 +139,108 @@ class FrozenJsonList(tuple[Any, ...]):
         return self
 
 
-def freeze_json_value(value: Any) -> Any:
-    """Recursively copy JSON into tuple-backed Mapping/Sequence values."""
+def _freeze_json_mapping(
+    value: Mapping[str, Any] | Iterable[tuple[str, Any]],
+    *,
+    frozen_type: type[FrozenJsonDict],
+    active_container_ids: set[int],
+) -> FrozenJsonDict:
+    container_id = id(value)
+    if container_id in active_container_ids:
+        raise ValueError("cyclic JSON container is not supported")
+    active_container_ids.add(container_id)
+    try:
+        items = value.items() if isinstance(value, Mapping) else value
+        frozen_items = tuple(
+            (
+                key,
+                _freeze_json_value(nested, active_container_ids),
+            )
+            for key, nested in items
+        )
+    finally:
+        active_container_ids.remove(container_id)
+    return tuple.__new__(frozen_type, frozen_items)
 
-    if isinstance(value, (FrozenJsonDict, FrozenJsonList)):
-        return value
+
+def _freeze_json_sequence(
+    value: Iterable[Any],
+    *,
+    frozen_type: type[FrozenJsonList],
+    active_container_ids: set[int],
+) -> FrozenJsonList:
+    container_id = id(value)
+    if container_id in active_container_ids:
+        raise ValueError("cyclic JSON container is not supported")
+    active_container_ids.add(container_id)
+    try:
+        frozen_items = tuple(
+            _freeze_json_value(item, active_container_ids)
+            for item in value
+        )
+    finally:
+        active_container_ids.remove(container_id)
+    return tuple.__new__(frozen_type, frozen_items)
+
+
+def _freeze_json_value(value: Any, active_container_ids: set[int]) -> Any:
     if isinstance(value, Mapping):
-        return FrozenJsonDict(
-            (key, freeze_json_value(nested)) for key, nested in value.items()
+        return _freeze_json_mapping(
+            value,
+            frozen_type=FrozenJsonDict,
+            active_container_ids=active_container_ids,
         )
     if isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray)
     ):
-        return FrozenJsonList(freeze_json_value(item) for item in value)
+        return _freeze_json_sequence(
+            value,
+            frozen_type=FrozenJsonList,
+            active_container_ids=active_container_ids,
+        )
+    return value
+
+
+def freeze_json_value(value: Any) -> Any:
+    """Rebuild JSON recursively without trusting existing Frozen instances."""
+
+    return _freeze_json_value(value, set())
+
+
+def _thaw_json_value(value: Any, active_container_ids: set[int]) -> Any:
+    if isinstance(value, Mapping):
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise ValueError("cyclic JSON container is not supported")
+        active_container_ids.add(container_id)
+        try:
+            return {
+                key: _thaw_json_value(nested, active_container_ids)
+                for key, nested in value.items()
+            }
+        finally:
+            active_container_ids.remove(container_id)
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise ValueError("cyclic JSON container is not supported")
+        active_container_ids.add(container_id)
+        try:
+            return [
+                _thaw_json_value(item, active_container_ids)
+                for item in value
+            ]
+        finally:
+            active_container_ids.remove(container_id)
     return value
 
 
 def thaw_json_value(value: Any) -> Any:
     """Project immutable JSON containers back to native serialization values."""
 
-    if isinstance(value, Mapping):
-        return {
-            key: thaw_json_value(nested)
-            for key, nested in value.items()
-        }
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        return [thaw_json_value(item) for item in value]
-    return value
+    return _thaw_json_value(value, set())
 
 
 def find_trusted_argument_field(value: Any) -> str | None:

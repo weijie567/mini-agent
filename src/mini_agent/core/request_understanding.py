@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -132,6 +132,11 @@ class NextMove(ModelVisibleModel):
     requested_tool_name: NonEmptyString | None = None
     arguments: Mapping[str, JsonValue] | None = None
     base_task_state_version: PositiveStateVersion | None = None
+
+    @field_validator("arguments", mode="before")
+    @classmethod
+    def argument_input_is_native_json(cls, value: Any) -> Any:
+        return thaw_json_value(value)
 
     @field_validator("arguments")
     @classmethod

@@ -5,6 +5,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from mini_agent.core.common import (
+    FrozenJsonDict,
+    FrozenJsonList,
+    freeze_json_value,
+)
 from mini_agent.core.tool_system import (
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     AuthorizedToolCommand,
@@ -200,6 +205,115 @@ def test_toolset_json_blocks_mutation_aliases_and_preserves_hash() -> None:
     assert compute_model_visible_toolset_hash(
         snapshot.provider_visible_toolset
     ) == original_hash
+
+
+def test_direct_frozen_dict_constructor_copies_aliases_before_dtos() -> None:
+    mutable_properties = {"resource_ref": {"type": "string"}}
+    mutable_required = ["resource_ref"]
+    frozen_schema = FrozenJsonDict(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": mutable_properties,
+            "required": mutable_required,
+        }
+    )
+    tool_spec = ToolSpec(
+        name="direct_frozen_read",
+        description="Safe direct Frozen input.",
+        input_schema=frozen_schema,
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    )
+    original_hash = compute_model_visible_toolset_hash((tool_spec,))
+
+    mutable_metadata = {"labels": ["safe"]}
+    frozen_arguments = FrozenJsonDict(
+        {
+            "order_id": "O-4242",
+            "metadata": mutable_metadata,
+        }
+    )
+    command = AuthorizedToolCommand(
+        gate_decision_id=uuid4(),
+        canonical_tool_name="get_order",
+        validated_arguments=frozen_arguments,
+        argument_binding_refs=(uuid4(),),
+        validated_task_state_version=1,
+        registry_snapshot_ref="snapshot-safe-ref",
+        trusted_context_ref="private-context-safe-ref",
+    )
+
+    mutable_properties["customer_id"] = {"type": "string"}
+    mutable_required.append("customer_id")
+    mutable_metadata["customer_id"] = "late-injection"
+
+    assert "customer_id" not in frozen_schema["properties"]
+    assert "customer_id" not in frozen_schema["required"]
+    assert "customer_id" not in frozen_arguments["metadata"]
+    assert "customer_id" not in str(tool_spec.model_dump(mode="json"))
+    assert "customer_id" not in str(command.model_dump(mode="json"))
+    assert compute_model_visible_toolset_hash((tool_spec,)) == original_hash
+
+
+def test_direct_frozen_list_constructor_copies_aliases_before_tool_result() -> None:
+    mutable_object = {"outcome": "SUCCESS"}
+    mutable_array = ["safe"]
+    frozen_payload = FrozenJsonList((mutable_object, mutable_array))
+    result = ToolResult(
+        tool_call_id=uuid4(),
+        canonical_tool_name="get_order",
+        outcome=ToolResultOutcome.SUCCESS,
+        payload=frozen_payload,
+        retryable=False,
+        observed_at=NOW,
+        completed_at=NOW,
+    )
+
+    mutable_object["customer_id"] = "late-injection"
+    mutable_array.append("customer_id")
+
+    assert "customer_id" not in frozen_payload[0]
+    assert "customer_id" not in frozen_payload[1]
+    assert result.model_dump(mode="json")["payload"] == [
+        {"outcome": "SUCCESS"},
+        ["safe"],
+    ]
+
+
+def test_freeze_json_value_rebuilds_untrusted_frozen_instances() -> None:
+    mutable_object: dict[str, object] = {"safe": True}
+    mutable_array = ["safe"]
+    forged_dict = tuple.__new__(
+        FrozenJsonDict,
+        (("nested", mutable_object),),
+    )
+    forged_list = tuple.__new__(FrozenJsonList, (mutable_array,))
+
+    rebuilt_dict = freeze_json_value(forged_dict)
+    rebuilt_list = freeze_json_value(forged_list)
+    mutable_object["customer_id"] = "late-injection"
+    mutable_array.append("customer_id")
+
+    assert rebuilt_dict is not forged_dict
+    assert rebuilt_list is not forged_list
+    assert "customer_id" not in rebuilt_dict["nested"]
+    assert "customer_id" not in rebuilt_list[0]
+
+
+def test_frozen_json_constructors_reject_cyclic_containers() -> None:
+    cyclic_object: dict[str, object] = {}
+    cyclic_object["self"] = cyclic_object
+    cyclic_array: list[object] = []
+    cyclic_array.append(cyclic_array)
+
+    with pytest.raises(ValueError, match="cyclic JSON container"):
+        FrozenJsonDict(cyclic_object)
+    with pytest.raises(ValueError, match="cyclic JSON container"):
+        FrozenJsonList(cyclic_array)
 
 
 def test_toolset_artifact_rejects_noncanonical_schema_version() -> None:
