@@ -95,7 +95,7 @@
 ## 8. 多 Agent 并行开发
 
 - 写入型并行工作使用不同 Git Worktree 和不同 branch；不得让多个 Agent 同时写同一个 checkout、branch 或文件。
-- 每个 Task Packet 必须包含精确 `base_sha`、文件 allowlist、禁止文件、依赖、验证命令与交接格式；同一 wave 内一个文件只有一个 writer。
+- 一个 GSD Plan 只对应一个精确 Task Packet；Packet 可以包含多个原子 task，但不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Task Packet 必须包含精确 `base_sha`、文件 allowlist、禁止文件、依赖、验证命令、`contract_changes`、`security_impact`、`eval_impact`、`rollback` 与交接格式；无适用项时显式填写 `NONE`，同一 wave 内一个文件只有一个 writer。
 - `pyproject.toml`、lockfile、migration chain、共享测试 bootstrap、Composition Root 和 active canonical 文档属于 single-writer 热点，由明确 owner 或 Integrator 串行修改。
 - 主任务 / Integrator 负责契约裁决、逐个集成、仓库级验证和 cross-file impact scan。子 Agent 默认用于只读探索、审查和测试分析；写入任务必须具备互不重叠的 ownership。
 - Agent 交接必须报告 branch / commit、实际变更文件、执行命令与结果、allowlist 检查、契约变化和未决风险；任务完成不等于切片已实现。
@@ -103,7 +103,9 @@
 - 新建空 GitHub repository 时，Integrator 可以一次性 push 已确认的 `main` 与 active integration baseline 以建立 PR base；必须记录精确 commit，并在 bootstrap 后立即配置可用的 branch protection。该例外不适用于后续开发变更。
 - E2E 实现 feature branch 先创建 draft PR 到对应 integration branch；Integrator 串行合并后，再由 integration branch 创建 PR 到 `main`。Repository 级流程或紧急修复可直接 PR 到 `main`，但仍不得绕过验证和 review。
 - PR 必须使用 [`.github/pull_request_template.md`](./.github/pull_request_template.md)，如实记录 Task Packet、ownership、契约变化、检查结果、未执行项、安全 / Eval 影响、风险和回滚方式。
-- GSD 只可作为派生的规划、执行和验证辅助；`.planning/` 不得成为产品、架构、契约或 Eval 语义的第二套 canonical owner。未完成现有 active 文档的 owner 映射与冲突审查前，不运行会批量生成或覆盖项目状态的 GSD 流程。
+- GSD 只可作为派生的规划、审查与验证辅助；`.planning/` 不得成为产品、架构、契约或 Eval 语义的第二套 canonical owner。其 owner mapping、single-writer、severity、GitHub / Worktree 映射、quality gate 与 rollback 见 [`.planning/GOVERNANCE.md`](./.planning/GOVERNANCE.md)，activation 基线、allowlist、冲突审查与实际验证见 [`.planning/ACTIVATION.md`](./.planning/ACTIVATION.md)。Activation 只有在独立 PR 的 final exact-head review 为 `PASS` 且合并后才生效。
+- Stock GSD 1.38.3 的 `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 与 `gsd-ship` 在当前项目禁用：plan / import 会写共享 State，verify 没有 `--no-transition` 且会进入 `phase.complete`，execute 会管理并可能以 `--force` 清理全部非当前 Worktree并提前完成 phase，ship 的单一 base 不能表达 feature → integration 与 integration → `main` 两级 PR。GSD planner / checker 角色可只读提供建议，最终 Plan 由 Integrator 在 dedicated planning-status Worktree 单写。`parallelization=false` 与 `workflow.use_worktrees=false` 只关闭 GSD 自管并行 / Worktree；Codex 多 Agent 仍由 Integrator 在 workflow 外预建精确 Task Packet Worktree / feature branch，走 draft PR、串行合并与显式 release PR。
+- `gsd-code-review` 只可在 exact-integration-SHA review-artifact Worktree 中用规范化绝对路径的 exact `--files` 写 Phase `REVIEW.md`；preflight 须证明 requested=accepted=unique、每项均为仓库内 regular tracked file 且 literal tracked 输出精确等于单个相对路径，workflow transcript scope 数量必须相等且不得出现 stock 的 outside-repository / file-not-found skip 输出。`gsd-code-review-fix` 与 `gsd-validate-phase` 只可在 Integrator 预建的 dedicated fix / validation Worktree 和 branch 中条件运行，并以前后 base/head/allowlist/changed-files/commits containment check 阻断 scope drift。`gsd-eval-review` 必须先有引用 canonical Eval owner 的派生 mapping；`gsd-secure-phase` 必须有完整 `<threat_model>` 映射且 zero-threat 不通过；会话式验收使用不含 lifecycle route 的受控 UAT adapter。
 - `E2E01-01/04` 的具体 Wave、ownership 与 Task Packet 见 [`docs/implementation/e2e01-thin-slice-multi-agent-plan.md`](./docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。该 Plan 只拥有执行拆分，不覆盖任何 active canonical owner。
 
 ## graphify
