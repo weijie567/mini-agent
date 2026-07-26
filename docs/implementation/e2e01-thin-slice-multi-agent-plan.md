@@ -269,11 +269,11 @@ Contract freeze 不得把 pre-review 暴露的冲突留给某个下游 Workstrea
 - Application use case 接收可信 `CustomerContext`，Persistence Port 只接收由其派生、不可选且仅含 `customer_id` 的 Runtime-private `TrustedOwnerScope`；启动恢复必须使用独立内部 authority / claim，并覆盖活动 `CREATED/RUNNING` Run。
 - Task / RequestUnit 更新、Run 恢复 claim 和 `RunTaskLinkRecord` finalize 必须使用版本条件或等效 CAS，不得伪造 `0` 版本或无条件覆盖。
 
-Contract-freeze Task Packet 必须从本次 Integrator alignment PR 合并后的同一个 integration head 创建并记录精确 `base_sha`，不能在本文预填未知 SHA。它的交付必须包含类型 / Port contract tests、active owner 对照、allowlist、完整离线回归和独立 exact-head review。只有该 PR 合并后才能进入下一个串行 gate；W2 三个 Worktree 的实际创建还必须等待下述 01-01 owner decision 与 01-02 implementation 依次合并。
+Contract-freeze Task Packet 必须从本次 Integrator alignment PR 合并后的同一个 integration head 创建并记录精确 `base_sha`，不能在本文预填未知 SHA。它的交付必须包含类型 / Port contract tests、active owner 对照、allowlist、完整离线回归和独立 exact-head review。只有该 PR 合并后才能进入下一个串行 gate；W2 三个 Worktree 的实际创建还必须等待下述 01-01–01-03 单 owner contract chain 与 01-04 implementation 依次合并。
 
 实际执行证据：W2.0 已通过 [PR #9](https://github.com/weijie567/mini-agent/pull/9) 合并到 `integration/e2e01-thin`，精确 merge commit 为 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`。该结果只证明 Application persistence DTO / Port contract freeze 已合并，不证明具体 Adapter、HTTP、Harness 或纵向切片已经实现。
 
-### W2.0a / Plan 01-01：persistence schema/version canonical-owner decision（串行）
+### W2.0a / Plans 01-01–01-03：persistence schema/version owner chain（串行）
 
 W2.0 exact-head review 暴露的是一个需要 owner 裁决的问题，而不是已经冻结的 Core RecordSchema contract。当前 [Thin Slice Spec](./e2e01-thin-slice-implementation-spec.md) 只确认以下 scoped 要求：
 
@@ -288,15 +288,21 @@ W2.0 exact-head review 暴露的是一个需要 owner 裁决的问题，而不�
 - unknown / mismatched schema version 是 fail closed、迁移、隔离还是其他行为；
 - 是否存在固定 record-code allowlist。
 
-Activation final exact-head PR 合并后，Integrator 必须在 workflow 外从 activation merge SHA 预建 01-01 专用 Worktree / feature branch，并发出一个精确 canonical-owner alignment Task Packet。该 Packet 只拥有问题说明、owner 影响分析、裁决、cross-file alignment 和适用验证；不得顺带实现未裁决的 RecordSchema API。只有 01-01 exact-head review 为 `PASS` 且 PR 合并后，才能形成 01-02 的实现 contract。
+独立 Plan Checker 发现：把 Project Direction、Memory、Tool、Eval 与 Thin Slice Spec 一次写入同一个 Packet 会跨越多个 canonical ownership boundary。因此 owner decision 固定拆成三个依赖有序的单 owner PR：
 
-### W2.0b / Plan 01-02：persistence schema/version implementation（串行、BLOCKED）
+1. `01-01 Project Direction persistence ownership / Trace structure decision`：只写 `PROJECT_DIRECTION.md`，固定 semantic/source/Port/adapter 四轴 ownership、版本维度与 `TraceEvent` shared structure / record-version owner。Activation merge SHA `6244756...` 预建的 `codex/e2e01-01-schema-owner-alignment` branch 只用于此 Packet。由于该 execution branch 早于 planning-status PR 创建，本地 checkout 不得作为 Plan provenance；写入前必须从串行合并后的 `origin/integration/e2e01-thin` 解析唯一 planning merge SHA，证明其相对 activation base 只包含声明的 8 个 planning-status 文件、`PROJECT_DIRECTION.md` byte-unchanged，并用 `git show` 读取和记录 Plan blob。
+2. `01-02 Memory persistence decode / recovery / migration contract`：仅在 01-01 exact-head PR 合并后，从新 integration SHA 建立；只写 Memory owner，裁决 fail-closed、用户读取、startup recovery 与逻辑/物理 migration 边界。
+3. `01-03 Thin Slice 17-item minimum-persistence schema/version scoped mapping`：仅在 01-02 exact-head PR 合并后建立；只写 Thin Slice Spec，针对第 10.1 节当前 17 行最低持久化集合（其中 1 项是 `ModelVisibleToolsetArtifact`）冻结 scoped item code/version、API 与 01-04 implementation contract。辅助 Pydantic 模型、Command 或未列入该 canonical 表格的对象不得被计入并制造“20-record”派生口径。Tool / Eval 已有语义通过引用消费；只有证明必须演进时才另建对应 specialized-owner Packet，不在 01-03 顺手改写。
 
-01-02 当前为 `BLOCKED_ON_01-01_EXACT_MERGE`。本 Plan 不预填其 allowlist、API、文件 ownership、decode 策略或 unknown-version 行为。
+当前唯一 `CONFIRMED` 的 scoped 要求仍只有写前 Pydantic serialization 与随记录保存 schema version。`RecordSchemaSpec`、registry、strict decoder、unknown-version fail-closed 和固定 record-code allowlist 在相应 owner PR 合并前均为 `OPEN / PROPOSAL_ONLY`。
 
-01-01 合并后，Integrator 必须依据裁决创建一对一的 Plan / Task Packet，记录精确 activation / alignment 后 integration `base_sha`、owner 文件、forbidden files、验证命令、契约变化、安全 / Eval 影响和回滚。实现不得复制 W2.0 已冻结的 Application DTO，也不得让 Infrastructure 私自发明第二套 projection contract。
+### W2.0b / Plan 01-04：persistence schema/version implementation（串行、BLOCKED）
 
-只有 01-02 feature PR 通过 focused checks、完整 canonical 回归、allowlist、cross-file impact scan、独立 exact-head review 并合并后，才从该新 integration exact head 预建三个 W2 Worktree。
+01-04 当前为 `BLOCKED_ON_01-03_EXACT_MERGE`。本 Plan 不预填其 allowlist、API、文件 ownership、decode 策略或 unknown-version 行为。
+
+01-03 合并后，Integrator 必须依据完整 owner chain 创建一对一的 Plan / Task Packet，记录新的精确 integration `base_sha`、owner 文件、forbidden files、验证命令、契约变化、安全 / Eval 影响和回滚。实现不得复制 W2.0 已冻结的 Application DTO，也不得让 Infrastructure 私自发明第二套 projection contract。
+
+只有 01-04 feature PR 通过 focused checks、完整 canonical 回归、allowlist、cross-file impact scan、独立 exact-head review 并合并后，才从该新 integration exact head 预建三个 W2 Worktree。
 
 ### W2：组件实现（并行）
 
@@ -320,11 +326,11 @@ Activation final exact-head PR 合并后，Integrator 必须在 workflow 外从 
 
 Gate：三方只通过冻结的 Port / DTO / Fixture contract 对接；不得修改其他 Workstream 的 owned files。
 
-三个分支由 Integrator 在 workflow 外，从同一个 01-02 merge SHA 预建并并行开发；完成后仍串行集成，推荐顺序为 `W2-RUNTIME` → `W2-INFRA` → `W2-EVAL`，每次合并后后续分支都必须基于最新 integration head 重新验证并取得新的 exact-head review。不得调用 stock `gsd-execute-phase` 创建、合并或清理这些 Worktree。
+三个分支对应 Plans 01-05/06/07，由 Integrator 在 workflow 外从同一个 01-04 merge SHA 预建并并行开发；完成后仍串行集成，推荐顺序为 `W2-RUNTIME` → `W2-INFRA` → `W2-EVAL`，每次合并后后续分支都必须基于最新 integration head 重新验证并取得新的 exact-head review。不得调用 stock `gsd-execute-phase` 创建、合并或清理这些 Worktree。
 
 ### W3：纵向集成（串行）
 
-Owner：Integrator。
+Plan 01-08，Owner：Integrator。
 
 - 只在 `bootstrap.py` 装配具体 Adapter。
 - 按 Spec 第 10.1 节逐项验证完整写入门禁：
@@ -345,7 +351,7 @@ Owner：Integrator。
 4. 真实 Qwen 配置存在时才运行 `qwen_baseline`；缺失时必须是 `SKIPPED / NOT_RUN`。
 5. 只有所有 DoD 有可复现证据后，才更新 Coverage Matrix 生命周期和 `AGENTS.md` canonical 命令。
 
-W4 是 01-01 至 01-06 执行并集成后的 quality gate，不计入 Phase 1 的六个 Plan。先由 canonical Coverage Matrix owner 更新 lifecycle，再由 Integrator 手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
+W4 是 01-01 至 01-08 执行并集成后的 quality gate，不计入 Phase 1 的八个 Plan。先由 canonical Coverage Matrix owner 更新 lifecycle，再由 Integrator 手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
 
 ## 8. 集成门禁
 
@@ -432,9 +438,9 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；当前在独立 `codex/gsd-activation` branch 上修复 exact-head review findings，状态为 `BLOCKED_REVIEW_SCOPE_REMEDIATION / PAUSED / NOT_EFFECTIVE`。精确候选 head 从 Git ref / GitHub PR head 读取，不在同一 commit 内容中自引用硬编码。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。当前 Phase 1 / Plan 01-01 已进入受控 planning adapter；精确执行 head 仍从 Git ref / GitHub PR head 外部解析，不在同一 commit 内容中自引用硬编码。
 
-### 11.1 Activation Gate（`IN_PROGRESS`）
+### 11.1 Activation Gate（`COMPLETE / EFFECTIVE`）
 
 启用任何会写入 `.planning/` 的 GSD 流程前，Integrator 必须通过一个独立、串行的 activation PR：
 
@@ -444,12 +450,12 @@ GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 
 - 在隔离 Worktree 演练初始化，证明不会覆盖 active canonical owner；
 - 记录可复现验证命令，并由独立 Reviewer 对精确 head SHA 给出 `PASS`。
 
-Activation 的派生文件与规则见 [`.planning/GOVERNANCE.md`](../../.planning/GOVERNANCE.md) 和 [`.planning/ACTIVATION.md`](../../.planning/ACTIVATION.md)。上述 Gate 未完成并合并前，不运行 `$gsd-code-review` 或其他依赖 phase / roadmap 状态的写入流程；只读 `$gsd-progress` 必须禁止自动 route，`$gsd-health` 必须同时读取 CJS / SDK surface 且不运行 `--repair` / `--force`。Stock `$gsd-import`、`$gsd-plan-phase`、`$gsd-execute-phase`、`$gsd-verify-work` 与 `$gsd-ship` 即使 activation 生效后也保持禁用。
+Activation 的派生文件与规则见 [`.planning/GOVERNANCE.md`](../../.planning/GOVERNANCE.md) 和 [`.planning/ACTIVATION.md`](../../.planning/ACTIVATION.md)。Gate 已由 PR #10 完成；后续只读 `$gsd-progress` 仍必须禁止自动 route，`$gsd-health` 必须同时读取 CJS / SDK surface 且不运行 `--repair` / `--force`。Stock `$gsd-import`、`$gsd-plan-phase`、`$gsd-execute-phase`、`$gsd-verify-work` 与 `$gsd-ship` 即使 activation 生效后也保持禁用。
 
 ### 11.2 激活后受控使用
 
 - GSD planner / checker 角色只读 canonical inputs 与目标 slot 后提供建议；Integrator 在预建的 dedicated planning-status Worktree / feature branch 中单写最终 Plan / Task Packet。一个 Plan 只映射一个 Packet；不运行会自动更新共享 State 的 stock `$gsd-import` / `$gsd-plan-phase`。
-- Activation merge 后首个工作不是直接导入 W2.0b，而是由 Integrator 预建 `01-01 persistence schema/version canonical-owner alignment` Worktree / branch。01-01 exact-head merge 前，01-02 仍为 `BLOCKED`。
+- Activation merge 后首个工作不是直接导入 implementation，而是由 Integrator 预建只写 `PROJECT_DIRECTION.md` 的 01-01 Worktree / branch。01-01 → 01-02 Memory → 01-03 Thin Slice 必须按单 owner exact-head PR 串行；01-03 merge 前，01-04 implementation 仍为 `BLOCKED`。
 - 实际实现由 Integrator 在 workflow 外预建 exact Task Packet Worktree / feature branch，再交给 Codex Agent。多个 Agent 只在 ownership 不重叠时并行；feature PR 指向 integration，Integrator 串行合并。
 - `$gsd-code-review` 只在 exact-integration-SHA review-artifact Worktree 中以规范化绝对路径的 exact `--files` 运行；preflight 必须证明 requested=accepted=unique、每项均为仓库内 regular tracked file 且 literal tracked 输出精确等于单个相对路径，workflow transcript 必须报告相同精确数量且不含 stock 的 outside-repository / file-not-found skip 输出，唯一写入为 Phase `REVIEW.md`。
 - `$gsd-code-review-fix` 与 `$gsd-validate-phase` 只在 Integrator 预建的 dedicated fix / validation Worktree / branch 中条件运行；precheck exact base/head/allowlist，postcheck 全部 changed files / commits，scope drift 即 `BLOCK` 且不 push。
@@ -490,13 +496,13 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；`main=5d668f71b565dff9ecf353d215c41affe86cb637`，当前 integration head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `BLOCKED_REVIEW_SCOPE_REMEDIATION / PAUSED / NOT_EFFECTIVE` | activation branch 从 integration exact base `85eb2a7...` fork；`1e6999c...`、`f740812...`、`b659c33...` 与 `f48461c...` 保留 blocked-review 记录；`9565275...` 因 time-sensitive W017 证据漂移在 review 前被本地 validation 拒绝；新候选 head 的双 review 与 PR merge 为 `PENDING` |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；activation 后的 integration head 为 `624475681847be5a8e463e32dafd28a0483b213b`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
+| GSD | `ACTIVE / EFFECTIVE / PLAN_01-01` | activation feature head `957cabd6...` 通过 owner / compatibility 双 review，tree `90b5d8db4d90dd8452660f5317c745d15103cbc4`，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 `6244756...`；当前使用受控 planner / checker adapter 建立 01-01 |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / CONTRACT_DEFINED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并；5 个 versioned JSON artifacts、20 个 focused consistency tests；尚无 Provider Adapter、Harness、Eval Result 或 Baseline |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `PENDING_PERSISTENCE_SCHEMA_OWNER_DECISION` | activation PR 合并后先执行 01-01 canonical-owner alignment；01-01 merge 后才生成 01-02 实现 Task Packet，W2 三路只能从 01-02 的新 exact integration head 预建 |
+| W2 dispatch | `PLAN_01-01_READY / OWNER_CHAIN_01-01_TO_01-03` | 01-01 planning-status 与 Project Direction owner 写入使用两个隔离 branch；01-01/02/03 逐个合并后才生成 01-04 implementation，W2 三路只能从 01-04 的新 exact integration head 预建 |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1 与 W2.0 contract freeze 已完成。当前下一步是完成 GSD activation remediation、final exact-head review 与 PR merge；随后从 activation merge SHA 预建 01-01 persistence schema/version canonical-owner alignment Worktree / branch。只有 01-01 裁决合并后才能生成 01-02 实现 Task Packet；01-02 exact-head review 与合并完成前不派发 W2 写入任务。后续任何“可运行”“已通过”结论都必须附实际 commit、命令与输出。
+W0、W1、W2.0 contract freeze 与 GSD activation 已完成。只写 `PROJECT_DIRECTION.md` 的 01-01 Worktree / branch 已从 activation merge SHA `6244756...` 预建；当前先合并其独立 planning-status PR，再执行该单 owner Task Packet。随后按 01-02 Memory、01-03 Thin Slice、01-04 implementation 串行；01-04 exact-head review 与合并完成前不派发 W2 写入任务。后续任何“可运行”“已通过”结论都必须附实际 commit、命令与输出。

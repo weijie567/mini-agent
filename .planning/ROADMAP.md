@@ -13,7 +13,7 @@
 
 ## Overview
 
-P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。只有 Phase 1 active，但 activation 仍 paused / not effective；Phase 2–6 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate mapping，不生成实现 Plan。
+P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 已通过 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效，只有 Phase 1 active；Phase 2–6 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate mapping，不生成实现 Plan。
 
 ## 🚧 **v0.1 GSD-only P0 execution**
 
@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。只有 Phas
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / ACTIVATION_PAUSED`
+**Status**: `ACTIVE / PLAN_01-01_READY`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze，以及 activation final exact-head `PASS` / merge。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze，以及 activation final exact-head `PASS` / merge（均已满足）。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -47,27 +47,31 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。只有 Phas
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 6 plans（当前只是 execution / planning slots；实际 PLAN 文件由 GSD planner / checker 角色提供只读建议，再由 Integrator 在 dedicated planning-status Worktree 中写入并通过 PR 创建；不运行 stock import / plan-phase）
+**Plans**: 8 plans（当前只有 01-01 具备 exact Task Packet；其余只是依赖有序的 execution / planning slots。每个 PLAN 文件均由 GSD planner / checker 角色提供只读建议，再由 Integrator 在 dedicated planning-status Worktree 中写入并通过 PR 创建；不运行 stock import / plan-phase）
 
 Plans:
 
-- [ ] 01-01: persistence schema/version canonical-owner decision（串行）
-- [ ] 01-02: W2.0b implementation slot（`BLOCKED`；仅在 01-01 exact merge 后按裁决生成 Task Packet）
-- [ ] 01-03: W2 Runtime（依赖 01-02 merge）
-- [ ] 01-04: W2 Infra（依赖 01-02 merge）
-- [ ] 01-05: W2 Eval（依赖 01-02 merge）
-- [ ] 01-06: W3 Composition Root 与纵向集成（Integrator 串行）
+- [ ] 01-01: Project Direction persistence ownership / Trace structure decision（串行、单 owner）
+- [ ] 01-02: Memory persistence decode / recovery / migration contract（`BLOCKED`；仅在 01-01 exact merge 后生成）
+- [ ] 01-03: Thin Slice 17-item minimum-persistence schema/version scoped mapping（`BLOCKED`；17 项派生自 Thin Slice Spec 第 10.1 节；仅在 01-02 exact merge 后生成）
+- [ ] 01-04: persistence schema/version implementation（`BLOCKED`；仅在 01-03 exact merge 后生成）
+- [ ] 01-05: W2 Runtime（依赖 01-04 merge）
+- [ ] 01-06: W2 Infra（依赖 01-04 merge）
+- [ ] 01-07: W2 Eval（依赖 01-04 merge）
+- [ ] 01-08: W3 Composition Root 与纵向集成（Integrator 串行）
 
 #### Phase 1 Execution Gates
 
 | Gate | 工作 | 启动条件 |
 |---|---|---|
-| Activation | activation remediation / review / merge | final exact-head review `PASS`；本 Roadmap 才生效 |
-| 01-01 | canonical-owner alignment PR | Integrator 在 workflow 外预建 exact Task Packet Worktree / branch |
-| 01-02 | W2.0b implementation | 01-01 exact-head PR 已合并；Task Packet 只实现已裁决 contract |
-| 01-03/04/05 | Runtime / Infra / Eval 并行 | Integrator 从同一 01-02 merge SHA 预建三个 ownership 不重叠的 Worktree；不调用 stock execute |
-| 01-06 | W3 串行集成 | 三个 W2 feature PR 逐个审查、重验并合并 |
-| Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-06 exact integration head 已形成；本 gate 不计入 Plan count |
+| Activation | activation remediation / review / merge | `PASS / MERGED`：reviewed feature head `957cabd6...`，PR #10 merge `6244756...` |
+| 01-01 | Project Direction owner PR | `READY`：Plan / Task Packet 由 planning-status PR 建立，单文件执行 Worktree / branch 已从 `6244756...` 预建 |
+| 01-02 | Memory owner PR | 01-01 exact-head PR 已合并；只写 Memory owner |
+| 01-03 | Thin Slice scoped mapping PR | 01-02 exact-head PR 已合并；只写 Thin Slice Spec；Tool / Eval 语义通过引用消费，不在同一 Packet 改写 |
+| 01-04 | schema/version implementation | 01-03 exact-head PR 已合并；Task Packet 只实现已裁决 contract |
+| 01-05/06/07 | Runtime / Infra / Eval 并行 | Integrator 从同一 01-04 merge SHA 预建三个 ownership 不重叠的 Worktree；不调用 stock execute |
+| 01-08 | W3 串行集成 | 三个 W2 feature PR 逐个审查、重验并合并 |
+| Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
 
 #### Post-execution Quality Gate（不是 Plan）
 
@@ -174,7 +178,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/6 | `Activation remediation / paused` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Plan 01-01 ready` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |

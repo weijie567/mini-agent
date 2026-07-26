@@ -9,7 +9,7 @@ W1 基础骨架已经进入 `integration/e2e01-thin`：
 - Python / uv 工具链、固定版本 PostgreSQL + pgvector、Alembic 与隔离测试 namespace；
 - Core / Application 的身份、Request Understanding、Task、Tool、Observation、Trace 等 contract；
 - `e2e01-thin-fixture-v1`、E2E01-01/04 与安全故障场景的 versioned Eval artifacts；
-- 根目录默认离线测试当前为 `125 passed`。
+- 根目录默认离线测试在 W2.0 contract freeze 合并时为 `181 passed`。
 
 这不表示首条纵向切片已经可运行。HTTP API、完整持久化 Adapter、`get_order` 执行链、Provider、Harness、Trajectory / E2E Eval 与 Qwen Baseline 仍未实现，Case 生命周期继续是 `CONTRACT_DEFINED`。
 
@@ -63,10 +63,10 @@ integration PR → main
 
 写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。一个 GSD Plan 只映射一个精确 Task Packet；Packet 不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令、契约变化、安全 / Eval 影响、回滚和交接格式；禁止直接 push `main` 或 integration。
 
-`W2-CONTRACT-FREEZE` 已通过 PR #9 合并。下一步先完成 GSD activation remediation、final exact-head review 与 PR merge；随后从 activation merge SHA 创建 `01-01 persistence schema/version canonical-owner alignment` PR。Thin Slice Spec 当前只确认 JSON persistence projection 写入前经过 Pydantic serialization 并保存 schema version；owner、API、decode 和 unknown-version 行为仍是 `OPEN / PROPOSAL_ONLY`。只有 01-01 裁决合并后才能生成 `01-02 W2.0b` 精确 Task Packet，其合并后三个 W2 Worktree 才从同一 integration SHA 并行启动。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并；GSD activation 已在精确 feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 通过双独立 review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。当前执行单 owner 的 `01-01 Project Direction persistence ownership / Trace structure decision`：其 GSD Plan / Task Packet 由 Integrator 在独立 planning-status branch 管理，实际写入 branch 只拥有 `PROJECT_DIRECTION.md`。随后按 01-02 Memory owner → 01-03 Thin Slice scoped mapping → 01-04 implementation 串行推进；Tool / Eval 现有语义通过引用消费，不在一个跨-owner Packet 中顺手改写。Thin Slice Spec 当前仍只确认 JSON persistence projection 写入前经过 Pydantic serialization 并保存 schema version；完整 owner、API、decode 和 unknown-version 行为在相应 owner PR 合并前仍是 `OPEN / PROPOSAL_ONLY`。只有 01-04 合并后，01-05/06/07 Runtime / Infra / Eval 才从同一 integration SHA 并行启动。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## GSD
 
-GSD 只作为派生的规划、审查和验证层，不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。独立 activation PR 合并前，依赖 Roadmap / Phase state 的写入流程保持暂停；合并后也必须按 [GSD Governance](.planning/GOVERNANCE.md)、[Activation Record](.planning/ACTIVATION.md) 与[当前派生 State](.planning/STATE.md) 受控使用。
+GSD 只作为派生的规划、审查和验证层，不能成为产品、架构、契约或 Eval 语义的第二套 canonical owner。Activation 已随 PR #10 合并而生效；后续仍必须按 [GSD Governance](.planning/GOVERNANCE.md)、[Activation Record](.planning/ACTIVATION.md) 与[当前派生 State](.planning/STATE.md) 受控使用。
 
 当前明确禁用 stock `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 和 `gsd-ship`。规划使用 GSD planner / checker 角色的只读建议，由 Integrator 在 dedicated planning-status Worktree 单写最终 Plan；UAT 使用无 lifecycle mutation 的受控 adapter。`.planning/config.json` 的 `parallelization=false` 与 `workflow.use_worktrees=false` 只关闭 GSD 自管并行 / Worktree，不关闭 Codex 多 Agent：Integrator 仍在 workflow 外预建精确 Task Packet Worktree / feature branch，Agent 实现并创建 draft feature → integration PR，Integrator 串行合并，最后显式创建 integration → `main` PR。Code review、fix、validation、Eval / Security audit 与 UAT 的条件和 containment gate 以 Governance 为准。
