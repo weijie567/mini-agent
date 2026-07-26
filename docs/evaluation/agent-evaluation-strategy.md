@@ -4,7 +4,7 @@
 状态：P0 规范性评测策略  
 适用范围：P0 Agent 的 Eval-driven development、Dataset、Grader、评测门禁、报告与架构决策证据
 
-> 本文定义目标评测契约，不表示仓库中已经存在可运行源码、Eval Harness、自动化 Dataset、Baseline、评测阈值、线上监控或生产结果。当前可复现实现与运行结果均为 `NOT_FOUND`；完整 P0 的具体技术栈与质量阈值仍为 `OPEN`，第一最薄 E2E-01 只有 scoped 编码选择，尚未实现。
+> 本文定义目标评测契约，不把 W1 contract / artifact tests 描述成可执行 E2E。仓库当前已有第一最薄 E2E-01 的 versioned Fixture / Case / script / lane artifacts 与 consistency tests，但 Eval Harness、结构化 Eval Result、Baseline、评测阈值、线上监控和生产结果仍为 `NOT_FOUND`；完整 P0 的质量阈值仍为 `OPEN`。
 
 ## 1. 文档所有权与适用边界
 
@@ -458,12 +458,12 @@ completed_at
 - P0 业务范围、两条 E2E 和安全不变量已有 active owner。
 - Intent、Tool Calling、Memory 和 RAG 已定义各自目标 Eval obligations。
 - P0 至少需要 Component、Trajectory 和 E2E 三层 Eval。
-- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约，但尚无运行证据。
+- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned W1 Fixture / Case / script / lane artifacts 与 component consistency tests，但尚无 Harness、HTTP / Trajectory E2E 或结构化 Eval Result 运行证据。
 
 ### 11.2 `NOT_FOUND`
 
-- 可运行源码和项目技术栈。
-- Eval Harness、自动化 Dataset、Fixture Loader 和 Grader 实现。
+- 可运行的 HTTP Application / Composition Root、完整业务与持久化 Adapter。
+- Eval Harness、Fixture Loader 和 Grader 实现；Dataset / Fixture artifacts 已存在但仍为 `CONTRACT_DEFINED`。
 - Baseline、回归报告、发布 Gate 和线上监控结果。
 
 ### 11.3 `OPEN`

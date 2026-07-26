@@ -344,7 +344,7 @@ Policy Corpus 的受控 ingestion、清洗、结构解析、Chunking，以及 Hy
 
 P0 的基础设施实现 profile 已裁决为从第一条可执行订单切片开始统一使用 `PostgreSQL + pgvector + tsvector`，本地开发与可复现测试通过 Docker Compose 启动数据库，不建立 SQLite 过渡实现。订单、物流、Runtime Record 与后续 Policy Corpus 共用这一关系数据库基础设施，但仍按 owner、事务和测试边界维护独立逻辑记录域；`pgvector` 在基础设施中可用不表示第一切片已经实现或使用 RAG。RAG Schema、索引与 `G-RAG-INFRA` 激活门禁以 [RAG Design Reference](docs/architecture/rag-design-reference.md) 为准，第一切片的 Compose、迁移和测试隔离目标契约以 [E2E-01 Thin Slice Implementation Spec](docs/implementation/e2e01-thin-slice-implementation-spec.md) 为准。
 
-上述内容当前仍是 `CONTRACT_DEFINED`：在 `compose.yaml`、Alembic migration、源码与测试真实出现并通过验证前，不得描述为数据库已经启动、Schema 已迁移或 `pgvector` 已可用。
+W1 已在当前开发环境中验证固定 pgvector image 的 Compose healthcheck、基础 Alembic migration、`vector` extension 和隔离测试 namespace，因此这些基础设施前置项为 `CONFIRMED / PARTIAL`。业务表、完整 Record Store、API、RAG Schema / FTS / capability manifest 和纵向 E2E 尚未实现；不得从 W1 前置项推导出应用、RAG 或 P0 已经可用，也不得把当前主机验证描述成生产部署或全新环境交付验证。
 
 ### 6.7 `DEVOPS-01`：完整应用容器化与单机部署演练（`DEFERRED`）
 

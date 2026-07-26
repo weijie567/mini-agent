@@ -65,8 +65,18 @@
 
 ## 6. 实现与验证
 
-- 当前尚未建立 canonical 的开发、启动、测试、lint、type-check 和构建命令；在真实技术栈与项目配置出现前不得编造。
-- 代码和工具链建立后，应以仓库内可执行配置验证命令，并在本节维护唯一 canonical 命令清单。
+- 当前 W1 基础骨架的 canonical 本地命令如下；必须从仓库根目录执行：
+
+  ```bash
+  uv sync --all-groups
+  docker compose up --wait -d db
+  docker compose --profile test up --wait -d db-test
+  uv run alembic upgrade head
+  uv run pytest
+  ```
+
+- 上述命令只证明当前依赖、PostgreSQL / pgvector、空业务 migration、测试 namespace、Core / Application contract 和 Eval artifact consistency 可复现；不证明 HTTP API、完整持久化 Adapter、Provider / Harness、Trajectory / E2E、Qwen Baseline 或 P0 产品已经实现。
+- 当前尚未建立 canonical 的应用启动、lint、type-check 和构建命令；相关配置和实现真实出现并通过验证前不得编造。可选并行测试只能作为附加证据，不能替代上述默认串行门禁。
 - 每个纵向切片在实现前先定义最小 Eval Contract；Component Eval 随实现增长，第一条完整纵向切片尽早运行 Trajectory / E2E Eval，实际失败必须进入回归集。不得在没有实现反馈时一次性冻结全部普通指标或阈值。
 - 修改完成后必须运行与风险相称的机械检查、测试或可复现验证，并准确报告已执行、未执行和失败的项目。
 - 没有自动化验证入口时，至少使用 `rg`、链接/路径检查和必要的源文件对照验证文档术语、状态、ID、范围及引用。

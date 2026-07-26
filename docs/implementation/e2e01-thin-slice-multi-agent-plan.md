@@ -2,7 +2,7 @@
 
 更新日期：2026-07-26｜状态：`ACTIVE / EXECUTION_PLAN`｜适用范围：`E2E01-01`、`E2E01-04`｜性质：`NON_NORMATIVE` 执行消费者
 
-> 本文只拥有第一最薄 E2E-01 的任务拆分、文件 ownership、依赖、集成顺序和交接格式。它不拥有产品、架构、HTTP、Schema、Fixture 语义、Eval 期望或 Case 生命周期，也不表示应用源码、测试和目标命令已经实现。
+> 本文只拥有第一最薄 E2E-01 的任务拆分、文件 ownership、依赖、集成顺序和交接格式。它不拥有产品、架构、HTTP、Schema、Fixture 语义、Eval 期望或 Case 生命周期。任务描述本身不证明实现完成；第 12 节只能用精确 commit、源码、命令输出和 PR 审查证据更新实时状态。
 
 本文中的“多 Agent”只指 Codex 辅助开发协作，不是 P0 产品能力、Runtime 架构或面向用户的多 Agent 平台。
 
@@ -246,9 +246,23 @@ Gate：无未提交改动；配置可被当前 Codex CLI 严格解析；每个�
 `W1-EVAL`：
 
 - 落盘 Fixture v1、Case v1、lane manifest 和 Scripted scenario catalog。
-- 建立不依赖应用代码的 Schema / version consistency checks。
+- 建立 artifact Schema / version consistency checks，并用最小 Core `NextMove` compatibility check 证明非法可信字段在真实 Pydantic 边界 fail-early；不得依赖 Application 或具体 Adapter。
 
 集成顺序：`W1-INFRA` → `W1-RUNTIME` → `W1-EVAL`。每次集成后，下一个分支基于最新 integration head 重新验证。
+
+### W2.0：共享契约冻结（串行）
+
+W2 不得直接从 W1 并行起跑。先执行一个独立的 `W2-CONTRACT-FREEZE` Task Packet，由 Runtime Engineer 单写 Core / Application shared contract，Integrator 负责 active owner 裁决、精确 base、review 和合并；此时不启动任何 W2 写入 Agent。
+
+必须冻结：
+
+1. 补齐第 10 节最低持久化集合中跨 Runtime / Infra / Eval 共用的 `ConversationRecord`、`MessageRecord`、`ConversationTaskLinkRecord`、`RunTaskLinkRecord` 与 `EvalResultRecord` DTO 或稳定投影边界。
+2. 补齐 `RuntimeRecordPort` 的可靠写入、按可信 owner 限定的读取，以及进程重启恢复所需的 Run / ToolCall / Task / RequestUnit 查询与状态更新边界；不得让 Infrastructure 自行发明第二套 DTO。
+3. 固定 trusted-field fault 的阶段映射：正常 Provider / Scripted raw candidate 在 Pydantic 阶段以 `INPUT_INVALID` fail-early；Gateway 的 `GATE_REJECTED` 只作为非正常 Adapter 绕过 canonical DTO 时的 defense-in-depth。
+4. 固定共享测试 bootstrap：`tests/conftest.py` 继续由 Infra 单写；Eval 只消费 `eval_postgres_namespace` / `postgres_namespace_factory`，新增 fixture 需求必须提交 dependency request。
+5. 固定 W3 Composition Root ownership：`src/mini_agent/__init__.py`、`src/mini_agent/main.py`、`src/mini_agent/bootstrap.py` 只由 Integrator 在 W3 串行创建或修改，W2 三个 workstream 都将其列为 forbidden files。
+
+Contract-freeze Task Packet 必须从本次 Integrator alignment PR 合并后的同一个 integration head 创建并记录精确 `base_sha`，不能在本文预填未知 SHA。它的交付必须包含类型 / Port contract tests、active owner 对照、allowlist、完整离线回归和独立 exact-head review。只有该 PR 合并后，Integrator 才能从同一精确 freeze SHA 创建三个 W2 Worktree 和 feature branch。
 
 ### W2：组件实现（并行）
 
@@ -256,18 +270,23 @@ Gate：无未提交改动；配置可被当前 Codex CLI 严格解析；每个�
 
 - Validator → Reducer → Registry / Gateway → Observation routing → Presentation Gate → Renderer。
 - 覆盖身份覆盖、参数替换、旧版本、停止原因和错误映射。
+- 只实现冻结后的 Runtime 行为；如需改变共享 DTO / Port，停止并提交 dependency request，不在本分支漂移契约。
 
 `W2-INFRA`：
 
 - Session / HTTP、持久化、作用域 `get_order`、安全分流和重启恢复。
 - 证明 Alice 查询 Bob 与查询不存在订单时均不产生私有 Observation。
+- 实现冻结 Port 的 PostgreSQL Adapter 和 migration；独占 `tests/conftest.py`、SQLAlchemy metadata、Alembic chain 与共享测试 bootstrap。
 
 `W2-EVAL`：
 
 - Scripted / Qwen Adapter、Harness、Graders、结构化 Eval Result 和故障注入。
 - 默认离线 lane 不读取模型凭据、不访问外部网络。
+- 只消费冻结 DTO / Port 与现有 PostgreSQL fixture，不修改 `tests/conftest.py`、migration、Application 或 Composition Root。
 
 Gate：三方只通过冻结的 Port / DTO / Fixture contract 对接；不得修改其他 Workstream 的 owned files。
+
+三个分支从同一 freeze SHA 创建并行开发；完成后仍串行集成，推荐顺序为 `W2-RUNTIME` → `W2-INFRA` → `W2-EVAL`，每次合并后后续分支都必须基于最新 integration head 重新验证并取得新的 exact-head review。
 
 ### W3：纵向集成（串行）
 
@@ -308,13 +327,11 @@ Owner：Integrator。
 - Fixture / Dataset 版本一致性；
 - 受影响 active 文件的 cross-file impact scan。
 
-最终门禁以仓库中真实出现且验证通过的配置为准。以下仍是 Implementation Spec 的目标命令，当前不得宣称可执行：
+最终门禁以仓库中真实出现且验证通过的配置为准，唯一 canonical 命令清单见 `AGENTS.md` 第 6 节。W1 已使依赖同步、根目录 Compose 数据库、migration 与当前 `uv run pytest` 套件可执行，但该套件目前只证明 W1 contract / artifact / persistence primitives，不得描述成 HTTP / Trajectory / E2E gate。
+
+以下仍只是 Implementation Spec 的后续目标，当前不得宣称可执行：
 
 ```bash
-uv sync --all-groups
-docker compose up -d db
-uv run alembic upgrade head
-uv run pytest
 uv run pytest -m qwen_baseline
 uv run uvicorn mini_agent.main:app --reload
 ```
@@ -415,10 +432,12 @@ GSD 只可作为现有协作模型上的选择性编排层，当前状态保持 
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=git@github.com:weijie567/mini-agent.git`；`main` 与 `integration/e2e01-thin` 已在 `a1c20b5d4152d292249d734c4c00d74ebbef055c` 完成 bootstrap；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)，其实时 lifecycle 以 GitHub 查询为准；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有虚构 required status checks |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；`main=5d668f71b565dff9ecf353d215c41affe86cb637`，W1 integration baseline `00f09d99aa12ffa1f58a684b6f4c28ce97d82ed9`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
 | GSD | `PROPOSED / NOT_INITIALIZED` | `.planning/STATE.md` 不存在，当前为 flat mode、0 workstreams |
-| 应用源码与工具链 | `NOT_FOUND` | 尚无 `src/`、`pyproject.toml`、`compose.yaml` |
-| Fixture / Harness / 自动化 Eval | `NOT_FOUND` | 尚无 `evals/` 和可执行测试 |
+| W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
+| W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / CONTRACT_DEFINED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并；5 个 versioned JSON artifacts、20 个 focused consistency tests；尚无 Provider Adapter、Harness、Eval Result 或 Baseline |
+| W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
+| W2 dispatch | `PENDING_SERIAL_CONTRACT_FREEZE` | 必须先完成 W2.0，共享 DTO / Port / recovery / bootstrap / Composition Root ownership 冻结后才能创建并行 Worktree |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0 完成后从 W1 开始开发。后续任何“可运行”“已通过”结论都必须附实际 commit、命令与输出。
+W0 与 W1 基础骨架已经完成。下一步是 W2.0 串行共享契约冻结；在其 exact-head review 与合并完成前，不派发 W2 写入任务。后续任何“可运行”“已通过”结论都必须附实际 commit、命令与输出。
