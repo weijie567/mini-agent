@@ -72,6 +72,8 @@ from mini_agent.core.task_state import (
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
+    GateDecisionValue,
+    GateReasonCode,
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
@@ -83,6 +85,9 @@ from mini_agent.core.trace import (
     AgentRunRecord,
     AgentRunStatus,
     StopReason,
+    TimingAndUsageSummary,
+    TraceEvent,
+    TraceEventType,
 )
 
 UTC_NOW = datetime(2026, 7, 26, 8, 0, tzinfo=timezone.utc)
@@ -344,6 +349,119 @@ def _rebuild(instance: BaseModel, **updates: object) -> BaseModel:
     return type(instance)(**values)
 
 
+def _recovery_trace_events(
+    *,
+    run_transition: MarkRunIncompleteForRecoveryCommand,
+    task_transitions: tuple[ApplyTaskTransitionCommand, ...],
+    tool_call_transitions: tuple[InterruptToolCallForRecoveryCommand, ...],
+) -> tuple[TraceEvent, ...]:
+    run_id = run_transition.expected_active_record.run_id
+    return (
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=run_transition.incomplete_record.completed_at,
+            run_id=run_id,
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        ),
+        *(
+            TraceEvent(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.TASK_STATE_CHANGED,
+                occurred_at=transition.task_state_transition.changed_at,
+                run_id=run_id,
+                task_id=transition.next_task_record.task_id,
+                request_unit_id=transition.next_request_unit_record.request_unit_id,
+            )
+            for transition in task_transitions
+        ),
+        *(
+            TraceEvent(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.TOOL_CALL_INTERRUPTED,
+                occurred_at=transition.interrupted_record.finished_at,
+                run_id=run_id,
+                tool_call_id=transition.interrupted_record.tool_call_id,
+                tool_call_terminal_status=ToolCallStatus.INTERRUPTED,
+            )
+            for transition in tool_call_transitions
+        ),
+    )
+
+
+_RECOVERY_TRACE_COMMON_FIELDS = frozenset(
+    {
+        "trace_event_id",
+        "event_type",
+        "occurred_at",
+        "run_id",
+    }
+)
+_RECOVERY_TRACE_ALLOWED_FIELDS = {
+    TraceEventType.RUN_STOPPED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"user_outcome", "stop_reason"},
+    TraceEventType.TASK_STATE_CHANGED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"task_id", "request_unit_id"},
+    TraceEventType.TOOL_CALL_INTERRUPTED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"tool_call_id", "tool_call_terminal_status"},
+}
+_RECOVERY_TRACE_CONTAMINATION_CASES = tuple(
+    (event_type, field_name)
+    for event_type, allowed_fields in _RECOVERY_TRACE_ALLOWED_FIELDS.items()
+    for field_name in sorted(set(TraceEvent.model_fields) - allowed_fields)
+)
+
+
+def _non_empty_trace_optional_value(field_name: str) -> object:
+    values: dict[str, object] = {
+        "case_id": "E2E01-01",
+        "message_ref": uuid4(),
+        "accepted_delta_ref": uuid4(),
+        "task_id": uuid4(),
+        "request_unit_id": uuid4(),
+        "input_binding_ref": uuid4(),
+        "model_call_id": uuid4(),
+        "model_call_purpose": "REQUEST_UNDERSTANDING",
+        "context_manifest_id": uuid4(),
+        "provider_name": "scripted",
+        "model_snapshot": "scripted-v1",
+        "tool_registry_version": "e2e01-thin-tools-v1",
+        "model_visible_toolset_hash": f"sha256:{'0' * 64}",
+        "next_move_kind": "CALL_TOOL",
+        "requested_tool_name": "get_order",
+        "proposed_base_task_state_version": 1,
+        "validated_task_state_version": 1,
+        "argument_binding_refs": (uuid4(),),
+        "gate_decision": GateDecisionValue.ACCEPT,
+        "gate_reason_code": GateReasonCode.TOOL_NOT_REGISTERED,
+        "tool_call_id": uuid4(),
+        "tool_call_terminal_status": ToolCallStatus.FAILED,
+        "safe_tool_outcome": ToolResultOutcome.SYSTEM_FAILURE,
+        "observation_ref": uuid4(),
+        "presentation_plan_ref": uuid4(),
+        "user_outcome": AgentOutcome.BLOCKED,
+        "stop_reason": StopReason.PROCESS_RESTART_DETECTED,
+        "timing_and_usage_summary": TimingAndUsageSummary(duration_ms=1),
+    }
+    return values[field_name]
+
+
+def _updated_recovery_trace_events(
+    command: ApplyRestartRecoveryCommand,
+    selected_event_type: TraceEventType,
+    **updates: object,
+) -> tuple[TraceEvent, ...]:
+    events = list(command.recovery_trace_events)
+    event_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type is selected_event_type
+    )
+    events[event_index] = events[event_index].model_copy(update=updates)
+    return tuple(events)
+
+
 def _initial_graph() -> CreateInitialTaskGraphCommand:
     conversation_id = uuid4()
     message_id = uuid4()
@@ -584,20 +702,26 @@ def _created_restart_recovery_closure() -> RestartRecoveryClosure:
 def _created_restart_recovery_command() -> ApplyRestartRecoveryCommand:
     closure = _created_restart_recovery_closure()
     active_run = closure.active_run_record
+    run_transition = MarkRunIncompleteForRecoveryCommand(
+        expected_active_record=active_run,
+        incomplete_record=_project_run(
+            active_run,
+            status=AgentRunStatus.INCOMPLETE,
+            completed_at=UTC_NOW + timedelta(milliseconds=1),
+            stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        ),
+    )
     return ApplyRestartRecoveryCommand(
         expected_closure=closure,
-        run_transition=MarkRunIncompleteForRecoveryCommand(
-            expected_active_record=active_run,
-            incomplete_record=_project_run(
-                active_run,
-                status=AgentRunStatus.INCOMPLETE,
-                completed_at=UTC_NOW + timedelta(milliseconds=1),
-                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
-            ),
-        ),
+        run_transition=run_transition,
         tool_call_transitions=(),
         task_transitions=(),
         terminal_run_task_links=(),
+        recovery_trace_events=_recovery_trace_events(
+            run_transition=run_transition,
+            task_transitions=(),
+            tool_call_transitions=(),
+        ),
     )
 
 
@@ -649,34 +773,41 @@ def _restart_recovery_command() -> ApplyRestartRecoveryCommand:
             changed_at=completed_at,
         ),
     )
+    run_transition = MarkRunIncompleteForRecoveryCommand(
+        expected_active_record=run,
+        incomplete_record=_project_run(
+            run,
+            status=AgentRunStatus.INCOMPLETE,
+            completed_at=completed_at,
+            stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        ),
+    )
+    tool_call_transitions = (
+        InterruptToolCallForRecoveryCommand(
+            active_record=tool_call,
+            interrupted_record=_project_tool_call(
+                tool_call,
+                status=ToolCallStatus.INTERRUPTED,
+                finished_at=completed_at,
+                interruption_reason="PROCESS_RESTART_DETECTED",
+            ),
+        ),
+    )
     return ApplyRestartRecoveryCommand(
         expected_closure=closure,
-        run_transition=MarkRunIncompleteForRecoveryCommand(
-            expected_active_record=run,
-            incomplete_record=_project_run(
-                run,
-                status=AgentRunStatus.INCOMPLETE,
-                completed_at=completed_at,
-                stop_reason=StopReason.PROCESS_RESTART_DETECTED,
-            ),
-        ),
-        tool_call_transitions=(
-            InterruptToolCallForRecoveryCommand(
-                active_record=tool_call,
-                interrupted_record=_project_tool_call(
-                    tool_call,
-                    status=ToolCallStatus.INTERRUPTED,
-                    finished_at=completed_at,
-                    interruption_reason="PROCESS_RESTART_DETECTED",
-                ),
-            ),
-        ),
+        run_transition=run_transition,
+        tool_call_transitions=tool_call_transitions,
         task_transitions=(task_transition,),
         terminal_run_task_links=(
             _rebuild(
                 closure.run_task_links[0],
                 result_task_state_version=3,
             ),
+        ),
+        recovery_trace_events=_recovery_trace_events(
+            run_transition=run_transition,
+            task_transitions=(task_transition,),
+            tool_call_transitions=tool_call_transitions,
         ),
     )
 
@@ -1852,6 +1983,7 @@ def test_application_port_declaration_models_freeze_the_exact_field_surface() ->
             "tool_call_transitions",
             "task_transitions",
             "terminal_run_task_links",
+            "recovery_trace_events",
         },
     }
 
@@ -1887,6 +2019,9 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         (ApplyRestartRecoveryCommand, "task_transitions"),
         (ApplyRestartRecoveryCommand, "terminal_run_task_links"),
     )
+    bounded_recovery_trace_fields = (
+        (ApplyRestartRecoveryCommand, "recovery_trace_events"),
+    )
     for model_type, field_name in exact_one_fields:
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema["minItems"] == 1
@@ -1895,6 +2030,10 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema.get("minItems", 0) == 0
         assert field_schema["maxItems"] == 1
+    for model_type, field_name in bounded_recovery_trace_fields:
+        field_schema = model_type.model_json_schema()["properties"][field_name]
+        assert field_schema["minItems"] == 1
+        assert field_schema["maxItems"] == 3
 
     graph = _initial_graph()
     child = graph.request_understanding.accepted_deltas[0]
@@ -2423,6 +2562,186 @@ def test_created_run_empty_recovery_apply_is_a_valid_total_projection() -> None:
     assert command.tool_call_transitions == ()
     assert command.task_transitions == ()
     assert command.terminal_run_task_links == ()
+    assert len(command.recovery_trace_events) == 1
+    assert command.recovery_trace_events[0].event_type is TraceEventType.RUN_STOPPED
+
+
+def test_restart_recovery_requires_the_exact_bounded_trace_event_set() -> None:
+    created_command = _created_restart_recovery_command()
+    running_command = _restart_recovery_command()
+    running_events = running_command.recovery_trace_events
+
+    assert {event.event_type for event in running_events} == {
+        TraceEventType.RUN_STOPPED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
+    }
+    assert len({event.trace_event_id for event in running_events}) == 3
+
+    with pytest.raises(ValidationError):
+        _rebuild(created_command, recovery_trace_events=())
+    with pytest.raises(ValidationError):
+        _rebuild(
+            running_command,
+            recovery_trace_events=(*running_events, running_events[0]),
+        )
+
+    unrelated_event = TraceEvent(
+        trace_event_id=uuid4(),
+        event_type=TraceEventType.RUN_STARTED,
+        occurred_at=created_command.run_transition.incomplete_record.completed_at,
+        run_id=created_command.expected_closure.active_run_record.run_id,
+    )
+    with pytest.raises(ValidationError, match="recovery Trace event type"):
+        _rebuild(
+            created_command,
+            recovery_trace_events=(
+                created_command.recovery_trace_events[0],
+                unrelated_event,
+            ),
+        )
+
+    duplicate_id_events = list(running_events)
+    duplicate_id_events[1] = duplicate_id_events[1].model_copy(
+        update={"trace_event_id": duplicate_id_events[0].trace_event_id}
+    )
+    with pytest.raises(ValidationError, match="Trace event identities"):
+        _rebuild(
+            running_command,
+            recovery_trace_events=tuple(duplicate_id_events),
+        )
+
+
+@pytest.mark.parametrize(
+    ("missing_event_type", "error_match"),
+    (
+        (TraceEventType.RUN_STOPPED, "exactly one RunStopped"),
+        (TraceEventType.TASK_STATE_CHANGED, "TaskStateChanged event set"),
+        (TraceEventType.TOOL_CALL_INTERRUPTED, "ToolCallInterrupted event set"),
+    ),
+)
+def test_restart_recovery_rejects_every_missing_event_family(
+    missing_event_type: TraceEventType,
+    error_match: str,
+) -> None:
+    command = _restart_recovery_command()
+    events = tuple(
+        event
+        for event in command.recovery_trace_events
+        if event.event_type is not missing_event_type
+    )
+
+    with pytest.raises(ValidationError, match=error_match):
+        _rebuild(command, recovery_trace_events=events)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "updates", "error_match"),
+    (
+        (
+            TraceEventType.RUN_STOPPED,
+            {"run_id": uuid4()},
+            "same recovery Run",
+        ),
+        (
+            TraceEventType.RUN_STOPPED,
+            {"user_outcome": AgentOutcome.COMPLETED},
+            "BLOCKED",
+        ),
+        (
+            TraceEventType.RUN_STOPPED,
+            {"stop_reason": StopReason.GOAL_COMPLETED},
+            "PROCESS_RESTART_DETECTED",
+        ),
+        (
+            TraceEventType.RUN_STOPPED,
+            {"occurred_at": UTC_NOW},
+            "Run completion timestamp",
+        ),
+        (
+            TraceEventType.TASK_STATE_CHANGED,
+            {"run_id": uuid4()},
+            "same recovery Run",
+        ),
+        (
+            TraceEventType.TASK_STATE_CHANGED,
+            {"task_id": uuid4()},
+            "TaskStateChanged event set",
+        ),
+        (
+            TraceEventType.TASK_STATE_CHANGED,
+            {"request_unit_id": uuid4()},
+            "TaskStateChanged event set",
+        ),
+        (
+            TraceEventType.TASK_STATE_CHANGED,
+            {"occurred_at": UTC_NOW},
+            "Task transition timestamp",
+        ),
+        (
+            TraceEventType.TOOL_CALL_INTERRUPTED,
+            {"run_id": uuid4()},
+            "same recovery Run",
+        ),
+        (
+            TraceEventType.TOOL_CALL_INTERRUPTED,
+            {"tool_call_id": uuid4()},
+            "ToolCallInterrupted event set",
+        ),
+        (
+            TraceEventType.TOOL_CALL_INTERRUPTED,
+            {"tool_call_terminal_status": ToolCallStatus.FAILED},
+            "status must match|INTERRUPTED",
+        ),
+        (
+            TraceEventType.TOOL_CALL_INTERRUPTED,
+            {"occurred_at": UTC_NOW},
+            "ToolCall interruption timestamp",
+        ),
+        (
+            TraceEventType.TASK_STATE_CHANGED,
+            {"event_type": TraceEventType.RUN_STARTED},
+            "recovery Trace event type",
+        ),
+    ),
+)
+def test_restart_recovery_trace_binds_kind_identity_status_and_timestamp(
+    event_type: TraceEventType,
+    updates: dict[str, object],
+    error_match: str,
+) -> None:
+    command = _restart_recovery_command()
+
+    with pytest.raises(ValidationError, match=error_match):
+        _rebuild(
+            command,
+            recovery_trace_events=_updated_recovery_trace_events(
+                command,
+                event_type,
+                **updates,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "field_name"),
+    _RECOVERY_TRACE_CONTAMINATION_CASES,
+)
+def test_restart_recovery_trace_rejects_every_cross_kind_or_unrelated_projection(
+    event_type: TraceEventType,
+    field_name: str,
+) -> None:
+    command = _restart_recovery_command()
+
+    with pytest.raises(ValidationError):
+        _rebuild(
+            command,
+            recovery_trace_events=_updated_recovery_trace_events(
+                command,
+                event_type,
+                **{field_name: _non_empty_trace_optional_value(field_name)},
+            ),
+        )
 
 
 def test_running_run_recovery_allows_zero_or_one_closed_graph() -> None:
@@ -2543,6 +2862,11 @@ def test_running_action_recovery_command_preserves_reconciliation_candidate() ->
         tool_call_transitions=(action_transition,),
         task_transitions=command.task_transitions,
         terminal_run_task_links=command.terminal_run_task_links,
+        recovery_trace_events=_recovery_trace_events(
+            run_transition=command.run_transition,
+            task_transitions=command.task_transitions,
+            tool_call_transitions=(action_transition,),
+        ),
     )
 
     assert action_command.tool_call_transitions[0].active_record.effect is (

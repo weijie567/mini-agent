@@ -46,6 +46,8 @@ from mini_agent.core.trace import (
     AgentRunRecord,
     AgentRunStatus,
     StopReason,
+    TraceEvent,
+    TraceEventType,
 )
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
@@ -1110,6 +1112,23 @@ _RECOVERY_ACTIVE_TASK_STATUSES = frozenset(
     }
 )
 
+_RECOVERY_TRACE_COMMON_FIELDS = frozenset(
+    {
+        "trace_event_id",
+        "event_type",
+        "occurred_at",
+        "run_id",
+    }
+)
+_RECOVERY_TRACE_ALLOWED_FIELDS = {
+    TraceEventType.RUN_STOPPED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"user_outcome", "stop_reason"},
+    TraceEventType.TASK_STATE_CHANGED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"task_id", "request_unit_id"},
+    TraceEventType.TOOL_CALL_INTERRUPTED: _RECOVERY_TRACE_COMMON_FIELDS
+    | {"tool_call_id", "tool_call_terminal_status"},
+}
+
 
 class RestartRecoveryClosure(_StrictRuntimePrivateRecord):
     """Internally consistent decoded recovery graph guarded by an opaque fence.
@@ -1297,6 +1316,10 @@ class ApplyRestartRecoveryCommand(_StrictRuntimePrivateRecord):
         tuple[RunTaskLinkRecord, ...],
         Field(max_length=1),
     ]
+    recovery_trace_events: Annotated[
+        tuple[TraceEvent, ...],
+        Field(min_length=1, max_length=3),
+    ]
 
     @model_validator(mode="after")
     def next_projections_are_bijective_with_expected_closure(self) -> Self:
@@ -1378,6 +1401,110 @@ class ApplyRestartRecoveryCommand(_StrictRuntimePrivateRecord):
             terminal_link_by_task[link.task_id] = link
         if set(terminal_link_by_task) != set(expected_link_by_task):
             raise ValueError("recovery requires the exact terminal RunTaskLink set")
+        return self
+
+    @model_validator(mode="after")
+    def recovery_trace_is_exact_bounded_and_projection_safe(self) -> Self:
+        events = self.recovery_trace_events
+        event_ids = tuple(event.trace_event_id for event in events)
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("recovery Trace event identities must be unique")
+
+        run_id = self.expected_closure.active_run_record.run_id
+        for event in events:
+            allowed_fields = _RECOVERY_TRACE_ALLOWED_FIELDS.get(event.event_type)
+            if allowed_fields is None:
+                raise ValueError("unsupported recovery Trace event type")
+            if event.run_id != run_id:
+                raise ValueError(
+                    "every recovery Trace event must use the same recovery Run"
+                )
+            for field_name in TraceEvent.model_fields:
+                if field_name in allowed_fields:
+                    continue
+                value = getattr(event, field_name)
+                if value is not None and value != ():
+                    raise ValueError(
+                        f"{event.event_type.value} recovery Trace only allows "
+                        "its exact per-kind projection"
+                    )
+
+        run_stopped_events = tuple(
+            event for event in events if event.event_type is TraceEventType.RUN_STOPPED
+        )
+        if len(run_stopped_events) != 1:
+            raise ValueError("recovery Trace requires exactly one RunStopped event")
+        run_stopped = run_stopped_events[0]
+        if run_stopped.user_outcome is not AgentOutcome.BLOCKED:
+            raise ValueError("recovery RunStopped requires BLOCKED user outcome")
+        if run_stopped.stop_reason is not StopReason.PROCESS_RESTART_DETECTED:
+            raise ValueError("recovery RunStopped requires PROCESS_RESTART_DETECTED")
+        if (
+            run_stopped.occurred_at
+            != self.run_transition.incomplete_record.completed_at
+        ):
+            raise ValueError(
+                "recovery RunStopped must use the Run completion timestamp"
+            )
+
+        expected_task_events = {
+            (
+                transition.next_task_record.task_id,
+                transition.next_request_unit_record.request_unit_id,
+            ): transition.task_state_transition.changed_at
+            for transition in self.task_transitions
+        }
+        actual_task_events: dict[tuple[UUID | None, UUID | None], datetime] = {}
+        for event in events:
+            if event.event_type is not TraceEventType.TASK_STATE_CHANGED:
+                continue
+            identity = (event.task_id, event.request_unit_id)
+            if identity in actual_task_events:
+                raise ValueError(
+                    "recovery TaskStateChanged event identities must be unique"
+                )
+            actual_task_events[identity] = event.occurred_at
+        if set(actual_task_events) != set(expected_task_events):
+            raise ValueError("recovery requires the exact TaskStateChanged event set")
+        if any(
+            actual_task_events[identity] != changed_at
+            for identity, changed_at in expected_task_events.items()
+        ):
+            raise ValueError(
+                "recovery TaskStateChanged must use the Task transition timestamp"
+            )
+
+        expected_tool_events = {
+            transition.interrupted_record.tool_call_id: (
+                transition.interrupted_record.finished_at
+            )
+            for transition in self.tool_call_transitions
+        }
+        actual_tool_events: dict[UUID | None, datetime] = {}
+        for event in events:
+            if event.event_type is not TraceEventType.TOOL_CALL_INTERRUPTED:
+                continue
+            if event.tool_call_terminal_status is not ToolCallStatus.INTERRUPTED:
+                raise ValueError(
+                    "recovery ToolCallInterrupted requires INTERRUPTED status"
+                )
+            if event.tool_call_id in actual_tool_events:
+                raise ValueError(
+                    "recovery ToolCallInterrupted event identities must be unique"
+                )
+            actual_tool_events[event.tool_call_id] = event.occurred_at
+        if set(actual_tool_events) != set(expected_tool_events):
+            raise ValueError(
+                "recovery requires the exact ToolCallInterrupted event set"
+            )
+        if any(
+            actual_tool_events[identity] != finished_at
+            for identity, finished_at in expected_tool_events.items()
+        ):
+            raise ValueError(
+                "recovery ToolCallInterrupted must use the ToolCall interruption "
+                "timestamp"
+            )
         return self
 
 
