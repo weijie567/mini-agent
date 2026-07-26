@@ -42,7 +42,7 @@ uv run pytest
 - Alice 可以访问 `O-1001`；
 - Bob 拥有 `O-2001`，用于验证跨用户访问不泄漏；
 - `O-9999` 是不得写入数据库的不存在订单 sentinel；
-- 所有 Case、model script、lane 和 manifest 都有固定版本与 SHA-256。
+- Fixture、Case dataset、model-script catalog 与 lane artifact 都有固定版本，其 SHA-256 由 versioned manifest 记录；manifest 自身由 Git 版本化。
 
 真实失败出现后再增量加入回归集；fixture 不包含真实客户、真实订单或生产凭据。
 
