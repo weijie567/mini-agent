@@ -467,8 +467,16 @@ class ToolCallRecord(AuditOnlyModel):
             ToolCallStatus.TIMED_OUT,
             ToolCallStatus.INTERRUPTED,
         }
-        if self.status is not ToolCallStatus.CREATED and self.attempt_count < 1:
-            raise ValueError("initiated ToolCall requires attempt_count >= 1")
+        requires_attempt = {
+            ToolCallStatus.RUNNING,
+            ToolCallStatus.SUCCEEDED,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.TIMED_OUT,
+        }
+        if self.status is ToolCallStatus.CREATED and self.attempt_count != 0:
+            raise ValueError("created ToolCall requires attempt_count = 0")
+        if self.status in requires_attempt and self.attempt_count < 1:
+            raise ValueError("dispatched ToolCall requires attempt_count >= 1")
         if self.status in terminal and self.finished_at is None:
             raise ValueError("terminal ToolCall requires finished_at")
         if self.status not in terminal and self.finished_at is not None:
@@ -506,7 +514,7 @@ class ToolAttemptRecord(AuditOnlyModel):
     attempt_no: Annotated[int, Field(ge=1)]
     started_at: datetime
     finished_at: datetime | None = None
-    outcome: ToolResultOutcome
+    outcome: ToolResultOutcome | None = None
     failure_code: NonEmptyString | None = None
 
     @field_validator("started_at", "finished_at")
@@ -517,9 +525,22 @@ class ToolAttemptRecord(AuditOnlyModel):
         return require_utc(value, field_name="ToolAttemptRecord timestamp")
 
     @model_validator(mode="after")
-    def attempt_dates_are_ordered(self) -> Self:
+    def lifecycle_is_consistent(self) -> Self:
+        if self.finished_at is None:
+            if self.outcome is not None:
+                raise ValueError("active ToolAttempt cannot carry outcome")
+            if self.failure_code is not None:
+                raise ValueError("active ToolAttempt cannot carry failure_code")
+            return self
+        if self.outcome is None:
+            raise ValueError("finalized ToolAttempt requires outcome")
         if self.finished_at is not None and self.finished_at < self.started_at:
             raise ValueError("ToolAttempt finished_at cannot precede started_at")
+        if (
+            self.outcome is ToolResultOutcome.SUCCESS
+            and self.failure_code is not None
+        ):
+            raise ValueError("successful ToolAttempt cannot carry failure_code")
         return self
 
 
