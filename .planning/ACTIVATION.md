@@ -14,7 +14,7 @@
 | Base branch | `integration/e2e01-thin` |
 | Exact base SHA | `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
 | Branch relation | activation branch **forked from** exact base SHA；该 base 不是当前 activation head |
-| Blocked review heads | `1e6999cbc60caa8f57d065ff4536dd238d48a911`, `f7408129b46f5a5bcaa0d4959e7b1cfe07b5e72d`, `b659c33d0670c57c1fc987e9487f6bd6165eb72c`, `f48461c9912d8240a8dba537087bffda08041f52` |
+| Rejected candidate / review heads | `1e6999cbc60caa8f57d065ff4536dd238d48a911`, `f7408129b46f5a5bcaa0d4959e7b1cfe07b5e72d`, `b659c33d0670c57c1fc987e9487f6bd6165eb72c`, `f48461c9912d8240a8dba537087bffda08041f52`, `9565275ab24673350758d3d145e1f71b0450cd9c` |
 | Current candidate head | 由 `git rev-parse HEAD` / GitHub PR head 在外部审查证据中解析；不在同一 commit 内容内自引用硬编码 |
 | Base evidence | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 的 W2.0 contract-freeze merge |
 | Governance | [GOVERNANCE.md](GOVERNANCE.md) |
@@ -80,11 +80,11 @@
 
 | 检查 | 状态 | 实际结果 |
 |---|---|---|
-| Worktree / branch / exact base | `CONFIRMED` | `codex/gsd-activation` 从 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` fork；blocked review heads 为 `1e6999c...`、`f740812...`、`b659c33...` 与 `f48461c...` |
+| Worktree / branch / exact base | `CONFIRMED` | `codex/gsd-activation` 从 `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` fork；`1e6999c...`、`f740812...`、`b659c33...`、`f48461c...` 为 blocked review heads，`9565275...` 因 time-sensitive W017 证据漂移在 review 前被本地 validation 拒绝 |
 | GSD installed version | `CONFIRMED` | `/Users/ming/.codex/get-shit-done/VERSION` 为 `1.38.3` |
 | GSD SDK version | `CONFIRMED` | `gsd-sdk --version` → `gsd-sdk v0.1.0` |
-| Evidence captured at | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE` | `2026-07-26T10:40:44Z` UTC；commit 后仍须对 exact head 重跑 |
-| CJS health surface | `DEGRADED` | `node /Users/ming/.codex/get-shit-done/bin/gsd-tools.cjs validate health --raw` → 6×`W017`（既有 W1 / W2 audit Worktree）、`errors=[]`、`repairable=0` |
+| Evidence captured at | `CONFIRMED_ON_REVIEW_SCOPE_REMEDIATION_TREE` | `2026-07-26T10:42:09Z` UTC；commit 后仍须对 exact head 重跑 |
+| CJS health surface | `DEGRADED / TIME_SENSITIVE_COUNT` | `node /Users/ming/.codex/get-shit-done/bin/gsd-tools.cjs validate health --raw` → 本次 7×`W017`（6 个既有 W1 / W2 audit Worktree + 正在工作的 activation Worktree 被目录 mtime heuristic 判为 stale）、`errors=[]`、`repairable=0`；数量随时间变化，不作为稳定 gate |
 | SDK health surface | `DEGRADED` | `gsd-sdk query validate.health` → 6×`W006`（Phase 1–6 directory 尚未创建）、`errors=[]`、`repairable=0` |
 | SDK Phase 1 init surface | `OPEN / ADAPTER_SURFACE_DIFFERENCE` | `gsd-sdk query init.phase-op 1` 可解析 Phase 1 / State / Roadmap，但 `phase_dir=null`（import 前预期）且本地 agent-file 探测为 false；conditional workflow 还必须独立确认所需 Codex collaboration role 可用 |
 | Dual-surface disposition | `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_FOR_ACTIVATION_WITH_CONTROLS` | warning code / object surface 不一致；未来创建 Phase 1 artifact directory 预计只减少一个 `W006`，不得声称整体 healthy |
