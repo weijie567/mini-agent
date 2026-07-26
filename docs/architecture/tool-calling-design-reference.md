@@ -522,9 +522,15 @@ Gate 通过后，Runtime 必须：
 5. 从 RuntimePrivateContext 注入可信 `customer_id` 和授权范围。
 6. 计算不超过 Run 剩余预算的实际 deadline。
 7. 对 Action 关联既有 `action_id / idempotency_key`。
-8. 才允许向 Business Port / Adapter 发起调用。
+8. 在调用任何 Handler / Business Port / Adapter 前，提交一个原子事务或等价的 durable dispatch fence：
+   - 以当前状态为条件把 ToolCall 从 `CREATED` 更新为 `RUNNING`；
+   - 追加当前 `ToolAttemptRecord` 并使 `attempt_count` 与之匹配；
+   - 对 Action 同时把同一幂等身份的 Action Record / attempt 更新为 `STARTED`。
+9. 只有该 fence 成功提交后，才允许向 Handler / Business Port / Adapter 发起调用；提交失败时不得 dispatch。
 
 模型参数不得覆盖服务端可信参数；发生同名字段时必须拒绝，而不是静默接受模型值。
+
+durable dispatch fence 是恢复语义的一部分，不只是物理事务优化。P0 模块化单体可以使用同一数据库事务；后续若拆成不同存储，也必须提供等价的原子性与恢复证据，不能留下“外部调用已经发生，但权威记录仍为 `CREATED`”的崩溃窗口。
 
 ### 9.2 ToolCallRecord
 
@@ -561,9 +567,16 @@ ToolAttemptRecord
   attempt_no
   started_at
   finished_at?
-  outcome
+  outcome?
   failure_code?
 ```
+
+`ToolAttemptRecord` 使用两阶段持久化：
+
+- durable dispatch fence 创建当前 attempt 时，只记录 `tool_call_id`、递增且唯一的 `attempt_no` 与 `started_at`；`finished_at`、`outcome` 和 `failure_code` 必须为空。
+- 底层调用结束后，以 attempt 尚未完成为条件 finalize 同一条记录；`finished_at` 与 `outcome` 必须同时出现，`failure_code` 只在适用的非成功结果中出现。
+- 新的重试追加新的 `attempt_no`，不得用后一次尝试覆盖或复用先前记录。
+- 进程重启发现未完成 attempt 时，保留已持久化的开始事实，并按 ToolCall / Action 恢复规则结束或对账；不得倒填一个未观察到的成功、失败或超时 outcome。
 
 普通 ToolCall 状态：
 
@@ -587,16 +600,21 @@ NextMoveProposed
   ├─ GateDecision(REJECT)
   └─ GateDecision(ACCEPT)
        → CREATED
-       → RUNNING
-       → SUCCEEDED | FAILED | TIMED_OUT | INTERRUPTED
+       ├─ INTERRUPTED
+       └─ RUNNING
+            → SUCCEEDED | FAILED | TIMED_OUT | INTERRUPTED
 ```
 
 约束：
 
+- `CREATED` 表示起始记录已可靠写入，但 durable dispatch fence 尚未提交，因此任何 Handler / Business Adapter dispatch 都不允许发生；此时 `attempt_count=0`，且不存在 `ToolAttemptRecord`。
+- 只有 Runtime 能确定调用仍停留在 `CREATED`、未发生 dispatch 时，才允许直接迁移为 `INTERRUPTED`。该迁移保留 `attempt_count=0`，记录安全的 `interruption_reason`，不得伪造一次底层尝试。
+- `RUNNING` 表示至少一次底层尝试已经开始，因此从 `RUNNING` 进入任何终态时 `attempt_count>=1`，并存在对应的追加式 `ToolAttemptRecord`。
 - 每个 ToolCall 只能有一个终态。
 - 状态只能向前迁移，不能把失败记录覆盖成成功。
 - 每次底层尝试使用同一 `tool_call_id`，通过追加的 ToolAttemptRecord 与 `attempt_no` 区分。
 - Action 的每次执行尝试还必须追加到同一个 Action Record。
+- 状态更新必须使用当前状态 / 版本条件或等效 CAS；恢复进程不得把已经进入终态或已被其他恢复实例认领的记录再次改写。
 
 ## 10. 超时、重试与中断
 
@@ -663,6 +681,8 @@ Read / Retrieval 只有同时满足以下条件时才能重试：
 4. Read / Retrieval 不生成伪造 Observation。
 5. Action 已 dispatch 或无法判断时进入 `RESULT_UNKNOWN`。
 6. Provider 原生 Tool Calling 如果要求每个 call 都有配对 result，Adapter 可以生成协议级 `INTERRUPTED` 响应以闭合消息结构。
+
+进程重启时，只有第 9.1 节 durable dispatch fence 得到实现和验证，持久化状态 `CREATED` 才能证明未发生 dispatch；恢复逻辑可以按第 9.3 节直接写入 `INTERRUPTED`，保留 `attempt_count=0` 且不追加 `ToolAttemptRecord`。如果状态为 `RUNNING`，必须保留既有 attempt；对于 Action，只要已经 dispatch 或无法确定是否 dispatch，Action Ledger 仍按 `RESULT_UNKNOWN` 处理。通用 ToolCall 的 `INTERRUPTED` 不能替代 Action Ledger 的权威结果，也不能被解释成业务系统明确失败。
 
 协议级 `INTERRUPTED` 响应：
 
