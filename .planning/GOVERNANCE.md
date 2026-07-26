@@ -117,7 +117,7 @@ exact-integration-SHA code review artifact
 → 显式 integration → main GitHub PR
 ```
 
-- `gsd-code-review` 只能在以 exact integration SHA 创建的只读 review-artifact Worktree 中，以 `--files=<normalized absolute exact list>` 运行；相对路径禁止使用，因为当前 macOS 的 `realpath` 不支持 workflow 使用的 GNU `-m` 选项。Preflight 必须用 repository root 与 tracked-file 检查确认每个绝对路径均在仓库内；workflow 输出必须证明至少一个文件实际进入 review 且没有 `SKIP_OUTSIDE_REPOSITORY`。唯一允许写入的是对应 Phase 的 `REVIEW.md`；它不得修改源码、共享状态或其他 artifact。
+- `gsd-code-review` 只能在以 exact integration SHA 创建的只读 review-artifact Worktree 中，以 `--files=<normalized absolute exact list>` 运行；相对路径禁止使用，因为当前 macOS 的 `realpath` 不支持 workflow 使用的 GNU `-m` 选项。Preflight 必须确认 requested / accepted 数量完全相等、每个绝对路径均位于 repository 内且是 tracked file；workflow transcript 必须包含同一精确数量的 `File scope: <N> files from --files override`，并且不含 stock 实际输出 `Error: File path outside repository, skipping:` 或 `Warning: File not found, skipping:`。唯一允许写入的是对应 Phase 的 `REVIEW.md`；它不得修改源码、共享状态或其他 artifact。
 - `gsd-code-review-fix` 仅在 Integrator 预建的 dedicated fix Worktree / feature branch 中条件使用，并服从第 3 节 precheck / postcheck；发现 scope drift 时 `BLOCK` 且不 push。
 - `gsd-validate-phase` 仅在 Integrator 预建的 dedicated validation Worktree / feature branch 中条件使用；测试或验证补缺必须作为独立 Task Packet / PR，不能直接修改 integration。
 - `gsd-eval-review` 只有在派生 AI / Eval mapping 明确引用 [canonical Eval owner](../docs/evaluation/agent-evaluation-strategy.md) 后才构成 gate；该 mapping 必须是 `DERIVED / NON_NORMATIVE`，不得创造第二套 Eval 语义。
@@ -127,14 +127,55 @@ exact-integration-SHA code review artifact
 - 禁止 `phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 及其他自动 lifecycle mutation。
 - release 只使用显式 GitHub head / base PR；不调用 `gsd-ship`。
 
-### 6.1 受控 Planning Adapter
+### 6.1 Code Review Scope Adapter
+
+Integrator 先把 Task Packet 的精确文件放入 `review_paths` Bash array；路径不得包含逗号，因为 stock `--files` 以逗号分隔。启动前运行：
+
+```bash
+review_repo_root=$(git rev-parse --show-toplevel) || exit 1
+review_repo_root=$(realpath "$review_repo_root") || exit 1
+review_requested_count=${#review_paths[@]}
+review_accepted_count=0
+review_absolute_paths=()
+
+for review_input in "${review_paths[@]}"; do
+  review_abs=$(realpath "$review_input") || exit 1
+  case "$review_abs" in
+    *','*|*$'\n'*) exit 1 ;;
+  esac
+  case "$review_abs" in
+    "$review_repo_root"/*) ;;
+    *) exit 1 ;;
+  esac
+  review_rel=${review_abs#"$review_repo_root"/}
+  git -C "$review_repo_root" ls-files --error-unmatch -- "$review_rel" >/dev/null || exit 1
+  review_absolute_paths+=("$review_abs")
+  review_accepted_count=$((review_accepted_count + 1))
+done
+
+review_unique_count=$(printf '%s\n' "${review_absolute_paths[@]}" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+test "$review_requested_count" -gt 0
+test "$review_accepted_count" -eq "$review_requested_count"
+test "$review_unique_count" -eq "$review_requested_count"
+```
+
+调用时只传上述已接受绝对路径。Integrator 在 captured workflow transcript 中断言精确出现 `File scope: ${review_requested_count} files from --files override`，并对以下两个 stock 真实前缀做零匹配检查：
+
+```text
+Error: File path outside repository, skipping:
+Warning: File not found, skipping:
+```
+
+任一计数不一致、任一路径无权威 tracked-file 证据、任一 skip 前缀出现或最终 review artifact 未覆盖全部 requested files，均为 `BLOCK`。
+
+### 6.2 受控 Planning Adapter
 
 1. Integrator 从 exact integration SHA 预建 dedicated planning-status Worktree / feature branch，并定义只允许一个目标 Plan、对应 Task Packet、必要共享派生索引的精确 allowlist。
 2. GSD planner / checker 角色只读 canonical inputs、目标 Roadmap slot 与 Task Packet 模板；只在 handoff 中返回建议，不写文件、不调用 stock `gsd-import` / `gsd-plan-phase`。
 3. Integrator 逐项裁决建议，在该 Worktree 中单写最终 Plan / Task Packet；precheck 必须证明目标 slot 唯一且不存在同名 Plan，postcheck 必须证明没有重复 slot、无 scope drift、无未授权 lifecycle mutation。
 4. Planning artifact 经独立 exact-head review 和 PR 合并后才可作为下游执行输入；Plan 本身仍不证明实现完成。
 
-### 6.2 受控 UAT Adapter
+### 6.3 受控 UAT Adapter
 
 1. Integrator 从 exact integration SHA 预建 UAT-artifact Worktree / feature branch，allowlist 只含对应 Phase 的 UAT artifact。
 2. Adapter 复用 `gsd-verify-work` 的用户可观察验收点选择与逐项记录方法，但不调用 stock workflow entrypoint 或任何 GSD state mutation。
@@ -170,7 +211,7 @@ GSD 健康必须同时读取两个表面，并保留原始分类：
 | Safe read-only | `gsd-progress` | 只读查看；关闭 / 拒绝任何自动 next-route |
 | Safe read-only | `gsd-health` | 同时读取 CJS 与 SDK surface；不运行 `--repair` / `--force` |
 | Safe planning advisory | GSD planner / checker roles | 只读 canonical inputs 与目标 slot；输出建议，不写共享 State。Integrator 在 dedicated planning-status Worktree 中创建一对一 Plan / Task Packet 并通过 PR 合并 |
-| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + normalized absolute exact `--files`；preflight / output 证明 non-zero reviewed files 且无 path skip；只写 Phase `REVIEW.md` |
+| Conditional review artifact | `gsd-code-review` | exact-integration-SHA review-artifact Worktree + normalized absolute exact `--files`；requested=accepted=transcript scope，且 stock 两种真实 skip 输出均为零；只写 Phase `REVIEW.md` |
 | Conditional fix | `gsd-code-review-fix` | 预建 dedicated fix Worktree / branch；精确 Task Packet 与 containment check |
 | Conditional validation | `gsd-validate-phase` | 预建 dedicated validation Worktree / branch；补缺走独立 PR |
 | Conditional Eval audit | `gsd-eval-review` | 先有引用 canonical Eval owner 的派生 mapping；否则不构成 gate |
