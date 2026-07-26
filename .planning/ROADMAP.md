@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / PACKETS_01-04E_F_G_OWNER_DEPENDENCIES`
+**Status**: `ACTIVE / W2_PLANS_REVISED / EXACT_HEAD_REVIEW_PENDING`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping / clarification chain `9632c18532baa2f4cd6ab7526d0e6db30328ea65` → `9602fc18148b19c841889a8041daf10ccc5b8f1c`、Plan 01-04 persistence codec merge `bde99edec0bbb9ba331c6099c8b467c14fe24e58`、Packet 01-04D Application Port closure merge `a84d30188eaec75e45619e9939180ba78efa3b80` 与对应 Graphify gates（均已满足）。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping / clarification chain `9632c18532baa2f4cd6ab7526d0e6db30328ea65` → `9602fc18148b19c841889a8041daf10ccc5b8f1c`、Plan 01-04 persistence codec merge `bde99edec0bbb9ba331c6099c8b467c14fe24e58`、Packet 01-04D Application Port closure merge `a84d30188eaec75e45619e9939180ba78efa3b80`、Packet 01-04E Memory token availability merge `be68490b9d8440a29a43fa8143e9dd5d4bcbfeda`、Packet 01-04F Thin Slice / Eval fault alignment merge `1d47fae3c2a3b910d92acb4713f2015199f54d49`、Packet 01-04G recovery Trace atomicity merge / W2 execution base `c35687dafa3881bb322d91515068d8d39be79df6` 与对应 Graphify gates（均已满足）。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -56,13 +56,13 @@ Plans:
 - [ ] 01-03: Thin Slice 17-item minimum-persistence schema/version scoped mapping（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：owner PR #16 与 clarification PR #17 merged；checkbox 保持未勾选）
 - [ ] 01-04: persistence schema/version implementation（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：PR #19 merge `bde99ed...`；134 focused / 315 full tests、双 reviewer final `PASS` 与 Graphify gate通过；checkbox 保持未勾选）
 - [ ] 01-04D: Application persistence write / recovery Port closure（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`：planning PR #20、feature PR #21 merge `a84d301...`；210 focused / 344 full tests、双 reviewer与 Graphify gate通过；不计入8个主 Plan）
-- [ ] 01-04E: Memory token availability（插入式 `PLAN_CHECKER_PASS / PLANNING_PR_PENDING`；exact three-file Memory owner；required TokenCounts object + nullable strict per-direction exact counts）
-- [ ] 01-04F: Thin Slice / Eval fault-path alignment（插入式 `PLAN_CHECKER_PASS / BLOCKED_ON_01-04E_MERGE`；exact six-file scoped owner / three-JSON artifact correction；canonical ACTIVE/v1 → WAITING_USER/v2 → BLOCKED/v3）
-- [ ] 01-04G: restart recovery state + Trace atomicity（插入式 `PLAN_CHECKER_PASS / BLOCKED_ON_01-04F_MERGE`；exact four-file Application contract；Port-level atomicity与per-event exact projection）
-- [ ] 01-05: W2 Runtime（`BLOCKED_ON_01-04E_F_G`；只拥有 Core / Application runtime behavior 与新增 Component tests）
-- [ ] 01-06: W2 Infra（`BLOCKED_ON_01-04E_F_G`；只拥有 Session / HTTP / PostgreSQL / migration / scoped `get_order` / recovery Adapter 与 Infra tests）
-- [ ] 01-07: W2 Eval（`BLOCKED_ON_01-04E_F_G`；只拥有 versioned loader、Provider Adapter、Harness / Graders、structured Eval records、fault injection 与 Eval tests）
-- [ ] 01-08: W3 Composition Root 与纵向集成（Integrator 串行）
+- [ ] 01-04E: Memory token availability（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #23 merge `be68490...`；required TokenCounts object + nullable strict per-direction exact counts；[Summary](phases/01-cycle-1-e2e-01/01-04E-SUMMARY.md)）
+- [ ] 01-04F: Thin Slice / Eval fault-path alignment（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #24 merge `1d47fae...`；canonical ACTIVE/v1 → WAITING_USER/v2 → BLOCKED/v3；[Summary](phases/01-cycle-1-e2e-01/01-04F-SUMMARY.md)）
+- [ ] 01-04G: restart recovery state + Trace atomicity（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #25 merge / W2 base `c35687d...`；Port-level APPLIED state/link/Trace atomicity与per-event exact projection；[Summary](phases/01-cycle-1-e2e-01/01-04G-SUMMARY.md)）
+- [ ] 01-05: W2 Runtime（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；14-file exact ownership；只拥有 Core / Application runtime behavior 与新增 Component tests）
+- [ ] 01-06: W2 Infra（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；13-file exact ownership；只拥有 Session / HTTP / PostgreSQL / migration / scoped `get_order` / recovery Adapter 与 Infra tests）
+- [ ] 01-07: W2 Eval（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；11-file exact ownership；只拥有 versioned loader、Provider Adapter、Harness / Graders、structured Eval records、fault injection 与 Eval tests）
+- [ ] 01-08: W3 Composition Root 与纵向集成（`NOT_STARTED`；三个 W2 feature PR 串行合并后由 Integrator规划与执行）
 
 #### Phase 1 Execution Gates
 
@@ -74,10 +74,10 @@ Plans:
 | 01-03 | Thin Slice scoped mapping PR | `COMPLETE / EVIDENCE_INDEXED`：PR #16 merge `9632c18...`；projection clarification PR #17 merge `9602fc1...`；181 tests；双 reviewer final `PASS` |
 | 01-04 | schema/version implementation | `COMPLETE / EVIDENCE_INDEXED`：PR #19 merge `bde99ed...`；315 tests、two-file containment、final dual review与 Graphify gate通过 |
 | 01-04D | Application Port owner dependency | `COMPLETE / EVIDENCE_INDEXED`：PR #21 merge `a84d301...`；344 tests、five-file containment、双 reviewer与 Graphify gate通过 |
-| 01-04E | Memory token availability | `PLAN_CHECKER_PASS / PLANNING_PR_PENDING`：nullable strict per-direction exact counts；unknown不得编码为0/估算，float/string/bool不得coerce |
-| 01-04F | Thin Slice / Eval fault alignment | `PLAN_CHECKER_PASS / BLOCKED_ON_01-04E_MERGE`：以canonical Port/transition修正 stale-state injection，并修正 fact-bearing presentation error stage |
-| 01-04G | Recovery Trace atomicity | `PLAN_CHECKER_PASS / BLOCKED_ON_01-04F_MERGE`：Port要求APPLIED state/link/Trace同事务、per-kind exact Trace projection；其他 recovery result零写 |
-| 01-05/06/07 | Runtime / Infra / Eval 并行 | 01-04G merge后，Integrator从同一新 exact integration SHA规划并预建三个 ownership不重叠的 Worktree；不调用 stock execute |
+| 01-04E | Memory token availability | `COMPLETE / EVIDENCE_INDEXED`：PR #23 merge `be68490...`；357 tests；nullable strict per-direction exact counts |
+| 01-04F | Thin Slice / Eval fault alignment | `COMPLETE / EVIDENCE_INDEXED`：PR #24 merge `1d47fae...`；364 tests；canonical Port/transition与fact-bearing presentation error stage已对齐 |
+| 01-04G | Recovery Trace atomicity | `COMPLETE / EVIDENCE_INDEXED`：PR #25 merge `c35687d...`；466 tests；Graphify 3353 nodes / 5999 links / 50 hyperedges，health error为0 |
+| 01-05/06/07 | Runtime / Infra / Eval 并行 | `REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`：三个Plan均使用exact base `c35687d...`，ownership分别为14 / 13 / 11 files且交集为0；当前published exact head双路review与planning PR merge后才预建三个Worktree |
 | 01-08 | W3 串行集成 | 三个 W2 feature PR逐个审查、重验并合并后，由 Integrator完成 Composition Root与纵向证据 |
 | Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
 
@@ -186,7 +186,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 4/8；实际 Task Packet完成5/12（含01-04D）；01-04E/F/G owner planning` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 4/8；实际 Task Packet完成8/12（含01-04D/E/F/G）；W2 01-05/06/07 revision applied，exact-head review pending` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
