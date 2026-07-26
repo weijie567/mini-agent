@@ -713,7 +713,7 @@ Qwen Responses API 官方文档说明其与 OpenAI 在参数和具体行为上�
 
 ## 10. 持久化与重启语义
 
-### 10.1 物理实现
+### 10.1 逻辑持久化契约与物理边界
 
 本地默认：
 
@@ -725,29 +725,123 @@ MINI_AGENT_DATABASE_URL=postgresql+psycopg://<user>:<password>@<host>:<port>/<da
 
 测试为每个 Eval Run 或并发 worker 分配独立 PostgreSQL database 或 schema namespace，不共享业务状态，也不得回退到 SQLite。Harness 必须能从空 namespace 应用同一份 Alembic migration，并在 Case 结束后确定性清理。所有 JSON 投影写入前先通过 Pydantic 序列化；Schema 版本必须随记录保存。
 
-最低持久化集合：
+下面是本切片唯一的 canonical 最低逻辑持久化集合。每行 source model / artifact 的全部必填字段与 owner 校验仍然有效；本表只增加跨 Port 持久化所需的 code、version、identity 和 owner / link 投影，不建立第二套 payload DTO。
 
-| 记录 | 必须字段 |
-|---|---|
-| `ConversationRecord` | `conversation_id`、Runtime-private `owner_customer_id`、创建时间 |
-| `MessageRecord` | `message_id`、`conversation_id`、方向、受控原始消息、接收时间；原文只保存在 Conversation Store |
-| `RequestUnderstandingRecord` | `run_id`、`message_ref`、Schema 版本、Candidate validation、accepted delta refs、候选与重验状态版本、`next_move_candidate_ref?` |
-| `TaskRecord` | `task_id`、Runtime-private `owner_customer_id`、状态、`state_version`、创建 / 更新时间、last outcome ref |
-| `RequestUnitRecord` | `request_unit_id`、`task_id`、goal source refs、`input_binding_refs[]`、状态、`state_version`、result refs |
-| `ConversationTaskLinkRecord` | `conversation_id`、`task_id`、link reason、创建 / 结束时间；不得退化为 `conversation.task_id` 唯一外键 |
-| `RunTaskLinkRecord` | `run_id`、`task_id`、本 Run 的 base / result state version |
-| `InputBindingRecord` | `binding_id`、名称、规范化值、authority、source refs、validation status、版本与时间 |
-| `ModelVisibleToolsetArtifact` | artifact Schema 版本、`model_visible_toolset_hash`、完整安全 Provider-visible ToolSpec 投影 |
-| `AgentRunRecord` | `run_id`、`conversation_id?`、状态、provider lane、开始 / 完成时间、`stop_reason`、`incomplete_reason?` |
-| `GateDecisionRecord` | `gate_decision_id`、候选与 canonical tool、各 Gate 结果、候选 / 重验版本、`argument_binding_refs[]`、decision、reason code |
-| `ToolCallRecord` | Tool owner 定义的关联、状态、attempt、failure code 与 result ref |
-| `ObservationRecord` | Memory owner 定义的来源、类型、最小值、时间、visibility |
-| `ContextManifestRecord` | 模型调用、消息 / Task / Observation 引用、Toolset hash、redaction policy version |
-| `TraceEventRecord` | 事件类型、关联 ID、安全字段、时间 |
-| `EvalResultRecord` | Schema 版本、Case、lane、attempt、状态、版本 manifest、grader 结果、critical failure、observed outcome、trace ref |
-| `EvalExecutionFailureRecord` | Schema 版本、Eval Run / Case?、lane、attempt?、failure phase、安全错误码、受限诊断 / Trace 引用、版本 manifest、发生时间 |
+<!-- P0-PERSISTENCE-REGISTRY:START -->
+| item | `record_code` | `record_schema_version` | semantic owner | current source | logical identity | owner / required link metadata |
+|---|---|---|---|---|---|---|
+| `ConversationRecord` | `conversation_record` | `conversation_record.p0.v1` | Application | `ConversationRecord` | `conversation_id` | direct `owner_customer_id` |
+| `MessageRecord` | `message_record` | `message_record.p0.v1` | Application | `MessageRecord` | `message_id` | `conversation_id -> conversation_record` |
+| `RequestUnderstandingRecord` | `request_understanding_record` | `request_understanding_record.p0.v1` | Request Understanding | `RequestUnderstandingRecord` | `run_id` | `run_id -> agent_run_record`; `message_ref -> message_record` |
+| `TaskRecord` | `task_record` | `task_record.p0.v1` | Core Runtime / Task State | `TaskRecord` | `task_id` | direct `owner_customer_id`; `state_version` independent |
+| `RequestUnitRecord` | `request_unit_record` | `request_unit_record.p0.v1` | Core Runtime / Task State | `RequestUnitRecord` | `request_unit_id` | `task_id -> task_record`; closed refs; `state_version` independent |
+| `ConversationTaskLinkRecord` | `conversation_task_link_record` | `conversation_task_link_record.p0.v1` | Application | `ConversationTaskLinkRecord` | `(conversation_id, task_id, linked_at)` | Conversation / Task roots both required and decoded owners equal |
+| `RunTaskLinkRecord` | `run_task_link_record` | `run_task_link_record.p0.v1` | Core Runtime / Task State | `RunTaskLinkRecord` | `(run_id, task_id)` | Run / Task roots; base/result state versions independent |
+| `InputBindingRecord` | `input_binding_record` | `input_binding_record.p0.v1` | Request Understanding | current `InputBinding` | `binding_id` | source-derived Message / supersedes refs；external-required `request_unit_id -> request_unit_record` |
+| `ModelVisibleToolsetArtifact` | `model_visible_toolset_artifact` | `model_visible_toolset_artifact.p0.v1` | Tool | `ModelVisibleToolsetArtifact` | `model_visible_toolset_hash` | content-addressed; no customer authority; artifact version independent |
+| `AgentRunRecord` | `agent_run_record` | `agent_run_record.p0.v1` | Core Runtime | `AgentRunRecord` | `run_id` | customer Run uses `conversation_id -> conversation_record`; null conversation cannot establish owner proof |
+| `GateDecisionRecord` | `gate_decision_record` | `gate_decision_record.p0.v1` | Tool / Gateway | current `GateDecision` | `gate_decision_id` | source-derived ContextManifest / InputBinding refs；`model_call_id` is payload correlation, not a top-level record ref |
+| `ToolCallRecord` | `tool_call_record` | `tool_call_record.p0.v1` | Tool | `ToolCallRecord` | `tool_call_id` | Run / Task / RequestUnit / ContextManifest / GateDecision / InputBinding refs form one owner-consistent graph |
+| `ObservationRecord` | `observation_record` | `observation_record.p0.v1` | Memory | first-slice `OrderObservation` | `observation_id` | external-required source ToolCall / Run / Task / RequestUnit refs；resource ref never authorizes |
+| `ContextManifestRecord` | `context_manifest_record` | `context_manifest_record.p0.v1` | Memory | current `ContextManifest` | `context_manifest_id` | source-derived Run / Message / Task / Observation / Toolset refs；first-slice Evidence / Action refs empty；registry version independent |
+| `TraceEventRecord` | `trace_event_record` | `trace_event_record.p0.v1` | Core shared + specialized payload owners | current `TraceEvent` | `trace_event_id` | Run root and every populated registered-record ref resolve within one graph；model-call / presentation / child refs remain payload correlation |
+| `EvalResultRecord` | `eval_result_record` | `eval_result_record.p0.v1` | Eval | `EvalResultRecord` | `(eval_run_id, case_id, lane, attempt)` | Eval-internal；`trace_ref` required for PASS / FAIL and empty for SKIPPED / NOT_RUN；`version_manifest` independent |
+| `EvalExecutionFailureRecord` | `eval_execution_failure_record` | `eval_execution_failure_record.p0.v1` | Eval | `EvalExecutionFailureRecord` | `(eval_run_id, lane, case_id?, attempt?, failure_phase, safe_error_code, occurred_at)` | Eval-internal optional diagnostic / Trace refs; manifest independent |
+<!-- P0-PERSISTENCE-REGISTRY:END -->
 
-这些是逻辑记录与行为要求，不要求一项对应一张表。物理表、Repository 数量、事务拆分和 JSON / 关系列选择属于后续 Plan 与实现决策。
+这些是逻辑记录与行为要求，不要求一项对应一张表。物理 table、column、index、foreign key、JSONB layout、Repository 数量、事务拆分与 Alembic migration 属于后续 Infrastructure Plan；本节不构成这些物理能力的实现证据。
+
+#### 10.1.1 Version、identity 与 relation projection
+
+- `record_schema_version` 是 logical envelope dimension；version string 只在对应 `record_code` 下有意义，不能作为跨 item 的全局版本。
+- `ConversationRecord`、`MessageRecord`、`RequestUnderstandingRecord`、`ConversationTaskLinkRecord`、`RunTaskLinkRecord`、`EvalResultRecord` 与 `EvalExecutionFailureRecord` 当前已有的泛型 payload `schema_version` 是 logical `record_schema_version` 的 mirror，必须精确等于该 item 的表列值。现有测试 fixture 中的自由字符串不是 canonical exact version。
+- `artifact_schema_version`、`state_version`、`tool_registry_version` 与 Eval `version_manifest` 保持 specialized owner 语义，不能替代、推断或充当 logical version mirror。`ModelVisibleToolsetArtifact` 必须同时通过 `model_visible_toolset_artifact.p0.v1` record gate 和 `model-visible-toolset.p0.v1` artifact gate。
+- Direct owner 与 linked owner 都不能授权。可信 scope 仍只来自当前服务端 `CustomerContext` 派生的 `TrustedOwnerScope`；持久化 owner / relation metadata 只用于 strict comparison 和后续 graph validation。
+- Source DTO 已携带的 relation 必须由 codec 从 record 重算，调用方不得覆盖。Optional source field 为空时不生成 relation；tuple source refs 逐项生成且不得重复。
+- External-required relation 只有以下封闭集合：`InputBindingRecord` 恰好一个 `request_unit_id -> request_unit_record`；`ObservationRecord` 各恰好一个 `source_tool_call_id -> tool_call_record`、`source_run_id -> agent_run_record`、`source_task_id -> task_record`、`source_request_unit_id -> request_unit_record`。其他 external relation、重复 relation、错误 target code / identity 或 cardinality 一律拒绝。
+- `GateDecisionRecord.model_call_id`、Trace 中的 model-call / presentation / logical-child ID 只是专项 payload correlation，不伪装成 top-level record reference。`ContextManifestRecord` 在本切片的 Evidence / Action refs 必须为空。
+- `EvalResultRecord.trace_ref` 消费 Eval owner 的 status matrix：`PASS / FAIL` 必填，`SKIPPED / NOT_RUN` 必须为空；codec 不得把条件关系改成无条件 required 或 optional。
+- `AcceptedTaskDelta`、`TaskStateTransition` 与 `ToolAttemptRecord` 是 logical child，不是第 18–20 个 top-level item；`CandidateValidationRecord`、Command 和 write-result enum 也不进入 registry。Child 结构变化推进父记录版本并继续服从对应 semantic owner。
+- `TraceEventRecord` 的首版 code/version 不改变 Project Direction 拥有的 shared structure；future shared / specialized migration 继续需要 shared owner 与对应 specialized owner 联合批准。
+
+#### 10.1.2 Plan 01-04 logical codec / closed registry API
+
+Plan 01-04 在 Application integration boundary 实现以下固定 API；名称、类型职责与封闭集合不得由实现分支自行扩展：
+
+- `P0RecordCode`：恰含上表 17 个 value 的 `StrEnum`。
+- `P0RecordReference`：immutable typed reference，携带 exact relation token、target `P0RecordCode` 和 target logical identity。
+- `P0LogicalChildCode`：恰含 `accepted_task_delta`、`task_state_transition`、`tool_attempt_record` 三个 value；它不是 `P0RecordCode`。
+- `P0LogicalChildPayload`：携带 child code、parent code / identity、child identity 与 Pydantic JSON data；child 没有独立 record version，严格继承 parent code/version。
+- `P0VersionedPayload`：内层再次携带 record code/version、Pydantic JSON data 与 typed logical children，用来检测 outer metadata、inner payload 与 child tampering。
+- `P0PersistenceEnvelope`：Runtime-private logical envelope，携带 outer code/version、logical identity、direct-owner projection 或 owner-root refs、required relation refs 与 `P0VersionedPayload`；它不是 table schema。
+- `P0RecordSchemaSpec`：frozen static spec，携带 exact code/version、直接导入的 source model class、identity projector、owner strategy、source-derived relation projector、external / conditional relation-cardinality rules、allowed child rules 与 optional specialized-version validator。
+- `P0_PERSISTENCE_REGISTRY`：immutable、恰含 17 项；source model 通过直接 import 绑定，不接受 module / class 字符串，不 dynamic import，不提供 `register()`、plugin extension 或 fallback-to-latest。
+- `P0_LOGICAL_CHILD_SPECS`：immutable、恰含三类 child；它是 child validation spec，不是第二个 top-level record registry。
+- `DecodedP0PersistenceRecord`：返回已验证 code/version、typed source record 与 typed logical children，但不授予 trusted scope，也不证明完整 owner graph 已闭合。
+
+固定入口签名：
+
+```python
+def encode_persistence_record(
+    record_code: P0RecordCode,
+    record: ContractModel,
+    *,
+    external_references: tuple[P0RecordReference, ...] = (),
+    logical_children: tuple[ContractModel, ...] = (),
+) -> P0PersistenceEnvelope: ...
+
+def decode_persistence_record(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    *,
+    expected_record_code: P0RecordCode,
+    correlation_ref: UUID,
+) -> DecodedP0PersistenceRecord: ...
+```
+
+Encode 只接受 registry 已知 code 与 exact source model；direct owner 和 source-derived refs 必须从 record 重算，调用方只能提供 registry 明列的 external-required refs。Logical children 必须匹配封闭 child spec、parent identity 与父 payload refs。
+
+Decode 对 `P0PersistenceEnvelope` 或 JSON-compatible mapping 先生成 JSON bytes，对 `str` / `bytes` raw JSON 直接使用；mapping 含非 JSON 值时拒绝，禁止 `default=str` 或其他 coercion。它先分类 outer / inner code/version 与 registry，再以对应 source / child model 的 `model_validate_json(..., strict=True)` 做完整验证，随后重算并比较 identity、direct owner、source-derived / external / conditional relations、children 与七个 mirror 字段；任一失败整体 fail closed。
+
+UUID / datetime 的合法 JSON 表示是字符串，因此 strict round-trip 必须使用 Pydantic JSON validation。不得把 JSON-mode dict 交给 `model_validate(..., strict=True)`，也不得通过关闭 strict、预先构造 UUID / datetime 或宽松 coercion 使非法 payload 通过。
+
+`P0PersistenceIntegrityCategory` 是下列封闭分类：
+
+- `MISSING_RECORD_CODE`
+- `UNKNOWN_RECORD_CODE`
+- `RECORD_CODE_MISMATCH`
+- `MISSING_RECORD_SCHEMA_VERSION`
+- `UNKNOWN_RECORD_SCHEMA_VERSION`
+- `RECORD_SCHEMA_VERSION_MISMATCH`
+- `METADATA_PAYLOAD_MISMATCH`
+- `SOURCE_MODEL_MISMATCH`
+- `PAYLOAD_VALIDATION_FAILED`
+- `IDENTITY_MISMATCH`
+- `OWNER_PROJECTION_MISMATCH`
+- `LINK_PROJECTION_MISMATCH`
+- `LINK_CARDINALITY_MISMATCH`
+- `CHILD_MISMATCH`
+- `SPECIALIZED_VERSION_MISMATCH`
+
+`P0PersistenceIntegrityError` 只暴露上述 bounded category 和由可信 Runtime 生成的 opaque UUID `correlation_ref`。异常本身、`args` 与字符串投影不得持有或格式化 raw payload、customer identity、Token、Prompt、Cookie、secret 或资源是否存在的信息；unknown、missing、mismatch 和 validation failure 都不得返回 `None`、partial object、latest model 或 fallback version。
+
+Logical child 规则固定为：
+
+- `AcceptedTaskDelta` 静态绑定 `RequestUnderstandingRecord`，child identity 是 `accepted_delta_id`。Parent 的 `accepted_delta_refs` 与 child identities 必须一一对应且顺序无关；closure strategy 为 `LOCAL_CLOSED`。
+- `TaskStateTransition` 静态绑定 `TaskRecord`，child identity 是 `(task_id, request_unit_id, result_state_version)`。`task_id` 必须等于 parent identity，每条 transition 继续满足 owner model 的单步 `base + 1 = result`；同一 envelope 内 identity / result version 唯一并按 result version 排序。Task parent 没有 transition refs，codec 不能证明完整历史，因此 closure strategy 为 `GRAPH_REQUIRED`；完整 cardinality / contiguous history 留给 01-05 / 01-06 record-graph gate。
+- `ToolAttemptRecord` 静态绑定 `ToolCallRecord`，child identity 是 `(tool_call_id, attempt_no)`，且 `tool_call_id` 必须等于 parent identity。Parent `attempt_count=N` 时 children 必须恰为唯一连续的 `attempt_no=1..N`；`N=0` 时必须为空，closure strategy 为 `LOCAL_CLOSED`。每个 attempt 的 lifecycle 继续服从 Tool owner。
+
+任何 locally provable 的 missing、extra、duplicate、wrong-parent、wrong-identity 或 child payload validation failure 均整体拒绝；`GRAPH_REQUIRED` 不能被 codec 的局部成功升级为完整 owner graph 证明。
+
+Codec 不是授权器、Repository、Adapter、migration runner 或 recovery claimant。Owner-scoped lookup、跨记录 graph closure、transactionally consistent recovery decode / claim 与 readiness 继续服从 Memory 15.2，并在后续 Runtime / Infrastructure Task Packet 实现。普通 read / recovery 永不迁移；future logical version 必须先由 semantic owner 定义 source / target、不变量、安全、审计、失败原子性和 rollback。
+
+Plan 01-04 的 exact owned files 只有：
+
+- `src/mini_agent/application/persistence.py`
+- `tests/component/application/test_persistence_contract.py`
+
+其他路径全部禁止，特别是 `src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`、`src/mini_agent/core/**`、`src/mini_agent/infrastructure/**`、`tests/component/core/**`、`tests/integration/**`、`alembic/**`、`pyproject.toml`、`uv.lock`、active docs 与 `.planning/**`。01-04 不新增 Alembic revision、不改 database metadata、不创建 table；physical mapping / migration 留给 01-06，complete graph / fenced claim 留给 01-05 / 01-06。
+
+01-04 tests 必须覆盖 registry exactly 17、code/source-model bijection、immutability、no runtime registration、17 项正向 JSON round-trip（含 UUID / datetime）、missing / unknown / mismatch、outer / inner tampering、wrong source model、strict field failure、identity / owner / relation / mirror mismatch、external relation missing / extra / duplicate / wrong cardinality、Accepted Delta / Tool Attempt local-closed、Task Transition graph-required 不误报、三类 child wrong-parent / wrong-identity / tampering、version substitution rejection、安全 error projection，以及 Toolset record / artifact version 双独立 gate。
 
 第一切片共享记录与 Port 冻结还必须遵守：
 
