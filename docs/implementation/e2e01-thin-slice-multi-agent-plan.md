@@ -56,7 +56,7 @@ Tech Lead / Integrator
 
 真正的并行写入必须使用不同 Codex Worktree 和不同 Git branch。单个 Codex 任务内的子 Agent 默认只用于只读探索、审查和测试分析；任何写入 Agent 都不得与其他 Agent 共享 checkout，不具备独立 Worktree 时只能串行写入。
 
-## 4. Git 与 Worktree 模型
+## 4. GitHub PR、Git 与 Worktree 模型
 
 ### 4.1 长期分支
 
@@ -74,12 +74,28 @@ Tech Lead / Integrator
 
 1. Agent 在自己的 feature branch 内完成 focused verification 和 allowlist 检查。
 2. Agent 提交一个可审查的原子 commit，并按第 10 节格式交接。
-3. Integrator 在 `integration/e2e01-thin` 上一次只集成一个分支。
-4. 下一个待集成分支先基于最新 integration head 解决接口差异并重新验证。
-5. 集成门禁通过后，才把 integration branch 合并到 `main`。
-6. 不复制 `.env`、Cookie、API Key 或其他本机 secret 到 Worktree；真实 Qwen lane 始终是显式、非发布门禁的运行。
+3. Agent 只 push 自己的 feature branch，并创建 draft PR 到 `integration/e2e01-thin`；不得直接 push integration branch。
+4. Reviewer 依据 canonical owner、Task Packet、PR 模板和实际 diff 做只读 review；原 owner 修复发现。
+5. Integrator 一次只合并一个 PR。默认对 feature PR 使用 squash merge，并保留 PR 作为审查与交接证据。
+6. 下一个待集成分支基于最新 integration head 解决接口差异并重新验证。
+7. 完整集成门禁通过后，由 `integration/e2e01-thin` 创建 PR 到 `main`；禁止直接 push `main`。
+8. 不复制 `.env`、Cookie、API Key 或其他本机 secret 到 Worktree；真实 Qwen lane 始终是显式、非发布门禁的运行。
 
 禁止多个 Agent 同时直接写 `main`，也禁止以“最后一次覆盖”为冲突处理方式。
+
+### 4.3 GitHub repository gate
+
+开始首个远端 Worktree 任务前必须确认：
+
+- `origin` 精确指向用户确认的 GitHub repository；
+- `gh auth status` 对目标 host 和 owner 有效；
+- head / base branch 与 Task Packet 一致；
+- feature branch 可 push，PR 模板可加载；
+- `main` 和 `integration/e2e01-thin` 的目标保护规则禁止直接 push 与 force push。
+
+如果目标是新建空 repository，Integrator 可以一次性 push 当前已确认的 `main` 与 `integration/e2e01-thin` commit 来建立 PR base；必须在 Task / bootstrap 记录中保存精确 SHA，并在基线发布后立即配置目标 repository 实际支持的保护规则。任何后续功能或文档变更都不得借用该例外。
+
+Required status checks 只有在仓库出现真实、可运行的 CI workflow 后才启用；当前不得用尚不存在的 lint、test 或 build 命令创建虚假门禁。只有一个 GitHub 用户时，也不预设会导致自有 PR 无法合并的 required approval 数量；先以 Codex 只读 review、PR 证据和用户合并决策模拟 review，真实协作者加入后再提高审批规则。
 
 ## 5. Single-writer ownership
 
@@ -343,13 +359,45 @@ Recommended merge order:
 
 `COMPLETE` 只表示该 Task Packet 完成，不表示整个切片已经实现。Integrator 必须从源码和命令输出独立验证后才能更新项目状态。
 
-## 11. 当前状态
+## 11. GSD 使用边界
+
+建议采用 GSD，但只作为现有协作模型上的选择性编排层，当前状态保持 `PROPOSED / NOT_INITIALIZED`。
+
+### 11.1 推荐使用
+
+- 后续尚未规划的独立 phase 使用 `$gsd-plan-phase` 生成可验证计划，再由 canonical owner 审查。
+- 已批准 phase 使用 `$gsd-execute-phase --wave N` 分批执行；每个写入 executor 仍必须映射到独立 Worktree、feature branch 和 PR。
+- 集成后使用 `$gsd-verify-work`、`$gsd-code-review` 或安全专项技能补充 UAT、代码审查和验证证据。
+- 只有真正独立、生命周期不同的 milestone 才使用 `$gsd-workstreams`；Runtime、Infra、Eval 是同一 E2E 切片的协作模块，不为它们建立三套产品 roadmap。
+
+### 11.2 当前不使用
+
+- 不直接运行 `$gsd-new-project`：仓库已经存在明确 canonical owner、P0 方向、Implementation Spec 和执行 Plan，重新问答生成会制造第二套项目定义。
+- 不直接以默认优先级运行 `$gsd-ingest-docs`：本项目采用“专门 owner 仅在自身范围内优先”，不能让通用 `ADR > SPEC > PRD > DOC` 规则静默覆盖跨域 owner。未来如需导入，必须使用显式 manifest、owner mapping 和 blocker conflict review。
+- 第一切片成为 `EXECUTABLE` 前不运行 `$gsd-autonomous`，也不让 GSD 自动修改 active canonical 文档或 Case 生命周期。
+
+### 11.3 GitHub 映射
+
+| GSD 对象 | GitHub / Codex 对象 |
+|---|---|
+| Milestone / Phase | integration branch 与最终 PR |
+| Plan | 一个或多个 Task Packet |
+| Wave | 一组无文件冲突的 Worktree tasks |
+| Executor | feature branch 的写入 Agent |
+| Verification / Review | PR checks、Reviewer findings 与可复现输出 |
+| `.planning/` | Integrator 管理的派生执行状态，不拥有产品语义 |
+
+如果后续正式启用 GSD，Integrator 是共享 `.planning/STATE.md`、Roadmap 和跨 phase 索引的 single writer；plan-scoped 文件可以通过 Task Packet 分配给独立 Agent，但不得让多个 feature branch 各自推进同一份共享状态。
+
+## 12. 当前状态
 
 | 项目 | 状态 | 证据 |
 |---|---|---|
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
+| GitHub PR 本地流程 | `LOCAL_READY / REMOTE_NOT_CONFIGURED` | PR 模板与 branch / review 规则已定义；尚无 `origin`、push 或 PR 证据 |
+| GSD | `PROPOSED / NOT_INITIALIZED` | `.planning/STATE.md` 不存在，当前为 flat mode、0 workstreams |
 | 应用源码与工具链 | `NOT_FOUND` | 尚无 `src/`、`pyproject.toml`、`compose.yaml` |
 | Fixture / Harness / 自动化 Eval | `NOT_FOUND` | 尚无 `evals/` 和可执行测试 |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
