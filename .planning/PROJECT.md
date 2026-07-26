@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；Plan 01-04 persistence codec 合并后的 exact head 为 `bde99edec0bbb9ba331c6099c8b467c14fe24e58`。
+- 当前 integration branch：`integration/e2e01-thin`；Packet 01-04D 合并后的 exact head 为 `a84d30188eaec75e45619e9939180ba78efa3b80`。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
-- Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate。四个 Packet 都不改变 `E2E01-01/04` lifecycle。
-- 当前 immediate gate：先通过插入式依赖 Packet `01-04D` 修复 Application Port declaration 与 01-04 codec external relation context、initial/transition/Run-finalization原子 aggregate、Memory 15.2 fenced closed-graph recovery claim之间的已确认缺口；该 owner Packet合并前，W2三路 dispatch为 `BLOCK`。
-- 01-04 已实现 owner 批准的 17-item registry、66 条 top-level / 7 条 child projection 与 strict logical codec；它不证明 physical persistence、Runtime、HTTP、complete recovery graph 或 Eval Harness 已实现。01-04D合并后，原 Plans 01-05/06/07才能从同一个新 exact integration SHA建立互斥 Runtime / Infra / Eval Worktree；01-08仍由 Integrator串行集成。
+- Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
+- 当前 immediate gate：独立 W2 Plan Checker 在 01-05/06/07 dispatch 前确认四个 blocker，必须按 ownership 串行关闭 `01-04E` Memory token-count availability、`01-04F` Thin Slice / Eval fault-path alignment 与 `01-04G` recovery state + Trace atomicity。三个 owner Packet 合并前，W2 三路 dispatch保持 `BLOCK`。
+- 01-04 已实现 owner 批准的 17-item registry、66 条 top-level / 7 条 child projection 与 strict logical codec，01-04D 已实现 relation-aware Application command / Port closure；它们仍不证明 physical persistence、Runtime、HTTP、complete recovery graph、recovery Trace transaction或 Eval Harness 已实现。01-04E/F/G合并后，原 Plans 01-05/06/07才从同一个新 exact integration SHA建立互斥 Runtime / Infra / Eval Worktree；01-08仍由 Integrator串行集成。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -69,8 +69,11 @@
 | P0 exact-version、decode / recovery / migration runtime 行为 | 已由 Plan 01-02 / PR #14 写入 Memory owner；不表示 codec、Adapter、业务表或 recovery 已实现 | `CONFIRMED / CONTRACT_ONLY` |
 | Thin Slice 17-item item code、版本、projection 与实现 API | 已由 Plan 01-03 / PR #16 与 clarification PR #17 写入 Thin Slice scoped owner；不得从测试 fixture 或 Python 类名动态推断 | `CONFIRMED / CONTRACT_ONLY` |
 | 01-04 Application logical persistence codec | PR #19 已合并；17-item registry、strict codec 与 Component tests 已实现；不拥有授权、complete graph、physical persistence 或 migration | `COMPLETE / EVIDENCE_INDEXED` |
-| 01-04D Application persistence write / recovery Port closure | 插入式 dependency Packet；冻结 codec external relation write context、initial/transition/Run-finalization原子 aggregate与 fenced complete-graph recovery claim boundary，只改 Application Port / Command contract 与契约测试 | `BLOCKER OWNER PACKET / CONTROLLED PLANNING` |
-| 01-05/06/07 W2 Runtime / Infra / Eval | 等待 01-04D owner Packet merge，再从同一个新 exact SHA 建立互斥 Task Packet | `BLOCKED ON 01-04D` |
+| 01-04D Application persistence write / recovery Port closure | PR #21 已合并；relation-aware write、原子 initial/transition/Run finalization 与 fenced complete-graph claim boundary已有 Application contract和契约测试证据 | `COMPLETE / EVIDENCE_INDEXED` |
+| 01-04E Memory token availability | 保持 required `TokenCounts` object；每个方向可为 strict `int \| None`，`None`表示未精确测量，禁止coercion、0占位或估算伪造 evidence | `PLAN CHECKER PASS / PLANNING PR PENDING` |
+| 01-04F Thin Slice / Eval fault alignment | stale-state变体以canonical Port执行`ACTIVE/v1 → WAITING_USER/v2` race，再由Gateway拒绝并推进`BLOCKED/v3`；fact-bearing raw presentation映射为 Provider protocol failure | `PLAN CHECKER PASS / BLOCKED ON 01-04E MERGE` |
+| 01-04G recovery Trace atomicity | Application command携带Core-produced exact recovery Trace；Port contract要求compliant Adapter将APPLIED state/link/Trace同事务并拒绝跨类型payload污染 | `PLAN CHECKER PASS / BLOCKED ON 01-04F MERGE` |
+| 01-05/06/07 W2 Runtime / Infra / Eval | 等待 01-04E → 01-04F → 01-04G 串行 owner merge，再从同一个新 exact SHA 建立互斥 Task Packet | `BLOCKED ON 01-04E/F/G` |
 
 ## 完成证据规则
 
