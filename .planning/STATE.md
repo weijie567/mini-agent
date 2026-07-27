@@ -38,7 +38,7 @@ Total Phases: 6
 Total Plans in Phase: 8
 Status: 01-07C / 01-07G owner-ruling planning
 Last Activity: 2026-07-27
-Last Activity Description: 01-07B planning/status PR #42–#43与feature PR #44均已reviewed merge；integration为`ccdafe87...`且748 Plan focused、40 migration、1493 full（1 deselected）与Graphify通过
+Last Activity Description: 01-07B planning/status PR #42–#43与feature PR #44均已reviewed merge；integration为`ccdafe87...`且762 Plan focused、40 migration、1493 full（1 deselected）与Graphify通过
 Progress: 0%
 
 ## Current Position
@@ -95,7 +95,7 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / ACTIVE_OWNER_STATUS_ALIGNED`: Business PR #39、Eval PR #40与project-rule PR #41仅对齐W2/01-07A证据状态并形成current exact head `8544137...`；Case lifecycle仍为0/8。
 - `CONFIRMED / 01-08_PREFLIGHT_BLOCKED`: 安全/Eval核查确认Case/Script/output oracle exposure、variant-scoped Trace precedence、RU semantic/mapping/codec/Core、P0 source-version/Core DTO、Application Evidence Port、strict PG reader、Eval mapper、invalid-RU failure taxonomy/Runtime/Scripted-Qwen consumers及credentialed Qwen runner缺口；不能从`8544137...`直接签发01-08。
 - `CONFIRMED / 01-07B_ISSUED`: 新Plan固定base `8544137...`、new branch/worktree与exact six-file Eval ownership；planning PR merge前不得写Eval。
-- `CONFIRMED / 01-07B_COMPLETE`: planning PR #42、Project Direction status PR #43与feature PR #44 reviewed merge `ccdafe87...`；367 Harness / 725 owned / 748 Plan focused / 40 migration / 1493 full（1 deselected）、seed 1/2/42各725、双review与post-merge Graphify通过。
+- `CONFIRMED / 01-07B_COMPLETE`: planning PR #42、Project Direction status PR #43与feature PR #44 reviewed merge `ccdafe87...`；367 Harness / 725 owned / 762 Plan focused / 40 migration / 1493 full（1 deselected）、seed 1/2/42各725、双review与post-merge Graphify通过。
 - `CONFIRMED / W2_PLAN_REVISION_APPLIED`: 首个published head `436ce5b...`的双路review发现Provider参数替换、not-found终态、Eval lane identity、Worktree事实、full-gate preflight与canonical执行owner状态问题；当前published revision已逐项修正。后续checker audit又识别出旧approval与第二条零网络命令两项MAJOR，均已修正。
 - `CONFIRMED / GSD_REVISION_CAP_REACHED`: 初始loop-3 approval已supersede；三轮revision cap后不再启动第5个planner loop，最终planning gate转为当前published exact head的双路独立review。
 - `CONFIRMED / GRAPHIFY_SERIAL_GATE_PASS`: `c35687d...`已完成AST refresh；最终3353 nodes、5999 links、50 hyperedges，graph health error为0、stale marker清除、tracked integration tree clean。

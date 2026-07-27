@@ -22,7 +22,7 @@ created: "2026-07-27"
 | Quick command | 每个 Task Packet 的 exact focused pytest command |
 | Full suite | `uv run pytest` |
 | Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
-| Current reviewed evidence | 01-07B merge `ccdafe87...`; `367 Harness` + `725 owned` + `748 Plan focused` + `40 migration` + `1493 full, 1 deselected, 12 warnings`; feature / overlay双review与post-merge Graphify通过 |
+| Current reviewed evidence | 01-07B merge `ccdafe87...`; `367 Harness` + `725 owned` + `762 Plan focused` + `40 migration` + `1493 full, 1 deselected, 12 warnings`; feature / overlay双review与post-merge Graphify通过 |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
 
 仓库当前没有 canonical lint、type-check、build 或 app-start命令，也没有 pinned Ruff dependency；不得编造。允许的附加机械检查为 `compileall`、`git diff --check`、artifact SHA 与 changed-file containment。

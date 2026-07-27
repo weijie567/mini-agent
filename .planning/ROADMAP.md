@@ -98,7 +98,7 @@ Plans:
 | 01-06R | Infra replacement | `COMPLETE / EVIDENCE_INDEXED`：PR #35/#36；merge `8e21652...`；83 focused / 40 migration / 745 full、review与Graphify gate |
 | 01-07 | Eval | `COMPLETE / EVIDENCE_INDEXED`：PR #29 merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、preflight/review与Graphify gate |
 | 01-07A | Runtime Trace alignment | `COMPLETE / EVIDENCE_INDEXED`：PR #37/#38 merge `4cfac0a...`；100 focused / 40 migration / 936 full（1 deselected）、review与Graphify gate |
-| 01-07B | Eval evidence boundary | `COMPLETE / EVIDENCE_INDEXED`：PR #42–#44，merge `ccdafe87...`；367 Harness / 725 owned / 748 Plan focused / 40 migration / 1493 full（1 deselected）、双review与Graphify gate |
+| 01-07B | Eval evidence boundary | `COMPLETE / EVIDENCE_INDEXED`：PR #42–#44，merge `ccdafe87...`；367 Harness / 725 owned / 762 Plan focused / 40 migration / 1493 full（1 deselected）、双review与Graphify gate |
 | 01-07C / 01-07G | RU semantic / source-version rulings | `READY_AFTER_STATUS_ALIGNMENT`：从当前status PR reviewed merge后的同一exact SHA分别签发；两个active owner不共享writer，Integrator串行合并 |
 | 01-07D / 01-07H | RU exact mapping / Core-Order DTO | 01-07C与01-07G均reviewed merge形成同一新exact SHA后才签发；D/H ownership不重叠可并行写入，Integrator串行合并 |
 | 01-07E / 01-07F | persistence codec / RU Core | 01-07D与01-07H均reviewed merge形成共同exact barrier后签发，ownership与文件不重叠；Integrator串行合并 |

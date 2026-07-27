@@ -32,7 +32,7 @@ metrics:
   files_changed: 6
   harness_tests_passed: 367
   owned_tests_passed: 725
-  plan_focused_tests_passed: 748
+  plan_focused_tests_passed: 762
   migration_tests_passed: 40
   full_tests_passed: 1493
   full_tests_deselected: 1
@@ -72,13 +72,15 @@ metrics:
 | Latest-integration overlay | base `2adceaf11da995faa1c77d9173180579e09b0bdf` / head `91a62371280b98335b84fc7329e2efdad32d673f` / tree `8ccee77e93d241486d9c9ecddc881a6f410d58c0` |
 | Integration merge / tree | `ccdafe87d5f118b729d6f3fff8635a0b92f3e3c5` / `8ccee77e93d241486d9c9ecddc881a6f410d58c0` |
 | Scope / provenance | exact six owned files；RED → GREEN → one review-fix；feature / overlay aggregate patch-id与文件 blobs一致 |
-| Harness / owned / Plan focused | `367 passed` / `725 passed` / `748 passed` |
+| Harness / owned / Plan focused | `367 passed` / `725 passed` / `762 passed` |
 | Migration / full | `40 passed` / `1493 passed, 1 deselected, 12 warnings` |
 | Determinism | `PYTHONHASHSEED=1/2/42` 各 `725 passed` |
 | Baseline preflight | missing env 与 synthetic env + real SUT not wired 均为 expected `SKIPPED / NOT_RUN`，零网络 |
 | Independent review | final feature / overlay 双 reviewer `PASS`；unresolved Critical / High / Medium 均为 `NOT_FOUND` |
 
 普通 HTTPS push 因 low-speed timeout 未更新 ref；Integrator 通过 Git Data API 逐层校验 blob、tree 与 reviewed commit object，并以 `force=false` 更新 feature ref。远端 PR head 已复读为 `d7fcfd34...`；该传输 fallback 不改变文件 tree 或 review 结论。
+
+PR #44 最初把遗漏 `test_e2e01_artifact_consistency.py` 的五文件子集结果 `748 passed`误标为 Plan focused。Status exact-head review发现后，Integrator在相同代码 merge `ccdafe87...` 上按 Plan 原始六文件命令复跑为`762 passed`；full suite的`1493 passed`已包含这14项测试，代码结论不变，远端证据以纠正说明为准。
 
 ## Post-merge Gate
 
