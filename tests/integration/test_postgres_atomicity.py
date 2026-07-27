@@ -42,6 +42,7 @@ from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunStatus,
     StopReason,
+    TraceEvent,
     TraceEventType,
 )
 from mini_agent.infrastructure.persistence.database import build_session_factory
@@ -1295,6 +1296,113 @@ async def test_finalize_run_lists_same_timestamp_terminal_traces_semantically(
                 run_id=command.terminal_record.run_id,
             )
             == command.terminal_trace_events
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_trace_listing_preserves_history_and_recovery_physical_order(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        task_changed_template = command.terminal_trace_events[0]
+        history_occurred_at = command.expected_active_record.started_at
+        response_rendered = TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RESPONSE_RENDERED,
+            occurred_at=history_occurred_at,
+            run_id=command.expected_active_record.run_id,
+        )
+        history_task_changed = task_changed_template.model_copy(
+            update={
+                "trace_event_id": uuid4(),
+                "occurred_at": history_occurred_at,
+            }
+        )
+        recovery_occurred_at = history_occurred_at + timedelta(seconds=1)
+        recovery_run_stopped = TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=recovery_occurred_at,
+            run_id=command.expected_active_record.run_id,
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        )
+        recovery_task_changed = task_changed_template.model_copy(
+            update={
+                "trace_event_id": uuid4(),
+                "occurred_at": recovery_occurred_at,
+            }
+        )
+        expected_history = (
+            response_rendered,
+            history_task_changed,
+            recovery_run_stopped,
+            recovery_task_changed,
+        )
+        for event in expected_history:
+            await adapter.append_trace_event(event)
+
+        stored_at = command.expected_active_record.started_at
+        with adapter.session_factory.begin() as session:
+            trace_rows = tuple(
+                session.scalars(
+                    select(P0RecordModel).where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value,
+                        P0RecordModel.run_id
+                        == command.expected_active_record.run_id,
+                    )
+                )
+            )
+            trace_row_by_id = {
+                adapter._decode_row(
+                    session,
+                    row,
+                ).source_record.trace_event_id: row
+                for row in trace_rows
+            }
+            trace_row_by_id[response_rendered.trace_event_id].stored_at = (
+                stored_at
+            )
+            trace_row_by_id[history_task_changed.trace_event_id].stored_at = (
+                stored_at + timedelta(microseconds=1)
+            )
+            recovery_run_row = trace_row_by_id[
+                recovery_run_stopped.trace_event_id
+            ]
+            recovery_task_row = trace_row_by_id[
+                recovery_task_changed.trace_event_id
+            ]
+            recovery_run_row.stored_at = (
+                stored_at + timedelta(microseconds=2)
+            )
+            recovery_task_row.stored_at = (
+                stored_at + timedelta(microseconds=2)
+            )
+            recovery_run_row.record_id = UUID(int=3)
+            recovery_task_row.record_id = UUID(int=4)
+
+        physical_history = await adapter._list_for_owner(
+            owner_scope=_owner_scope(),
+            record_code=P0RecordCode.TRACE_EVENT_RECORD,
+            filters=(
+                P0RecordModel.run_id
+                == command.expected_active_record.run_id,
+            ),
+            expected_type=TraceEvent,
+        )
+        assert physical_history == expected_history
+        assert (
+            await adapter.list_trace_events_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=command.expected_active_record.run_id,
+            )
+            == expected_history
         )
     finally:
         engine.dispose()
