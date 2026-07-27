@@ -518,7 +518,7 @@ W4 是 01-01 至 01-08 执行并集成后的 quality gate，不计入 Phase 1 �
 - Fixture / Dataset 版本一致性；
 - 受影响 active 文件的 cross-file impact scan。
 
-最终门禁以仓库中真实出现且验证通过的配置为准，唯一 canonical 命令清单见 `AGENTS.md` 第 6 节。W1 已使依赖同步、根目录 Compose 数据库、migration 与当前 `uv run pytest` 套件可执行，但该套件目前只证明 W1 contract / artifact / persistence primitives，不得描述成 HTTP / Trajectory / E2E gate。
+最终门禁以仓库中真实出现且验证通过的配置为准，唯一 canonical 命令清单见 `AGENTS.md` 第 6 节。W1/W2 已使依赖同步、根目录 Compose 数据库、migration 与当前 `uv run pytest` 套件可执行，并为已合并的 Core / Application、Runtime、Infrastructure 与 Eval component / integration 行为提供证据；由于 Composition Root、real `EvalCaseSut` / PostgreSQL evidence reader及真实 HTTP → Runtime → PostgreSQL → Eval 纵向装配仍未出现，该套件不得描述成 Trajectory / E2E gate。
 
 以下仍只是 Implementation Spec 的后续目标，当前不得宣称可执行：
 
