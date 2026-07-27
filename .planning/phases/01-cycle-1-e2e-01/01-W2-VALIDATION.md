@@ -1,17 +1,17 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-05-01-07
+scope: 01-04H-01-07
 status: execution_evidence_in_progress
 nyquist_compliant: true
-wave_0_complete: true
+wave_0_complete: false
 created: "2026-07-27"
 ---
 
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义 01-05/06/07 execution feedback sampling。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代 01-08 真实纵向证据。
+> 本文件只定义 01-04H 与既有 01-05/06/07 execution feedback sampling。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代 replacement Packet、01-08 真实纵向证据或 post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -40,6 +40,8 @@ created: "2026-07-27"
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure behavior | Test type | Automated command | File exists | Status |
 |---|---|---:|---|---|---|---|---|---|
+| 01-04H-01 | 01-04H | 9 | E2E01-01/04 | TERM-R01/TERM-T01 | RED覆盖partial terminal turn、非法reason/outcome/Task/status组合与Trace污染 | Component contract | `uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -x` | ✅ existing | ⬜ pending |
+| 01-04H-02 | 01-04H | 9 | E2E01-01/04 | TERM-D01/TERM-E01 | GREEN冻结complete aggregate、APPLIED全写与non-APPLIED零写Port语义 | Component contract | `uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -x`；`uv run pytest` | ✅ existing | ⬜ pending |
 | 01-05-01 | 01-05 | 1 | E2E01-01/04 | RT-S01/RT-T01 | trusted identity、candidate validation、binding、state reducer | Component | `uv run pytest tests/component/core/test_request_processing.py -x` | ❌ W0 | ⬜ pending |
 | 01-05-02 | 01-05 | 1 | E2E01-01/04 | RT-T02/RT-E01 | snapshot/schema/binding/version Gate fail closed | Component | `uv run pytest tests/component/core/test_control_gateway.py -x` | ❌ W0 | ⬜ pending |
 | 01-05-03 | 01-05 | 1 | E2E01-01/04 | RT-R01/RT-D01 | durable fence before唯一 read；no retry | Component | `uv run pytest tests/component/application/test_read_tool_executor.py -x` | ❌ W0 | ⬜ pending |
@@ -65,14 +67,32 @@ created: "2026-07-27"
 
 Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 
+- 01-04H：扩展两个既有 Application contract test files，不创建共享 bootstrap。
 - 01-05：创建 7 个 allowlisted Component test files。
 - 01-06：扩展现有 migration test并创建 5 个 allowlisted Infra integration test files；复用 byte-identical `tests/conftest.py`。
 - 01-07：创建 6 个 allowlisted Eval / model / baseline test files。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
-`wave_0_complete` 只有三个 writer均提交并展示预期 RED 后才能改为 `true`。
+原01-05/06/07三个writer已展示各自RED；由于本文件现在纳入01-04H，`wave_0_complete`重新保持`false`，只有01-04H Task 1在其exact owner branch取得并记录预期RED后才可由Integrator改为`true`。该字段不提前证明未来01-05R/01-06R。
 
 ## Packet Full Gates
+
+### 01-04H Application terminal-turn contract
+
+```bash
+uv run pytest \
+  tests/component/application/test_record_contracts.py \
+  tests/component/application/test_ports_contract.py -x
+uv run pytest
+uv run python -m compileall -q \
+  src/mini_agent/application/records.py \
+  src/mini_agent/application/ports.py \
+  tests/component/application/test_record_contracts.py \
+  tests/component/application/test_ports_contract.py
+git diff --check
+```
+
+01-04H changed-file set必须精确等于四文件allowlist；Ruff不是required gate，因为仓库尚无pinned / canonical Ruff入口。01-05R / 01-06R必须在各自exact base已知后通过独立planning PR补充本 Validation map，不能复用历史01-05/01-06状态冒充replacement evidence。
 
 ### 01-05 Runtime
 
@@ -161,10 +181,10 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 | Behavior | Requirement | Why manual | Instructions |
 |---|---|---|---|
 | GitHub branch / PR ownership | E2E01-01/04 | Git metadata不由pytest证明 | 比较exact base/head/tree、changed-file allowlist、PR base/head与reviewed SHA |
-| Latest-integration compatibility | E2E01-01/04 | 三个Sibling branch都从相同base开始 | 每次merge前生成latest overlay并运行full suite，确认无hidden contract drift |
+| Latest-integration compatibility | E2E01-01/04 | 历史三个Sibling从同base开始，但replacement改为exact predecessor串行签发 | 每次merge前生成latest overlay并运行full suite，确认无hidden contract drift |
 | Nonclaims / lifecycle discipline | E2E01-01/04 | 需要审查文案和manifest状态 | 确认Case仍`CONTRACT_DEFINED`、Requirements unchecked；Adapter测试不冒充真实Qwen Baseline或production claim |
 
-01-08 的真实 HTTP / PostgreSQL / Trajectory / E2E、Security audit与UAT不属于这三个 Packet的“manual替代”；它们是后续必须自动化或可复现执行的独立 gate。
+01-08 的真实 HTTP / PostgreSQL / Trajectory / E2E、Security audit与UAT不属于这些Component/contract Packet的“manual替代”；它们是后续必须自动化或可复现执行的独立 gate。
 
 ## Validation Sign-off
 
@@ -173,12 +193,15 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] 所有 missing test reference均在exact Packet allowlist内。
 - [x] 无watch-mode flag。
 - [x] `nyquist_compliant: true`。
+- [x] 01-04H 两个结构化TDD task都有existing allowlisted test file、RED/GREEN focused command与full gate；physical transaction和Runtime consumer验证明确留给尚未签发的01-05R/01-06R。
 - [x] 01-05/06/07 每个 task 均有 exact automated command 与 allowlisted Wave 0 test。
 - [x] 初始 Plan Checker loop 3/3 `PASS` 已被 PR #26 首个 exact-head review 的 canonical/security findings 明确 supersede，不再作为 approval。
 - [x] 超出三轮 cap 后的只读 checker audit 识别出两项 `MAJOR`；对应 approval 声明与第二条零网络命令已修正，不再启动第 5 个 planner loop。
 - [x] planning PR #26 final published head `2922308b...` 已取得canonical与security/process两个Codex只读Reviewer的`PASS`，所有planning findings已关闭，并merge为`968b4a9...`；持久化记录见PR #26 [canonical evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174316)与[security/process evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174609)，不是GitHub Reviews API formal approvals。
-- [x] 三个 Packet Wave 0 RED证据已提交至各自published feature history。
-- [x] 三个 Packet focused / full本地门禁均green：Runtime 83 / 549，Infra 68 / 496，Eval 111 / 577（1 deselected）；这些结果仍须独立review与latest-integration replay。
-- [ ] 三个 exact-head review与latest-integration compatibility均PASS。
+- [x] **HISTORICAL PR #26 SIGN-OFF / SUPERSEDED FOR CURRENT INTEGRATION:** 原01-05/06/07 Wave 0 RED已进入published feature history；首轮focused/full为Runtime 83/549、Infra 68/496、Eval 111/577（1 deselected）。它们只证明当时feature形成，不批准当前合并。
+- [x] Historical Runtime/Infra heads后续测试增长至95/561与23/506并被exact-head review判定BLOCK；Eval `c4eca0d...`为136/602（1 deselected）且fresh review同样判定BLOCK。Green机械测试不覆盖review findings。
+- [ ] 当前01-04H Revision Gate通过，planning PR合并，owner Task 1取得RED并把`wave_0_complete`恢复为`true`，随后owner实现/review/merge。
+- [ ] 01-05R与01-06R在各自exact predecessor merge后分别签发、实现和review；Eval当前两个HIGH修复并fresh exact-head review通过。
+- [ ] Runtime → Infra → Eval latest-integration compatibility、serial merge与post-merge gates全部PASS。
 
-**Approval:** `PLANNING_GATE_PASS / FEATURE_REVIEW_AND_INTEGRATION_PENDING`。PR #26与post-merge preflight已允许三个execution Worktree从`c35687d...`创建；PR #28/#30/#29只证明published component feature heads与本地门禁已形成，不批准Case、Baseline、release或lifecycle结论。Feature exact-head review、latest-integration compatibility、serial merge与01-08纵向证据仍待产生。
+**Approval:** `REVISION_GATE_PENDING / CURRENT_INTEGRATION_BLOCKED`。PR #26只批准历史01-05/06/07 Packet从`c35687d...`创建；PR #28/#30/#29均已有current review blocker，不能据旧approval进入integration。当前必须依次通过01-04H、01-05R、01-06R、Eval fix/re-review、latest-integration replay与01-08；不批准Case、Baseline、release或lifecycle结论。
