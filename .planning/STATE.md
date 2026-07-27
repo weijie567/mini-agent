@@ -6,8 +6,8 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "5"
 status: "in_progress"
-last_updated: "2026-07-27T07:50:51+08:00"
-last_activity: "2026-07-27 — PR #26 initial exact-head review blocked; findings corrected; new exact-head review pending"
+last_updated: "2026-07-27T07:59:49+08:00"
+last_activity: "2026-07-27 — PR #26 dual exact-head PASS / merge complete; three W2 worktrees dispatched from c35687d"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -36,25 +36,25 @@ Current Phase Name: Cycle 1｜第一最薄 E2E-01
 Current Plan: 5
 Total Phases: 6
 Total Plans in Phase: 8
-Status: W2 Plans 01-05/06/07 revised / exact-head review pending
+Status: W2 Plans 01-05/06/07 parallel execution in progress
 Last Activity: 2026-07-27
-Last Activity Description: 01-04E/F/G已由PR #23/#24/#25合并；PR #26首个exact-head review发现并已修正canonical/security findings；GSD三轮revision cap已达到，当前修正版等待双路exact-head review
+Last Activity Description: PR #26 reviewed head `2922308b...`已取得canonical与security/process双路PASS并squash merge为`968b4a9...`；三个execution Worktree已从exact base `c35687d...`创建并派发
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 5 of 8（01-04E/F/G owner dependencies均已关闭；01-05/06/07 planning PR pending）
-Status: `ACTIVE / W2_PLANS_REVISED / EXACT_HEAD_REVIEW_PENDING`
-Last activity: 2026-07-27 — 01-04E/F/G均已合并；01-05/06/07已修正PR #26首个exact-head review findings与后续checker audit的两项MAJOR；修正版已发布，当前双路exact-head review与merge仍待完成，实际Task Packet完成口径为8/12
+Plan: 5 of 8（01-04E/F/G owner dependencies均已关闭；01-05/06/07 parallel execution in progress）
+Status: `ACTIVE / W2_PARALLEL_EXECUTION_IN_PROGRESS`
+Last activity: 2026-07-27 — PR #26 reviewed head `2922308b...`双路PASS并merge为`968b4a9...`；Runtime / Infra / Eval三个互斥Worktree及branch均从`c35687d...`创建，初始diff为空，实际Task Packet完成口径仍为8/12
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 对draft PR #26已发布修正版的当前exact head完成两路只读review，所有finding关闭后再转ready并merge。
-2. planning PR合并后，从execution base `c35687dafa3881bb322d91515068d8d39be79df6`分别预建`codex/e2e01-w2-runtime`、`codex/e2e01-w2-infra`、`codex/e2e01-w2-eval`三个互斥Worktree；验证Plan provenance、所有owned path在三个Worktree相对base均byte-identical或按计划不存在。
-3. 并行执行01-05 Runtime、01-06 Infra、01-07 Eval；每个Agent按Task Packet TDD、exact allowlist、focused/full gate、handoff与draft PR要求交付。
-4. Integrator按Runtime → Infra → Eval顺序对latest integration overlay逐个复验、review、fix并合并，随后规划并执行01-08 Composition Root与纵向证据。
+1. 继续并行执行01-05 Runtime、01-06 Infra、01-07 Eval；每个Agent仅按Task Packet TDD、exact allowlist、focused/full gate、handoff与draft PR要求交付，当前不得把Worktree创建或Agent运行描述为实现完成。
+2. 每个feature branch发布后，由独立Reviewer对当前remote exact head完成correctness/security/contract/test-gap review；所有finding关闭后才可进入overlay gate。
+3. Integrator按Runtime → Infra → Eval顺序创建独立latest-integration compatibility overlay、逐个复验并合并；不得rebase或force-push已发布feature branch。
+4. 三路feature PR均合并并完成Graphify/cross-file gate后，规划并执行01-08 Composition Root与纵向证据。
 
 ## Decisions
 
@@ -74,8 +74,10 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / W2_PLAN_REVISION_APPLIED`: 首个published head `436ce5b...`的双路review发现Provider参数替换、not-found终态、Eval lane identity、Worktree事实、full-gate preflight与canonical执行owner状态问题；当前published revision已逐项修正。后续checker audit又识别出旧approval与第二条零网络命令两项MAJOR，均已修正。
 - `CONFIRMED / GSD_REVISION_CAP_REACHED`: 初始loop-3 approval已supersede；三轮revision cap后不再启动第5个planner loop，最终planning gate转为当前published exact head的双路独立review。
 - `CONFIRMED / GRAPHIFY_SERIAL_GATE_PASS`: `c35687d...`已完成AST refresh；最终3353 nodes、5999 links、50 hyperedges，graph health error为0、stale marker清除、tracked integration tree clean。
+- `CONFIRMED / W2_PLANNING_GATE_PASS`: PR #26 reviewed head `2922308b...`已取得canonical与security/process双路`PASS`，并squash merge为integration commit `968b4a9...`；merge后full gate为466 tests通过。
+- `CONFIRMED / W2_DISPATCHED`: `codex/e2e01-w2-runtime`、`codex/e2e01-w2-infra`、`codex/e2e01-w2-eval`三个branch/Worktree均从`c35687d...`创建，HEAD与merge-base精确匹配、初始diff为空、14/13/11 ownership两两无交集。
 - `OPEN / TOOL_SURFACE_DRIFT / ACCEPTED_WITH_CONTROLS`: planning PR提交前重新运行SDK/CJS health；后续Phase目录warning与保留历史Worktree warning不触发repair、force或cleanup，任何新error必须BLOCK。
-- `OPEN / PLANNING_PR_REVIEW`: draft PR #26已存在且修正版已发布；当前仅待双路exact-head `PASS`与merge，未通过前不得创建三个execution Worktree。
+- `OPEN / W2_IMPLEMENTATION_EVIDENCE`: 三个Agent已派发，但尚无可接受的published head、Draft PR、focused/full gate、独立review或merge证据；完成口径保持8/12。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -85,5 +87,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-27
-Stopped At: W2 Plans 01-05/06/07 review revision applied；exact-head review pending
+Stopped At: W2 Plans 01-05/06/07 parallel execution dispatched；implementation evidence pending
 Resume File: [phases/01-cycle-1-e2e-01/01-05-PLAN.md](phases/01-cycle-1-e2e-01/01-05-PLAN.md)

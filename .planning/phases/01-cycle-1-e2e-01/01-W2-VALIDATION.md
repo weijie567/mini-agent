@@ -176,9 +176,9 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] 01-05/06/07 每个 task 均有 exact automated command 与 allowlisted Wave 0 test。
 - [x] 初始 Plan Checker loop 3/3 `PASS` 已被 PR #26 首个 exact-head review 的 canonical/security findings 明确 supersede，不再作为 approval。
 - [x] 超出三轮 cap 后的只读 checker audit 识别出两项 `MAJOR`；对应 approval 声明与第二条零网络命令已修正，不再启动第 5 个 planner loop。
-- [ ] 当前 published exact head 已取得两路独立 Reviewer `PASS`，所有 findings 已关闭。
+- [x] planning PR #26 final published head `2922308b...` 已取得canonical与security/process两路独立Reviewer `PASS`，所有planning findings已关闭，并merge为`968b4a9...`。
 - [ ] 三个 Packet Wave 0 RED证据已提交。
 - [ ] 三个 Packet focused / full gate均green。
 - [ ] 三个 exact-head review与latest-integration compatibility均PASS。
 
-**Approval:** `PENDING_EXACT_HEAD_REVIEW`。只有当前 published exact head 的两路独立 Reviewer 均为 `PASS` 且 planning PR 合并后，才能进入三个 execution Worktree 的创建门禁；execution evidence仍待产生。
+**Approval:** `PLANNING_GATE_PASS / EXECUTION_EVIDENCE_PENDING`。PR #26与post-merge preflight已允许三个execution Worktree从`c35687d...`创建；这只批准按exact Task Packet开始实现，不批准任何实现、Case、Baseline、release或lifecycle结论。Wave 0、focused/full、feature exact-head review、latest-integration compatibility与01-08纵向证据仍待产生。

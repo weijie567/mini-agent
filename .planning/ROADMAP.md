@@ -32,7 +32,7 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / W2_PLANS_REVISED / EXACT_HEAD_REVIEW_PENDING`
+**Status**: `ACTIVE / W2_PARALLEL_EXECUTION_IN_PROGRESS`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
@@ -59,9 +59,9 @@ Plans:
 - [ ] 01-04E: Memory token availability（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #23 merge `be68490...`；required TokenCounts object + nullable strict per-direction exact counts；[Summary](phases/01-cycle-1-e2e-01/01-04E-SUMMARY.md)）
 - [ ] 01-04F: Thin Slice / Eval fault-path alignment（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #24 merge `1d47fae...`；canonical ACTIVE/v1 → WAITING_USER/v2 → BLOCKED/v3；[Summary](phases/01-cycle-1-e2e-01/01-04F-SUMMARY.md)）
 - [ ] 01-04G: restart recovery state + Trace atomicity（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；PR #25 merge / W2 base `c35687d...`；Port-level APPLIED state/link/Trace atomicity与per-event exact projection；[Summary](phases/01-cycle-1-e2e-01/01-04G-SUMMARY.md)）
-- [ ] 01-05: W2 Runtime（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；14-file exact ownership；只拥有 Core / Application runtime behavior 与新增 Component tests）
-- [ ] 01-06: W2 Infra（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；13-file exact ownership；只拥有 Session / HTTP / PostgreSQL / migration / scoped `get_order` / recovery Adapter 与 Infra tests）
-- [ ] 01-07: W2 Eval（`REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`；base `c35687d...`；11-file exact ownership；只拥有 versioned loader、Provider Adapter、Harness / Graders、structured Eval records、fault injection 与 Eval tests）
+- [ ] 01-05: W2 Runtime（`EXECUTION_DISPATCHED / EVIDENCE_PENDING`；branch `codex/e2e01-w2-runtime`从base `c35687d...`创建；14-file exact ownership；只拥有 Core / Application runtime behavior 与新增 Component tests）
+- [ ] 01-06: W2 Infra（`EXECUTION_DISPATCHED / EVIDENCE_PENDING`；branch `codex/e2e01-w2-infra`从base `c35687d...`创建；13-file exact ownership；只拥有 Session / HTTP / PostgreSQL / migration / scoped `get_order` / recovery Adapter 与 Infra tests）
+- [ ] 01-07: W2 Eval（`EXECUTION_DISPATCHED / EVIDENCE_PENDING`；branch `codex/e2e01-w2-eval`从base `c35687d...`创建；11-file exact ownership；只拥有 versioned loader、Provider Adapter、Harness / Graders、structured Eval records、fault injection 与 Eval tests）
 - [ ] 01-08: W3 Composition Root 与纵向集成（`NOT_STARTED`；三个 W2 feature PR 串行合并后由 Integrator规划与执行）
 
 #### Phase 1 Execution Gates
@@ -77,7 +77,7 @@ Plans:
 | 01-04E | Memory token availability | `COMPLETE / EVIDENCE_INDEXED`：PR #23 merge `be68490...`；357 tests；nullable strict per-direction exact counts |
 | 01-04F | Thin Slice / Eval fault alignment | `COMPLETE / EVIDENCE_INDEXED`：PR #24 merge `1d47fae...`；364 tests；canonical Port/transition与fact-bearing presentation error stage已对齐 |
 | 01-04G | Recovery Trace atomicity | `COMPLETE / EVIDENCE_INDEXED`：PR #25 merge `c35687d...`；466 tests；Graphify 3353 nodes / 5999 links / 50 hyperedges，health error为0 |
-| 01-05/06/07 | Runtime / Infra / Eval 并行 | `REVISION_APPLIED / EXACT_HEAD_REVIEW_PENDING`：三个Plan均使用exact base `c35687d...`，ownership分别为14 / 13 / 11 files且交集为0；当前published exact head双路review与planning PR merge后才预建三个Worktree |
+| 01-05/06/07 | Runtime / Infra / Eval 并行 | `EXECUTION_DISPATCHED / EVIDENCE_PENDING`：PR #26 reviewed head `2922308b...`双路PASS并merge为`968b4a9...`；三个Worktree均从exact base `c35687d...`创建，ownership为14 / 13 / 11且交集为0；实现、测试、feature PR与review仍待产生 |
 | 01-08 | W3 串行集成 | 三个 W2 feature PR逐个审查、重验并合并后，由 Integrator完成 Composition Root与纵向证据 |
 | Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
 
@@ -186,7 +186,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 4/8；实际 Task Packet完成8/12（含01-04D/E/F/G）；W2 01-05/06/07 revision applied，exact-head review pending` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 4/8；实际 Task Packet完成8/12（含01-04D/E/F/G）；W2 01-05/06/07 planning gate已通过并进入parallel execution，implementation evidence pending` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
