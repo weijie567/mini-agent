@@ -8,7 +8,7 @@ from functools import wraps
 from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from pydantic_core import to_jsonable_python
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -61,7 +61,7 @@ from mini_agent.core.tool_system import (
     ToolCallRecord,
     ToolEffect,
 )
-from mini_agent.core.trace import AgentRunRecord, TraceEvent
+from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, TraceEvent
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
@@ -200,14 +200,24 @@ class PostgresRecordAdapter:
 
     @staticmethod
     def _parse_envelope(raw: dict[str, Any]) -> P0PersistenceEnvelope:
-        return P0PersistenceEnvelope.model_validate_json(
-            json.dumps(
-                raw,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            strict=True,
-        )
+        parsed: P0PersistenceEnvelope | None = None
+        validation_failed = False
+        try:
+            parsed = P0PersistenceEnvelope.model_validate_json(
+                json.dumps(
+                    raw,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                strict=True,
+            )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            validation_failed = True
+        if validation_failed or parsed is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+            ) from None
+        return parsed
 
     @staticmethod
     def _row_key(row: P0RecordModel) -> tuple[str, str]:
@@ -321,23 +331,33 @@ class PostgresRecordAdapter:
             raise _integrity(
                 P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
             )
-        return tuple(
-            P0RecordReference.model_validate_json(
-                json.dumps(
-                    {
-                        "relation": reference.relation,
-                        "target_record_code": reference.target_record_code,
-                        "target_logical_identity": (
-                            reference.target_logical_identity
-                        ),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                strict=True,
+        normalized: tuple[P0RecordReference, ...] | None = None
+        validation_failed = False
+        try:
+            normalized = tuple(
+                P0RecordReference.model_validate_json(
+                    json.dumps(
+                        {
+                            "relation": reference.relation,
+                            "target_record_code": reference.target_record_code,
+                            "target_logical_identity": (
+                                reference.target_logical_identity
+                            ),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    strict=True,
+                )
+                for reference in references
             )
-            for reference in references
-        )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            validation_failed = True
+        if validation_failed or normalized is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            ) from None
+        return normalized
 
     def _decode_row(
         self,
@@ -1190,6 +1210,18 @@ class PostgresRecordAdapter:
                 for_update=True,
             )
             if run_row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            decoded_run = self._validate_physical_projection(
+                session,
+                run_row,
+            ).source_record
+            if (
+                type(decoded_run) is not AgentRunRecord
+                or decoded_run.run_id != command.created_record.run_id
+                or decoded_run.status is not AgentRunStatus.RUNNING
+            ):
                 raise _integrity(
                     P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
                 )
