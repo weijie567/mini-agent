@@ -2,7 +2,7 @@
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
 scope: 01-05-01-07
-status: pending_exact_head_review
+status: execution_evidence_in_progress
 nyquist_compliant: true
 wave_0_complete: false
 created: "2026-07-27"
@@ -176,9 +176,9 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] 01-05/06/07 每个 task 均有 exact automated command 与 allowlisted Wave 0 test。
 - [x] 初始 Plan Checker loop 3/3 `PASS` 已被 PR #26 首个 exact-head review 的 canonical/security findings 明确 supersede，不再作为 approval。
 - [x] 超出三轮 cap 后的只读 checker audit 识别出两项 `MAJOR`；对应 approval 声明与第二条零网络命令已修正，不再启动第 5 个 planner loop。
-- [x] planning PR #26 final published head `2922308b...` 已取得canonical与security/process两路独立Reviewer `PASS`，所有planning findings已关闭，并merge为`968b4a9...`。
-- [ ] 三个 Packet Wave 0 RED证据已提交。
-- [ ] 三个 Packet focused / full gate均green。
+- [x] planning PR #26 final published head `2922308b...` 已取得canonical与security/process两个Codex只读Reviewer的`PASS`，所有planning findings已关闭，并merge为`968b4a9...`；持久化记录见PR #26 [canonical evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174316)与[security/process evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174609)，不是GitHub Reviews API formal approvals。
+- [x] 三个 Packet Wave 0 RED证据已提交至各自published feature history。
+- [x] 三个 Packet focused / full本地门禁均green：Runtime 83 / 549，Infra 68 / 496，Eval 111 / 577（1 deselected）；这些结果仍须独立review与latest-integration replay。
 - [ ] 三个 exact-head review与latest-integration compatibility均PASS。
 
-**Approval:** `PLANNING_GATE_PASS / EXECUTION_EVIDENCE_PENDING`。PR #26与post-merge preflight已允许三个execution Worktree从`c35687d...`创建；这只批准按exact Task Packet开始实现，不批准任何实现、Case、Baseline、release或lifecycle结论。Wave 0、focused/full、feature exact-head review、latest-integration compatibility与01-08纵向证据仍待产生。
+**Approval:** `PLANNING_GATE_PASS / FEATURE_REVIEW_AND_INTEGRATION_PENDING`。PR #26与post-merge preflight已允许三个execution Worktree从`c35687d...`创建；PR #28/#30/#29只证明published component feature heads与本地门禁已形成，不批准Case、Baseline、release或lifecycle结论。Feature exact-head review、latest-integration compatibility、serial merge与01-08纵向证据仍待产生。

@@ -16,7 +16,7 @@
 - [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
 - [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
 
-当前八个 numbered Plan 中 `01-01`–`01-04` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D/E/F/G` 也均已完成并合并。`01-05` Runtime、`01-06` Infra、`01-07` Eval 的planning PR #26 reviewed head `2922308b...`已取得两路独立`PASS`并merge为`968b4a9...`；三个execution Worktree随后从共同 exact base `c35687dafa3881bb322d91515068d8d39be79df6`创建并进入parallel execution。实际 Packet完成口径仍为`8/12`，canonical lifecycle与本文件复选框仍保持`0/8`；Worktree创建、Agent运行、规划或组件契约完成均不等于Case已通过。
+当前八个 numbered Plan 中 `01-01`–`01-04` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D/E/F/G` 也均已完成并合并。`01-05` Runtime、`01-06` Infra、`01-07` Eval 的planning PR #26 reviewed head `2922308b...`已取得两个Codex只读Reviewer的`PASS`并merge为`968b4a9...`；Reviewer记录见PR #26 [canonical evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174316)与[security/process evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174609)，它们不是GitHub Reviews API formal approvals。三个execution Worktree随后从共同 exact base `c35687dafa3881bb322d91515068d8d39be79df6`创建；Runtime / Infra / Eval已分别发布Draft PR #28/#30/#29，但independent feature review、latest-integration overlay与serial merge仍待完成。实际 Packet完成口径保持`8/12`，canonical lifecycle与本文件复选框保持`0/8`。
 
 ## Phase 2｜Cycle 2：完成 E2E-01（PLANNED MAPPING ONLY）
 
