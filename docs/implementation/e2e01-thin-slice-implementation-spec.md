@@ -1,6 +1,6 @@
 # 第一最薄 E2E-01｜Implementation Spec
 
-更新日期：2026-07-27
+更新日期：2026-07-28
 状态：`ACTIVE / CONTRACT_DEFINED`  
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
@@ -464,6 +464,7 @@ GetOrderResult
     NOT_FOUND_OR_NOT_ACCESSIBLE
     SYSTEM_FAILURE
   order_summary?: OrderSummaryProjection
+  source_version?: str
   failure_code?: str
 
 OrderSummaryProjection
@@ -487,6 +488,7 @@ OrderLineSummary
 约束：
 
 - `order_summary` 只允许在 `FOUND` 时存在。
+- `source_version` 是 Runtime-private 的快照版本元数据，只允许在 `FOUND` 时存在；迁移期与最终闭合语义见第 6.2.1 节。
 - `line_items` 至少一项；`quantity >= 1`。
 - 日期必须是带时区的 UTC RFC 3339 值。
 - 状态必须是受控枚举，不接受自由文本。
@@ -507,11 +509,126 @@ customer_id
 原始 ToolResult
 ```
 
+#### 6.2.1 `source_version` scoped canonical contract
+
+本小节只拥有第一最薄切片 `get_order` 的具体 source-version 编码。它消费 Memory owner 的 Observation / `VersionedRecordRef` exact-version 语义，不把该编码升级为所有 Observation 的全局必填字段，也不改变 Agent-visible ToolSpec。
+
+##### Authority、canonical bytes 与 token
+
+`source_version_schema` 固定为：
+
+```text
+mock-order-source-version.p0.v1
+```
+
+唯一 authority 是 Infrastructure `get_order` Adapter。它只能在一次使用服务端可信 `customer_id` 与已校验 `order_id` 的 owner-scoped 查询返回一行之后，依次完成以下步骤：
+
+1. 把本次实际读取的 JSONB payload 严格校验为 `OrderSummaryProjection`；不接受 coercion、额外字段或部分投影。
+2. 校验 `projection.order_number == validated_query.order_id`。不一致属于损坏，不得重新绑定订单号。
+3. 使用本次查询的可信身份、已校验订单标识和严格安全投影构造唯一 canonical payload：
+
+   ```python
+   {
+       "source_version_schema": source_version_schema,
+       "owner_customer_id": trusted_query.customer_id,
+       "order_id": validated_query.order_id,
+       "safe_projection": projection.model_dump(mode="json"),
+   }
+   ```
+
+4. 使用以下 Python-compatible JSON 语义生成 UTF-8 bytes；参数及其值都是合同的一部分：
+
+   ```python
+   canonical_bytes = json.dumps(
+       canonical_payload,
+       allow_nan=False,
+       ensure_ascii=False,
+       separators=(",", ":"),
+       sort_keys=True,
+   ).encode("utf-8")
+   ```
+
+5. 对 `canonical_bytes` 计算 SHA-256，使用小写十六进制，并生成：
+
+   ```python
+   source_version = (
+       "mock-order-source-version.p0.v1:sha256:"
+       + hashlib.sha256(canonical_bytes).hexdigest()
+   )
+   ```
+
+token 必须完整匹配：
+
+```regex
+^mock-order-source-version\.p0\.v1:sha256:[0-9a-f]{64}$
+```
+
+用户消息、模型、Provider、Fixture、Runtime、Eval、持久化 record metadata 或调用方都不能提供、覆盖、补齐或重算这个值。计算不能执行第二次查询，也不能扩大 `customer_id + order_id` 的可信 owner predicate。
+
+当前合成 Fixture 的固定向量如下；Fixture 只提供复现输入，不是 token authority，`fixture_version` 也不进入 hash：
+
+| trusted owner | order | exact `source_version` |
+|---|---|---|
+| `customer-A` | `O-1001` | `mock-order-source-version.p0.v1:sha256:861c136b1a41ecef3cd9625dc58524ec452e939b5ca1eb70ebcab69181561c42` |
+| `customer-B` | `O-2001` | `mock-order-source-version.p0.v1:sha256:4801da34c67c9405986e368042209dedf87896b16aa5a1eead6031eed5c988be` |
+
+相同 trusted owner、`order_id` 与安全投影产生相同 token；任一 included field 变化必须产生不同 token。它是 content version，不是 monotonic revision 或事件序号：若安全投影从 A 变为 B 后又回到 A，token 可以回到第一次 A 的值，不能据此声称 ABA detection。
+
+##### 最终 outcome 与传播矩阵
+
+以下是 01-07M 闭合后的最终 P0 acceptance contract；01-07H 的临时 optional 表示能力不能替代本矩阵：
+
+| `GetOrderResult.outcome` | `order_summary` | `source_version` | `failure_code` | Observation / Context Manifest #2 |
+|---|---|---|---|---|
+| `FOUND` | 必填且通过严格安全投影校验 | 必填、非空且精确匹配上述 pattern | 禁止 | 创建 `OrderObservation`，随后创建只引用该安全 Observation 的 Manifest #2 |
+| `NOT_FOUND_OR_NOT_ACCESSIBLE` | 禁止 | 禁止 | 禁止 | 均不创建；不存在与非本人保持外部不可区分 |
+| `SYSTEM_FAILURE` | 禁止 | 禁止 | 只允许现有有界安全 failure code | 均不创建；不得伪装成 safe not-found |
+
+owner-scoped 查询无行继续返回 `NOT_FOUND_OR_NOT_ACCESSIBLE`。查询已返回行后，payload 损坏、严格投影失败、订单号不匹配，或在 Runtime acceptance boundary 发现缺失、空、畸形、不可用的 `source_version`，都进入现有有界 `SYSTEM_FAILURE` 路径；不得重试、fallback、执行第二次查询、返回部分事实或降级为 `NOT_FOUND_OR_NOT_ACCESSIBLE`。
+
+传播链固定为：
+
+```text
+GetOrderResult.source_version
+→ OrderObservation.source_version
+→ ContextManifest.observation_refs_and_versions[
+    matching observation_id
+  ].version
+```
+
+三处必须 byte-for-byte exact copy。Runtime、Memory、Eval 与任何下游消费者不得 parse、normalize、rehash、recompute、截断或替换；Manifest 中的值是该业务安全快照版本，不是 Observation 的 `record_schema_version`。以下值都不得作为 substitute 或 fallback：
+
+- `order-observation.p0.v1` 或其他 record / schema version。
+- `mock_orders.stored_at`、单独的 `status_updated_at` 或数据库事务时间。
+- `fixture_version`、`dataset_version`、`tool_registry_version`、artifact、Prompt、Renderer、Runtime 或 Eval version。
+- 任意 `latest`、default、placeholder、随机值或调用方提供值。
+
+token 是 Runtime-private、可审计的 authority metadata，不是 secret、HMAC、授权凭据、权限证明或防重放 capability。它只能存在于 Runtime-private Result、Audit-only Observation 与 Manifest version reference，以及受控 Eval evidence reader 的精确相等断言中；不得进入 Agent-visible `ToolSpec.output_schema`、Provider / 模型输入、`PresentationInput`、Renderer 文案、HTTP 响应、用户回复或普通 Trace。Eval 只能消费受控审计证据，不能成为 producer 或重新计算 token。
+
+##### Expand → enforce → produce → close
+
+每个阶段都必须在自己的 ownership allowlist 内独立通过完整测试；临时迁移态不是可执行 P0 完成声明：
+
+| Packet | owner boundary | 必须交付 | 本阶段明确不做 |
+|---|---|---|---|
+| `01-07H` additive expand | Core / Order DTO 与被其 allowlist 覆盖的 in-repo FOUND stubs / fixtures | `GetOrderResult.source_version` 暂为 optional；一旦存在就必须匹配 exact pattern；所有 non-FOUND outcome 均禁止携带；可修改的 FOUND 测试替身显式使用有效测试 token | 不拒绝 legacy `FOUND + None`；不把测试 token 变成 authority；PostgreSQL producer 仍是唯一已声明的 legacy absence |
+| `01-07J` runtime enforce | Application Runtime acceptance boundary | 在创建 Observation / Manifest #2 之前检查 FOUND 的 `source_version`；缺失、空、畸形或不可用统一进入有界 `SYSTEM_FAILURE`，无 Observation、无 Manifest #2、无 Presentation、无 retry、无 fallback | 不生成 token，不放宽 non-FOUND，不让 H 的临时 `FOUND + None` 到达 Presentation |
+| `01-07K` producer | Infrastructure `get_order` Adapter | 在同一次 owner-scoped 查询和严格投影成功后按本小节算法生成 token，并随 FOUND Result 返回；覆盖两个固定向量、内容变化、foreign / missing 不产 token和corruption system failure | 不执行第二次查询，不把 `stored_at` / Fixture / schema version 当 token，不放宽 01-07J |
+| `01-07M` Core contract closure | Core / Order DTO | 只在 01-07K 与 01-07L reviewed merge 后的共同 exact integration barrier 上，把 `GetOrderResult.FOUND.source_version` 收紧为必填 exact-pattern 字段，保留所有 non-FOUND 禁止规则并运行完整测试 | 不引入 migration 或全局 Memory required 字段；在 reviewed merge 前持续阻塞 01-08 |
+
+`01-07H` 只能从 01-07C 与 01-07G feature 均 reviewed merge 后的共同 exact integration SHA 签发。`01-07M` reviewed merge 之前，本切片不得以最终矩阵已实现、Trajectory / E2E 已验证或 01-08 已解锁为由推进生命周期。
+
+通用持久化 `OrderObservation.source_version?` 对本切片之外的旧记录保持 optional；旧记录的 `None` 可以继续被旧模型解码，但不能支持新的 Presentation Manifest，也不能形成通过该合同的 Eval evidence。本裁决不要求旧记录 backfill、read-time migration、物理 column / Alembic migration、全局 Memory 字段收紧或新外部配置。
+
+如果后续要求 monotonic revision、ABA detection、HMAC secrecy、opaque persisted version、全局 Memory required 字段、Agent-visible output、新外部配置、旧记录 backfill 或 schema / data migration，必须停止当前链路并新增有独立 owner、threat model、验证和 denominator 决策的 Task Packet；不得在 01-07H/J/K/M 内扩 scope。
+
+合同回滚只允许关闭未合并 PR，或通过普通 revert PR 恢复上一版 owner 并重新阻塞 01-07H–01-07M 与 01-08；不得 reset、force-push、删除数据、静默 backfill 或发明本 Packet 未批准的 migration rollback。
+
 ### 6.3 ToolResult 映射
 
 | `GetOrderResult` | ToolResult | 后续 |
 |---|---|---|
-| `FOUND` | `SUCCESS` | 形成安全 `OrderObservation` |
+| `FOUND` | 只有 `order_summary + exact source_version` 通过第 6.2.1 节最终 acceptance gate 后才是 `SUCCESS` | exact-copy 形成安全 `OrderObservation` 与 Context Manifest #2 |
 | `NOT_FOUND_OR_NOT_ACCESSIBLE` | `BUSINESS_FAILURE` + 同名安全码 | 不形成私有 Observation；直接进入 `RunResultMapper` |
 | `SYSTEM_FAILURE` | `SYSTEM_FAILURE` | 不形成业务 Observation；固定 `BLOCKED` |
 
@@ -613,9 +730,10 @@ Auth
 → Control Gateway
 → ToolCall(CREATED/RUNNING)
 → scoped get_order
+→ FOUND(order_summary + exact source_version)
 → ToolCall(SUCCEEDED)
-→ OrderObservation
-→ Context Manifest #2（只引用安全 Observation）
+→ OrderObservation（byte-for-byte copy source_version）
+→ Context Manifest #2（只引用安全 Observation，并 exact-copy 同一 version）
 → plan_presentation
 → PresentationPlan Gate
 → DeterministicRenderer
@@ -1398,6 +1516,7 @@ W1 已建立依赖、Compose PostgreSQL / pgvector、空业务 migration、Core 
 - Alice 不能读取或推断 Bob 订单，非本人和不存在分支外部安全等价。
 - 每个有效明确订单号都形成可追溯的 accepted Delta、Task / RequestUnit 和 `USER_CLAIM` InputBinding。
 - `get_order.order_id` 精确绑定当前有效 InputBinding；参数替换、first-new-goal 的非空 base version 与 stale-state 竞态均在 ToolCall 创建前被拒绝。
+- 最终接受的 `get_order FOUND` 同时携带安全 `order_summary` 与 Adapter 从同一次 owner-scoped 读取计算的 exact `source_version`；该值 byte-for-byte 传播到 `OrderObservation` 和 Context Manifest #2，缺失或损坏时在 Presentation 前 fail closed。
 - 模型从未看到未经归属验证的 ToolResult。
 - 模型不生成订单号、数量、日期、状态或商品名事实值。
 - 订单事实由 Renderer 从白名单 `OrderSummaryProjection` 注入。
