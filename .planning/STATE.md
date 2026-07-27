@@ -107,7 +107,8 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / INFRA_FINDINGS_CLOSED`: PR #30的bounded decode、late ToolCall及后续finalization/Trace/concurrency findings均在01-06R独立RED/GREEN lineage中关闭并reviewed merge。
 - `CONFIRMED / EVAL_FEATURE_AND_OVERLAY_PASS`: PR #29 head `b8ecbb0...`与latest overlay `ee46f38...`均获独立`PASS / NOT_FOUND`；merge与post-merge gate完成。
 - `CONFIRMED / REAL_EVAL_RUNTIME_TRACE_ALIGNMENT_CLOSED`: 01-07A已关闭ContextManifest purpose、fixed-result ResponseRendered与explicit active-run hook identity；Eval reader仍禁止合成。
-- `CONFIRMED / PROJECT_DIRECTION_STATUS_ALIGNMENT`: `PROJECT_DIRECTION.md`实现状态段已对齐01-07B reviewed merge、14/28与0/8边界；状态修订不表示纵向Case或产品完成。
+- `HISTORICAL / PROJECT_DIRECTION_01-07B_STATUS_ALIGNMENT`: `PROJECT_DIRECTION.md`实现状态段曾在01-07B reviewed merge时对齐14/28、16个signed Plans与0/8边界；01-07C Plan签发后该易漂移Plan计数不再是current alignment，以下owner follow-up必须先关闭。
+- `OPEN / PROJECT_DIRECTION_01-07C_PLAN_COUNT_ALIGNMENT`: 当前Project Direction实现状态仍保留01-07B时点的“正式签发16个Plan”，而本planning PR目标状态为17；该active owner不在本Packet allowlist。必须在本PR reviewed merge后以独立Project Direction owner PR移除或对齐易漂移计数，完成前不得启动01-07G planning或C/G feature dispatch；本仓库尚未声称cross-file完全aligned。
 - `CONFIRMED / 01-07C_ISSUED`: [01-07C Plan](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)固定execution base `3f0753f7...`、Intent owner单文件allowlist、完整version/closure/threat/rollback gate；feature execution尚未开始。
 - `READY / 01-07G_ISSUANCE`: 01-07G必须通过新的single-target planning PR签发并固定同一execution base；C/G均reviewed merge后形成共同barrier，D/H才可从该SHA签发。
 - `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。新增依赖后当前目标Packet完成14/28、正式签发17个Plan。

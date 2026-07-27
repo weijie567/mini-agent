@@ -107,6 +107,7 @@ dependencies:
 
 - 01-07B reviewed merge and status alignment exact execution base `3f0753f7bef87fc02f314e28fe8b07860a819701`
 - this planning-status PR reviewed merge before any feature write
+- `PROJECT_DIRECTION.md` at the planning base still reports the volatile derived count as `16` signed Plans; that active-owner file is outside this planning Packet. The planning PR must record the difference, then a separate Project Direction owner PR must remove or align the volatile count before 01-07G planning or C/G feature dispatch
 - 01-07G is a same-wave independent owner ruling from the same `base_sha`; neither C nor G depends on the other
 - 01-07D / 01-07H remain blocked until both C and G owner PRs are serially merged and a common exact integration barrier is recorded
 - 01-07E / 01-07F remain blocked until the later D/H common barrier
@@ -131,6 +132,7 @@ required_checks:
 - exact-version-only semantics reject unknown, future and mismatched versions; no fallback, best-effort decode, read-time rewrite or silent downgrade
 - future migration guidance names source/target versions, closure invariants, security/Eval impact, atomic failure behavior and rollback/readiness constraints; an old runtime unable to read a new record cannot be reported ready after rollback
 - cross-file impact scan classifies every affected consumer as downstream work, aligned reference, or explicit non-impact; forbidden-file edits stop the Packet
+- the known `PROJECT_DIRECTION.md` signed-Plan-count mismatch is explicitly recorded as a deferred owner-boundary alignment, not silently called aligned; execution preflight requires the separate owner PR evidence
 - `git diff --check`, focused `rg` owner checks, Markdown frontmatter/local-link checks where applicable, `uv run pytest`, and independent exact-head canonical/ownership/security review
 - latest-integration overlay proves the sole owner change remains compatible after the first C/G owner PR is merged; no rebase or force-push rewrites reviewed lineage
 
@@ -142,6 +144,7 @@ done_when:
 - exact feature and latest-integration overlay checks pass
 - unresolved `CRITICAL / HIGH / MEDIUM = 0 / 0 / 0`
 - draft PR targets `integration/e2e01-thin` and records contract change, nonclaims, checks, risks and rollback
+- Project Direction’s volatile signed-Plan count is aligned or removed by a separate reviewed owner PR before 01-07G planning or C/G feature dispatch
 - merge does not advance Case / Requirement / numbered Phase lifecycle
 
 contract_changes: `YES / CANONICAL INTENT SEMANTICS` — freezes the durable Request Understanding aggregate, independent version axes, closure and compatibility / migration rules. Exact Thin Slice fields/version strings and all code remain downstream.
@@ -161,6 +164,7 @@ handoff_format:
 - compatibility/migration/rollback matrix
 - commands and exact results
 - cross-file impact map, contract/security/Eval impact and explicit nonclaims
+- separate Project Direction owner-alignment PR/merge evidence for the volatile signed-Plan count
 - independent feature/overlay reviews and unresolved risks
 </packet_contract>
 
@@ -186,6 +190,8 @@ handoff_format:
 在现有 Request Understanding canonical owner 内对齐并规范 durable aggregate：定义 identity/replay、canonical validated projection、contextualization、candidate/validation/accepted/rejected closure、按 Task 或 accepted delta 关联的 base/result versions，以及可信 `created_at`。明确 logical record、model input/output 和 Task State concurrency versions 互不替代；不要指定 Thin Slice exact string 或实现字段。
   </action>
   <verify>
+    <automated>test "$(git diff --name-only 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD)" = "docs/architecture/intent-design-reference.md"
+rg -n 'request_understanding_record_id|record_schema_version|model.*schema_version|contextualization|task_delta_candidates|candidate_validation|accepted_delta|created_at|base.*state_version|result.*state_version' docs/architecture/intent-design-reference.md >/dev/null</automated>
 对照 owner 现有 minimum-persistence 列表与当前 source/codec 冲突，确认所有字段都有唯一语义、cardinality、authority、closure 与 retention/minimization 规则。
   </verify>
   <done>
@@ -200,6 +206,9 @@ handoff_format:
 把 breaking-shape evolution、exact-version-only decode、unknown/future/mismatch failure、显式 migration 与 rollback/readiness 约束写入同一 owner。说明 downstream Thin Slice mapping、codec、Core implementation分别由01-07D/E/F消费；不要修改消费者文件。
   </action>
   <verify>
+    <automated>git diff --check 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD
+rg -n 'exact-version|unknown|future|fallback|migration|rollback|downgrade' docs/architecture/intent-design-reference.md >/dev/null
+uv run pytest</automated>
 运行 repository-wide impact scan，特别核对 Memory owner、Thin Slice Spec、PROJECT_DIRECTION、current RU DTO/construction/codec 与 tests；记录差异但不越界修复。
   </verify>
   <done>
