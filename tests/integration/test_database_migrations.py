@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from alembic import command
 from sqlalchemy import inspect, text
 
 from mini_agent.infrastructure.persistence.database import (
@@ -14,9 +15,15 @@ from mini_agent.infrastructure.persistence.database import (
     validate_test_database_url,
 )
 from mini_agent.infrastructure.persistence.migrations import (
+    alembic_config,
     upgrade_database_to_head,
 )
-from mini_agent.infrastructure.persistence.models import Base
+from mini_agent.infrastructure.persistence.models import (
+    Base,
+    MockOrderModel,
+    P0RecordModel,
+    P0RecordReferenceModel,
+)
 
 _LIBPQ_ROUTING_ENVIRONMENT_CASES = [
     ("PGHOSTADDR", "203.0.113.10"),
@@ -181,11 +188,24 @@ def test_development_engine_does_not_enable_test_environment_guard(
         engine.dispose()
 
 
-def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
+def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
     engine = postgres_namespace.build_engine()
     try:
-        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
-        assert not Base.metadata.tables
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) == {
+            "alembic_version",
+            "mock_orders",
+            "p0_record_references",
+            "p0_records",
+        }
+        assert set(Base.metadata.tables) == {
+            "mock_orders",
+            "p0_record_references",
+            "p0_records",
+        }
+        assert P0RecordModel.__tablename__ == "p0_records"
+        assert P0RecordReferenceModel.__tablename__ == "p0_record_references"
+        assert MockOrderModel.__tablename__ == "mock_orders"
 
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT current_schema()")) == (
@@ -193,9 +213,154 @@ def test_empty_namespace_has_only_alembic_bootstrap(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("20260726_0001")
+            ) == ("20260727_0002")
     finally:
         engine.dispose()
+
+
+def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
+    postgres_namespace,
+) -> None:
+    engine = postgres_namespace.build_engine()
+    try:
+        inspector = inspect(engine)
+        assert {column["name"] for column in inspector.get_columns("p0_records")} == {
+            "record_id",
+            "record_code",
+            "record_schema_version",
+            "logical_identity",
+            "direct_owner_customer_id",
+            "scope_owner_customer_id",
+            "conversation_id",
+            "run_id",
+            "task_id",
+            "request_unit_id",
+            "lifecycle_status",
+            "state_version",
+            "attempt_count",
+            "recovery_sort_at",
+            "envelope",
+            "stored_at",
+        }
+        assert {
+            column["name"]
+            for column in inspector.get_columns("p0_record_references")
+        } == {
+            "reference_id",
+            "source_record_code",
+            "source_logical_identity",
+            "ordinal",
+            "relation",
+            "target_record_code",
+            "target_logical_identity",
+        }
+        assert {column["name"] for column in inspector.get_columns("mock_orders")} == {
+            "customer_id",
+            "order_id",
+            "order_payload",
+            "stored_at",
+        }
+
+        record_unique_names = {
+            item["name"] for item in inspector.get_unique_constraints("p0_records")
+        }
+        assert record_unique_names == {"uq_p0_records_code_identity"}
+        record_check_names = {
+            item["name"] for item in inspector.get_check_constraints("p0_records")
+        }
+        assert record_check_names == {
+            "ck_p0_records_attempt_count",
+            "ck_p0_records_code_closed",
+            "ck_p0_records_code_version_closed",
+            "ck_p0_records_envelope_object",
+            "ck_p0_records_logical_identity_array",
+            "ck_p0_records_state_version",
+        }
+        assert {item["name"] for item in inspector.get_indexes("p0_records")} == {
+            "ix_p0_records_code_request_unit",
+            "ix_p0_records_code_run_status",
+            "ix_p0_records_code_task_status",
+            "ix_p0_records_recovery_candidate",
+            "ix_p0_records_scope_owner_code",
+        }
+
+        reference_unique_names = {
+            item["name"]
+            for item in inspector.get_unique_constraints("p0_record_references")
+        }
+        assert reference_unique_names == {
+            "uq_p0_record_references_source_ordinal",
+            "uq_p0_record_references_source_relation_target",
+        }
+        assert {
+            item["name"] for item in inspector.get_indexes("p0_record_references")
+        } == {"ix_p0_record_references_target"}
+        foreign_keys = {
+            foreign_key["name"]: foreign_key
+            for foreign_key in inspector.get_foreign_keys("p0_record_references")
+        }
+        assert set(foreign_keys) == {
+            "fk_p0_record_references_source",
+            "fk_p0_record_references_target",
+        }
+        assert foreign_keys["fk_p0_record_references_source"][
+            "referred_columns"
+        ] == ["record_code", "logical_identity"]
+        assert foreign_keys["fk_p0_record_references_source"]["options"] == {
+            "ondelete": "CASCADE",
+            "initially": "DEFERRED",
+            "deferrable": True,
+        }
+        assert foreign_keys["fk_p0_record_references_target"][
+            "referred_columns"
+        ] == ["record_code", "logical_identity"]
+        assert foreign_keys["fk_p0_record_references_target"]["options"] == {
+            "ondelete": "RESTRICT",
+            "initially": "DEFERRED",
+            "deferrable": True,
+        }
+        assert inspector.get_pk_constraint("mock_orders")["constrained_columns"] == [
+            "customer_id",
+            "order_id",
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_disposable_namespace_upgrade_downgrade_upgrade(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("migration-cycle")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        command.downgrade(config, "20260726_0001")
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) == {"alembic_version"}
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT version_num FROM alembic_version")
+            ) == "20260726_0001"
+
+        command.upgrade(config, "head")
+        inspector.clear_cache()
+        assert set(inspector.get_table_names()) == {
+            "alembic_version",
+            "mock_orders",
+            "p0_record_references",
+            "p0_records",
+        }
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT version_num FROM alembic_version")
+            ) == "20260727_0002"
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
 
 
 def test_programmatic_migration_cannot_be_redirected_to_dev_url(
