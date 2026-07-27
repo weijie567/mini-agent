@@ -139,6 +139,7 @@ def _expectations(**overrides: object) -> EvalCaseExpectations:
         "expected_request_unit_state_version": 2,
         "expected_gate_decision": GateDecisionValue.ACCEPT,
         "expected_gate_reason": None,
+        "expected_validated_task_state_version": 1,
         "expected_tool_call_status": ToolCallStatus.SUCCEEDED,
         "expected_tool_calls": 1,
         "expected_observations": 1,
@@ -217,9 +218,7 @@ def _observation(*, order_id: str = "O-1001") -> OrderObservation:
         normalized_value=OrderSummaryProjection(
             order_number=order_id,
             status=OrderStatus.SHIPPED,
-            line_items=(
-                OrderLineSummary(product_name="轻量跑鞋", quantity=1),
-            ),
+            line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
             ordered_at=datetime(2026, 7, 20, 2, 15, tzinfo=UTC),
             status_updated_at=datetime(2026, 7, 24, 9, 30, tzinfo=UTC),
         ),
@@ -280,12 +279,8 @@ def _trace(
     if event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
         values.update(
             {
-                "context_manifest_id": (
-                    CONTEXT_1 if context_index == 1 else CONTEXT_2
-                ),
-                "model_call_id": (
-                    MODEL_CALL_1 if context_index == 1 else MODEL_CALL_2
-                ),
+                "context_manifest_id": (CONTEXT_1 if context_index == 1 else CONTEXT_2),
+                "model_call_id": (MODEL_CALL_1 if context_index == 1 else MODEL_CALL_2),
                 "tool_registry_version": "e2e01-thin-tools-v1",
                 "model_visible_toolset_hash": TOOLSET_HASH,
             }
@@ -348,14 +343,21 @@ def _trace_events() -> tuple[TraceEvent, ...]:
 
 def _rendered_message(observation: OrderObservation) -> str:
     summary = observation.normalized_value
-    return " ".join(
+    return "\n".join(
         (
-            summary.order_number,
-            summary.status.value,
-            summary.line_items[0].product_name,
-            str(summary.line_items[0].quantity),
-            summary.ordered_at.isoformat(),
-            summary.status_updated_at.isoformat(),
+            "已为你查到订单信息：",
+            f"订单号：{summary.order_number}",
+            "状态：已发货",
+            "商品："
+            + "、".join(
+                f"{item.product_name} × {item.quantity}" for item in summary.line_items
+            ),
+            f"下单时间：{summary.ordered_at.strftime('%Y-%m-%d %H:%M UTC')}",
+            (
+                "状态更新时间："
+                f"{summary.status_updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            ),
+            "如需继续查询配送信息，请告诉我。",
         )
     )
 
@@ -597,9 +599,7 @@ def _tampered(grader_name: str) -> EvalEvidence:
             )
         )
     if grader_name == "PersistenceGrader":
-        unit = evidence.request_units[0].model_copy(
-            update={"task_id": UUID(int=999)}
-        )
+        unit = evidence.request_units[0].model_copy(update={"task_id": UUID(int=999)})
         return _evidence(request_units=(unit,))
     if grader_name == "ToolsetReplayGrader":
         manifest = _manifest(
@@ -608,9 +608,7 @@ def _tampered(grader_name: str) -> EvalEvidence:
             toolset_hash=f"sha256:{'b' * 64}",
             include_observation=True,
         )
-        return _evidence(
-            context_manifests=(evidence.context_manifests[0], manifest)
-        )
+        return _evidence(context_manifests=(evidence.context_manifests[0], manifest))
     raise AssertionError(f"unhandled grader {grader_name}")
 
 
@@ -664,6 +662,111 @@ def test_each_grader_rejects_directed_typed_evidence_tamper(
         EvalGraderReasonCode.ASSERTION_FAILED,
         EvalGraderReasonCode.TRACE_EVENT_MISSING,
     }
+
+
+@pytest.mark.parametrize(
+    "gate_update",
+    [
+        {"argument_binding_refs": (UUID(int=901),)},
+        {"validated_task_state_version": 999},
+        {"context_manifest_id": UUID(int=902)},
+    ],
+)
+def test_tool_call_grader_closes_gate_and_tool_call_graph(
+    gate_update: dict[str, object],
+) -> None:
+    evidence = _evidence()
+    gate = evidence.gate_decisions[0].model_copy(update=gate_update)
+
+    result = grader_registry()["ToolCallGrader"].grade(
+        _evidence(gate_decisions=(gate,)),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_renderer_fact_grader_rejects_any_extra_unapproved_fact() -> None:
+    evidence = _evidence()
+    assert evidence.agent_result is not None
+    result = grader_registry()["RendererFactGrader"].grade(
+        _evidence(
+            agent_result=evidence.agent_result.model_copy(
+                update={
+                    "message": (
+                        f"{evidence.agent_result.message}\n"
+                        "另一个订单 O-2001，商品：未授权商品，"
+                        "地址：他人私有地址"
+                    )
+                }
+            )
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_trace_grader_rejects_tampered_task_state_top_level_refs() -> None:
+    tampered_task_event = TraceEvent(
+        trace_event_id=UUID(int=903),
+        event_type=TraceEventType.TASK_STATE_CHANGED,
+        occurred_at=NOW + timedelta(microseconds=9500),
+        run_id=RUN_ID,
+        case_id="E2E01-01",
+        task_id=UUID(int=904),
+        request_unit_id=UUID(int=905),
+    )
+    events = tuple(
+        sorted(
+            (*_trace_events(), tampered_task_event),
+            key=lambda event: event.occurred_at,
+        )
+    )
+
+    result = grader_registry()["TraceCompletenessGrader"].grade(
+        _evidence(trace_events=events),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    ("grader_name", "field_name"),
+    [
+        ("InputBindingGrader", "input_bindings"),
+        ("TaskStateGrader", "task_records"),
+        ("TaskStateGrader", "request_units"),
+        ("ToolCallGrader", "gate_decisions"),
+    ],
+)
+def test_extra_typed_record_is_mismatch_not_missing(
+    grader_name: str,
+    field_name: str,
+) -> None:
+    evidence = _evidence()
+    records = getattr(evidence, field_name)
+    identity_field = {
+        "input_bindings": "binding_id",
+        "task_records": "task_id",
+        "request_units": "request_unit_id",
+        "gate_decisions": "gate_decision_id",
+    }[field_name]
+    extra = records[0].model_copy(
+        update={identity_field: UUID(int=910 + len(field_name))}
+    )
+
+    result = grader_registry()[grader_name].grade(
+        _evidence(**{field_name: (*records, extra)}),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
 def test_missing_applicable_observation_uses_stable_missing_record_reason() -> None:
@@ -823,7 +926,9 @@ def test_ordinary_trace_shape_exposes_only_allowlisted_safe_fields() -> None:
         assert forbidden not in serialized
 
 
-def test_evidence_aggregate_references_existing_records_without_copying_business_dto() -> None:
+def test_evidence_aggregate_references_existing_records_without_copying_business_dto() -> (
+    None
+):
     evidence = _evidence()
     assert type(evidence.run_record) is AgentRunRecord
     assert type(evidence.agent_result) is AgentRunResult

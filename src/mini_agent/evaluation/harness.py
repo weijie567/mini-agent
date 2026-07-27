@@ -52,7 +52,7 @@ from mini_agent.evaluation.graders import (
     GradingOutcome,
     SafeCaseObservable,
     TraceEventCountExpectation,
-    determine_result_status,
+    derive_grading_outcome,
     e2e01_04_safe_observables_match,
     grade_evidence,
     ordinary_trace_shape,
@@ -80,8 +80,7 @@ class EvalCaseSutResult(AuditOnlyModel):
     def observable_matches_evidence(self) -> "EvalCaseSutResult":
         if (
             self.evidence.case_id != self.safe_observable.case_id
-            or self.evidence.observed_outcome
-            is not self.safe_observable.user_outcome
+            or self.evidence.observed_outcome is not self.safe_observable.user_outcome
             or self.evidence.safe_observable != self.safe_observable
         ):
             raise ValueError("safe observable must match Eval evidence")
@@ -122,8 +121,7 @@ class EvalLaneRunOutcome(AuditOnlyModel):
             self.execution_failures
             or not self.results
             or any(
-                result.status is not EvalResultStatus.PASS
-                for result in self.results
+                result.status is not EvalResultStatus.PASS for result in self.results
             )
         ):
             raise ValueError("passing command requires only complete PASS records")
@@ -154,6 +152,7 @@ class QwenBaselinePreflight(AuditOnlyModel):
 @dataclass(frozen=True, slots=True)
 class _StagedCase:
     case: EvalCaseArtifact
+    expectations: EvalCaseExpectations
     result: EvalResultRecord
     safe_observable: SafeCaseObservable
 
@@ -168,9 +167,7 @@ _FAILURE_CODE_BY_PHASE = {
     EvalExecutionFailurePhase.SYSTEM_UNDER_TEST: (
         EvalExecutionSafeErrorCode.SYSTEM_UNDER_TEST_FAILED
     ),
-    EvalExecutionFailurePhase.GRADING: (
-        EvalExecutionSafeErrorCode.GRADING_FAILED
-    ),
+    EvalExecutionFailurePhase.GRADING: (EvalExecutionSafeErrorCode.GRADING_FAILED),
     EvalExecutionFailurePhase.RESULT_PERSISTENCE: (
         EvalExecutionSafeErrorCode.RESULT_PERSISTENCE_FAILED
     ),
@@ -222,12 +219,10 @@ def _case_trace_expectations(
     if matches:
         selected = matches[0]
     required = tuple(
-        TraceEventType(value)
-        for value in tuple(selected.get("required_events", ()))
+        TraceEventType(value) for value in tuple(selected.get("required_events", ()))
     )
     forbidden = tuple(
-        TraceEventType(value)
-        for value in tuple(selected.get("forbidden_events", ()))
+        TraceEventType(value) for value in tuple(selected.get("forbidden_events", ()))
     )
     counts: list[TraceEventCountExpectation] = []
     for item in tuple(selected.get("event_count_assertions", ())):
@@ -328,9 +323,7 @@ def build_authenticated_case_expectations(
         else None
     )
     task_version = (
-        None
-        if task_forbidden
-        else _terminal_state_version(control, record="task")
+        None if task_forbidden else _terminal_state_version(control, record="task")
     )
     unit_version = (
         None
@@ -389,9 +382,7 @@ def build_authenticated_case_expectations(
     )
     critical_values = tuple(
         CriticalFailureCode(value)
-        for value in tuple(
-            case.expectations.get("critical_failure_refs", ())
-        )
+        for value in tuple(case.expectations.get("critical_failure_refs", ()))
     )
     version = case.version_manifest.get("tool_registry_version")
     if not isinstance(version, str) or not version:
@@ -419,6 +410,9 @@ def build_authenticated_case_expectations(
         expected_request_unit_state_version=unit_version,
         expected_gate_decision=gate_decision,
         expected_gate_reason=gate_reason,
+        expected_validated_task_state_version=(
+            1 if gate_decision is not None else None
+        ),
         expected_tool_call_status=tool_status,
         expected_tool_calls=tool_calls,
         expected_observations=observations,
@@ -467,11 +461,7 @@ class OfflineEvalHarness:
         setup_failed = False
         lane_artifact: EvalLaneArtifact | None = None
         try:
-            if (
-                lane != "offline_gate"
-                or type(attempt) is not int
-                or attempt < 1
-            ):
+            if lane != "offline_gate" or type(attempt) is not int or attempt < 1:
                 raise ArtifactContractError("offline Harness lane is invalid")
             lane_artifact = self._artifacts.lane_by_name(lane)
         except Exception:
@@ -496,9 +486,7 @@ class OfflineEvalHarness:
         selection_failed = False
         try:
             selected_ids = (
-                tuple(lane_artifact.case_refs)
-                if case_ids is None
-                else tuple(case_ids)
+                tuple(lane_artifact.case_refs) if case_ids is None else tuple(case_ids)
             )
             script_selection = dict(script_ref_by_case or {})
         except Exception:
@@ -508,9 +496,7 @@ class OfflineEvalHarness:
         if (
             selection_failed
             or not selected_ids
-            or not all(
-                isinstance(case_id, str) and case_id for case_id in selected_ids
-            )
+            or not all(isinstance(case_id, str) and case_id for case_id in selected_ids)
             or len(selected_ids) != len(set(selected_ids))
             or not set(selected_ids) <= set(lane_artifact.case_refs)
         ):
@@ -604,15 +590,18 @@ class OfflineEvalHarness:
                     )
             else:
                 pair = {
-                    case_id: staged[case_id].safe_observable
-                    for case_id in pair_ids
+                    case_id: staged[case_id].safe_observable for case_id in pair_ids
                 }
                 if not e2e01_04_safe_observables_match(pair):
                     for case_id in pair_ids:
                         current = staged[case_id]
                         staged[case_id] = _StagedCase(
                             case=current.case,
-                            result=_force_disclosure_failure(current.result),
+                            expectations=current.expectations,
+                            result=_force_disclosure_failure(
+                                current.result,
+                                current.expectations,
+                            ),
                             safe_observable=current.safe_observable,
                         )
 
@@ -634,9 +623,7 @@ class OfflineEvalHarness:
         command_passed = (
             not failures
             and len(persisted) == len(selected_ids)
-            and all(
-                result.status is EvalResultStatus.PASS for result in persisted
-            )
+            and all(result.status is EvalResultStatus.PASS for result in persisted)
         )
         return EvalLaneRunOutcome(
             lane=lane,
@@ -684,11 +671,7 @@ class OfflineEvalHarness:
             runtime_fault = provider.take_runtime_fault_directive()
         except Exception:
             case_setup_failed = True
-        if (
-            case_setup_failed
-            or provider is None
-            or expectations is None
-        ):
+        if case_setup_failed or provider is None or expectations is None:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
@@ -762,9 +745,7 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
         non_trace_names = tuple(
-            name
-            for name in configured_names
-            if name != "TraceCompletenessGrader"
+            name for name in configured_names if name != "TraceCompletenessGrader"
         )
         grading_failed = False
         initial_grading: GradingOutcome | None = None
@@ -774,7 +755,11 @@ class OfflineEvalHarness:
                 evidence,
                 expectations,
             )
-            _validate_grading_output(initial_grading, non_trace_names)
+            _validate_grading_output(
+                initial_grading,
+                non_trace_names,
+                expectations,
+            )
         except Exception:
             grading_failed = True
         if grading_failed or initial_grading is None:
@@ -797,9 +782,7 @@ class OfflineEvalHarness:
                 ),
             ),
             event_type=TraceEventType.EVAL_CASE_GRADED,
-            occurred_at=max(
-                event.occurred_at for event in evidence.trace_events
-            )
+            occurred_at=max(event.occurred_at for event in evidence.trace_events)
             + timedelta(microseconds=1),
             run_id=evidence.trace_events[0].run_id,
             case_id=case.case_id,
@@ -814,9 +797,7 @@ class OfflineEvalHarness:
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
                 phase=EvalExecutionFailurePhase.TRACE_PERSISTENCE,
-                safe_error_code=(
-                    EvalExecutionSafeErrorCode.TRACE_PERSISTENCE_FAILED
-                ),
+                safe_error_code=(EvalExecutionSafeErrorCode.TRACE_PERSISTENCE_FAILED),
                 case=case,
                 attempt=attempt,
                 trace_ref=evidence.trace_ref,
@@ -826,9 +807,7 @@ class OfflineEvalHarness:
         reload_failed = False
         final_trace: tuple[TraceEvent, ...] | None = None
         try:
-            final_trace = await self._trace_callbacks.reload_trace(
-                evidence.trace_ref
-            )
+            final_trace = await self._trace_callbacks.reload_trace(evidence.trace_ref)
         except Exception:
             reload_failed = True
         if reload_failed:
@@ -874,6 +853,7 @@ class OfflineEvalHarness:
             _validate_grading_output(
                 final_grading,
                 ("TraceCompletenessGrader",),
+                expectations,
             )
         except Exception:
             final_grading_failed = True
@@ -895,21 +875,10 @@ class OfflineEvalHarness:
                 *final_grading.grader_results,
             )
         }
-        grader_results = tuple(
-            result_by_name[name] for name in configured_names
-        )
-        critical_failures = tuple(
-            code
-            for code in CriticalFailureCode
-            if code
-            in {
-                *initial_grading.critical_failures,
-                *final_grading.critical_failures,
-            }
-        )
-        status = determine_result_status(
+        grader_results = tuple(result_by_name[name] for name in configured_names)
+        combined_grading = derive_grading_outcome(
             grader_results,
-            critical_failures,
+            expectations,
         )
         result = EvalResultRecord(
             schema_version="eval_result_record.p0.v1",
@@ -917,9 +886,9 @@ class OfflineEvalHarness:
             case_id=case.case_id,
             lane=lane_artifact.lane,
             attempt=attempt,
-            status=status,
-            grader_results=grader_results,
-            critical_failures=critical_failures,
+            status=combined_grading.status,
+            grader_results=combined_grading.grader_results,
+            critical_failures=combined_grading.critical_failures,
             observed_outcome=final_evidence.observed_outcome,
             trace_ref=final_evidence.trace_ref,
             version_manifest=self._version_manifest(case, lane_artifact),
@@ -938,6 +907,7 @@ class OfflineEvalHarness:
         return (
             _StagedCase(
                 case=case,
+                expectations=expectations,
                 result=result,
                 safe_observable=safe_observable,
             ),
@@ -959,10 +929,7 @@ class OfflineEvalHarness:
             append_failed = True
         if not append_failed and write_result is InsertOnlyWriteResult.INSERTED:
             return record, None
-        if (
-            not append_failed
-            and write_result is InsertOnlyWriteResult.ALREADY_EXISTS
-        ):
+        if not append_failed and write_result is InsertOnlyWriteResult.ALREADY_EXISTS:
             load_failed = False
             existing: EvalResultRecord | None = None
             try:
@@ -1072,11 +1039,7 @@ def build_qwen_baseline_preflight(
     if type(artifacts) is not LoadedE2E01Artifacts:
         raise TypeError("artifacts must be an authenticated E2E01 bundle")
     lane = artifacts.lane_by_name("qwen_baseline")
-    if (
-        case_id not in lane.case_refs
-        or type(attempt) is not int
-        or attempt < 1
-    ):
+    if case_id not in lane.case_refs or type(attempt) is not int or attempt < 1:
         raise ArtifactContractError("Qwen preflight Case identity is invalid")
     required_env = tuple(lane.credential_policy.get("required_env", ()))
     missing_env = any(
@@ -1086,11 +1049,7 @@ def build_qwen_baseline_preflight(
     )
     if not missing_env and real_sut is not None:
         return QwenBaselinePreflight(ready=True)
-    reason = (
-        "MISSING_REQUIRED_ENV"
-        if missing_env
-        else "REAL_EVAL_CASE_SUT_NOT_WIRED"
-    )
+    reason = "MISSING_REQUIRED_ENV" if missing_env else "REAL_EVAL_CASE_SUT_NOT_WIRED"
     case = artifacts.case_by_id(case_id)
     record = EvalResultRecord(
         schema_version="eval_result_record.p0.v1",
@@ -1107,14 +1066,10 @@ def build_qwen_baseline_preflight(
             dataset_version=case.version_manifest["dataset_version"],
             candidate_version=artifacts.candidate_version,
             baseline_version=None,
-            fixture_versions=tuple(
-                case.version_manifest["fixture_versions"]
-            ),
+            fixture_versions=tuple(case.version_manifest["fixture_versions"]),
             model_config_version=lane.model_config_version,
             prompt_version=case.version_manifest.get("prompt_version"),
-            tool_registry_version=case.version_manifest.get(
-                "tool_registry_version"
-            ),
+            tool_registry_version=case.version_manifest.get("tool_registry_version"),
             corpus_version=None,
             runtime_version=artifacts.runtime_version,
         ),
@@ -1168,11 +1123,22 @@ async def append_qwen_not_run_record(
 def _validate_grading_output(
     outcome: object,
     configured_names: Sequence[str],
+    expectations: EvalCaseExpectations,
 ) -> None:
-    if type(outcome) is not GradingOutcome or tuple(
-        result.grader_name for result in outcome.grader_results
-    ) != tuple(configured_names):
+    if type(outcome) is not GradingOutcome:
         raise GradingConfigurationError("grader output is incomplete")
+    if tuple(result.grader_name for result in outcome.grader_results) != tuple(
+        configured_names
+    ):
+        raise GradingConfigurationError("grader output is incomplete")
+    expected = derive_grading_outcome(
+        outcome.grader_results,
+        expectations,
+    )
+    if outcome != expected:
+        raise GradingConfigurationError(
+            "grader output does not match authenticated derivation"
+        )
 
 
 def _replace_trace(
@@ -1187,34 +1153,33 @@ def _replace_trace(
     return EvalEvidence(**values)
 
 
-def _force_disclosure_failure(record: EvalResultRecord) -> EvalResultRecord:
+def _force_disclosure_failure(
+    record: EvalResultRecord,
+    expectations: EvalCaseExpectations,
+) -> EvalResultRecord:
     replacement = EvalGraderResult(
         grader_name="DisclosureGrader",
         status=EvalGraderStatus.FAIL,
         reason_code=EvalGraderReasonCode.ASSERTION_FAILED,
     )
     grader_results = tuple(
-        replacement
-        if result.grader_name == "DisclosureGrader"
-        else result
+        replacement if result.grader_name == "DisclosureGrader" else result
         for result in record.grader_results
     )
     if not any(
-        result.grader_name == "DisclosureGrader"
-        for result in record.grader_results
+        result.grader_name == "DisclosureGrader" for result in record.grader_results
     ):
-        raise GradingConfigurationError(
-            "E2E01-04 requires DisclosureGrader"
-        )
+        raise GradingConfigurationError("E2E01-04 requires DisclosureGrader")
+    derived = derive_grading_outcome(grader_results, expectations)
     return EvalResultRecord(
         schema_version=record.schema_version,
         eval_run_id=record.eval_run_id,
         case_id=record.case_id,
         lane=record.lane,
         attempt=record.attempt,
-        status=EvalResultStatus.FAIL,
-        grader_results=grader_results,
-        critical_failures=record.critical_failures,
+        status=derived.status,
+        grader_results=derived.grader_results,
+        critical_failures=derived.critical_failures,
         observed_outcome=record.observed_outcome,
         trace_ref=record.trace_ref,
         version_manifest=record.version_manifest,

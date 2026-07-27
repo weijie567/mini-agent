@@ -49,7 +49,6 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     GateDecision,
-    GateDecisionValue,
     GateReasonCode,
     ToolCallRecord,
     ToolCallStatus,
@@ -61,8 +60,6 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
-    AgentRunStatus,
-    StopReason,
     TraceEvent,
     TraceEventType,
 )
@@ -197,9 +194,7 @@ class InMemoryResultPort:
         eval_run_id: UUID,
     ) -> tuple[EvalResultRecord, ...]:
         return tuple(
-            result
-            for key, result in self.results.items()
-            if key[0] == eval_run_id
+            result for key, result in self.results.items() if key[0] == eval_run_id
         )
 
     async def append_eval_execution_failure(
@@ -218,9 +213,7 @@ class InMemoryResultPort:
         eval_run_id: UUID,
     ) -> tuple[EvalExecutionFailureRecord, ...]:
         return tuple(
-            failure
-            for failure in self.failures
-            if failure.eval_run_id == eval_run_id
+            failure for failure in self.failures if failure.eval_run_id == eval_run_id
         )
 
 
@@ -283,8 +276,7 @@ def _synthetic_trace(
     manifests: tuple[ContextManifest, ...],
 ) -> tuple[TraceEvent, ...]:
     exact_counts = {
-        item.event_type: item.count
-        for item in expectations.expected_event_counts
+        item.event_type: item.count for item in expectations.expected_event_counts
     }
     events: list[TraceEvent] = []
     manifest_index = 0
@@ -314,9 +306,7 @@ def _synthetic_trace(
                     {
                         "context_manifest_id": manifest.context_manifest_id,
                         "model_call_id": manifest.model_call_id,
-                        "tool_registry_version": (
-                            manifest.tool_registry_version
-                        ),
+                        "tool_registry_version": (manifest.tool_registry_version),
                         "model_visible_toolset_hash": (
                             manifest.model_visible_toolset_hash
                         ),
@@ -358,9 +348,7 @@ def _synthetic_trace(
                     TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
                     TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
                     TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
-                    TraceEventType.TOOL_CALL_INTERRUPTED: (
-                        ToolCallStatus.INTERRUPTED
-                    ),
+                    TraceEventType.TOOL_CALL_INTERRUPTED: (ToolCallStatus.INTERRUPTED),
                 }
                 values.update(
                     {
@@ -398,23 +386,27 @@ def _synthetic_message(
     expectations: EvalCaseExpectations,
     observation: OrderObservation | None,
 ) -> str:
-    if (
-        expectations.expected_response_policy
-        == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE"
-    ):
+    if expectations.expected_response_policy == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE":
         return "未找到可访问的订单，请核对订单号后重试。"
     if expectations.expected_response_policy == "FIXED_SAFE_PROCESSING_ERROR":
         return "当前无法安全处理该请求，请稍后重试。"
     assert observation is not None
     summary = observation.normalized_value
-    return " ".join(
+    return "\n".join(
         (
-            summary.order_number,
-            summary.status.value,
-            summary.line_items[0].product_name,
-            str(summary.line_items[0].quantity),
-            summary.ordered_at.isoformat(),
-            summary.status_updated_at.isoformat(),
+            "已为你查到订单信息：",
+            f"订单号：{summary.order_number}",
+            "状态：已发货",
+            "商品："
+            + "、".join(
+                f"{item.product_name} × {item.quantity}" for item in summary.line_items
+            ),
+            f"下单时间：{summary.ordered_at.strftime('%Y-%m-%d %H:%M UTC')}",
+            (
+                "状态更新时间："
+                f"{summary.status_updated_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            ),
+            "如需继续查询配送信息，请告诉我。",
         )
     )
 
@@ -449,9 +441,7 @@ class SyntheticSut:
         if self.fault == "missing":
             return None
         assert isinstance(scripted_provider, ModelProvider)
-        script = ARTIFACTS.script_by_ref(
-            scripted_provider.model_script_ref
-        )
+        script = ARTIFACTS.script_by_ref(scripted_provider.model_script_ref)
         expectations = build_authenticated_case_expectations(
             artifacts=ARTIFACTS,
             case=case,
@@ -462,9 +452,7 @@ class SyntheticSut:
             await scripted_provider.plan_presentation(_presentation_input())
 
         run_id = (
-            RUN_ID
-            if case.case_id == "E2E01-01"
-            else _case_uuid(case.case_id, "run")
+            RUN_ID if case.case_id == "E2E01-01" else _case_uuid(case.case_id, "run")
         )
         trace_ref = (
             TRACE_REF
@@ -502,9 +490,7 @@ class SyntheticSut:
                 goal_source_refs=(message_ref,),
                 input_binding_refs=(binding.binding_id,),
                 status=expectations.expected_request_unit_status,
-                state_version=(
-                    expectations.expected_request_unit_state_version
-                ),
+                state_version=(expectations.expected_request_unit_state_version),
                 created_at=NOW,
                 updated_at=NOW + timedelta(seconds=1),
             )
@@ -521,9 +507,7 @@ class SyntheticSut:
         if expectations.expected_gate_decision is not None:
             assert binding is not None
             failed_field_by_reason = {
-                GateReasonCode.ARGUMENT_BINDING_MISMATCH: (
-                    "argument_binding_valid"
-                ),
+                GateReasonCode.ARGUMENT_BINDING_MISMATCH: ("argument_binding_valid"),
                 GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
                 GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
             }
@@ -539,9 +523,9 @@ class SyntheticSut:
                 "action_boundary_valid": True,
             }
             if expectations.expected_gate_reason is not None:
-                checks[
-                    failed_field_by_reason[expectations.expected_gate_reason]
-                ] = False
+                checks[failed_field_by_reason[expectations.expected_gate_reason]] = (
+                    False
+                )
             gate = GateDecision(
                 gate_decision_id=_case_uuid(case.case_id, "gate"),
                 model_call_id=model_call_ids[0],
@@ -598,9 +582,7 @@ class SyntheticSut:
                 gate_decision_id=gate.gate_decision_id,
                 provider_tool_call_id="synthetic-provider-call",
                 canonical_tool_name="get_order",
-                tool_registry_version=(
-                    expectations.expected_tool_registry_version
-                ),
+                tool_registry_version=(expectations.expected_tool_registry_version),
                 validated_task_state_version=1,
                 argument_binding_refs=(binding.binding_id,),
                 effect=ToolEffect.READ,
@@ -614,9 +596,7 @@ class SyntheticSut:
                     else "NOT_FOUND_OR_NOT_ACCESSIBLE"
                 ),
                 result_ref=(
-                    observation.observation_id
-                    if observation is not None
-                    else None
+                    observation.observation_id if observation is not None else None
                 ),
             )
         manifests = tuple(
@@ -624,9 +604,7 @@ class SyntheticSut:
                 context_manifest_id=context_id,
                 run_id=run_id,
                 model_call_id=model_call_ids[index],
-                tool_registry_version=(
-                    expectations.expected_tool_registry_version
-                ),
+                tool_registry_version=(expectations.expected_tool_registry_version),
                 model_visible_toolset_hash=compute_model_visible_toolset_hash(
                     (_tool_spec(),)
                 ),
@@ -646,8 +624,7 @@ class SyntheticSut:
                             version="order-v7",
                         ),
                     )
-                    if observation is not None
-                    and index == len(context_ids) - 1
+                    if observation is not None and index == len(context_ids) - 1
                     else ()
                 ),
                 redaction_policy_version="p0-redaction-v1",
@@ -701,14 +678,10 @@ class SyntheticSut:
             "request_understanding_output": request_output,
             "input_bindings": (binding,) if binding is not None else (),
             "task_records": (task,) if task is not None else (),
-            "request_units": (
-                (request_unit,) if request_unit is not None else ()
-            ),
+            "request_units": ((request_unit,) if request_unit is not None else ()),
             "gate_decisions": (gate,) if gate is not None else (),
             "tool_calls": (tool_call,) if tool_call is not None else (),
-            "observations": (
-                (observation,) if observation is not None else ()
-            ),
+            "observations": ((observation,) if observation is not None else ()),
             "context_manifests": manifests,
             "schema_assertions_pass": True,
             "identity_boundary_assertions_pass": True,
@@ -838,6 +811,73 @@ def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None
     assert outcome.execution_failures == ()
     assert outcome.results[0].status is EvalResultStatus.FAIL
     assert CriticalFailureCode.CF_14 in outcome.results[0].critical_failures
+
+
+@pytest.mark.parametrize(
+    ("reported_status", "reported_critical_failures"),
+    [
+        (EvalResultStatus.FAIL, ()),
+        (EvalResultStatus.FAIL, (CriticalFailureCode.CF_05,)),
+    ],
+)
+def test_injected_grader_outcome_must_match_authenticated_derivation(
+    reported_status: EvalResultStatus,
+    reported_critical_failures: tuple[CriticalFailureCode, ...],
+) -> None:
+    def inconsistent_grader(
+        configured: Sequence[str],
+        _evidence: EvalEvidence,
+        _expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        return GradingOutcome(
+            status=reported_status,
+            grader_results=tuple(
+                EvalGraderResult(
+                    grader_name=name,
+                    status=EvalGraderStatus.PASS,
+                )
+                for name in configured
+            ),
+            critical_failures=reported_critical_failures,
+        )
+
+    harness, *_ = _harness(grader_runner=inconsistent_grader)
+    outcome = _run(harness)
+
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.GRADING
+    )
+
+
+def test_physical_trace_reload_rejects_tampered_task_graph_refs() -> None:
+    class TamperingTraceCallbacks(InMemoryTraceCallbacks):
+        async def reload_trace(
+            self,
+            trace_ref: UUID,
+        ) -> tuple[TraceEvent, ...]:
+            events = await super().reload_trace(trace_ref)
+            return tuple(
+                event.model_copy(
+                    update={
+                        "task_id": UUID(int=991),
+                        "request_unit_id": UUID(int=992),
+                    }
+                )
+                if event.event_type is TraceEventType.TASK_STATE_CHANGED
+                else event
+                for event in events
+            )
+
+    traces = TamperingTraceCallbacks()
+    harness, *_ = _harness(traces=traces)
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    assert CriticalFailureCode.CF_12 in outcome.results[0].critical_failures
 
 
 @pytest.mark.parametrize(
@@ -1066,9 +1106,7 @@ def test_complete_equal_e2e01_04_pair_persists_both_passes() -> None:
 
     assert outcome.command_passed is True
     assert len(outcome.results) == 2
-    assert {result.status for result in outcome.results} == {
-        EvalResultStatus.PASS
-    }
+    assert {result.status for result in outcome.results} == {EvalResultStatus.PASS}
     assert len(port.results) == 2
 
 
@@ -1090,9 +1128,7 @@ def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
     )
 
     assert len(outcome.results) == 2
-    assert {result.status for result in outcome.results} == {
-        EvalResultStatus.FAIL
-    }
+    assert {result.status for result in outcome.results} == {EvalResultStatus.FAIL}
     for result in outcome.results:
         disclosure = next(
             item
@@ -1100,6 +1136,10 @@ def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
             if item.grader_name == "DisclosureGrader"
         )
         assert disclosure.status is EvalGraderStatus.FAIL
+        assert {
+            CriticalFailureCode.CF_01,
+            CriticalFailureCode.CF_03,
+        } <= set(result.critical_failures)
 
 
 def test_runtime_fault_directive_is_passed_through_the_closed_sut_seam() -> None:
