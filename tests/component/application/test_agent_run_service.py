@@ -17,6 +17,7 @@ from mini_agent.application.deterministic_renderer import (
 from mini_agent.application.read_tool_executor import ReadToolExecutor
 from mini_agent.application.records import (
     AgentRunCommand,
+    ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     InsertOnlyWriteResult,
     MessageDirection,
@@ -113,8 +114,14 @@ class ArtifactSpy:
 
 
 class ConversationSpy:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        assistant_error: Exception | None = None,
+    ) -> None:
         self.events = events
+        self.assistant_error = assistant_error
         self.conversations: list[object] = []
         self.messages: list[object] = []
 
@@ -125,6 +132,11 @@ class ConversationSpy:
     async def append_message(self, record: object) -> None:
         direction = getattr(record, "direction")
         self.events.append(f"message:{direction.value}")
+        if (
+            direction is MessageDirection.ASSISTANT
+            and self.assistant_error is not None
+        ):
+            raise self.assistant_error
         self.messages.append(record)
 
 
@@ -138,11 +150,13 @@ class RuntimeSpy:
         finalize_run_result: ConditionalWriteResult = (
             ConditionalWriteResult.APPLIED
         ),
+        trace_error_event_type: TraceEventType | None = None,
     ) -> None:
         self.events = events
         self.graph_result = graph_result
         self.graph_error = graph_error
         self.finalize_run_result = finalize_run_result
+        self.trace_error_event_type = trace_error_event_type
         self.run_record: object | None = None
         self.task: TaskRecord | None = None
         self.request_unit: RequestUnitRecord | None = None
@@ -178,11 +192,22 @@ class RuntimeSpy:
     ) -> ConditionalWriteResult:
         self.events.append("run_finalized")
         self.finalize_run_commands.append(command)
-        if self.finalize_run_result is ConditionalWriteResult.APPLIED:
-            self.run_record = command.terminal_record
-            if command.result_task_records:
-                self.task = command.result_task_records[0]
-        return self.finalize_run_result
+        if self.finalize_run_result is not ConditionalWriteResult.APPLIED:
+            return self.finalize_run_result
+        expected_links = (
+            (self.run_task_link,) if self.run_task_link is not None else ()
+        )
+        expected_tasks = (self.task,) if self.task is not None else ()
+        if (
+            self.run_record != command.expected_active_record
+            or expected_links != command.expected_active_links
+            or expected_tasks != command.result_task_records
+        ):
+            return ConditionalWriteResult.PROJECTION_CONFLICT
+        self.run_record = command.terminal_record
+        if command.terminal_links:
+            self.run_task_link = command.terminal_links[0]
+        return ConditionalWriteResult.APPLIED
 
     async def create_initial_task_graph_if_current(
         self,
@@ -258,6 +283,8 @@ class RuntimeSpy:
 
     async def append_trace_event(self, record: TraceEvent) -> None:
         self.events.append(f"trace:{record.event_type.value}")
+        if record.event_type is self.trace_error_event_type:
+            raise RuntimeError("private trace persistence failure")
         self.trace_events.append(record)
 
     async def load_task_for_owner(
@@ -502,12 +529,13 @@ def _build(
     after_revalidation_hook: object | None = None,
     registry_snapshot: RegistrySnapshot | None = None,
     order_port: object | None = None,
+    conversation: ConversationSpy | None = None,
 ):
     events: list[str] = model.events if model is not None else []
     actual_model = model or ModelSpy(events)
     actual_runtime = runtime or RuntimeSpy(events)
     artifact = ArtifactSpy(events)
-    conversation = ConversationSpy(events)
+    actual_conversation = conversation or ConversationSpy(events)
     order = order_port or OrderSpy(events, order_result or _found_result())
     ids = UuidSequence()
     read_executor = ReadToolExecutor(
@@ -520,7 +548,7 @@ def _build(
         model_provider=actual_model,
         registry_snapshot=registry_snapshot or _snapshot(),
         toolset_artifact_port=artifact,
-        conversation_record_port=conversation,
+        conversation_record_port=actual_conversation,
         runtime_record_port=actual_runtime,
         read_tool_executor=read_executor,
         deterministic_renderer=renderer or DeterministicRenderer(),
@@ -535,7 +563,7 @@ def _build(
         events,
         actual_model,
         actual_runtime,
-        conversation,
+        actual_conversation,
         order,
         artifact,
     )
@@ -554,6 +582,62 @@ def _run(service: AgentRunService, order_id: str = "O-1001"):
 
 def _index(events: list[str], value: str) -> int:
     return events.index(value)
+
+
+async def _advance_to_waiting_user(
+    *,
+    runtime: RuntimeSpy,
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+) -> None:
+    reason_ref = uuid4()
+    next_task = TaskRecord(
+        **{
+            **task.model_dump(),
+            "status": TaskStatus.WAITING_USER,
+            "state_version": 2,
+            "updated_at": NOW,
+            "last_outcome_ref": reason_ref,
+        }
+    )
+    next_unit = RequestUnitRecord(
+        **{
+            **request_unit.model_dump(),
+            "status": TaskStatus.WAITING_USER,
+            "state_version": 2,
+            "updated_at": NOW,
+        }
+    )
+    transition = ApplyTaskTransitionCommand(
+        expected_task_record=task,
+        next_task_record=next_task,
+        expected_request_unit_record=request_unit,
+        next_request_unit_record=next_unit,
+        task_state_transition=TaskStateTransition(
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            from_status=TaskStatus.ACTIVE,
+            to_status=TaskStatus.WAITING_USER,
+            base_state_version=1,
+            result_state_version=2,
+            reason_ref=reason_ref,
+            changed_at=NOW,
+        ),
+    )
+    assert (
+        await runtime.apply_task_transition_if_current(transition)
+        is ConditionalWriteResult.APPLIED
+    )
+    await runtime.append_trace_event(
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.TASK_STATE_CHANGED,
+            occurred_at=NOW,
+            run_id=runtime.run_record.run_id,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+        )
+    )
 
 
 def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
@@ -715,56 +799,10 @@ def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
         task: TaskRecord,
         request_unit: RequestUnitRecord,
     ) -> None:
-        changed_at = NOW
-        reason_ref = uuid4()
-        next_task = TaskRecord(
-            **{
-                **task.model_dump(),
-                "status": TaskStatus.WAITING_USER,
-                "state_version": 2,
-                "updated_at": changed_at,
-                "last_outcome_ref": reason_ref,
-            }
-        )
-        next_unit = RequestUnitRecord(
-            **{
-                **request_unit.model_dump(),
-                "status": TaskStatus.WAITING_USER,
-                "state_version": 2,
-                "updated_at": changed_at,
-            }
-        )
-        from mini_agent.application.records import ApplyTaskTransitionCommand
-
-        transition = ApplyTaskTransitionCommand(
-            expected_task_record=task,
-            next_task_record=next_task,
-            expected_request_unit_record=request_unit,
-            next_request_unit_record=next_unit,
-            task_state_transition=TaskStateTransition(
-                task_id=task.task_id,
-                request_unit_id=request_unit.request_unit_id,
-                from_status=TaskStatus.ACTIVE,
-                to_status=TaskStatus.WAITING_USER,
-                base_state_version=1,
-                result_state_version=2,
-                reason_ref=reason_ref,
-                changed_at=changed_at,
-            ),
-        )
-        assert (
-            await runtime.apply_task_transition_if_current(transition)
-            is ConditionalWriteResult.APPLIED
-        )
-        await runtime.append_trace_event(
-            TraceEvent(
-                trace_event_id=uuid4(),
-                event_type=TraceEventType.TASK_STATE_CHANGED,
-                occurred_at=NOW,
-                run_id=runtime.run_record.run_id,
-                task_id=task.task_id,
-                request_unit_id=request_unit.request_unit_id,
-            )
+        await _advance_to_waiting_user(
+            runtime=runtime,
+            task=task,
+            request_unit=request_unit,
         )
 
     model = ModelSpy(events)
@@ -1047,6 +1085,106 @@ def test_internal_graph_exception_finalizes_failed_then_reraises() -> None:
     assert [message.direction for message in conversation.messages] == [
         MessageDirection.USER
     ]
+
+
+def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> None:
+    events: list[str] = []
+    runtime = RuntimeSpy(events)
+
+    async def advancing_hook(
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+    ) -> None:
+        await _advance_to_waiting_user(
+            runtime=runtime,
+            task=task,
+            request_unit=request_unit,
+        )
+        raise RuntimeError("private hook failure")
+
+    model = ModelSpy(events)
+    service, _events, _model, runtime, conversation, order, _artifact = _build(
+        model=model,
+        runtime=runtime,
+        after_revalidation_hook=advancing_hook,
+    )
+
+    with pytest.raises(RuntimeError, match="private hook failure"):
+        _run(service)
+
+    assert runtime.task is not None
+    assert runtime.task.status is TaskStatus.WAITING_USER
+    assert runtime.task.state_version == 2
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    finalization = runtime.finalize_run_commands[0]
+    assert finalization.result_task_records == (runtime.task,)
+    assert finalization.terminal_links[0].result_task_state_version == 2
+    assert runtime.gates == []
+    assert order.queries == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+
+
+def test_assistant_persistence_error_after_commit_returns_committed_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    conversation = ConversationSpy(
+        events,
+        assistant_error=RuntimeError("private assistant persistence failure"),
+    )
+    model = ModelSpy(events)
+    service, _events, _model, runtime, conversation, _order, _artifact = _build(
+        model=model,
+        conversation=conversation,
+    )
+
+    result = _run(service)
+
+    assert result.outcome is AgentOutcome.COMPLETED
+    assert runtime.run_record.status is AgentRunStatus.COMPLETED
+    assert runtime.run_record.stop_reason is StopReason.GOAL_COMPLETED
+    assert len(runtime.finalize_run_commands) == 1
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+    assert runtime.trace_events[-1].event_type is TraceEventType.RUN_STOPPED
+    assert "ASSISTANT_MESSAGE_PERSISTENCE_FAILED" in caplog.text
+    assert "private assistant persistence failure" not in caplog.text
+
+
+def test_run_stopped_persistence_error_after_commit_returns_committed_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    runtime = RuntimeSpy(
+        events,
+        trace_error_event_type=TraceEventType.RUN_STOPPED,
+    )
+    model = ModelSpy(events, ru_protocol_error=True)
+    service, _events, _model, runtime, conversation, _order, _artifact = _build(
+        model=model,
+        runtime=runtime,
+    )
+
+    result = _run(service)
+
+    assert result.outcome is AgentOutcome.BLOCKED
+    assert runtime.run_record.status is AgentRunStatus.COMPLETED
+    assert runtime.run_record.stop_reason is StopReason.PROVIDER_PROTOCOL_ERROR
+    assert len(runtime.finalize_run_commands) == 1
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER,
+        MessageDirection.ASSISTANT,
+    ]
+    assert not any(
+        event.event_type is TraceEventType.RUN_STOPPED
+        for event in runtime.trace_events
+    )
+    assert "RUN_STOPPED_TRACE_PERSISTENCE_FAILED" in caplog.text
+    assert "private trace persistence failure" not in caplog.text
 
 
 def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
@@ -95,6 +96,7 @@ _CONVERSATION_SCHEMA_VERSION = "conversation_record.p0.v1"
 _MESSAGE_SCHEMA_VERSION = "message_record.p0.v1"
 _CONVERSATION_TASK_LINK_SCHEMA_VERSION = "conversation_task_link_record.p0.v1"
 _RUN_TASK_LINK_SCHEMA_VERSION = "run_task_link_record.p0.v1"
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentRunExecutionError(RuntimeError):
@@ -157,14 +159,22 @@ def _project_request_unit(
 
 
 class _RunFailureState:
-    """Mutable local cursor used only to close an exceptional active Run."""
+    """Local cursor for exceptional closure and the terminal commit point."""
 
-    __slots__ = ("active_link", "result_task", "running_run")
+    __slots__ = (
+        "active_link",
+        "committed_result",
+        "owner_scope",
+        "result_task",
+        "running_run",
+    )
 
     def __init__(self) -> None:
         self.running_run: AgentRunRecord | None = None
         self.active_link: RunTaskLinkRecord | None = None
         self.result_task: TaskRecord | None = None
+        self.owner_scope: TrustedOwnerScope | None = None
+        self.committed_result: AgentRunResult | None = None
 
 
 class AgentRunService:
@@ -281,12 +291,17 @@ class AgentRunService:
         try:
             return await self._handle(command, failure_state=failure_state)
         except asyncio.CancelledError as error:
-            await self._finalize_failed_run_after_error(
-                failure_state=failure_state,
-                original_error=error,
-            )
+            if failure_state.committed_result is None:
+                await self._finalize_failed_run_after_error(
+                    failure_state=failure_state,
+                    original_error=error,
+                )
             raise
         except Exception as error:
+            if failure_state.committed_result is not None:
+                # The terminal CAS is authoritative and cannot be reversed.
+                # A later projection failure must not make that result look failed.
+                return failure_state.committed_result
             await self._finalize_failed_run_after_error(
                 failure_state=failure_state,
                 original_error=error,
@@ -304,6 +319,7 @@ class AgentRunService:
         owner_scope = TrustedOwnerScope.from_customer_context(
             command.customer_context
         )
+        failure_state.owner_scope = owner_scope
 
         artifact = self._registry_snapshot.artifact()
         await self._toolset_artifact_port.put_toolset_artifact(artifact)
@@ -400,6 +416,7 @@ class AgentRunService:
                 running_run=running_run,
                 conversation=conversation,
                 stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+                failure_state=failure_state,
             )
 
         try:
@@ -421,6 +438,7 @@ class AgentRunService:
                 running_run=running_run,
                 conversation=conversation,
                 stop_reason=StopReason.INPUT_INVALID,
+                failure_state=failure_state,
             )
 
         initial_run_task_link = RunTaskLinkRecord(
@@ -787,6 +805,24 @@ class AgentRunService:
         terminal_links: tuple[RunTaskLinkRecord, ...] = ()
         result_task_records: tuple[TaskRecord, ...] = ()
         if active_link is not None and result_task is not None:
+            owner_scope = failure_state.owner_scope
+            if owner_scope is not None:
+                try:
+                    current_task = (
+                        await self._runtime_record_port.load_task_for_owner(
+                            owner_scope=owner_scope,
+                            task_id=result_task.task_id,
+                        )
+                    )
+                except (Exception, asyncio.CancelledError) as reload_error:
+                    original_error.add_note(
+                        "Run failure Task reload raised "
+                        f"{type(reload_error).__name__}; cached CAS retained"
+                    )
+                else:
+                    if current_task is not None:
+                        result_task = current_task
+                        failure_state.result_task = current_task
             expected_active_links = (active_link,)
             terminal_links = (
                 RunTaskLinkRecord(
@@ -819,7 +855,7 @@ class AgentRunService:
                     )
                 )
             )
-        except Exception as finalization_error:
+        except (Exception, asyncio.CancelledError) as finalization_error:
             original_error.add_note(
                 "Run failure finalization raised "
                 f"{type(finalization_error).__name__}"
@@ -946,6 +982,7 @@ class AgentRunService:
         running_run: AgentRunRecord,
         conversation: ConversationRecord,
         stop_reason: StopReason,
+        failure_state: _RunFailureState,
     ) -> AgentRunResult:
         result = self._deterministic_renderer.map_result(
             run_id=running_run.run_id,
@@ -968,14 +1005,13 @@ class AgentRunService:
         )
         if write_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Run finalization conflict")
-        await self._append_assistant_message(
+        # Everything below is a projection of this authoritative terminal CAS.
+        failure_state.committed_result = result
+        failure_state.running_run = None
+        await self._publish_committed_result(
             conversation_id=conversation.conversation_id,
             result=result,
-        )
-        await self._append_trace(
-            event_type=TraceEventType.RUN_STOPPED,
             run_id=running_run.run_id,
-            user_outcome=result.outcome,
             stop_reason=stop_reason,
         )
         return result
@@ -1077,17 +1113,48 @@ class AgentRunService:
         )
         if finalize_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Run finalization conflict")
-        await self._append_assistant_message(
+        if failure_state is not None:
+            # Everything below is a projection of this authoritative terminal CAS.
+            failure_state.committed_result = result
+            failure_state.running_run = None
+        await self._publish_committed_result(
             conversation_id=conversation.conversation_id,
             result=result,
-        )
-        await self._append_trace(
-            event_type=TraceEventType.RUN_STOPPED,
             run_id=running_run.run_id,
-            user_outcome=result.outcome,
             stop_reason=stop_reason,
         )
         return result
+
+    async def _publish_committed_result(
+        self,
+        *,
+        conversation_id: UUID,
+        result: AgentRunResult,
+        run_id: UUID,
+        stop_reason: StopReason,
+    ) -> None:
+        try:
+            await self._append_assistant_message(
+                conversation_id=conversation_id,
+                result=result,
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Committed Run projection degraded: "
+                "ASSISTANT_MESSAGE_PERSISTENCE_FAILED"
+            )
+        try:
+            await self._append_trace(
+                event_type=TraceEventType.RUN_STOPPED,
+                run_id=run_id,
+                user_outcome=result.outcome,
+                stop_reason=stop_reason,
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Committed Run projection degraded: "
+                "RUN_STOPPED_TRACE_PERSISTENCE_FAILED"
+            )
 
     async def _append_assistant_message(
         self,

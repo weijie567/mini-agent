@@ -27,6 +27,8 @@ from mini_agent.core.order import (
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
     ExecutionPolicy,
+    ToolAttemptRecord,
+    ToolCallRecord,
     ToolCallStatus,
     ToolResultOutcome,
     ToolTimeoutPhase,
@@ -48,21 +50,30 @@ class RuntimeSpy:
         observation_result: ObservationWriteResult = (
             ObservationWriteResult.INSERTED
         ),
+        block_first_finalization: bool = False,
     ) -> None:
         self.events: list[str] = []
         self.fence_result = fence_result
         self.insert_result = insert_result
         self.finalize_result = finalize_result
         self.observation_result = observation_result
+        self.block_first_finalization = block_first_finalization
         self.create_commands: list[object] = []
         self.dispatch_commands: list[object] = []
         self.finalize_commands: list[object] = []
+        self.applied_finalize_commands: list[object] = []
         self.observation_commands: list[object] = []
         self.trace_events: list[TraceEvent] = []
+        self.tool_call: ToolCallRecord | None = None
+        self.attempt: ToolAttemptRecord | None = None
+        self.finalization_started = asyncio.Event()
+        self._release_finalization = asyncio.Event()
 
     async def insert_tool_call(self, command: object) -> InsertOnlyWriteResult:
         self.events.append("tool_call_created")
         self.create_commands.append(command)
+        if self.insert_result is InsertOnlyWriteResult.INSERTED:
+            self.tool_call = command.created_record
         return self.insert_result
 
     async def start_tool_call_if_created(
@@ -71,6 +82,10 @@ class RuntimeSpy:
     ) -> ToolDispatchFenceWriteResult:
         self.events.append("dispatch_fence")
         self.dispatch_commands.append(command)
+        if self.fence_result is ToolDispatchFenceWriteResult.APPLIED:
+            assert self.tool_call == command.expected_created_record
+            self.tool_call = command.running_record
+            self.attempt = command.started_attempt
         return self.fence_result
 
     async def finalize_tool_call_attempt_if_running(
@@ -79,7 +94,20 @@ class RuntimeSpy:
     ) -> ConditionalWriteResult:
         self.events.append("tool_call_finalized")
         self.finalize_commands.append(command)
-        return self.finalize_result
+        if self.block_first_finalization and len(self.finalize_commands) == 1:
+            self.finalization_started.set()
+            await self._release_finalization.wait()
+        if self.finalize_result is not ConditionalWriteResult.APPLIED:
+            return self.finalize_result
+        if (
+            self.tool_call != command.expected_running_record
+            or self.attempt != command.expected_started_attempt
+        ):
+            return ConditionalWriteResult.PROJECTION_CONFLICT
+        self.tool_call = command.terminal_record
+        self.attempt = command.finalized_attempt
+        self.applied_finalize_commands.append(command)
+        return ConditionalWriteResult.APPLIED
 
     async def save_observation(
         self,
@@ -445,6 +473,105 @@ def test_cancelled_applied_read_finalizes_interrupted_then_reraises() -> None:
     assert [event.event_type for event in runtime.trace_events] == [
         TraceEventType.TOOL_CALL_INTERRUPTED
     ]
+
+
+def test_cancel_during_terminal_finalization_closes_interrupted_once() -> None:
+    async def scenario():
+        runtime = RuntimeSpy(block_first_finalization=True)
+        order = OrderSpy(
+            GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=_summary(),
+            ),
+            runtime.events,
+        )
+        executor = ReadToolExecutor(
+            runtime_record_port=runtime,
+            get_order_port=order,
+            clock=lambda: NOW,
+            uuid_factory=UuidSequence(),
+        )
+        execution_task = asyncio.create_task(
+            executor.execute_get_order(
+                owner_scope=_owner_scope(),
+                authorized_command=_authorized(),
+                run_id=uuid4(),
+                task_id=uuid4(),
+                request_unit_id=uuid4(),
+                model_call_id=uuid4(),
+                context_manifest_id=uuid4(),
+                provider_tool_call_id=None,
+                tool_registry_version="runtime-tools-v1",
+                execution_policy=_execution_policy(timeout_ms=5_000),
+                remaining_run_time_budget_ms=5_000,
+            )
+        )
+        await asyncio.wait_for(runtime.finalization_started.wait(), timeout=0.5)
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution_task
+        return runtime, order
+
+    runtime, order = asyncio.run(scenario())
+
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_commands) == 2
+    assert len(runtime.applied_finalize_commands) == 1
+    finalization = runtime.applied_finalize_commands[0]
+    assert finalization.terminal_record.status is ToolCallStatus.INTERRUPTED
+    assert finalization.finalized_attempt.outcome is ToolResultOutcome.INTERRUPTED
+    assert runtime.tool_call == finalization.terminal_record
+    assert runtime.attempt == finalization.finalized_attempt
+    assert runtime.observation_commands == []
+    assert [event.event_type for event in runtime.trace_events] == [
+        TraceEventType.TOOL_CALL_INTERRUPTED
+    ]
+
+
+def test_cancellation_finalization_conflict_preserves_cancelled_error() -> None:
+    async def scenario():
+        runtime = RuntimeSpy(
+            finalize_result=ConditionalWriteResult.PROJECTION_CONFLICT
+        )
+        order = HangingOrderSpy(runtime.events)
+        executor = ReadToolExecutor(
+            runtime_record_port=runtime,
+            get_order_port=order,
+            clock=lambda: NOW,
+            uuid_factory=UuidSequence(),
+        )
+        execution_task = asyncio.create_task(
+            executor.execute_get_order(
+                owner_scope=_owner_scope(),
+                authorized_command=_authorized(),
+                run_id=uuid4(),
+                task_id=uuid4(),
+                request_unit_id=uuid4(),
+                model_call_id=uuid4(),
+                context_manifest_id=uuid4(),
+                provider_tool_call_id=None,
+                tool_registry_version="runtime-tools-v1",
+                execution_policy=_execution_policy(timeout_ms=5_000),
+                remaining_run_time_budget_ms=5_000,
+            )
+        )
+        await asyncio.wait_for(order.started.wait(), timeout=0.5)
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await execution_task
+        return runtime, order, raised.value
+
+    runtime, order, cancellation = asyncio.run(scenario())
+
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_commands) == 1
+    assert runtime.applied_finalize_commands == []
+    assert runtime.observation_commands == []
+    assert runtime.trace_events == []
+    assert any(
+        "cancellation finalization raised ReadToolExecutionError" in note
+        for note in cancellation.__notes__
+    )
 
 
 def test_read_executor_has_no_retry_parallel_or_action_execution_surface() -> None:

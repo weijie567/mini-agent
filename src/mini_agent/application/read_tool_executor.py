@@ -250,113 +250,136 @@ class ReadToolExecutor:
             )
 
         try:
-            async with asyncio.timeout(effective_timeout_ms / 1000):
-                result = await self._get_order_port.get_order(
-                    GetOrderQuery(
-                        customer_id=owner_scope.customer_id,
-                        order_id=order_id,
+            try:
+                async with asyncio.timeout(effective_timeout_ms / 1000):
+                    result = await self._get_order_port.get_order(
+                        GetOrderQuery(
+                            customer_id=owner_scope.customer_id,
+                            order_id=order_id,
+                        )
+                    )
+            except TimeoutError:
+                terminal, finalized_attempt = (
+                    await self._finalize_running_attempt(
+                        running=running,
+                        attempt=attempt,
+                        terminal_status=ToolCallStatus.TIMED_OUT,
+                        tool_outcome=ToolResultOutcome.TIMEOUT,
+                        safe_failure_code="TOOL_CALL_TIMEOUT",
+                        timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
                     )
                 )
-        except TimeoutError:
-            terminal, finalized_attempt = await self._finalize_running_attempt(
-                running=running,
-                attempt=attempt,
-                terminal_status=ToolCallStatus.TIMED_OUT,
-                tool_outcome=ToolResultOutcome.TIMEOUT,
-                safe_failure_code="TOOL_CALL_TIMEOUT",
-                timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
+                return ReadToolExecution(
+                    created_tool_call=created,
+                    dispatch_fence_result=fence_result,
+                    terminal_tool_call=terminal,
+                    finalized_attempt=finalized_attempt,
+                    get_order_outcome=GetOrderOutcome.SYSTEM_FAILURE,
+                    effective_timeout_ms=effective_timeout_ms,
+                )
+
+            observation: OrderObservation | None = None
+            if result.outcome is GetOrderOutcome.FOUND:
+                summary = result.order_summary
+                if summary is None:
+                    raise ReadToolExecutionError(
+                        "FOUND result missing safe projection"
+                    )
+                terminal_status = ToolCallStatus.SUCCEEDED
+                safe_failure_code = None
+                tool_outcome = ToolResultOutcome.SUCCESS
+                result_ref = self._uuid_factory()
+            elif (
+                result.outcome
+                is GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
+            ):
+                terminal_status = ToolCallStatus.FAILED
+                safe_failure_code = "NOT_FOUND_OR_NOT_ACCESSIBLE"
+                tool_outcome = ToolResultOutcome.BUSINESS_FAILURE
+                result_ref = None
+            else:
+                terminal_status = ToolCallStatus.FAILED
+                safe_failure_code = "ORDER_SERVICE_UNAVAILABLE"
+                tool_outcome = ToolResultOutcome.SYSTEM_FAILURE
+                result_ref = None
+
+            terminal, finalized_attempt = (
+                await self._finalize_running_attempt(
+                    running=running,
+                    attempt=attempt,
+                    terminal_status=terminal_status,
+                    tool_outcome=tool_outcome,
+                    safe_failure_code=safe_failure_code,
+                    result_ref=result_ref,
+                )
             )
+            finished_at = terminal.finished_at
+
+            if result.outcome is GetOrderOutcome.FOUND:
+                summary = result.order_summary
+                if summary is None:
+                    raise ReadToolExecutionError(
+                        "FOUND result missing safe projection"
+                    )
+                observation = OrderObservation(
+                    observation_id=self._uuid_factory(),
+                    source_tool="get_order",
+                    source_resource_ref=summary.order_number,
+                    normalized_type="ORDER_SUMMARY",
+                    normalized_value=summary,
+                    observed_at=finished_at,
+                    recorded_at=finished_at,
+                    visibility=ObservationVisibility.MODEL_VISIBLE,
+                )
+                observation_result = (
+                    await self._runtime_record_port.save_observation(
+                        SaveObservationCommand(
+                            owner_scope=owner_scope,
+                            observation_record=observation,
+                            source_tool_call_record=terminal,
+                        )
+                    )
+                )
+                if observation_result not in {
+                    ObservationWriteResult.INSERTED,
+                    ObservationWriteResult.ALREADY_APPLIED,
+                }:
+                    raise ReadToolExecutionError(
+                        "Observation source conflict"
+                    )
+
             return ReadToolExecution(
                 created_tool_call=created,
                 dispatch_fence_result=fence_result,
                 terminal_tool_call=terminal,
                 finalized_attempt=finalized_attempt,
-                get_order_outcome=GetOrderOutcome.SYSTEM_FAILURE,
+                get_order_outcome=result.outcome,
+                observation=observation,
                 effective_timeout_ms=effective_timeout_ms,
             )
         except asyncio.CancelledError as cancellation:
-            terminal, _finalized_attempt = (
-                await self._finalize_running_attempt(
-                    running=running,
-                    attempt=attempt,
-                    terminal_status=ToolCallStatus.INTERRUPTED,
-                    tool_outcome=ToolResultOutcome.INTERRUPTED,
-                    safe_failure_code="TOOL_CALL_CANCELLED",
-                    interruption_reason="TOOL_CALL_CANCELLED",
-                )
-            )
             try:
-                await self._append_interrupted_trace(terminal=terminal)
-            except Exception as trace_error:
+                terminal, _finalized_attempt = (
+                    await self._finalize_running_attempt(
+                        running=running,
+                        attempt=attempt,
+                        terminal_status=ToolCallStatus.INTERRUPTED,
+                        tool_outcome=ToolResultOutcome.INTERRUPTED,
+                        safe_failure_code="TOOL_CALL_CANCELLED",
+                        interruption_reason="TOOL_CALL_CANCELLED",
+                    )
+                )
+            except (Exception, asyncio.CancelledError) as finalization_error:
                 cancellation.add_note(
-                    "ToolCallInterrupted Trace append raised "
-                    f"{type(trace_error).__name__}"
+                    "ToolCall cancellation finalization raised "
+                    f"{type(finalization_error).__name__}"
                 )
+            else:
+                try:
+                    await self._append_interrupted_trace(terminal=terminal)
+                except (Exception, asyncio.CancelledError) as trace_error:
+                    cancellation.add_note(
+                        "ToolCallInterrupted Trace append raised "
+                        f"{type(trace_error).__name__}"
+                    )
             raise
-
-        observation: OrderObservation | None = None
-        if result.outcome is GetOrderOutcome.FOUND:
-            summary = result.order_summary
-            if summary is None:
-                raise ReadToolExecutionError("FOUND result missing safe projection")
-            terminal_status = ToolCallStatus.SUCCEEDED
-            safe_failure_code = None
-            tool_outcome = ToolResultOutcome.SUCCESS
-            result_ref = self._uuid_factory()
-        elif result.outcome is GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE:
-            terminal_status = ToolCallStatus.FAILED
-            safe_failure_code = "NOT_FOUND_OR_NOT_ACCESSIBLE"
-            tool_outcome = ToolResultOutcome.BUSINESS_FAILURE
-            result_ref = None
-        else:
-            terminal_status = ToolCallStatus.FAILED
-            safe_failure_code = "ORDER_SERVICE_UNAVAILABLE"
-            tool_outcome = ToolResultOutcome.SYSTEM_FAILURE
-            result_ref = None
-
-        terminal, finalized_attempt = await self._finalize_running_attempt(
-            running=running,
-            attempt=attempt,
-            terminal_status=terminal_status,
-            tool_outcome=tool_outcome,
-            safe_failure_code=safe_failure_code,
-            result_ref=result_ref,
-        )
-        finished_at = terminal.finished_at
-
-        if result.outcome is GetOrderOutcome.FOUND:
-            summary = result.order_summary
-            if summary is None:
-                raise ReadToolExecutionError("FOUND result missing safe projection")
-            observation = OrderObservation(
-                observation_id=self._uuid_factory(),
-                source_tool="get_order",
-                source_resource_ref=summary.order_number,
-                normalized_type="ORDER_SUMMARY",
-                normalized_value=summary,
-                observed_at=finished_at,
-                recorded_at=finished_at,
-                visibility=ObservationVisibility.MODEL_VISIBLE,
-            )
-            observation_result = await self._runtime_record_port.save_observation(
-                SaveObservationCommand(
-                    owner_scope=owner_scope,
-                    observation_record=observation,
-                    source_tool_call_record=terminal,
-                )
-            )
-            if observation_result not in {
-                ObservationWriteResult.INSERTED,
-                ObservationWriteResult.ALREADY_APPLIED,
-            }:
-                raise ReadToolExecutionError("Observation source conflict")
-
-        return ReadToolExecution(
-            created_tool_call=created,
-            dispatch_fence_result=fence_result,
-            terminal_tool_call=terminal,
-            finalized_attempt=finalized_attempt,
-            get_order_outcome=result.outcome,
-            observation=observation,
-            effective_timeout_ms=effective_timeout_ms,
-        )
