@@ -238,7 +238,12 @@ def _request_understanding(
     )
 
 
-def _observation(*, order_id: str = "O-1001") -> OrderObservation:
+def _observation(
+    *,
+    order_id: str = "O-1001",
+    supersedes: UUID | None = None,
+    visibility: ObservationVisibility = ObservationVisibility.MODEL_VISIBLE,
+) -> OrderObservation:
     return OrderObservation(
         observation_id=OBSERVATION_ID,
         source_tool="get_order",
@@ -254,7 +259,8 @@ def _observation(*, order_id: str = "O-1001") -> OrderObservation:
         ),
         observed_at=NOW,
         recorded_at=NOW,
-        visibility=ObservationVisibility.MODEL_VISIBLE,
+        supersedes=supersedes,
+        visibility=visibility,
     )
 
 
@@ -969,6 +975,128 @@ def test_payload_correlation_ref_does_not_imply_an_observation_record() -> None:
     assert result.status is EvalGraderStatus.PASS
 
 
+def _observation_field_values(
+    observation: OrderObservation,
+) -> dict[str, object]:
+    return {
+        field_name: getattr(observation, field_name)
+        for field_name in OrderObservation.model_fields
+    }
+
+
+def test_raw_string_audit_only_observation_fails_every_canonical_grader() -> None:
+    canonical = _observation(visibility=ObservationVisibility.AUDIT_ONLY)
+    raw_values = _observation_field_values(canonical)
+    raw_values["visibility"] = "AUDIT_ONLY"
+    raw_observation = OrderObservation.model_construct(**raw_values)
+    evidence = _evidence(
+        observations=(raw_observation,),
+        observation_persistence_envelopes=(_observation_envelope(canonical),),
+    )
+
+    results = tuple(
+        grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        for grader_name in GRADER_NAMES
+    )
+    assert all(result.status is EvalGraderStatus.FAIL for result in results)
+    assert all(
+        result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for result in results
+    )
+
+    canonical_outcome = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical_outcome.status is EvalResultStatus.FAIL
+
+
+def test_nested_raw_enum_observation_projection_fails_closed() -> None:
+    canonical = _observation()
+    raw_projection = canonical.normalized_value.model_copy(update={"status": "SHIPPED"})
+    raw_observation = canonical.model_copy(update={"normalized_value": raw_projection})
+    evidence = _evidence(
+        observations=(raw_observation,),
+        observation_persistence_envelopes=(_observation_envelope(canonical),),
+    )
+
+    results = tuple(
+        grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        for grader_name in GRADER_NAMES
+    )
+    assert all(result.status is EvalGraderStatus.FAIL for result in results)
+    assert all(
+        result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for result in results
+    )
+
+
+@pytest.mark.parametrize(
+    "storage_attribute",
+    ("field", "__pydantic_extra__", "__pydantic_private__"),
+)
+def test_hidden_observation_storage_fails_closed(
+    storage_attribute: str,
+) -> None:
+    canonical = _observation()
+    hidden = canonical.model_copy()
+    if storage_attribute == "field":
+        object.__setattr__(hidden, "hidden_secret", "must-not-be-serialized")
+    else:
+        object.__setattr__(
+            hidden,
+            storage_attribute,
+            {"hidden_secret": "must-not-be-serialized"},
+        )
+    evidence = _evidence(
+        observations=(hidden,),
+        observation_persistence_envelopes=(_observation_envelope(canonical),),
+    )
+
+    results = tuple(
+        grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        for grader_name in GRADER_NAMES
+    )
+    assert all(result.status is EvalGraderStatus.FAIL for result in results)
+    assert all(
+        result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for result in results
+    )
+
+
+def test_valid_enum_audit_only_observation_cannot_be_rendered() -> None:
+    observation = _observation(visibility=ObservationVisibility.AUDIT_ONLY)
+    evidence = _evidence(
+        observations=(observation,),
+        observation_persistence_envelopes=(_observation_envelope(observation),),
+    )
+
+    for grader_name in ("ObservationGrader", "RendererFactGrader"):
+        result = grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.FAIL
+
+
 @pytest.mark.parametrize(
     "relation",
     (
@@ -1063,6 +1191,87 @@ def test_observation_provenance_requires_exactly_four_external_refs(
 
     _assert_observation_provenance_fails(
         _evidence(observation_persistence_envelopes=(forged,))
+    )
+
+
+def test_canonical_supersedes_reference_is_additive_to_four_external_refs() -> None:
+    observation = _observation(supersedes=UUID(int=942))
+    envelope = _observation_envelope(observation)
+    evidence = _evidence(
+        observations=(observation,),
+        observation_persistence_envelopes=(envelope,),
+    )
+
+    assert len(envelope.record_references) == 5
+    assert (
+        sum(
+            reference.relation == "supersedes"
+            for reference in envelope.record_references
+        )
+        == 1
+    )
+    for grader_name in GRADER_NAMES:
+        result = grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.PASS
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "foreign", "tampered"),
+)
+def test_supersedes_reference_must_match_canonical_source_projection(
+    mutation: str,
+) -> None:
+    observation = _observation(supersedes=UUID(int=942))
+    envelope = _observation_envelope(observation)
+    supersedes = next(
+        reference
+        for reference in envelope.record_references
+        if reference.relation == "supersedes"
+    )
+    if mutation == "missing":
+        references = tuple(
+            reference
+            for reference in envelope.record_references
+            if reference.relation != "supersedes"
+        )
+    elif mutation == "foreign":
+        references = tuple(
+            reference.model_copy(
+                update={
+                    "target_logical_identity": (("observation_id", str(UUID(int=943))),)
+                }
+            )
+            if reference is supersedes
+            else reference
+            for reference in envelope.record_references
+        )
+    else:
+        references = tuple(
+            reference.model_copy(
+                update={"target_record_code": P0RecordCode.MESSAGE_RECORD}
+            )
+            if reference is supersedes
+            else reference
+            for reference in envelope.record_references
+        )
+    forged = envelope.model_copy(update={"record_references": references})
+
+    _assert_observation_provenance_fails(
+        _evidence(
+            observations=(observation,),
+            observation_persistence_envelopes=(forged,),
+        )
     )
 
 

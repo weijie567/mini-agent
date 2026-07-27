@@ -817,6 +817,54 @@ class SyntheticSut:
                     tool_call=tool_call,
                 ),
             )
+        evidence_observations = (observation,) if observation is not None else ()
+        if self.fault == "raw_observation_visibility":
+            assert observation is not None
+            assert task is not None
+            assert request_unit is not None
+            assert tool_call is not None
+            canonical_audit = observation.model_copy(
+                update={"visibility": ObservationVisibility.AUDIT_ONLY}
+            )
+            raw_values = {
+                field_name: getattr(canonical_audit, field_name)
+                for field_name in OrderObservation.model_fields
+            }
+            raw_values["visibility"] = "AUDIT_ONLY"
+            raw_observation = OrderObservation.model_construct(**raw_values)
+            evidence_observations = (raw_observation,)
+            observation_envelopes = (
+                _observation_envelope(
+                    observation=canonical_audit,
+                    run_id=run_id,
+                    task=task,
+                    request_unit=request_unit,
+                    tool_call=tool_call,
+                ),
+            )
+        elif self.fault == "observation_supersedes":
+            assert observation is not None
+            assert task is not None
+            assert request_unit is not None
+            assert tool_call is not None
+            superseding = observation.model_copy(
+                update={
+                    "supersedes": _case_uuid(
+                        case.case_id,
+                        "previous-observation",
+                    )
+                }
+            )
+            evidence_observations = (superseding,)
+            observation_envelopes = (
+                _observation_envelope(
+                    observation=superseding,
+                    run_id=run_id,
+                    task=task,
+                    request_unit=request_unit,
+                    tool_call=tool_call,
+                ),
+            )
         self.traces.seed(trace_ref, initial_trace)
         observable_values: dict[str, object] = {
             "case_id": case.case_id,
@@ -885,7 +933,7 @@ class SyntheticSut:
             "gate_decisions": (gate,) if gate is not None else (),
             "tool_calls": (tool_call,) if tool_call is not None else (),
             "tool_attempts": ((tool_attempt,) if tool_attempt is not None else ()),
-            "observations": ((observation,) if observation is not None else ()),
+            "observations": evidence_observations,
             "observation_persistence_envelopes": observation_envelopes,
             "context_manifests": manifests,
             "model_visible_toolset_artifacts": (
@@ -1035,6 +1083,48 @@ def test_missing_observation_provenance_fails_canonical_harness_grading() -> Non
     for grader_name, reason_code in expected_reasons.items():
         assert by_name[grader_name].status is EvalGraderStatus.FAIL
         assert by_name[grader_name].reason_code is reason_code
+
+
+def test_raw_observation_visibility_fails_canonical_harness_grading() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        fault="raw_observation_visibility",
+    )
+    harness, *_ = _harness(sut=sut, traces=traces)
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    result = outcome.results[0]
+    assert result.status is EvalResultStatus.FAIL
+    configured_names = tuple(ARTIFACTS.case_by_id("E2E01-01").grading["graders"])
+    assert tuple(item.grader_name for item in result.grader_results) == configured_names
+    assert all(
+        item.status is EvalGraderStatus.FAIL
+        and item.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for item in result.grader_results
+    )
+
+
+def test_supersedes_provenance_passes_canonical_harness_grading() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        fault="observation_supersedes",
+    )
+    harness, *_ = _harness(sut=sut, traces=traces)
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is True
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    result = outcome.results[0]
+    assert result.status is EvalResultStatus.PASS
+    assert all(item.status is EvalGraderStatus.PASS for item in result.grader_results)
 
 
 def test_authenticated_expectations_pin_message_and_toolset_projection() -> None:

@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Annotated, Protocol
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from mini_agent.application.persistence import (
     P0PersistenceEnvelope,
@@ -17,6 +17,7 @@ from mini_agent.application.persistence import (
     P0RecordCode,
     P0RecordReference,
     decode_persistence_record,
+    encode_persistence_record,
 )
 from mini_agent.application.records import (
     AgentRunResult,
@@ -306,14 +307,137 @@ class DeterministicGrader(Protocol):
     ) -> EvalGraderResult: ...
 
 
+def _recursive_python_field_projection(
+    value: object,
+    active_ids: set[int],
+) -> tuple[object, object]:
+    if isinstance(value, BaseModel):
+        value_id = id(value)
+        if value_id in active_ids:
+            raise ValueError("cyclic model storage")
+        model_type = type(value)
+        field_names = tuple(model_type.model_fields)
+        field_name_set = frozenset(field_names)
+        if (
+            frozenset(vars(value)) != field_name_set
+            or not value.model_fields_set.issubset(field_name_set)
+            or value.__pydantic_extra__ is not None
+            or value.__pydantic_private__ is not None
+        ):
+            raise ValueError("non-canonical model storage")
+        active_ids.add(value_id)
+        try:
+            projected_fields: dict[str, object] = {}
+            field_signatures: list[tuple[str, object]] = []
+            for field_name in field_names:
+                projected, signature = _recursive_python_field_projection(
+                    getattr(value, field_name),
+                    active_ids,
+                )
+                projected_fields[field_name] = projected
+                field_signatures.append((field_name, signature))
+            return projected_fields, (model_type, tuple(field_signatures))
+        finally:
+            active_ids.remove(value_id)
+    if type(value) is tuple:
+        value_id = id(value)
+        if value_id in active_ids:
+            raise ValueError("cyclic tuple storage")
+        active_ids.add(value_id)
+        try:
+            projected_items: list[object] = []
+            item_signatures: list[object] = []
+            for item in value:
+                projected, signature = _recursive_python_field_projection(
+                    item,
+                    active_ids,
+                )
+                projected_items.append(projected)
+                item_signatures.append(signature)
+            return tuple(projected_items), (tuple, tuple(item_signatures))
+        finally:
+            active_ids.remove(value_id)
+    if type(value) is list:
+        value_id = id(value)
+        if value_id in active_ids:
+            raise ValueError("cyclic list storage")
+        active_ids.add(value_id)
+        try:
+            projected_items = []
+            item_signatures = []
+            for item in value:
+                projected, signature = _recursive_python_field_projection(
+                    item,
+                    active_ids,
+                )
+                projected_items.append(projected)
+                item_signatures.append(signature)
+            return projected_items, (list, tuple(item_signatures))
+        finally:
+            active_ids.remove(value_id)
+    if type(value) is dict:
+        value_id = id(value)
+        if value_id in active_ids:
+            raise ValueError("cyclic mapping storage")
+        active_ids.add(value_id)
+        try:
+            projected_items: dict[object, object] = {}
+            item_signatures: list[tuple[object, type[object], object]] = []
+            for key, item in value.items():
+                projected, signature = _recursive_python_field_projection(
+                    item,
+                    active_ids,
+                )
+                projected_items[key] = projected
+                item_signatures.append((key, type(key), signature))
+            return projected_items, (dict, tuple(item_signatures))
+        finally:
+            active_ids.remove(value_id)
+    return value, type(value)
+
+
+def _observation_canonicalization_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    for observation in evidence.observations:
+        if type(observation) is not OrderObservation:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        try:
+            projection, observed_signature = _recursive_python_field_projection(
+                observation,
+                set(),
+            )
+            canonical = OrderObservation.model_validate(
+                projection,
+                strict=True,
+            )
+            _, canonical_signature = _recursive_python_field_projection(
+                canonical,
+                set(),
+            )
+        except (
+            AttributeError,
+            KeyError,
+            RecursionError,
+            TypeError,
+            ValidationError,
+            ValueError,
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if observed_signature != canonical_signature:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 def _validate_grader_inputs(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
-) -> None:
+) -> EvalGraderReasonCode | None:
     if type(evidence) is not EvalEvidence:
         raise TypeError("grader evidence must be EvalEvidence")
     if type(expectations) is not EvalCaseExpectations:
         raise TypeError("grader expectations must be authenticated")
+    return _observation_canonicalization_reason(evidence)
 
 
 class SchemaGrader:
@@ -324,7 +448,9 @@ class SchemaGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if (
             evidence.run_record is None
             or evidence.agent_result is None
@@ -353,7 +479,9 @@ class IdentityBoundaryGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if not evidence.conversation_records or not evidence.message_records:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         if (
@@ -395,7 +523,9 @@ class RequestUnderstandingGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         output = evidence.request_understanding_output
         if not expectations.request_understanding_required:
             return (
@@ -438,7 +568,9 @@ class InputBindingGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if expectations.expected_task_status is None:
             return (
                 _passed(self.name)
@@ -474,7 +606,9 @@ class TaskStateGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if expectations.expected_task_status is None:
             return (
                 _passed(self.name)
@@ -704,6 +838,9 @@ def _p0_reference(
 def _observation_persistence_graph_reason(
     evidence: EvalEvidence,
 ) -> EvalGraderReasonCode | None:
+    canonicalization_reason = _observation_canonicalization_reason(evidence)
+    if canonicalization_reason is not None:
+        return canonicalization_reason
     count_reason = _closed_record_count_reason(
         len(evidence.observation_persistence_envelopes),
         len(evidence.observations),
@@ -736,7 +873,7 @@ def _observation_persistence_graph_reason(
     task = evidence.task_records[0]
     request_unit = evidence.request_units[0]
     tool_call = evidence.tool_calls[0]
-    expected_references = (
+    external_references = (
         _p0_reference(
             "source_request_unit_id",
             P0RecordCode.REQUEST_UNIT_RECORD,
@@ -762,15 +899,12 @@ def _observation_persistence_graph_reason(
             tool_call.tool_call_id,
         ),
     )
-    if (
-        envelope.record_code is not P0RecordCode.OBSERVATION_RECORD
-        or envelope.direct_owner_customer_id is not None
-        or envelope.logical_identity
-        != (("observation_id", str(observation.observation_id)),)
-        or envelope.record_references != expected_references
-    ):
-        return EvalGraderReasonCode.ASSERTION_FAILED
     try:
+        expected_envelope = encode_persistence_record(
+            P0RecordCode.OBSERVATION_RECORD,
+            observation,
+            external_references=external_references,
+        )
         decoded = decode_persistence_record(
             envelope,
             expected_record_code=P0RecordCode.OBSERVATION_RECORD,
@@ -779,7 +913,13 @@ def _observation_persistence_graph_reason(
     except (P0PersistenceIntegrityError, TypeError, ValueError, AttributeError):
         return EvalGraderReasonCode.ASSERTION_FAILED
     if (
-        decoded.record_code is not P0RecordCode.OBSERVATION_RECORD
+        envelope.record_code is not expected_envelope.record_code
+        or envelope.record_schema_version != expected_envelope.record_schema_version
+        or envelope.direct_owner_customer_id
+        != expected_envelope.direct_owner_customer_id
+        or envelope.logical_identity != expected_envelope.logical_identity
+        or envelope.record_references != expected_envelope.record_references
+        or decoded.record_code is not P0RecordCode.OBSERVATION_RECORD
         or type(decoded.source_record) is not OrderObservation
         or decoded.source_record != observation
     ):
@@ -1114,7 +1254,9 @@ class ToolCallGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if expectations.expected_gate_decision is None:
             if evidence.gate_decisions:
                 return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
@@ -1163,7 +1305,9 @@ class ObservationGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if len(evidence.observations) != expectations.expected_observations:
             reason = (
                 EvalGraderReasonCode.MISSING_RECORD
@@ -1203,7 +1347,9 @@ class DisclosureGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         observable = evidence.safe_observable
         result = evidence.agent_result
         if observable is None or result is None:
@@ -1281,7 +1427,9 @@ class RendererFactGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if evidence.agent_result is None:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         message = evidence.agent_result.message
@@ -1298,7 +1446,10 @@ class RendererFactGrader:
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         observation = evidence.observations[0]
         assert isinstance(observation, OrderObservation)
-        if message not in _approved_renderer_messages(observation):
+        if (
+            observation.visibility is ObservationVisibility.AUDIT_ONLY
+            or message not in _approved_renderer_messages(observation)
+        ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         return _passed(self.name)
 
@@ -1311,7 +1462,9 @@ class ErrorMappingGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if (
             evidence.run_record is None
             or evidence.agent_result is None
@@ -1339,7 +1492,9 @@ class TraceCompletenessGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         events = evidence.trace_events
         if not events:
             return _failed(self.name, EvalGraderReasonCode.TRACE_EVENT_MISSING)
@@ -1401,7 +1556,9 @@ class PersistenceGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         if evidence.run_record is None:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         conversation_reason = _conversation_graph_reason(evidence, expectations)
@@ -1497,7 +1654,9 @@ class ToolsetReplayGrader:
         evidence: EvalEvidence,
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
-        _validate_grader_inputs(evidence, expectations)
+        input_reason = _validate_grader_inputs(evidence, expectations)
+        if input_reason is not None:
+            return _failed(self.name, input_reason)
         manifests = evidence.context_manifests
         if len(manifests) != expectations.expected_model_calls:
             reason = (
