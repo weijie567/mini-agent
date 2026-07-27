@@ -108,16 +108,18 @@ class AfterRevalidationHook(Protocol):
 
     def __call__(
         self,
+        run_id: UUID,
         task: TaskRecord,
         request_unit: RequestUnitRecord,
     ) -> Awaitable[None] | None: ...
 
 
 async def _noop_after_revalidation(
+    run_id: UUID,
     task: TaskRecord,
     request_unit: RequestUnitRecord,
 ) -> None:
-    del task, request_unit
+    del run_id, task, request_unit
 
 
 def _project_run(
@@ -240,6 +242,7 @@ class AgentRunService:
         *,
         run_id: UUID,
         model_call_id: UUID,
+        model_call_purpose: str,
         message_id: UUID,
         task: TaskRecord | None = None,
         observation_ref: VersionedRecordRef | None = None,
@@ -278,6 +281,7 @@ class AgentRunService:
             event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
             run_id=run_id,
             model_call_id=model_call_id,
+            model_call_purpose=model_call_purpose,
             context_manifest_id=manifest.context_manifest_id,
             tool_registry_version=manifest.tool_registry_version,
             model_visible_toolset_hash=manifest.model_visible_toolset_hash,
@@ -389,6 +393,7 @@ class AgentRunService:
         first_manifest = await self._save_manifest(
             run_id=running_run.run_id,
             model_call_id=first_model_call_id,
+            model_call_purpose="REQUEST_UNDERSTANDING",
             message_id=user_message.message_id,
         )
         request = RequestUnderstandingInput(
@@ -515,6 +520,7 @@ class AgentRunService:
         )
 
         hook_result = self._after_revalidation_hook(
+            running_run.run_id,
             decision.task,
             decision.request_unit,
         )
@@ -666,6 +672,7 @@ class AgentRunService:
         second_manifest = await self._save_manifest(
             run_id=running_run.run_id,
             model_call_id=second_model_call_id,
+            model_call_purpose="PRESENTATION",
             message_id=user_message.message_id,
             task=current_task,
             observation_ref=VersionedRecordRef(
@@ -724,6 +731,7 @@ class AgentRunService:
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=presentation_plan_ref,
                 observation_ref=observation.observation_id,
+                presentation_plan_ref=presentation_plan_ref,
                 failure_state=failure_state,
             )
         try:
@@ -744,16 +752,9 @@ class AgentRunService:
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=presentation_plan_ref,
                 observation_ref=observation.observation_id,
+                presentation_plan_ref=presentation_plan_ref,
                 failure_state=failure_state,
             )
-        await self._append_trace(
-            event_type=TraceEventType.RESPONSE_RENDERED,
-            run_id=running_run.run_id,
-            task_id=current_task.task_id,
-            request_unit_id=current_unit.request_unit_id,
-            observation_ref=observation.observation_id,
-            presentation_plan_ref=presentation_plan_ref,
-        )
         return await self._finish_with_task(
             running_run=running_run,
             conversation=conversation,
@@ -764,6 +765,7 @@ class AgentRunService:
             target_status=TaskStatus.COMPLETED,
             reason_ref=self._uuid_factory(),
             observation_ref=observation.observation_id,
+            presentation_plan_ref=presentation_plan_ref,
             rendered_message=rendered_message,
             failure_state=failure_state,
         )
@@ -989,6 +991,10 @@ class AgentRunService:
             run_id=running_run.run_id,
             stop_reason=stop_reason,
         )
+        await self._append_trace(
+            event_type=TraceEventType.RESPONSE_RENDERED,
+            run_id=running_run.run_id,
+        )
         completed_at = self._clock()
         terminal_run = _project_run(
             running_run,
@@ -1043,6 +1049,7 @@ class AgentRunService:
         target_status: TaskStatus,
         reason_ref: UUID,
         observation_ref: UUID | None = None,
+        presentation_plan_ref: UUID | None = None,
         rendered_message: str | None = None,
         failure_state: _RunFailureState | None = None,
     ) -> AgentRunResult:
@@ -1050,6 +1057,14 @@ class AgentRunService:
             run_id=running_run.run_id,
             stop_reason=stop_reason,
             rendered_message=rendered_message,
+        )
+        await self._append_trace(
+            event_type=TraceEventType.RESPONSE_RENDERED,
+            run_id=running_run.run_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            observation_ref=observation_ref,
+            presentation_plan_ref=presentation_plan_ref,
         )
         changed_at = self._clock()
         next_task = _project_task(

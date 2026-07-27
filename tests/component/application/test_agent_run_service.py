@@ -694,8 +694,99 @@ def _assert_no_standalone_terminal_writes(events: list[str]) -> None:
     assert f"trace:{TraceEventType.RUN_STOPPED.value}" not in events
 
 
+def _trace_events_of_type(
+    runtime: RuntimeSpy,
+    event_type: TraceEventType,
+) -> list[TraceEvent]:
+    return [
+        event
+        for event in runtime.trace_events
+        if event.event_type is event_type
+    ]
+
+
+def _assert_manifest_trace_purposes(
+    runtime: RuntimeSpy,
+    model: ModelSpy,
+) -> None:
+    context_events = _trace_events_of_type(
+        runtime,
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    )
+    expected_purposes = [
+        *(["REQUEST_UNDERSTANDING"] * model.next_move_calls),
+        *(["PRESENTATION"] * model.presentation_calls),
+    ]
+    assert [event.model_call_purpose for event in context_events] == (
+        expected_purposes
+    )
+    assert [event.model_call_id for event in context_events] == [
+        manifest.model_call_id for manifest in runtime.manifests
+    ]
+    assert [event.context_manifest_id for event in context_events] == [
+        manifest.context_manifest_id for manifest in runtime.manifests
+    ]
+
+
+def _assert_one_response_rendered(
+    runtime: RuntimeSpy,
+    *,
+    with_task: bool,
+    observation_ref: UUID | None = None,
+    presentation_plan_ref: UUID | None = None,
+    expect_run_stopped: bool = True,
+) -> TraceEvent:
+    rendered_events = _trace_events_of_type(
+        runtime,
+        TraceEventType.RESPONSE_RENDERED,
+    )
+    assert len(rendered_events) == 1
+    rendered = rendered_events[0]
+    assert rendered.run_id == runtime.run_record.run_id
+    if with_task:
+        assert runtime.task is not None
+        assert runtime.request_unit is not None
+        assert rendered.task_id == runtime.task.task_id
+        assert (
+            rendered.request_unit_id
+            == runtime.request_unit.request_unit_id
+        )
+    else:
+        assert rendered.task_id is None
+        assert rendered.request_unit_id is None
+    assert rendered.observation_ref == observation_ref
+    assert rendered.presentation_plan_ref == presentation_plan_ref
+
+    stopped_events = _trace_events_of_type(
+        runtime,
+        TraceEventType.RUN_STOPPED,
+    )
+    if expect_run_stopped:
+        assert len(stopped_events) == 1
+        assert runtime.trace_events.index(rendered) < runtime.trace_events.index(
+            stopped_events[0]
+        )
+    else:
+        assert stopped_events == []
+    return rendered
+
+
+def _assert_no_response_rendered_or_run_stopped(
+    runtime: RuntimeSpy,
+) -> None:
+    assert _trace_events_of_type(
+        runtime,
+        TraceEventType.RESPONSE_RENDERED,
+    ) == []
+    assert _trace_events_of_type(
+        runtime,
+        TraceEventType.RUN_STOPPED,
+    ) == []
+
+
 async def _advance_to_waiting_user(
     *,
+    run_id: UUID,
     runtime: RuntimeSpy,
     task: TaskRecord,
     request_unit: RequestUnitRecord,
@@ -743,7 +834,7 @@ async def _advance_to_waiting_user(
             trace_event_id=uuid4(),
             event_type=TraceEventType.TASK_STATE_CHANGED,
             occurred_at=NOW,
-            run_id=runtime.run_record.run_id,
+            run_id=run_id,
             task_id=task.task_id,
             request_unit_id=request_unit.request_unit_id,
         )
@@ -786,6 +877,17 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
     assert runtime.aggregate_messages == [terminal_command.assistant_message]
     assert runtime.aggregate_trace_events == list(
         terminal_command.terminal_trace_events
+    )
+    _assert_manifest_trace_purposes(runtime, model)
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
     )
 
     assert _index(events, "artifact_get") < _index(events, "manifest:1")
@@ -845,6 +947,8 @@ def test_model_visible_schema_drift_is_rejected_before_tool_execution() -> None:
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.observation_commands == []
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -882,6 +986,8 @@ def test_foreign_and_nonexistent_are_identical_and_skip_presentation(
     assert runtime.task_history[-1].status is TaskStatus.COMPLETED
     assert runtime.task_history[-1].state_version == 2
     assert runtime.run_record.stop_reason is StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -910,6 +1016,8 @@ def test_argument_replacement_stops_at_gateway_with_zero_tool_side_effect(
     assert runtime.observation_commands == []
     assert runtime.task_history[-1].status is TaskStatus.BLOCKED
     assert runtime.task_history[-1].state_version == 2
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -932,6 +1040,8 @@ def test_unknown_tool_stops_at_gateway_with_zero_tool_side_effect() -> None:
     assert order.queries == []
     assert runtime.observation_commands == []
     assert runtime.task_history[-1].state_version == 2
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -942,12 +1052,24 @@ def test_unknown_tool_stops_at_gateway_with_zero_tool_side_effect() -> None:
 def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
     events: list[str] = []
     runtime = RuntimeSpy(events)
+    hook_arguments: list[
+        tuple[UUID, TaskRecord, RequestUnitRecord]
+    ] = []
 
     async def stale_hook(
+        run_id: UUID,
         task: TaskRecord,
         request_unit: RequestUnitRecord,
     ) -> None:
+        hook_arguments.append((run_id, task, request_unit))
+        assert run_id == runtime.run_record.run_id
+        assert task == runtime.task
+        assert request_unit == runtime.request_unit
+        assert "task_reloaded" not in events
+        assert "request_unit_reloaded" not in events
+        assert "gate_saved" not in events
         await _advance_to_waiting_user(
+            run_id=run_id,
             runtime=runtime,
             task=task,
             request_unit=request_unit,
@@ -988,6 +1110,27 @@ def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
         event.event_type is TraceEventType.TASK_STATE_CHANGED
         for event in runtime.trace_events
     ) == 3
+    assert hook_arguments == [
+        (
+            terminal_command.expected_active_record.run_id,
+            runtime.task_history[0],
+            runtime.request_unit_history[0],
+        )
+    ]
+    assert _index(
+        events,
+        f"trace:{TraceEventType.NEXT_MOVE_REVALIDATED.value}",
+    ) < _index(events, "task_transition:WAITING_USER:v2")
+    assert _index(events, "task_transition:WAITING_USER:v2") < _index(
+        events,
+        "task_reloaded",
+    )
+    assert _index(events, "request_unit_reloaded") < _index(
+        events,
+        "gate_saved",
+    )
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         terminal_command,
         result=result,
@@ -1025,6 +1168,8 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.run_record.stop_reason is expected_stop
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=False)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -1059,6 +1204,8 @@ def test_no_task_completion_commits_result_message_and_run_stopped_once() -> Non
         event.startswith("task_transition:") for event in events
     )
     _assert_no_standalone_terminal_writes(events)
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=False)
     assert events[-1] == "terminal_aggregate_applied"
 
 
@@ -1080,6 +1227,8 @@ def test_order_system_failure_has_one_read_no_observation_or_presentation() -> N
     assert runtime.observation_commands == []
     assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
     assert "private-upstream-detail" not in result.message
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -1108,9 +1257,9 @@ def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
             ),
             timeout=0.5,
         )
-        return result, runtime, order
+        return result, runtime, order, model
 
-    result, runtime, order = asyncio.run(scenario())
+    result, runtime, order, model = asyncio.run(scenario())
 
     assert result.outcome is AgentOutcome.BLOCKED
     assert len(order.queries) == 1
@@ -1127,6 +1276,8 @@ def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
         for event in runtime.trace_events
     ) == 1
     assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(runtime, with_task=True)
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -1180,6 +1331,7 @@ def test_cancelled_order_read_closes_tool_and_run_before_reraising() -> None:
         event.event_type is TraceEventType.TOOL_CALL_INTERRUPTED
         for event in runtime.trace_events
     ) == 1
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_presentation_protocol_failure_retains_observation_without_plan_trace() -> None:
@@ -1198,9 +1350,15 @@ def test_presentation_protocol_failure_retains_observation_without_plan_trace() 
         event.event_type is TraceEventType.PRESENTATION_PLAN_PROPOSED
         for event in runtime.trace_events
     )
-    assert not any(
-        event.event_type is TraceEventType.RESPONSE_RENDERED
-        for event in runtime.trace_events
+    observation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.OBSERVATION_RECORDED,
+    )[0]
+    _assert_manifest_trace_purposes(runtime, model)
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=observation_event.observation_ref,
     )
     assert runtime.run_record.stop_reason is StopReason.PROVIDER_PROTOCOL_ERROR
     _assert_complete_terminal_aggregate(
@@ -1239,6 +1397,16 @@ def test_presentation_policy_rejection_never_reaches_renderer(
     assert runtime.run_record.stop_reason is (
         StopReason.PRESENTATION_PLAN_REJECTED
     )
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
+    )
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -1258,6 +1426,16 @@ def test_renderer_invariant_failure_returns_no_partial_fact_message() -> None:
     assert result.message == "当前无法安全处理该请求，请稍后重试。"
     assert renderer.render_calls == 1
     assert runtime.run_record.stop_reason is StopReason.RENDERER_INVARIANT_FAILED
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
+    )
     _assert_complete_terminal_aggregate(
         runtime.finalize_run_commands[-1],
         result=result,
@@ -1290,6 +1468,7 @@ def test_conditional_graph_conflict_finalizes_failed_then_reraises() -> None:
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.observation_commands == []
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_internal_graph_exception_finalizes_failed_then_reraises() -> None:
@@ -1320,6 +1499,7 @@ def test_internal_graph_exception_finalizes_failed_then_reraises() -> None:
     assert [message.direction for message in conversation.messages] == [
         MessageDirection.USER
     ]
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> None:
@@ -1327,10 +1507,12 @@ def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> N
     runtime = RuntimeSpy(events)
 
     async def advancing_hook(
+        run_id: UUID,
         task: TaskRecord,
         request_unit: RequestUnitRecord,
     ) -> None:
         await _advance_to_waiting_user(
+            run_id=run_id,
             runtime=runtime,
             task=task,
             request_unit=request_unit,
@@ -1361,6 +1543,7 @@ def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> N
     assert [message.direction for message in conversation.messages] == [
         MessageDirection.USER
     ]
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_with_task_applied_aggregate_never_awaits_standalone_terminal_writes() -> None:
@@ -1399,6 +1582,16 @@ def test_with_task_applied_aggregate_never_awaits_standalone_terminal_writes() -
     assert runtime.aggregate_messages == [terminal_command.assistant_message]
     assert runtime.aggregate_trace_events == list(
         terminal_command.terminal_trace_events
+    )
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
     )
     assert events[-1] == "terminal_aggregate_applied"
 
@@ -1440,6 +1633,7 @@ def test_no_task_applied_aggregate_never_awaits_standalone_terminal_writes() -> 
     assert runtime.aggregate_trace_events == list(
         terminal_command.terminal_trace_events
     )
+    _assert_one_response_rendered(runtime, with_task=False)
     assert events[-1] == "terminal_aggregate_applied"
 
 
@@ -1457,7 +1651,7 @@ def test_no_task_applied_aggregate_never_awaits_standalone_terminal_writes() -> 
     ),
     ids=("conflict", "exception"),
 )
-def test_terminal_aggregate_failure_has_zero_success_and_zero_partial_projection(
+def test_terminal_aggregate_failure_preserves_render_without_terminal_projection(
     first_effect: ConditionalWriteResult | BaseException,
     expected_error: type[BaseException],
 ) -> None:
@@ -1506,6 +1700,17 @@ def test_terminal_aggregate_failure_has_zero_success_and_zero_partial_projection
         event.startswith("task_transition:") for event in events
     )
     _assert_no_standalone_terminal_writes(events)
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
+        expect_run_stopped=False,
+    )
 
 
 def test_failed_cleanup_error_adds_only_bounded_type_note() -> None:
@@ -1546,9 +1751,20 @@ def test_failed_cleanup_error_adds_only_bounded_type_note() -> None:
         MessageDirection.USER
     ]
     _assert_no_standalone_terminal_writes(events)
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
+        expect_run_stopped=False,
+    )
 
 
-def test_terminal_aggregate_cancellation_has_zero_success_and_zero_partial_projection() -> None:
+def test_terminal_aggregate_cancellation_preserves_render_without_terminal_projection() -> None:
     async def scenario():
         events: list[str] = []
         runtime = RuntimeSpy(events, block_completed_finalize=True)
@@ -1600,6 +1816,17 @@ def test_terminal_aggregate_cancellation_has_zero_success_and_zero_partial_proje
         event.startswith("task_transition:") for event in events
     )
     _assert_no_standalone_terminal_writes(events)
+    presentation_event = _trace_events_of_type(
+        runtime,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )[0]
+    _assert_one_response_rendered(
+        runtime,
+        with_task=True,
+        observation_ref=presentation_event.observation_ref,
+        presentation_plan_ref=presentation_event.presentation_plan_ref,
+        expect_run_stopped=False,
+    )
 
 
 def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -> None:
