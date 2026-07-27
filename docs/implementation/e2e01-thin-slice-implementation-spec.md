@@ -1,6 +1,6 @@
 # 第一最薄 E2E-01｜Implementation Spec
 
-更新日期：2026-07-26  
+更新日期：2026-07-27
 状态：`ACTIVE / CONTRACT_DEFINED`  
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
@@ -1047,7 +1047,7 @@ PROCESS_RESTART_DETECTED
 | PresentationPlan Gate 拒绝 | `COMPLETED / PRESENTATION_PLAN_REJECTED` | Task / RequestUnit 转为 `BLOCKED`；既有安全 Observation 保留 | `200 + BLOCKED` + 统一安全文案 | 不“尽量解析”，不进入 Renderer |
 | Renderer 禁止字段或事实一致性断言失败 | `COMPLETED / RENDERER_INVARIANT_FAILED` | Task / RequestUnit 转为 `BLOCKED`；既有安全 Observation 保留 | `200 + BLOCKED` + 统一安全文案 | 丢弃待发送内容，不返回部分事实 |
 
-受控映射之外的未捕获 Web / 进程级异常使用 HTTP `500`，对应 Run 如果已创建则标记 `FAILED`；它们不得生成 `COMPLETED`、业务 Observation 或 Eval PASS。第一切片对上述内部错误均不自动重试；后续 retry 策略只能在对应故障 Case 激活后扩展。
+受控映射之外的未捕获 Web / 进程级异常使用 HTTP `500`，对应 Run 如果已创建则标记 `FAILED`；它们不得生成 `COMPLETED`、业务 Observation、用户可见 `AgentRunResult` 或 Eval PASS。第一切片的 `FAILED` Run 不携带 `stop_reason`；由于现有 `RunStopped` 结构同时要求 `user_outcome` 与 `stop_reason`，该路径只可靠关闭 `AgentRunRecord` 与已有 `RunTaskLink`，不伪造 `RunStopped`。未来如需为未捕获异常增加 terminal Trace，必须先由本 owner 明确新增或映射 reason / outcome，再同步 Core、Runtime、Eval 与迁移影响。第一切片对上述内部错误均不自动重试；后续 retry 策略只能在对应故障 Case 激活后扩展。
 
 ### 10.4 重启但不续跑
 
@@ -1090,6 +1090,8 @@ ResponseRendered
 RunStopped
 EvalCaseGraded
 ```
+
+上述“最低事件”按实际到达的受控阶段适用，不表示每条轨迹无条件包含全部事件。`RunStopped` 对正常 `COMPLETED` Run 和第 10.4 节 `INCOMPLETE / PROCESS_RESTART_DETECTED` 恢复 closure 是必需事件；第 10.3 节未捕获异常形成的 `FAILED` Run 是第一切片唯一例外，因为该路径没有 canonical `stop_reason` 或用户结果，必须保留 `AgentRunRecord(FAILED)` 而不能伪造 reason / outcome。`TaskStateChanged`、ToolCall 生命周期事件、Observation 与 Presentation 事件同样只在对应状态迁移或阶段实际发生时出现。
 
 跨组件安全投影：
 
