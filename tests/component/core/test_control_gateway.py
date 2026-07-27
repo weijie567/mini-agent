@@ -346,6 +346,49 @@ def test_stale_revalidated_v1_against_current_v2_is_rejected() -> None:
     assert gate.state_version_valid is False
 
 
+def test_bypassed_raw_and_normalized_candidate_drift_fails_closed() -> None:
+    decision = _decision()
+    snapshot = _snapshot()
+    model_call_id = uuid4()
+    context_manifest_id = uuid4()
+    manifest = _manifest(
+        snapshot=snapshot,
+        run_id=decision.request_understanding.run_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+    )
+    move = revalidate_next_move(
+        decision=decision,
+        current_task=decision.task,
+        current_request_unit=decision.request_unit,
+        current_input_binding=decision.input_binding,
+    ).model_copy(
+        update={"candidate_arguments": {"order_id": "O-2001"}}
+    )
+
+    gate = evaluate_control_gateway(
+        revalidated_move=move,
+        customer_context=_context(),
+        current_task=decision.task,
+        current_request_unit=decision.request_unit,
+        current_input_binding=decision.input_binding,
+        registry_snapshot=snapshot,
+        context_manifest=manifest,
+        gate_decision_id=uuid4(),
+        model_call_id=model_call_id,
+        provider_tool_call_id=None,
+        decided_at=NOW,
+        tool_calls_used=0,
+        max_tool_calls=1,
+        progress_valid=True,
+    )
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is GateReasonCode.SCHEMA_INVALID
+    assert gate.schema_valid is False
+    assert "tool_call_id" not in type(gate).model_fields
+
+
 def test_gateway_modules_are_pure_core_without_outer_layer_imports() -> None:
     import mini_agent.core.control_gateway as control_gateway
     import mini_agent.core.request_processing as request_processing

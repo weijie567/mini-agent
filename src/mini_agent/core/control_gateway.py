@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from uuid import UUID
@@ -20,6 +21,8 @@ from .tool_system import (
     ToolRegistration,
     get_order_tool_spec,
 )
+
+_ORDER_ID_PATTERN = re.compile(r"^O-[0-9]{4,20}$")
 
 
 def _resolve_registration(
@@ -57,7 +60,13 @@ def _closed_get_order_schema_is_valid(
     raw_order_id = arguments.get("order_id")
     if type(raw_order_id) is not str:
         return False
-    return normalized_candidate_order_id is not None
+    normalized_raw_order_id = raw_order_id.strip()
+    if normalized_raw_order_id[:2].casefold() == "o-":
+        normalized_raw_order_id = f"O-{normalized_raw_order_id[2:]}"
+    return (
+        _ORDER_ID_PATTERN.fullmatch(normalized_raw_order_id) is not None
+        and normalized_raw_order_id == normalized_candidate_order_id
+    )
 
 
 def evaluate_control_gateway(
