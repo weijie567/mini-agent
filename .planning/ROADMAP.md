@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / 01-06R_PLANNED`
+**Status**: `ACTIVE / 01-07A_PLANNED`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping / clarification chain `9632c18532baa2f4cd6ab7526d0e6db30328ea65` → `9602fc18148b19c841889a8041daf10ccc5b8f1c`、Plan 01-04 persistence codec merge `bde99edec0bbb9ba331c6099c8b467c14fe24e58`、Packet 01-04D Application Port closure merge `a84d30188eaec75e45619e9939180ba78efa3b80`、Packet 01-04E Memory token availability merge `be68490b9d8440a29a43fa8143e9dd5d4bcbfeda`、Packet 01-04F Thin Slice / Eval fault alignment merge `1d47fae3c2a3b910d92acb4713f2015199f54d49`、Packet 01-04G recovery Trace atomicity merge `c35687dafa3881bb322d91515068d8d39be79df6`、Packet 01-04H normal terminal-turn atomicity merge `64992cf3bdc6205e00d0c36433309b1657a57531`、Packet 01-05R Runtime replacement merge / current Infra replacement base `fb607019130843c94825a47d7822518cbdb2143c` 与对应 Graphify gates（均已满足）。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation final exact-head `PASS` / merge、Plan 01-01 Project Direction owner merge `c96dea9f9f798212227cd05ff2a7b1f029a60287`、Plan 01-02 Memory owner merge `af5afd2c93d429e1b090bfaf7af22c0fc4ec3c7b`、Plan 01-03 mapping / clarification chain `9632c18532baa2f4cd6ab7526d0e6db30328ea65` → `9602fc18148b19c841889a8041daf10ccc5b8f1c`、Plan 01-04 persistence codec merge `bde99edec0bbb9ba331c6099c8b467c14fe24e58`、Packet 01-04D Application Port closure merge `a84d30188eaec75e45619e9939180ba78efa3b80`、Packet 01-04E Memory token availability merge `be68490b9d8440a29a43fa8143e9dd5d4bcbfeda`、Packet 01-04F Thin Slice / Eval fault alignment merge `1d47fae3c2a3b910d92acb4713f2015199f54d49`、Packet 01-04G recovery Trace atomicity merge `c35687dafa3881bb322d91515068d8d39be79df6`、Packet 01-04H normal terminal-turn atomicity merge `64992cf3bdc6205e00d0c36433309b1657a57531`、Packet 01-05R Runtime merge `fb607019130843c94825a47d7822518cbdb2143c`、Packet 01-06R Infra merge `8e21652fbfcba4e9efb351e298b9a0c58f4a46d8`、Plan 01-07 Eval merge / current Trace-alignment base `eee1c0e46e1bca1160dea54d586d477c173daadc` 与对应 Graphify gates（均已满足）。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -47,7 +47,7 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 当前磁盘正式签发14个Plan（7个numbered + 5个inserted dependency Packets D–H + 2个replacement 05R/06R），`01-08`尚无Plan文件。01-05R已通过PR #33/#34消费Application aggregate并reviewed merge；historical 01-05/01-06 Packet不改写。新`01-06R`固定exact base `fb607019...`、新branch/worktree、原13-file ownership、四文件allowed delta、两项review HIGH与physical terminal transaction repair。每个Plan由GSD planner / checker角色提供只读建议，再由Integrator在dedicated planning-status Worktree中单写并通过PR创建；不运行stock import / plan-phase。
+**Plans**: 当前磁盘正式签发15个Plan（7个numbered + 6个inserted dependency Packets D–H/07A + 2个replacement 05R/06R），`01-08`尚无Plan文件。01-05R、01-06R与01-07已reviewed merge为`eee1c0e...`；historical 01-05/01-06 Packet不改写。新`01-07A`固定该exact base、new branch/worktree与two-file Runtime ownership，先关闭真实Eval不能补造的purpose/render/hook gap；其merge后再签发01-08。每个Plan由GSD planner / checker角色提供只读建议，再由Integrator在dedicated planning-status Worktree中单写并通过PR创建；不运行stock import / plan-phase。
 
 Plans:
 
@@ -63,9 +63,10 @@ Plans:
 - [ ] 01-05: W2 Runtime historical Packet（`EXECUTED_FEATURE / REVIEW_BLOCKED`；旧 [PR #28](https://github.com/weijie567/mini-agent/pull/28) current head `a27141b...`，exact 14 files、95 focused / 561 full；旧race/cancellation finding已关闭，但post-commit Message/RunStopped degradation为confirmed HIGH；本Plan不改写）
 - [ ] 01-05R: W2 Runtime replacement（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；planning [PR #33](https://github.com/weijie567/mini-agent/pull/33)、Runtime [PR #34](https://github.com/weijie567/mini-agent/pull/34) merge `fb607019...`；100 focused / 660 full、38 migration、feature/overlay `PASS / NOT_FOUND`与Graphify gate；[Summary](phases/01-cycle-1-e2e-01/01-05R-SUMMARY.md)）
 - [ ] 01-06: W2 Infra historical Packet（`EXECUTED_FEATURE / REVIEW_BLOCKED`；旧 [PR #30](https://github.com/weijie567/mini-agent/pull/30) current head `054dcaf...`，exact 13 files、23 focused / 506 full；phantom schedule已关闭，raw ValidationError disclosure与recovery-first late ToolCall为confirmed blocker；本Plan不改写）
-- [ ] 01-06R: W2 Infra replacement（`PLANNED / PLANNING_PR_PENDING`；[Plan](phases/01-cycle-1-e2e-01/01-06R-PLAN.md)固定base `fb607019...`、branch `codex/e2e01-w2-infra-r`、原13-file ownership；只允许`postgres.py`与三份tests改变，关闭两项review HIGH与01-04H physical transaction；planning PR merge前不得写Infra）
-- [ ] 01-07: W2 Eval（`FEATURE_REVIEW_PASS / LATEST_REPLAY_PENDING`；[PR #29](https://github.com/weijie567/mini-agent/pull/29) current head `b8ecbb0...`，exact 11 files；150 grader+harness / 657 full、1 deselected，independent `PASS / NOT_FOUND`；保持Draft并等待post-Runtime/Infra latest-integration replay/review）
-- [ ] 01-08: W3 Composition Root 与纵向集成（`NOT_STARTED`；三个 W2 feature PR 串行合并后由 Integrator规划与执行）
+- [ ] 01-06R: W2 Infra replacement（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；planning [PR #35](https://github.com/weijie567/mini-agent/pull/35)、Infra [PR #36](https://github.com/weijie567/mini-agent/pull/36) merge `8e21652...`；83 focused / 40 migration / 745 full、feature/overlay `PASS / NOT_FOUND`与Graphify gate；[Summary](phases/01-cycle-1-e2e-01/01-06R-SUMMARY.md)）
+- [ ] 01-07: W2 Eval（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；[PR #29](https://github.com/weijie567/mini-agent/pull/29) head `b8ecbb0...`经latest overlay `ee46f38...`复验并merge `eee1c0e...`；191 focused / 40 migration / 936 full、1 deselected，双preflight、双review与Graphify gate；[Summary](phases/01-cycle-1-e2e-01/01-07-SUMMARY.md)）
+- [ ] 01-07A: Runtime Trace alignment（插入式 `PLANNED / PLANNING_PR_PENDING`；[Plan](phases/01-cycle-1-e2e-01/01-07A-PLAN.md)固定base `eee1c0e...`、branch `codex/e2e01-01-runtime-trace-alignment`与two-file ownership；关闭real Eval purpose、ResponseRendered与stale hook identity blockers）
+- [ ] 01-08: W3 Composition Root 与纵向集成（`BLOCKED_BY_01-07A`；01-07A reviewed merge后从新的exact integration SHA规划与执行）
 
 #### Phase 1 Execution Gates
 
@@ -82,9 +83,10 @@ Plans:
 | 01-04G | Recovery Trace atomicity | `COMPLETE / EVIDENCE_INDEXED`：PR #25 merge `c35687d...`；466 tests；Graphify 3353 nodes / 5999 links / 50 hyperedges，health error为0 |
 | 01-04H | Normal terminal-turn atomicity | `COMPLETE / EVIDENCE_INDEXED`：PR #31/#32；merge `64992cf...`；560-test与Graphify gate |
 | 01-05R | Runtime replacement | `COMPLETE / EVIDENCE_INDEXED`：PR #33/#34；merge `fb607019...`；660-test、38 migration与Graphify gate |
-| 01-06R | Infra replacement | `PLANNED / PLANNING_PR_PENDING`：exact base `fb607019...`、new branch/worktree、13-file ownership、四文件delta与三类physical repair已固定 |
-| 01-07 | Eval | `FEATURE_REVIEW_PASS / LATEST_REPLAY_PENDING`：PR #29 current `b8ecbb0...`已独立PASS；post-Runtime/Infra latest replay仍待完成 |
-| 01-08 | W3 串行集成 | 三个 W2 feature PR逐个审查、重验并合并后，由 Integrator完成 Composition Root与纵向证据 |
+| 01-06R | Infra replacement | `COMPLETE / EVIDENCE_INDEXED`：PR #35/#36；merge `8e21652...`；83 focused / 40 migration / 745 full、review与Graphify gate |
+| 01-07 | Eval | `COMPLETE / EVIDENCE_INDEXED`：PR #29 merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、preflight/review与Graphify gate |
+| 01-07A | Runtime Trace alignment | `PLANNED / PLANNING_PR_PENDING`：exact base `eee1c0e...`、two-file ownership与一个RED→GREEN pair已固定 |
+| 01-08 | W3 串行集成 | 01-07A reviewed merge后，由 Integrator从新的exact SHA完成 Composition Root与纵向证据 |
 | Post-execution quality | review / fix / validation / Eval / Security / UAT / release decision | 01-08 exact integration head 已形成；本 gate 不计入 Plan count |
 
 #### Post-execution Quality Gate（不是 Plan）
@@ -192,7 +194,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 5/8；目标Packet完成10/15、当前正式签发14个Plan（01-08未签发）；01-05R complete，01-06R planned，01-07 feature review PASS但post-Infra latest replay/serial integration待完成` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 7/8；目标Packet完成12/16、当前正式签发15个Plan（01-08未签发）；01-05R/01-06R/01-07 complete，01-07A planned，01-08等待新的exact base` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
