@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from inspect import signature
 from pathlib import Path
 from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
+from pydantic import ValidationError
 
 from mini_agent.application.persistence import (
     P0PersistenceEnvelope,
@@ -117,6 +119,68 @@ EVAL_RUN_ID = UUID("00000000-0000-4000-8000-000000000801")
 RUN_ID = UUID("00000000-0000-4000-8000-000000000802")
 TRACE_REF = UUID("00000000-0000-4000-8000-000000000803")
 NOW = datetime(2026, 7, 27, 9, 0, tzinfo=UTC)
+EXECUTION_REF_1 = UUID("11111111-1111-4111-8111-111111111111")
+SCRIPT_EXECUTION_REF_1 = UUID("22222222-2222-4222-8222-222222222222")
+EXECUTION_REF_2 = UUID("33333333-3333-4333-8333-333333333333")
+SCRIPT_EXECUTION_REF_2 = UUID("44444444-4444-4444-8444-444444444444")
+EXECUTION_REF_3 = UUID("55555555-5555-4555-8555-555555555555")
+SCRIPT_EXECUTION_REF_3 = UUID("66666666-6666-4666-8666-666666666666")
+EXECUTION_REF_4 = UUID("77777777-7777-4777-8777-777777777777")
+SCRIPT_EXECUTION_REF_4 = UUID("88888888-8888-4888-8888-888888888888")
+UNKNOWN_EXECUTION_REF = UUID("99999999-9999-4999-8999-999999999999")
+EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF = {
+    "script:e2e01-01:success": "SUCCESS",
+    "script:e2e01-04-a:foreign-order": "FOREIGN_ORDER",
+    "script:e2e01-04-b:nonexistent-order": "NONEXISTENT_ORDER",
+    "script:sec-argument-binding:foreign-order": "ARGUMENT_BINDING_REJECTED",
+    "script:sec-argument-binding:nonexistent-order": "ARGUMENT_BINDING_REJECTED",
+    "script:fault-provider:zero-target-functions": (
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE"
+    ),
+    "script:fault-provider:multiple-target-functions": (
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE"
+    ),
+    "script:fault-provider:invalid-request-understanding-schema": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:source-authority-mismatch": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:trusted-field-override": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:unknown-tool-name": "UNKNOWN_TOOL_GATEWAY_REJECTED",
+    "script:fault-runtime:state-advanced-before-gate": (
+        "STALE_STATE_GATEWAY_REJECTED"
+    ),
+    "script:fault-presentation:zero-target-functions": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:multiple-target-functions": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:invalid-schema": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:fact-bearing-envelope": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+}
+
+
+class NonceFactorySpy:
+    def __init__(self, values: Sequence[UUID]) -> None:
+        self._values = tuple(values)
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> UUID:
+        self.calls.append((args, dict(kwargs)))
+        if args or kwargs:
+            raise AssertionError("nonce factory received semantic arguments")
+        index = len(self.calls) - 1
+        if index >= len(self._values):
+            raise AssertionError("nonce factory called more often than expected")
+        return self._values[index]
 
 
 def _tool_spec() -> ToolSpec:
@@ -965,15 +1029,108 @@ class SyntheticSut:
         )
 
 
+class BoundaryProbeSut:
+    def __init__(self) -> None:
+        self.received_calls: list[dict[str, object]] = []
+
+    async def execute_case(self, **kwargs: object) -> None:
+        self.received_calls.append(dict(kwargs))
+        return None
+
+
+class ResultBoundaryMutationSut:
+    def __init__(self, delegate: SyntheticSut, *, mutation: str) -> None:
+        self._delegate = delegate
+        self._mutation = mutation
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        result = await self._delegate.execute_case(**kwargs)
+        assert type(result) is EvalCaseSutResult
+        if self._mutation == "unknown_execution_ref":
+            return result.model_copy(
+                update={"execution_ref": UNKNOWN_EXECUTION_REF}
+            )
+        if self._mutation == "provider_execution_ref":
+            provider = kwargs["scripted_provider"]
+            return result.model_copy(
+                update={"execution_ref": provider.script_execution_ref}
+            )
+        if self._mutation in {
+            "semantic_evidence_case_id",
+            "semantic_observable_case_id",
+        }:
+            target = (
+                result.evidence
+                if self._mutation == "semantic_evidence_case_id"
+                else result.safe_observable
+            )
+            object.__setattr__(target, "case_id", "E2E01-01")
+            return result
+        if self._mutation == "trace_case_id":
+            trace_events = (
+                result.evidence.trace_events[0].model_copy(
+                    update={"case_id": "E2E01-01"}
+                ),
+                *result.evidence.trace_events[1:],
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={"trace_events": trace_events}
+                    )
+                }
+            )
+        if self._mutation == "observable_disagreement":
+            mismatched_observable = result.safe_observable.model_copy(
+                update={"user_outcome": AgentOutcome.BLOCKED}
+            )
+            return type(result)(
+                execution_ref=result.execution_ref,
+                evidence=result.evidence,
+                safe_observable=mismatched_observable,
+            )
+        raise AssertionError(f"unknown result mutation {self._mutation}")
+
+
+class ReplayWithoutProviderSut:
+    def __init__(self, delegate: SyntheticSut) -> None:
+        self._delegate = delegate
+        self._first_result: EvalCaseSutResult | None = None
+        self.calls = 0
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        self.calls += 1
+        if self._first_result is None:
+            self._first_result = await self._delegate.execute_case(**kwargs)
+            return self._first_result
+        return self._first_result
+
+
+class IncompleteThenStaleRefSut:
+    def __init__(self, delegate: SyntheticSut) -> None:
+        self._delegate = delegate
+        self._incomplete_ref: UUID | None = None
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        execution_input = kwargs["execution_input"]
+        if self._incomplete_ref is None:
+            self._incomplete_ref = execution_input.execution_ref
+            return None
+        result = await self._delegate.execute_case(**kwargs)
+        assert type(result) is EvalCaseSutResult
+        return result.model_copy(update={"execution_ref": self._incomplete_ref})
+
+
 def _harness(
     *,
-    sut: SyntheticSut | None = None,
+    sut: object | None = None,
     traces: InMemoryTraceCallbacks | None = None,
     port: InMemoryResultPort | None = None,
     grader_runner=None,
+    nonce_factory: Callable[..., UUID] | None = None,
 ) -> tuple[
     OfflineEvalHarness,
-    SyntheticSut,
+    object,
     InMemoryTraceCallbacks,
     InMemoryResultPort,
 ]:
@@ -983,13 +1140,18 @@ def _harness(
     traces.timeline = timeline
     port.timeline = timeline
     sut = sut or SyntheticSut(traces)
+    harness_arguments: dict[str, object] = {
+        "artifacts": ARTIFACTS,
+        "sut": sut,
+        "trace_callbacks": traces,
+        "result_port": cast(EvalResultPort, port),
+        "clock": lambda: NOW + timedelta(seconds=2),
+        "grader_runner": grader_runner,
+    }
+    if nonce_factory is not None:
+        harness_arguments["nonce_factory"] = nonce_factory
     harness = OfflineEvalHarness(
-        artifacts=ARTIFACTS,
-        sut=sut,
-        trace_callbacks=traces,
-        result_port=cast(EvalResultPort, port),
-        clock=lambda: NOW + timedelta(seconds=2),
-        grader_runner=grader_runner,
+        **harness_arguments,
     )
     return harness, sut, traces, port
 
@@ -1011,6 +1173,428 @@ def _run(
             script_ref_by_case=script_ref_by_case,
         )
     )
+
+
+def test_execution_only_sut_input_excludes_case_oracle_and_nested_setup() -> None:
+    source_case = ARTIFACTS.case_by_id("E2E01-01")
+    case_values = source_case.model_dump(mode="json")
+    source_message = dict(case_values["input"]["messages"][0])
+    source_message["setup_answer"] = {
+        "environment_fixture_ref": "order:oracle-only",
+        "expected_user_outcome": "COMPLETED",
+    }
+    case_input = dict(case_values["input"])
+    case_input["messages"] = [source_message]
+    case_input["oracle_only_top_level"] = {
+        "expected_control_result": "PASS",
+    }
+    case_values["input"] = case_input
+    case = EvalCaseArtifact.model_validate(case_values)
+    artifacts = ARTIFACTS.model_copy(
+        update={
+            "cases": tuple(
+                case if item.case_id == case.case_id else item
+                for item in ARTIFACTS.cases
+            )
+        }
+    )
+    probe = BoundaryProbeSut()
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness = OfflineEvalHarness(
+        artifacts=artifacts,
+        sut=probe,
+        trace_callbacks=traces,
+        result_port=cast(EvalResultPort, port),
+        clock=lambda: NOW + timedelta(seconds=2),
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert len(probe.received_calls) == 1
+    received = probe.received_calls[0]
+    assert set(received) == {
+        "execution_input",
+        "scripted_provider",
+        "runtime_fault",
+    }
+    execution_input = received["execution_input"]
+    assert set(type(execution_input).model_fields) == {
+        "execution_ref",
+        "messages",
+        "trusted_context_fixture_ref",
+    }
+    assert execution_input.execution_ref == EXECUTION_REF_1
+    assert execution_input.trusted_context_fixture_ref == (
+        source_case.input["trusted_context_fixture_ref"]
+    )
+    assert execution_input.messages == (
+        type(execution_input.messages[0])(
+            role="user",
+            content=source_case.input["messages"][0]["content"],
+        ),
+    )
+    assert set(type(execution_input.messages[0]).model_fields) == {
+        "role",
+        "content",
+    }
+    assert execution_input.model_dump() == {
+        "execution_ref": EXECUTION_REF_1,
+        "messages": (
+            {
+                "role": "user",
+                "content": source_case.input["messages"][0]["content"],
+            },
+        ),
+        "trusted_context_fixture_ref": (
+            source_case.input["trusted_context_fixture_ref"]
+        ),
+    }
+    assert received["scripted_provider"].script_execution_ref == (
+        SCRIPT_EXECUTION_REF_1
+    )
+    assert EXECUTION_REF_1 not in {
+        uuid5(NAMESPACE_URL, source_case.case_id),
+        uuid5(
+            NAMESPACE_URL,
+            tuple(source_case.input["model_script_refs"])[0],
+        ),
+    }
+    with pytest.raises(ValidationError):
+        type(execution_input)(
+            **execution_input.model_dump(),
+            case_id=source_case.case_id,
+        )
+    with pytest.raises(ValidationError):
+        execution_input.messages[0].content = "tampered"
+    message_type = type(execution_input.messages[0])
+    input_type = type(execution_input)
+    with pytest.raises(ValidationError):
+        message_type(role="assistant", content="not allowed")
+    with pytest.raises(ValidationError):
+        message_type(role="user", content="")
+    with pytest.raises(ValidationError):
+        input_type(
+            execution_ref=EXECUTION_REF_1,
+            messages=(),
+            trusted_context_fixture_ref=(
+                source_case.input["trusted_context_fixture_ref"]
+            ),
+        )
+    with pytest.raises(ValidationError):
+        input_type(
+            execution_ref=EXECUTION_REF_1,
+            messages=(
+                execution_input.messages[0],
+                execution_input.messages[0],
+            ),
+            trusted_context_fixture_ref=(
+                source_case.input["trusted_context_fixture_ref"]
+            ),
+        )
+
+
+def test_execution_ref_result_correlation_has_zero_argument_nonce_seam() -> None:
+    constructor_parameters = signature(OfflineEvalHarness.__init__).parameters
+
+    assert "nonce_factory" in constructor_parameters
+    assert set(EvalCaseSutResult.model_fields) == {
+        "execution_ref",
+        "evidence",
+        "safe_observable",
+    }
+    evidence_type = EvalCaseSutResult.model_fields["evidence"].annotation
+    observable_type = EvalCaseSutResult.model_fields["safe_observable"].annotation
+    assert "case_id" not in evidence_type.model_fields
+    assert "case_id" not in observable_type.model_fields
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown_execution_ref",
+        "provider_execution_ref",
+        "semantic_evidence_case_id",
+        "semantic_observable_case_id",
+        "trace_case_id",
+        "observable_disagreement",
+    ],
+)
+def test_result_correlation_rejects_unbound_spoofing_before_grading(
+    mutation: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(delegate, mutation=mutation)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_result_correlation_replay_wins_over_unexhausted_provider() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ReplayWithoutProviderSut(delegate)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    replayed = _run(harness, attempt=2)
+
+    assert first.execution_failures == ()
+    assert first.results[0].status is EvalResultStatus.PASS
+    assert replayed.results == ()
+    assert len(replayed.execution_failures) == 1
+    assert replayed.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_incomplete_exit_clears_correlation_before_later_stale_echo() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = IncompleteThenStaleRefSut(delegate)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    incomplete = _run(harness, attempt=1)
+    stale_echo = _run(harness, attempt=2)
+
+    assert incomplete.results == ()
+    assert incomplete.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert stale_echo.results == ()
+    assert stale_echo.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_nonce_factory_values_are_used_verbatim_and_unique_across_attempts() -> None:
+    probe = BoundaryProbeSut()
+    nonce_values = (
+        EXECUTION_REF_1,
+        SCRIPT_EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        SCRIPT_EXECUTION_REF_2,
+    )
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert all(
+        item.failure_phase is EvalExecutionFailurePhase.RESULT_COMPLETENESS
+        for outcome in (first, second)
+        for item in outcome.execution_failures
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(probe.received_calls) == 2
+    assert tuple(
+        call["execution_input"].execution_ref
+        for call in probe.received_calls
+    ) == (EXECUTION_REF_1, EXECUTION_REF_2)
+    assert tuple(
+        call["scripted_provider"].script_execution_ref
+        for call in probe.received_calls
+    ) == (SCRIPT_EXECUTION_REF_1, SCRIPT_EXECUTION_REF_2)
+    assert len(set(nonce_values)) == len(nonce_values)
+
+
+def test_nonce_factory_values_are_distinct_across_selected_cases() -> None:
+    probe = BoundaryProbeSut()
+    nonce_values = (
+        EXECUTION_REF_1,
+        SCRIPT_EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        SCRIPT_EXECUTION_REF_2,
+    )
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-04-A", "E2E01-04-B"),
+    )
+
+    assert outcome.results == ()
+    assert all(
+        failure.failure_phase is EvalExecutionFailurePhase.RESULT_COMPLETENESS
+        for failure in outcome.execution_failures
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(probe.received_calls) == 2
+    assert tuple(
+        call["execution_input"].execution_ref
+        for call in probe.received_calls
+    ) == (EXECUTION_REF_1, EXECUTION_REF_2)
+    assert tuple(
+        call["scripted_provider"].script_execution_ref
+        for call in probe.received_calls
+    ) == (SCRIPT_EXECUTION_REF_1, SCRIPT_EXECUTION_REF_2)
+
+
+@pytest.mark.parametrize(
+    "nonce_values",
+    [
+        (EXECUTION_REF_1, EXECUTION_REF_1),
+        (
+            uuid5(NAMESPACE_URL, "E2E01-01"),
+            SCRIPT_EXECUTION_REF_1,
+        ),
+    ],
+    ids=("execution-provider-collision", "deterministic-version-five-ref"),
+)
+def test_nonce_collision_or_non_uuid4_fails_result_completeness(
+    nonce_values: tuple[UUID, UUID],
+) -> None:
+    probe = BoundaryProbeSut()
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert probe.received_calls == []
+    assert port.results == {}
+    assert all(args == () and kwargs == {} for args, kwargs in nonce_factory.calls)
+
+
+@pytest.mark.parametrize(
+    "nonce_values",
+    [
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_2,
+        ),
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_1,
+        ),
+    ],
+    ids=("execution-ref-reuse", "script-execution-ref-reuse"),
+)
+def test_nonce_reuse_across_attempts_fails_before_second_sut_call(
+    nonce_values: tuple[UUID, UUID, UUID, UUID],
+) -> None:
+    probe = BoundaryProbeSut()
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert first.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert second.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert len(probe.received_calls) == 1
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_actual_mismatch_reaches_graders_and_persists_fail() -> None:
+    case = ARTIFACTS.case_by_id("E2E01-01")
+    provider = ScriptedModelProvider(
+        ARTIFACTS,
+        model_script_ref="script:e2e01-01:success",
+    )
+    actual = asyncio.run(provider.propose_next_move(_request(case)))
+    mismatched_move = actual.next_move_candidate.model_copy(
+        update={"arguments": {"order_id": "O-2001"}}
+    )
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides={
+            "request_understanding_output": actual.model_copy(
+                update={"next_move_candidate": mismatched_move}
+            )
+        },
+    )
+    harness, *_ = _harness(sut=sut, traces=traces)
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    request_grader = next(
+        item
+        for item in outcome.results[0].grader_results
+        if item.grader_name == "RequestUnderstandingGrader"
+    )
+    assert request_grader.status is EvalGraderStatus.FAIL
+    assert request_grader.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
 def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
@@ -1057,6 +1641,16 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     assert [event.event_type for event in final_trace].count(
         TraceEventType.EVAL_CASE_GRADED
     ) == 1
+    assert all(
+        event.case_id is None
+        for event in final_trace
+        if event.event_type is not TraceEventType.EVAL_CASE_GRADED
+    )
+    assert tuple(
+        event.case_id
+        for event in final_trace
+        if event.event_type is TraceEventType.EVAL_CASE_GRADED
+    ) == ("E2E01-01",)
 
 
 def test_missing_observation_provenance_fails_canonical_harness_grading() -> None:
@@ -1144,6 +1738,23 @@ def test_authenticated_expectations_pin_message_and_toolset_projection() -> None
     assert expectations.expected_model_visible_toolset_hash == (
         compute_model_visible_toolset_hash((get_order_tool_spec(),))
     )
+
+
+def test_authenticated_case_script_selects_closed_trace_variant() -> None:
+    selected: dict[str, str] = {}
+    for case in ARTIFACTS.cases:
+        for script_ref in tuple(case.input["model_script_refs"]):
+            script = ARTIFACTS.script_by_ref(script_ref)
+            expectations = build_authenticated_case_expectations(
+                artifacts=ARTIFACTS,
+                case=case,
+                script=script,
+            )
+            selected[script_ref] = expectations.trace_variant
+
+    assert selected == EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF
+    assert len(selected) == 16
+    assert len(set(selected.values())) == 9
 
 
 def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None:

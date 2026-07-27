@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from mini_agent.application.ports import ModelProvider
 from mini_agent.application.records import ProviderProtocolError
@@ -26,12 +28,17 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingOutput,
 )
 from mini_agent.core.tool_system import ToolSpec, compute_model_visible_toolset_hash
-from mini_agent.evaluation.artifacts import load_e2e01_artifacts
+from mini_agent.evaluation.artifacts import (
+    LoadedE2E01Artifacts,
+    ModelScriptArtifact,
+    load_e2e01_artifacts,
+)
 from mini_agent.evaluation.scripted_provider import ScriptedModelProvider
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MESSAGE_REF = UUID("00000000-0000-4000-8000-000000000101")
+SCRIPT_EXECUTION_REF = UUID("abababab-abab-4bab-8bab-abababababab")
 
 
 def _tool_spec() -> ToolSpec:
@@ -82,6 +89,223 @@ def _provider(script_ref: str) -> ScriptedModelProvider:
     provider = ScriptedModelProvider(artifacts, model_script_ref=script_ref)
     assert isinstance(provider, ModelProvider)
     return provider
+
+
+@dataclass(frozen=True, slots=True)
+class _ReachableState:
+    field_names: frozenset[str]
+    string_values: frozenset[str]
+    value_types: frozenset[type[object]]
+
+
+def _reachable_state(
+    value: object,
+    *,
+    visited: set[int] | None = None,
+) -> _ReachableState:
+    visited = visited if visited is not None else set()
+    value_type = type(value)
+    types: set[type[object]] = {value_type}
+    if value is None:
+        return _ReachableState(frozenset(), frozenset(), frozenset(types))
+    if value_type is str:
+        return _ReachableState(
+            frozenset(),
+            frozenset({value}),
+            frozenset(types),
+        )
+    if value_type in {int, float, bool, bytes, UUID}:
+        return _ReachableState(frozenset(), frozenset(), frozenset(types))
+    value_id = id(value)
+    if value_id in visited:
+        return _ReachableState(frozenset(), frozenset(), frozenset())
+    visited.add(value_id)
+    names: set[str] = set()
+    strings: set[str] = set()
+
+    def merge(item: object) -> None:
+        reachable = _reachable_state(item, visited=visited)
+        names.update(reachable.field_names)
+        strings.update(reachable.string_values)
+        types.update(reachable.value_types)
+
+    if isinstance(value, BaseModel):
+        names.update(type(value).model_fields)
+        for field_name in type(value).model_fields:
+            merge(getattr(value, field_name))
+        return _ReachableState(
+            frozenset(names),
+            frozenset(strings),
+            frozenset(types),
+        )
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str):
+                names.add(key)
+            else:
+                merge(key)
+            merge(item)
+        return _ReachableState(
+            frozenset(names),
+            frozenset(strings),
+            frozenset(types),
+        )
+    if isinstance(value, (tuple, list, set, frozenset)):
+        for item in value:
+            merge(item)
+        return _ReachableState(
+            frozenset(names),
+            frozenset(strings),
+            frozenset(types),
+        )
+    if is_dataclass(value):
+        for item in fields(value):
+            names.add(item.name)
+            merge(getattr(value, item.name))
+    seen_slots: set[str] = set()
+    for owner in type(value).__mro__:
+        raw_slots = owner.__dict__.get("__slots__", ())
+        slots = (raw_slots,) if isinstance(raw_slots, str) else tuple(raw_slots)
+        for field_name in slots:
+            if (
+                field_name in {"__dict__", "__weakref__"}
+                or field_name in seen_slots
+                or not hasattr(value, field_name)
+            ):
+                continue
+            seen_slots.add(field_name)
+            names.add(field_name.removeprefix("_"))
+            merge(getattr(value, field_name))
+    if hasattr(value, "__dict__"):
+        for field_name, item in vars(value).items():
+            names.add(field_name.removeprefix("_"))
+            merge(item)
+    return _ReachableState(
+        frozenset(names),
+        frozenset(strings),
+        frozenset(types),
+    )
+
+
+def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> None:
+    artifacts = load_e2e01_artifacts(REPO_ROOT, candidate_version="candidate")
+    source = artifacts.script_by_ref("script:e2e01-01:success")
+    first_step = dict(source.steps[0])
+    first_step.update(
+        {
+            "grader_answer": {
+                "expected_control_result": "PASS",
+                "observable_equivalence": "SAME",
+            },
+            "setup_fixture_ref": "order:oracle-only",
+        }
+    )
+    script = ModelScriptArtifact(
+        model_script_ref=source.model_script_ref,
+        case_refs=source.case_refs,
+        steps=(first_step, *source.steps[1:]),
+        expected_control_result=source.expected_control_result,
+        runtime_fault=source.runtime_fault,
+    )
+    projected_artifacts = artifacts.model_copy(
+        update={
+            "scripts": tuple(
+                script
+                if item.model_script_ref == script.model_script_ref
+                else item
+                for item in artifacts.scripts
+            )
+        }
+    )
+
+    provider = ScriptedModelProvider(
+        projected_artifacts,
+        model_script_ref=script.model_script_ref,
+    )
+    reachable = _reachable_state(provider)
+
+    assert not hasattr(provider, "model_script_ref")
+    assert {
+        "model_script_ref",
+        "case_refs",
+        "expected_control_result",
+        "grader_answer",
+        "observable_equivalence",
+        "setup_fixture_ref",
+        "fact_source",
+    }.isdisjoint(reachable.field_names)
+    assert {
+        script.model_script_ref,
+        *script.case_refs,
+        "DETERMINISTIC_ORDER_SUMMARY_V1",
+        "SAFE_ORDER_OBSERVATION",
+        "order:oracle-only",
+        "PASS",
+        "SAME",
+    }.isdisjoint(reachable.string_values)
+    assert {
+        ModelScriptArtifact,
+        LoadedE2E01Artifacts,
+        dict,
+        list,
+    }.isdisjoint(reachable.value_types)
+    step_types = {
+        value_type
+        for value_type in reachable.value_types
+        if value_type.__module__ == "mini_agent.evaluation.scripted_provider"
+        and value_type.__name__.endswith("Step")
+    }
+    assert step_types
+    assert all(
+        is_dataclass(value_type)
+        and value_type.__dataclass_params__.frozen
+        and "__slots__" in value_type.__dict__
+        for value_type in step_types
+    )
+
+    output = asyncio.run(provider.propose_next_move(_request()))
+    assert output.task_delta_candidates[0].candidate_id != uuid5(
+        NAMESPACE_URL,
+        f"{script.model_script_ref}:{MESSAGE_REF}",
+    )
+
+
+def test_execution_only_provider_drops_fact_bearing_raw_payload() -> None:
+    artifacts = load_e2e01_artifacts(REPO_ROOT, candidate_version="candidate")
+    script = artifacts.script_by_ref(
+        "script:fault-presentation:fact-bearing-envelope"
+    )
+    provider = ScriptedModelProvider(
+        artifacts,
+        model_script_ref=script.model_script_ref,
+    )
+
+    reachable = _reachable_state(provider)
+
+    assert {
+        "raw_function_arguments",
+        "free_text",
+        "validation_model",
+        "raw_envelope_disposition",
+    }.isdisjoint(reachable.field_names)
+    assert {
+        script.model_script_ref,
+        *script.case_refs,
+        "订单 O-1001 已发货",
+        "FIXED_SAFE_PROCESSING_ERROR",
+    }.isdisjoint(reachable.string_values)
+    assert {
+        ModelScriptArtifact,
+        LoadedE2E01Artifacts,
+        dict,
+        list,
+    }.isdisjoint(reachable.value_types)
+
+    request_output = asyncio.run(provider.propose_next_move(_request()))
+    assert request_output.next_move_candidate.arguments == {"order_id": "O-1001"}
+    with pytest.raises(ProviderProtocolError):
+        asyncio.run(provider.plan_presentation(_presentation_input()))
+    provider.assert_exhausted()
 
 
 @pytest.mark.parametrize(
