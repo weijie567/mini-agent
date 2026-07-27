@@ -75,6 +75,12 @@ class ScriptedModelProvider:
         else:
             raise ArtifactContractError("unknown scripted Runtime fault")
 
+    @property
+    def model_script_ref(self) -> str:
+        """Authenticated scenario identity used by the injected Eval SUT."""
+
+        return self._script.model_script_ref
+
     async def propose_next_move(
         self,
         request: RequestUnderstandingInput,

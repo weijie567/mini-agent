@@ -23,14 +23,41 @@ from mini_agent.application.records import (
     EvalResultStatus,
     InsertOnlyWriteResult,
 )
+from mini_agent.core.memory import (
+    ContextManifest,
+    ObservationVisibility,
+    OrderObservation,
+    TaskStateRefAndVersion,
+    TokenCounts,
+    VersionedRecordRef,
+)
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
 )
 from mini_agent.core.presentation import PresentationInput, PresentationPurpose
-from mini_agent.core.request_understanding import RequestUnderstandingInput
-from mini_agent.core.tool_system import ToolSpec, compute_model_visible_toolset_hash
+from mini_agent.core.request_understanding import (
+    InputAuthority,
+    RequestUnderstandingInput,
+)
+from mini_agent.core.task_state import (
+    InputBinding,
+    InputValidationStatus,
+    RequestUnitRecord,
+    TaskRecord,
+)
+from mini_agent.core.tool_system import (
+    GateDecision,
+    GateDecisionValue,
+    GateReasonCode,
+    ToolCallRecord,
+    ToolCallStatus,
+    ToolEffect,
+    ToolResultOutcome,
+    ToolSpec,
+    compute_model_visible_toolset_hash,
+)
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
@@ -44,6 +71,7 @@ from mini_agent.evaluation.artifacts import (
     load_e2e01_artifacts,
 )
 from mini_agent.evaluation.graders import (
+    EvalCaseExpectations,
     EvalEvidence,
     GradingOutcome,
     SafeCaseObservable,
@@ -55,6 +83,7 @@ from mini_agent.evaluation.harness import (
     EvalHarnessCommandError,
     OfflineEvalHarness,
     append_qwen_not_run_record,
+    build_authenticated_case_expectations,
     build_qwen_baseline_preflight,
 )
 from mini_agent.evaluation.scripted_provider import (
@@ -236,6 +265,160 @@ class InMemoryTraceCallbacks:
         return tuple(self.events_by_ref[trace_ref])
 
 
+def _case_uuid(case_id: str, label: str) -> UUID:
+    return uuid5(NAMESPACE_URL, f"synthetic:{case_id}:{label}")
+
+
+def _synthetic_trace(
+    *,
+    expectations: EvalCaseExpectations,
+    run_id: UUID,
+    message_ref: UUID,
+    binding: InputBinding | None,
+    task: TaskRecord | None,
+    request_unit: RequestUnitRecord | None,
+    gate: GateDecision | None,
+    tool_call: ToolCallRecord | None,
+    observation: OrderObservation | None,
+    manifests: tuple[ContextManifest, ...],
+) -> tuple[TraceEvent, ...]:
+    exact_counts = {
+        item.event_type: item.count
+        for item in expectations.expected_event_counts
+    }
+    events: list[TraceEvent] = []
+    manifest_index = 0
+    sequence = 0
+    for event_type in expectations.required_trace_events:
+        if event_type is TraceEventType.EVAL_CASE_GRADED:
+            continue
+        count = exact_counts.get(event_type, 1)
+        for _ in range(count):
+            sequence += 1
+            values: dict[str, object] = {
+                "trace_event_id": _case_uuid(
+                    expectations.case_id,
+                    f"trace:{sequence}",
+                ),
+                "event_type": event_type,
+                "occurred_at": NOW + timedelta(milliseconds=sequence),
+                "run_id": run_id,
+                "case_id": expectations.case_id,
+            }
+            if event_type is TraceEventType.MESSAGE_ACCEPTED:
+                values["message_ref"] = message_ref
+            elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
+                manifest = manifests[manifest_index]
+                manifest_index += 1
+                values.update(
+                    {
+                        "context_manifest_id": manifest.context_manifest_id,
+                        "model_call_id": manifest.model_call_id,
+                        "tool_registry_version": (
+                            manifest.tool_registry_version
+                        ),
+                        "model_visible_toolset_hash": (
+                            manifest.model_visible_toolset_hash
+                        ),
+                    }
+                )
+            elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
+                assert binding is not None
+                values["input_binding_ref"] = binding.binding_id
+            elif event_type is TraceEventType.TASK_STATE_CHANGED:
+                assert task is not None and request_unit is not None
+                values.update(
+                    {
+                        "task_id": task.task_id,
+                        "request_unit_id": request_unit.request_unit_id,
+                    }
+                )
+            elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
+                values["validated_task_state_version"] = 1
+            elif event_type is TraceEventType.GATE_DECISION_RECORDED:
+                assert gate is not None
+                values.update(
+                    {
+                        "gate_decision": gate.decision,
+                        "gate_reason_code": gate.reason_code,
+                    }
+                )
+            elif event_type in {
+                TraceEventType.TOOL_CALL_CREATED,
+                TraceEventType.TOOL_CALL_STARTED,
+                TraceEventType.TOOL_CALL_SUCCEEDED,
+                TraceEventType.TOOL_CALL_FAILED,
+                TraceEventType.TOOL_CALL_TIMED_OUT,
+                TraceEventType.TOOL_CALL_INTERRUPTED,
+            }:
+                assert tool_call is not None
+                status_by_type = {
+                    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+                    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+                    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+                    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+                    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+                    TraceEventType.TOOL_CALL_INTERRUPTED: (
+                        ToolCallStatus.INTERRUPTED
+                    ),
+                }
+                values.update(
+                    {
+                        "tool_call_id": tool_call.tool_call_id,
+                        "tool_call_terminal_status": status_by_type[event_type],
+                    }
+                )
+            elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+                assert tool_call is not None
+                values.update(
+                    {
+                        "tool_call_id": tool_call.tool_call_id,
+                        "safe_tool_outcome": (
+                            ToolResultOutcome.SUCCESS
+                            if tool_call.status is ToolCallStatus.SUCCEEDED
+                            else ToolResultOutcome.BUSINESS_FAILURE
+                        ),
+                    }
+                )
+            elif event_type is TraceEventType.OBSERVATION_RECORDED:
+                assert observation is not None
+                values["observation_ref"] = observation.observation_id
+            elif event_type is TraceEventType.RUN_STOPPED:
+                values.update(
+                    {
+                        "user_outcome": expectations.expected_outcome,
+                        "stop_reason": expectations.expected_stop_reason,
+                    }
+                )
+            events.append(TraceEvent(**values))
+    return tuple(events)
+
+
+def _synthetic_message(
+    expectations: EvalCaseExpectations,
+    observation: OrderObservation | None,
+) -> str:
+    if (
+        expectations.expected_response_policy
+        == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE"
+    ):
+        return "未找到可访问的订单，请核对订单号后重试。"
+    if expectations.expected_response_policy == "FIXED_SAFE_PROCESSING_ERROR":
+        return "当前无法安全处理该请求，请稍后重试。"
+    assert observation is not None
+    summary = observation.normalized_value
+    return " ".join(
+        (
+            summary.order_number,
+            summary.status.value,
+            summary.line_items[0].product_name,
+            str(summary.line_items[0].quantity),
+            summary.ordered_at.isoformat(),
+            summary.status_updated_at.isoformat(),
+        )
+    )
+
+
 class SyntheticSut:
     def __init__(
         self,
@@ -266,78 +449,267 @@ class SyntheticSut:
         if self.fault == "missing":
             return None
         assert isinstance(scripted_provider, ModelProvider)
-        await scripted_provider.propose_next_move(_request(case))
+        script = ARTIFACTS.script_by_ref(
+            scripted_provider.model_script_ref
+        )
+        expectations = build_authenticated_case_expectations(
+            artifacts=ARTIFACTS,
+            case=case,
+            script=script,
+        )
+        request_output = await scripted_provider.propose_next_move(_request(case))
         if case.case_id == "E2E01-01":
             await scripted_provider.plan_presentation(_presentation_input())
 
-        outcome = (
-            AgentOutcome.COMPLETED
-            if case.case_id == "E2E01-01"
-            else AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
-        )
-        stop_reason = (
-            StopReason.GOAL_COMPLETED
-            if case.case_id == "E2E01-01"
-            else StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE
-        )
         run_id = (
             RUN_ID
             if case.case_id == "E2E01-01"
-            else uuid5(NAMESPACE_URL, f"synthetic-run:{case.case_id}")
+            else _case_uuid(case.case_id, "run")
         )
         trace_ref = (
             TRACE_REF
             if case.case_id == "E2E01-01"
-            else uuid5(NAMESPACE_URL, f"synthetic-trace:{case.case_id}")
+            else _case_uuid(case.case_id, "trace")
         )
-        initial_trace = (
-            TraceEvent(
-                trace_event_id=UUID(int=810),
-                event_type=TraceEventType.RUN_STARTED,
-                occurred_at=NOW,
+        message_ref = request_output.message_ref
+        binding: InputBinding | None = None
+        task: TaskRecord | None = None
+        request_unit: RequestUnitRecord | None = None
+        if expectations.expected_task_status is not None:
+            binding = InputBinding(
+                binding_id=_case_uuid(case.case_id, "binding"),
+                name="order_id",
+                normalized_value=expectations.expected_binding_order_id,
+                authority=InputAuthority.USER_CLAIM,
+                source_refs=(message_ref,),
+                validation_status=InputValidationStatus.ACCEPTED,
+                confirmed_by_user=True,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+            task = TaskRecord(
+                task_id=_case_uuid(case.case_id, "task"),
+                owner_customer_id=expectations.trusted_customer_id,
+                status=expectations.expected_task_status,
+                state_version=expectations.expected_task_state_version,
+                created_at=NOW,
+                updated_at=NOW + timedelta(seconds=1),
+            )
+            request_unit = RequestUnitRecord(
+                request_unit_id=_case_uuid(case.case_id, "request-unit"),
+                task_id=task.task_id,
+                goal_text="查询指定订单状态",
+                goal_source_refs=(message_ref,),
+                input_binding_refs=(binding.binding_id,),
+                status=expectations.expected_request_unit_status,
+                state_version=(
+                    expectations.expected_request_unit_state_version
+                ),
+                created_at=NOW,
+                updated_at=NOW + timedelta(seconds=1),
+            )
+
+        context_ids = tuple(
+            _case_uuid(case.case_id, f"context:{index}")
+            for index in range(expectations.expected_model_calls)
+        )
+        model_call_ids = tuple(
+            _case_uuid(case.case_id, f"model-call:{index}")
+            for index in range(expectations.expected_model_calls)
+        )
+        gate: GateDecision | None = None
+        if expectations.expected_gate_decision is not None:
+            assert binding is not None
+            failed_field_by_reason = {
+                GateReasonCode.ARGUMENT_BINDING_MISMATCH: (
+                    "argument_binding_valid"
+                ),
+                GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
+                GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
+            }
+            checks = {
+                "snapshot_match": True,
+                "registration_valid": True,
+                "schema_valid": True,
+                "trusted_field_valid": True,
+                "argument_binding_valid": True,
+                "budget_valid": True,
+                "progress_valid": True,
+                "state_version_valid": True,
+                "action_boundary_valid": True,
+            }
+            if expectations.expected_gate_reason is not None:
+                checks[
+                    failed_field_by_reason[expectations.expected_gate_reason]
+                ] = False
+            gate = GateDecision(
+                gate_decision_id=_case_uuid(case.case_id, "gate"),
+                model_call_id=model_call_ids[0],
+                context_manifest_id=context_ids[0],
+                provider_tool_call_id="synthetic-provider-call",
+                requested_provider_tool_name=(
+                    expectations.expected_requested_tool_name
+                ),
+                resolved_canonical_tool_name=(
+                    None
+                    if expectations.expected_gate_reason
+                    is GateReasonCode.TOOL_NOT_REGISTERED
+                    else "get_order"
+                ),
+                argument_binding_refs=(binding.binding_id,),
+                proposed_base_task_state_version=None,
+                validated_task_state_version=1,
+                decision=expectations.expected_gate_decision,
+                reason_code=expectations.expected_gate_reason,
+                decided_at=NOW,
+                **checks,
+            )
+
+        observation: OrderObservation | None = None
+        if expectations.expected_observations == 1:
+            projection = _presentation_input().order_summary
+            observation = OrderObservation(
+                observation_id=_case_uuid(case.case_id, "observation"),
+                source_tool="get_order",
+                source_resource_ref=expectations.expected_binding_order_id,
+                source_version="order-v7",
+                normalized_type="ORDER_SUMMARY",
+                normalized_value=projection,
+                observed_at=NOW,
+                recorded_at=NOW,
+                visibility=ObservationVisibility.MODEL_VISIBLE,
+            )
+        tool_call: ToolCallRecord | None = None
+        if expectations.expected_tool_calls == 1:
+            assert (
+                binding is not None
+                and task is not None
+                and request_unit is not None
+                and gate is not None
+            )
+            status = expectations.expected_tool_call_status
+            tool_call = ToolCallRecord(
+                tool_call_id=_case_uuid(case.case_id, "tool-call"),
                 run_id=run_id,
-                case_id=case.case_id,
-            ),
-            TraceEvent(
-                trace_event_id=UUID(int=811),
-                event_type=TraceEventType.RUN_STOPPED,
-                occurred_at=NOW + timedelta(seconds=1),
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                model_call_id=model_call_ids[0],
+                context_manifest_id=context_ids[0],
+                gate_decision_id=gate.gate_decision_id,
+                provider_tool_call_id="synthetic-provider-call",
+                canonical_tool_name="get_order",
+                tool_registry_version=(
+                    expectations.expected_tool_registry_version
+                ),
+                validated_task_state_version=1,
+                argument_binding_refs=(binding.binding_id,),
+                effect=ToolEffect.READ,
+                attempt_count=1,
+                status=status,
+                started_at=NOW,
+                finished_at=NOW + timedelta(milliseconds=500),
+                failure_code=(
+                    None
+                    if status is ToolCallStatus.SUCCEEDED
+                    else "NOT_FOUND_OR_NOT_ACCESSIBLE"
+                ),
+                result_ref=(
+                    observation.observation_id
+                    if observation is not None
+                    else None
+                ),
+            )
+        manifests = tuple(
+            ContextManifest(
+                context_manifest_id=context_id,
                 run_id=run_id,
-                case_id=case.case_id,
-                user_outcome=outcome,
-                stop_reason=stop_reason,
-            ),
+                model_call_id=model_call_ids[index],
+                tool_registry_version=(
+                    expectations.expected_tool_registry_version
+                ),
+                model_visible_toolset_hash=compute_model_visible_toolset_hash(
+                    (_tool_spec(),)
+                ),
+                selected_message_refs=(message_ref,),
+                task_state_ref_and_version=(
+                    TaskStateRefAndVersion(
+                        task_id=task.task_id,
+                        state_version=1,
+                    )
+                    if task is not None
+                    else None
+                ),
+                observation_refs_and_versions=(
+                    (
+                        VersionedRecordRef(
+                            record_ref=observation.observation_id,
+                            version="order-v7",
+                        ),
+                    )
+                    if observation is not None
+                    and index == len(context_ids) - 1
+                    else ()
+                ),
+                redaction_policy_version="p0-redaction-v1",
+                token_counts=TokenCounts(),
+                assembled_at=NOW + timedelta(milliseconds=index),
+            )
+            for index, context_id in enumerate(context_ids)
+        )
+        initial_trace = _synthetic_trace(
+            expectations=expectations,
+            run_id=run_id,
+            message_ref=message_ref,
+            binding=binding,
+            task=task,
+            request_unit=request_unit,
+            gate=gate,
+            tool_call=tool_call,
+            observation=observation,
+            manifests=manifests,
         )
         self.traces.seed(trace_ref, initial_trace)
+        observable_values: dict[str, object] = {
+            "case_id": case.case_id,
+            "http_status": expectations.expected_http_status,
+            "user_outcome": expectations.expected_outcome,
+            "response_policy": expectations.expected_response_policy,
+            "ordinary_trace_shape": ordinary_trace_shape(initial_trace),
+            "model_calls": expectations.expected_model_calls,
+        }
+        observable_values.update(self.observable_overrides)
+        observable = SafeCaseObservable(**observable_values)
         evidence_values: dict[str, object] = {
             "case_id": case.case_id,
-            "observed_outcome": outcome,
+            "observed_outcome": expectations.expected_outcome,
             "trace_ref": trace_ref,
             "trace_events": initial_trace,
-            "required_trace_events": (
-                TraceEventType.RUN_STARTED,
-                TraceEventType.RUN_STOPPED,
-                TraceEventType.EVAL_CASE_GRADED,
-            ),
-            "expected_event_counts": (
-                {
-                    "event_type": TraceEventType.EVAL_CASE_GRADED,
-                    "count": 1,
-                },
-            ),
+            "safe_observable": observable,
             "run_record": AgentRunRecord(
                 run_id=run_id,
-                status=AgentRunStatus.COMPLETED,
+                status=expectations.expected_run_status,
                 provider_lane="offline_gate",
                 started_at=NOW,
                 completed_at=NOW + timedelta(seconds=1),
-                stop_reason=stop_reason,
+                stop_reason=expectations.expected_stop_reason,
             ),
             "agent_result": AgentRunResult(
                 run_id=run_id,
-                outcome=outcome,
-                message="合成结果",
+                outcome=expectations.expected_outcome,
+                message=_synthetic_message(expectations, observation),
             ),
+            "request_understanding_output": request_output,
+            "input_bindings": (binding,) if binding is not None else (),
+            "task_records": (task,) if task is not None else (),
+            "request_units": (
+                (request_unit,) if request_unit is not None else ()
+            ),
+            "gate_decisions": (gate,) if gate is not None else (),
+            "tool_calls": (tool_call,) if tool_call is not None else (),
+            "observations": (
+                (observation,) if observation is not None else ()
+            ),
+            "context_manifests": manifests,
             "schema_assertions_pass": True,
             "identity_boundary_assertions_pass": True,
             "request_understanding_assertions_pass": True,
@@ -353,22 +725,9 @@ class SyntheticSut:
         }
         evidence_values.update(self.evidence_overrides)
         evidence = EvalEvidence(**evidence_values)
-        observable_values: dict[str, object] = {
-            "case_id": case.case_id,
-            "http_status": 200,
-            "user_outcome": outcome,
-            "response_policy": (
-                "DETERMINISTIC_ORDER_SUMMARY_V1"
-                if case.case_id == "E2E01-01"
-                else "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE"
-            ),
-            "ordinary_trace_shape": ordinary_trace_shape(initial_trace),
-            "model_calls": 2 if case.case_id == "E2E01-01" else 1,
-        }
-        observable_values.update(self.observable_overrides)
         return EvalCaseSutResult(
             evidence=evidence,
-            safe_observable=SafeCaseObservable(**observable_values),
+            safe_observable=observable,
         )
 
 
@@ -428,9 +787,10 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     def recording_grader(
         configured: Sequence[str],
         evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
     ) -> GradingOutcome:
         timeline.append(f"grade:{','.join(configured)}")
-        return grade_evidence(configured, evidence)
+        return grade_evidence(configured, evidence, expectations)
 
     harness, _sut, traces, port = _harness(
         traces=traces,
@@ -465,14 +825,11 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     ) == 1
 
 
-def test_expected_assertion_and_critical_failure_persist_case_fail() -> None:
+def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None:
     traces = InMemoryTraceCallbacks()
     sut = SyntheticSut(
         traces,
-        evidence_overrides={
-            "disclosure_assertions_pass": False,
-            "critical_failures": (CriticalFailureCode.CF_01,),
-        },
+        evidence_overrides={"input_bindings": ()},
     )
     harness, _sut, _traces, _port = _harness(sut=sut, traces=traces)
     outcome = _run(harness)
@@ -480,7 +837,7 @@ def test_expected_assertion_and_critical_failure_persist_case_fail() -> None:
     assert outcome.command_passed is False
     assert outcome.execution_failures == ()
     assert outcome.results[0].status is EvalResultStatus.FAIL
-    assert outcome.results[0].critical_failures == (CriticalFailureCode.CF_01,)
+    assert CriticalFailureCode.CF_14 in outcome.results[0].critical_failures
 
 
 @pytest.mark.parametrize(
@@ -556,6 +913,7 @@ def test_execution_faults_write_safe_failure_not_fabricated_case_fail(
     def grading_fault(
         _configured: Sequence[str],
         _evidence: EvalEvidence,
+        _expectations: EvalCaseExpectations,
     ) -> GradingOutcome:
         raise RuntimeError("raw-grader-secret")
 
@@ -746,10 +1104,7 @@ def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
 
 def test_runtime_fault_directive_is_passed_through_the_closed_sut_seam() -> None:
     traces = InMemoryTraceCallbacks()
-    sut = SyntheticSut(
-        traces,
-        evidence_overrides={"error_mapping_assertions_pass": False},
-    )
+    sut = SyntheticSut(traces)
     harness, sut, _traces, _port = _harness(sut=sut, traces=traces)
     outcome = _run(
         harness,
@@ -761,7 +1116,7 @@ def test_runtime_fault_directive_is_passed_through_the_closed_sut_seam() -> None
         },
     )
 
-    assert outcome.results[0].status is EvalResultStatus.FAIL
+    assert outcome.results[0].status is EvalResultStatus.PASS
     assert sut.last_runtime_fault == RuntimeFaultDirective(
         behavior="ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE",
         boundary="AFTER_REVALIDATION_BEFORE_GATE",

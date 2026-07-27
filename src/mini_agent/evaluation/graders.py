@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Protocol
+from typing import Annotated, Protocol
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -19,13 +19,35 @@ from mini_agent.application.records import (
     EvalResultStatus,
 )
 from mini_agent.core.common import AuditOnlyModel
-from mini_agent.core.memory import ContextManifest, OrderObservation
-from mini_agent.core.request_understanding import RequestUnderstandingOutput
-from mini_agent.core.task_state import InputBinding, RequestUnitRecord, TaskRecord
-from mini_agent.core.tool_system import GateDecision, ToolCallRecord
+from mini_agent.core.memory import (
+    ContextManifest,
+    ObservationVisibility,
+    OrderObservation,
+)
+from mini_agent.core.request_understanding import (
+    InputAuthority,
+    NextMoveKind,
+    RequestUnderstandingOutput,
+)
+from mini_agent.core.task_state import (
+    InputBinding,
+    RequestUnitRecord,
+    TaskRecord,
+    TaskStatus,
+)
+from mini_agent.core.tool_system import (
+    GateDecision,
+    GateDecisionValue,
+    GateReasonCode,
+    ToolCallRecord,
+    ToolCallStatus,
+    ToolEffect,
+)
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
+    AgentRunStatus,
+    StopReason,
     TraceEvent,
     TraceEventType,
 )
@@ -57,16 +79,123 @@ class TraceEventCountExpectation(AuditOnlyModel):
     count: Annotated[int, Field(ge=0)]
 
 
+class SafeTraceShapeEntry(AuditOnlyModel):
+    event_type: TraceEventType
+    count: Annotated[int, Field(ge=1)]
+    status: str | None = None
+    reason: str | None = None
+
+
+class SafeCaseObservable(AuditOnlyModel):
+    case_id: str
+    http_status: Annotated[int, Field(ge=100, le=599)]
+    user_outcome: AgentOutcome
+    response_policy: str
+    ordinary_trace_shape: tuple[SafeTraceShapeEntry, ...]
+    model_calls: Annotated[int, Field(ge=0)]
+
+
+class EvalCaseExpectations(AuditOnlyModel):
+    """Authenticated, artifact-derived assertions supplied by the Harness.
+
+    This model is deliberately separate from :class:`EvalEvidence`: the SUT
+    may report observations, but it cannot choose the standard against which
+    those observations are graded.
+    """
+
+    case_id: str
+    trusted_customer_id: str
+    expected_http_status: Annotated[int, Field(ge=100, le=599)]
+    expected_outcome: AgentOutcome
+    expected_run_status: AgentRunStatus
+    expected_stop_reason: StopReason
+    expected_response_policy: str
+    request_understanding_required: bool
+    expected_binding_order_id: str | None = None
+    expected_next_move_order_id: str | None = None
+    expected_requested_tool_name: str | None = None
+    expected_task_status: TaskStatus | None = None
+    expected_request_unit_status: TaskStatus | None = None
+    expected_task_state_version: Annotated[int, Field(ge=1)] | None = None
+    expected_request_unit_state_version: (
+        Annotated[int, Field(ge=1)] | None
+    ) = None
+    expected_gate_decision: GateDecisionValue | None = None
+    expected_gate_reason: GateReasonCode | None = None
+    expected_tool_call_status: ToolCallStatus | None = None
+    expected_tool_calls: Annotated[int, Field(ge=0)]
+    expected_observations: Annotated[int, Field(ge=0)]
+    expected_model_calls: Annotated[int, Field(ge=0)]
+    expected_presentation_model_calls: Annotated[int, Field(ge=0)]
+    expected_tool_registry_version: str
+    required_trace_events: tuple[TraceEventType, ...]
+    forbidden_trace_events: tuple[TraceEventType, ...] = ()
+    expected_event_counts: tuple[TraceEventCountExpectation, ...] = ()
+    applicable_critical_failures: tuple[CriticalFailureCode, ...] = ()
+
+    @model_validator(mode="after")
+    def expectations_are_closed_and_unambiguous(
+        self,
+    ) -> "EvalCaseExpectations":
+        for values, label in (
+            (self.required_trace_events, "required Trace event types"),
+            (self.forbidden_trace_events, "forbidden Trace event types"),
+            (
+                tuple(item.event_type for item in self.expected_event_counts),
+                "Trace count expectations",
+            ),
+            (
+                self.applicable_critical_failures,
+                "applicable Critical failures",
+            ),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} must be unique")
+        if set(self.required_trace_events) & set(self.forbidden_trace_events):
+            raise ValueError("required and forbidden Trace events overlap")
+        task_shape = (
+            self.expected_task_status,
+            self.expected_request_unit_status,
+            self.expected_task_state_version,
+            self.expected_request_unit_state_version,
+        )
+        if any(value is None for value in task_shape) and any(
+            value is not None for value in task_shape
+        ):
+            raise ValueError("Task and RequestUnit expectations are all-or-none")
+        if self.request_understanding_required and (
+            self.expected_binding_order_id is None
+            or self.expected_next_move_order_id is None
+            or self.expected_requested_tool_name is None
+        ):
+            raise ValueError(
+                "Request Understanding expectation requires exact candidate data"
+            )
+        if self.expected_tool_calls == 0:
+            if self.expected_tool_call_status is not None:
+                raise ValueError("zero ToolCalls cannot have a terminal status")
+        elif (
+            self.expected_tool_calls != 1
+            or self.expected_tool_call_status is None
+        ):
+            raise ValueError("thin-slice ToolCall expectation must be zero or one")
+        return self
+
+
 class EvalEvidence(AuditOnlyModel):
-    """Eval-only aggregate referencing canonical records and safe assertions."""
+    """Observed typed records supplied by the SUT.
+
+    The legacy ``*_assertions_pass`` fields remain parseable only so an older
+    SUT cannot break the Harness at deserialization time. Graders never read
+    them; PASS is derived solely from authenticated expectations and canonical
+    typed evidence.
+    """
 
     case_id: str
     observed_outcome: AgentOutcome
     trace_ref: UUID
     trace_events: tuple[TraceEvent, ...]
-    required_trace_events: tuple[TraceEventType, ...] = ()
-    forbidden_trace_events: tuple[TraceEventType, ...] = ()
-    expected_event_counts: tuple[TraceEventCountExpectation, ...] = ()
+    safe_observable: SafeCaseObservable | None = None
     schema_assertions_pass: bool | None = None
     identity_boundary_assertions_pass: bool | None = None
     request_understanding_assertions_pass: bool | None = None
@@ -79,7 +208,6 @@ class EvalEvidence(AuditOnlyModel):
     error_mapping_assertions_pass: bool | None = None
     persistence_assertions_pass: bool | None = None
     toolset_replay_assertions_pass: bool | None = None
-    critical_failures: tuple[CriticalFailureCode, ...] = ()
     run_record: AgentRunRecord | None = None
     agent_result: AgentRunResult | None = None
     request_understanding_output: RequestUnderstandingOutput | None = None
@@ -93,114 +221,442 @@ class EvalEvidence(AuditOnlyModel):
 
     @model_validator(mode="after")
     def evidence_sets_are_unambiguous(self) -> "EvalEvidence":
-        if len(self.critical_failures) != len(set(self.critical_failures)):
-            raise ValueError("critical_failures must contain unique codes")
-        if len(self.required_trace_events) != len(
-            set(self.required_trace_events)
-        ):
-            raise ValueError("required Trace event types must be unique")
-        if len(self.forbidden_trace_events) != len(
-            set(self.forbidden_trace_events)
-        ):
-            raise ValueError("forbidden Trace event types must be unique")
-        count_types = tuple(
-            expectation.event_type for expectation in self.expected_event_counts
+        identity_sets: tuple[tuple[object, ...], ...] = (
+            tuple(item.binding_id for item in self.input_bindings),
+            tuple(item.task_id for item in self.task_records),
+            tuple(item.request_unit_id for item in self.request_units),
+            tuple(item.gate_decision_id for item in self.gate_decisions),
+            tuple(item.tool_call_id for item in self.tool_calls),
+            tuple(item.observation_id for item in self.observations),
+            tuple(
+                item.context_manifest_id for item in self.context_manifests
+            ),
         )
-        if len(count_types) != len(set(count_types)):
-            raise ValueError("Trace count expectations must be unique")
+        if any(len(values) != len(set(values)) for values in identity_sets):
+            raise ValueError("typed Eval evidence identities must be unique")
         return self
 
 
 class DeterministicGrader(Protocol):
     name: str
 
-    def grade(self, evidence: EvalEvidence) -> EvalGraderResult: ...
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult: ...
 
 
-class _CheckGrader:
-    name = ""
-    check_field: ClassVar[str]
+def _validate_grader_inputs(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> None:
+    if type(evidence) is not EvalEvidence:
+        raise TypeError("grader evidence must be EvalEvidence")
+    if type(expectations) is not EvalCaseExpectations:
+        raise TypeError("grader expectations must be authenticated")
 
-    def grade(self, evidence: EvalEvidence) -> EvalGraderResult:
-        if type(evidence) is not EvalEvidence:
-            raise TypeError("grader evidence must be EvalEvidence")
-        check = getattr(evidence, self.check_field)
-        if check is None:
+
+def _single_or_none(values: Sequence[object]) -> object | None:
+    return values[0] if len(values) == 1 else None
+
+
+class SchemaGrader:
+    name = "SchemaGrader"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if (
+            evidence.run_record is None
+            or evidence.agent_result is None
+            or evidence.safe_observable is None
+        ):
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
-        if check is not True:
+        if (
+            evidence.case_id != expectations.case_id
+            or evidence.run_record.run_id != evidence.agent_result.run_id
+            or evidence.run_record.status is not expectations.expected_run_status
+            or evidence.run_record.stop_reason
+            is not expectations.expected_stop_reason
+            or evidence.agent_result.outcome is not evidence.observed_outcome
+            or evidence.observed_outcome is not expectations.expected_outcome
+            or evidence.safe_observable.case_id != evidence.case_id
+            or evidence.safe_observable.user_outcome
+            is not evidence.observed_outcome
+        ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         return _passed(self.name)
 
 
-class SchemaGrader(_CheckGrader):
-    name = "SchemaGrader"
-    check_field = "schema_assertions_pass"
+class IdentityBoundaryGrader:
+    name = "IdentityBoundaryGrader"
 
-    def grade(self, evidence: EvalEvidence) -> EvalGraderResult:
-        result = super().grade(evidence)
-        if result.status is EvalGraderStatus.FAIL:
-            return result
-        if evidence.run_record is None or evidence.agent_result is None:
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if expectations.expected_task_status is None:
+            if evidence.task_records:
+                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        elif not evidence.task_records:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
-        if (
-            evidence.run_record.run_id != evidence.agent_result.run_id
-            or evidence.agent_result.outcome is not evidence.observed_outcome
+        if any(
+            task.owner_customer_id != expectations.trusted_customer_id
+            for task in evidence.task_records
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
-        return result
+        if evidence.agent_result is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if expectations.trusted_customer_id in evidence.agent_result.message:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class IdentityBoundaryGrader(_CheckGrader):
-    name = "IdentityBoundaryGrader"
-    check_field = "identity_boundary_assertions_pass"
-
-
-class RequestUnderstandingGrader(_CheckGrader):
+class RequestUnderstandingGrader:
     name = "RequestUnderstandingGrader"
-    check_field = "request_understanding_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        output = evidence.request_understanding_output
+        if not expectations.request_understanding_required:
+            return (
+                _passed(self.name)
+                if output is None
+                else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            )
+        if output is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if len(output.task_delta_candidates) != 1:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        delta = output.task_delta_candidates[0]
+        if len(delta.input_candidates) != 1:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        candidate = delta.input_candidates[0]
+        next_move = output.next_move_candidate
+        arguments = dict(next_move.arguments or {})
+        if (
+            candidate.candidate_value
+            != expectations.expected_binding_order_id
+            or candidate.authority is not InputAuthority.USER_CLAIM
+            or candidate.source_ref != output.message_ref
+            or next_move.kind is not NextMoveKind.CALL_TOOL
+            or next_move.requested_tool_name
+            != expectations.expected_requested_tool_name
+            or arguments
+            != {"order_id": expectations.expected_next_move_order_id}
+            or next_move.base_task_state_version is not None
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class InputBindingGrader(_CheckGrader):
+class InputBindingGrader:
     name = "InputBindingGrader"
-    check_field = "input_binding_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if expectations.expected_task_status is None:
+            return (
+                _passed(self.name)
+                if not evidence.input_bindings
+                else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            )
+        binding = _single_or_none(evidence.input_bindings)
+        output = evidence.request_understanding_output
+        if binding is None or output is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        assert isinstance(binding, InputBinding)
+        if (
+            binding.normalized_value
+            != expectations.expected_binding_order_id
+            or binding.authority is not InputAuthority.USER_CLAIM
+            or binding.source_refs != (output.message_ref,)
+            or binding.confirmed_by_user is not True
+            or any(
+                binding.binding_id not in unit.input_binding_refs
+                for unit in evidence.request_units
+            )
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class TaskStateGrader(_CheckGrader):
+class TaskStateGrader:
     name = "TaskStateGrader"
-    check_field = "task_state_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if expectations.expected_task_status is None:
+            return (
+                _passed(self.name)
+                if not evidence.task_records and not evidence.request_units
+                else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            )
+        task = _single_or_none(evidence.task_records)
+        unit = _single_or_none(evidence.request_units)
+        if task is None or unit is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        assert isinstance(task, TaskRecord)
+        assert isinstance(unit, RequestUnitRecord)
+        if (
+            unit.task_id != task.task_id
+            or task.status is not expectations.expected_task_status
+            or unit.status is not expectations.expected_request_unit_status
+            or task.state_version != expectations.expected_task_state_version
+            or unit.state_version
+            != expectations.expected_request_unit_state_version
+            or not unit.input_binding_refs
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class ToolCallGrader(_CheckGrader):
+class ToolCallGrader:
     name = "ToolCallGrader"
-    check_field = "tool_call_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if expectations.expected_gate_decision is None:
+            if evidence.gate_decisions:
+                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        else:
+            gate = _single_or_none(evidence.gate_decisions)
+            if gate is None:
+                return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+            assert isinstance(gate, GateDecision)
+            if (
+                gate.decision is not expectations.expected_gate_decision
+                or gate.reason_code is not expectations.expected_gate_reason
+            ):
+                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        if len(evidence.tool_calls) != expectations.expected_tool_calls:
+            reason = (
+                EvalGraderReasonCode.MISSING_RECORD
+                if len(evidence.tool_calls) < expectations.expected_tool_calls
+                else EvalGraderReasonCode.ASSERTION_FAILED
+            )
+            return _failed(self.name, reason)
+        if not evidence.tool_calls:
+            return _passed(self.name)
+        call = evidence.tool_calls[0]
+        run = evidence.run_record
+        task = _single_or_none(evidence.task_records)
+        unit = _single_or_none(evidence.request_units)
+        gate = _single_or_none(evidence.gate_decisions)
+        binding_ids = tuple(item.binding_id for item in evidence.input_bindings)
+        if (
+            run is None
+            or task is None
+            or unit is None
+            or gate is None
+        ):
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        assert isinstance(task, TaskRecord)
+        assert isinstance(unit, RequestUnitRecord)
+        assert isinstance(gate, GateDecision)
+        if (
+            call.run_id != run.run_id
+            or call.task_id != task.task_id
+            or call.request_unit_id != unit.request_unit_id
+            or call.gate_decision_id != gate.gate_decision_id
+            or call.canonical_tool_name != "get_order"
+            or call.tool_registry_version
+            != expectations.expected_tool_registry_version
+            or call.argument_binding_refs != binding_ids
+            or call.effect is not ToolEffect.READ
+            or call.status is not expectations.expected_tool_call_status
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class ObservationGrader(_CheckGrader):
+class ObservationGrader:
     name = "ObservationGrader"
-    check_field = "observation_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if len(evidence.observations) != expectations.expected_observations:
+            reason = (
+                EvalGraderReasonCode.MISSING_RECORD
+                if len(evidence.observations)
+                < expectations.expected_observations
+                else EvalGraderReasonCode.ASSERTION_FAILED
+            )
+            return _failed(self.name, reason)
+        if not evidence.observations:
+            if any(call.result_ref is not None for call in evidence.tool_calls):
+                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            return _passed(self.name)
+        observation = evidence.observations[0]
+        call = _single_or_none(evidence.tool_calls)
+        if call is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        assert isinstance(call, ToolCallRecord)
+        if (
+            observation.source_tool != "get_order"
+            or observation.source_resource_ref
+            != expectations.expected_binding_order_id
+            or observation.normalized_value.order_number
+            != expectations.expected_binding_order_id
+            or observation.visibility is ObservationVisibility.AUDIT_ONLY
+            or call.status is not ToolCallStatus.SUCCEEDED
+            or call.result_ref != observation.observation_id
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class DisclosureGrader(_CheckGrader):
+class DisclosureGrader:
     name = "DisclosureGrader"
-    check_field = "disclosure_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        observable = evidence.safe_observable
+        result = evidence.agent_result
+        if observable is None or result is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if (
+            observable.http_status != expectations.expected_http_status
+            or observable.user_outcome is not expectations.expected_outcome
+            or observable.response_policy
+            != expectations.expected_response_policy
+            or observable.model_calls != expectations.expected_model_calls
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        fixed_message = _fixed_message(expectations.expected_response_policy)
+        if fixed_message is not None and result.message != fixed_message:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        forbidden_fragments = (
+            expectations.trusted_customer_id,
+            "customer_id",
+            "raw_payload",
+            "raw_result",
+        )
+        if any(fragment in result.message for fragment in forbidden_fragments):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        if (
+            expectations.expected_response_policy
+            == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE"
+            and expectations.expected_binding_order_id is not None
+            and expectations.expected_binding_order_id in result.message
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class RendererFactGrader(_CheckGrader):
+class RendererFactGrader:
     name = "RendererFactGrader"
-    check_field = "renderer_fact_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if evidence.agent_result is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        message = evidence.agent_result.message
+        if (
+            expectations.expected_response_policy
+            != "DETERMINISTIC_ORDER_SUMMARY_V1"
+        ):
+            fixed_message = _fixed_message(
+                expectations.expected_response_policy
+            )
+            return (
+                _passed(self.name)
+                if fixed_message is not None and message == fixed_message
+                else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            )
+        observation = _single_or_none(evidence.observations)
+        if observation is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        assert isinstance(observation, OrderObservation)
+        summary = observation.normalized_value
+        required_tokens = (
+            summary.order_number,
+            summary.status.value,
+            *(item.product_name for item in summary.line_items),
+            *(str(item.quantity) for item in summary.line_items),
+            summary.ordered_at.isoformat(),
+            summary.status_updated_at.isoformat(),
+        )
+        if any(token not in message for token in required_tokens):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class ErrorMappingGrader(_CheckGrader):
+class ErrorMappingGrader:
     name = "ErrorMappingGrader"
-    check_field = "error_mapping_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if (
+            evidence.run_record is None
+            or evidence.agent_result is None
+            or evidence.safe_observable is None
+        ):
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if (
+            evidence.run_record.stop_reason
+            is not expectations.expected_stop_reason
+            or evidence.agent_result.outcome is not expectations.expected_outcome
+            or evidence.safe_observable.response_policy
+            != expectations.expected_response_policy
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        fixed_message = _fixed_message(expectations.expected_response_policy)
+        if (
+            fixed_message is not None
+            and evidence.agent_result.message != fixed_message
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
 class TraceCompletenessGrader:
     name = "TraceCompletenessGrader"
 
-    def grade(self, evidence: EvalEvidence) -> EvalGraderResult:
-        if type(evidence) is not EvalEvidence:
-            raise TypeError("grader evidence must be EvalEvidence")
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
         events = evidence.trace_events
         if not events:
             return _failed(self.name, EvalGraderReasonCode.TRACE_EVENT_MISSING)
@@ -208,21 +664,17 @@ class TraceCompletenessGrader:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         event_types = tuple(event.event_type for event in events)
         event_counts = Counter(event_types)
-        if set(evidence.required_trace_events) & set(
-            evidence.forbidden_trace_events
-        ):
-            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         if any(
             required not in event_counts
-            for required in evidence.required_trace_events
+            for required in expectations.required_trace_events
         ):
             return _failed(self.name, EvalGraderReasonCode.TRACE_EVENT_MISSING)
         if any(
             forbidden in event_counts
-            for forbidden in evidence.forbidden_trace_events
+            for forbidden in expectations.forbidden_trace_events
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
-        for expectation in evidence.expected_event_counts:
+        for expectation in expectations.expected_event_counts:
             actual = event_counts[expectation.event_type]
             if actual != expectation.count:
                 reason = (
@@ -244,33 +696,221 @@ class TraceCompletenessGrader:
             event.case_id not in {None, evidence.case_id} for event in events
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        stopped = tuple(
+            event
+            for event in events
+            if event.event_type is TraceEventType.RUN_STOPPED
+        )
+        if len(stopped) != 1 or (
+            stopped[0].user_outcome is not expectations.expected_outcome
+            or stopped[0].stop_reason is not expectations.expected_stop_reason
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        if not _trace_references_match_typed_records(evidence):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         return _passed(self.name)
 
 
-class PersistenceGrader(_CheckGrader):
+class PersistenceGrader:
     name = "PersistenceGrader"
-    check_field = "persistence_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        if evidence.run_record is None:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if (
+            expectations.expected_task_status is not None
+            and (
+                len(evidence.task_records) != 1
+                or len(evidence.request_units) != 1
+                or len(evidence.input_bindings) != 1
+            )
+        ):
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        run_id = evidence.run_record.run_id
+        if any(
+            record.run_id != run_id
+            for record in (
+                *evidence.tool_calls,
+                *evidence.context_manifests,
+            )
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        if evidence.task_records and evidence.request_units:
+            task = evidence.task_records[0]
+            unit = evidence.request_units[0]
+            binding_ids = {
+                item.binding_id for item in evidence.input_bindings
+            }
+            if (
+                unit.task_id != task.task_id
+                or set(unit.input_binding_refs) != binding_ids
+                or any(call.task_id != task.task_id for call in evidence.tool_calls)
+                or any(
+                    call.request_unit_id != unit.request_unit_id
+                    for call in evidence.tool_calls
+                )
+            ):
+                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        observation_ids = {
+            item.observation_id for item in evidence.observations
+        }
+        if {
+            call.result_ref
+            for call in evidence.tool_calls
+            if call.result_ref is not None
+        } != observation_ids:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class ToolsetReplayGrader(_CheckGrader):
+class ToolsetReplayGrader:
     name = "ToolsetReplayGrader"
-    check_field = "toolset_replay_assertions_pass"
+
+    def grade(
+        self,
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> EvalGraderResult:
+        _validate_grader_inputs(evidence, expectations)
+        manifests = evidence.context_manifests
+        if len(manifests) != expectations.expected_model_calls:
+            reason = (
+                EvalGraderReasonCode.MISSING_RECORD
+                if len(manifests) < expectations.expected_model_calls
+                else EvalGraderReasonCode.ASSERTION_FAILED
+            )
+            return _failed(self.name, reason)
+        if not manifests:
+            return _passed(self.name)
+        hashes = {item.model_visible_toolset_hash for item in manifests}
+        if (
+            len(hashes) != 1
+            or any(
+                item.tool_registry_version
+                != expectations.expected_tool_registry_version
+                for item in manifests
+            )
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        trace_projection = {
+            (
+                event.context_manifest_id,
+                event.model_visible_toolset_hash,
+                event.tool_registry_version,
+            )
+            for event in evidence.trace_events
+            if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+        }
+        expected_projection = {
+            (
+                item.context_manifest_id,
+                item.model_visible_toolset_hash,
+                item.tool_registry_version,
+            )
+            for item in manifests
+        }
+        if trace_projection != expected_projection:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        return _passed(self.name)
 
 
-class SafeTraceShapeEntry(AuditOnlyModel):
-    event_type: TraceEventType
-    count: Annotated[int, Field(ge=1)]
-    status: str | None = None
-    reason: str | None = None
+_FIXED_MESSAGES = MappingProxyType(
+    {
+        "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE": (
+            "未找到可访问的订单，请核对订单号后重试。"
+        ),
+        "FIXED_SAFE_PROCESSING_ERROR": (
+            "当前无法安全处理该请求，请稍后重试。"
+        ),
+    }
+)
 
 
-class SafeCaseObservable(AuditOnlyModel):
-    case_id: str
-    http_status: Annotated[int, Field(ge=100, le=599)]
-    user_outcome: AgentOutcome
-    response_policy: str
-    ordinary_trace_shape: tuple[SafeTraceShapeEntry, ...]
-    model_calls: Annotated[int, Field(ge=0)]
+def _fixed_message(response_policy: str) -> str | None:
+    return _FIXED_MESSAGES.get(response_policy)
+
+
+def _trace_references_match_typed_records(evidence: EvalEvidence) -> bool:
+    events = evidence.trace_events
+
+    binding_refs = {
+        event.input_binding_ref
+        for event in events
+        if event.event_type is TraceEventType.INPUT_BINDING_RECORDED
+    }
+    if binding_refs != {
+        item.binding_id for item in evidence.input_bindings
+    }:
+        return False
+
+    context_projection = {
+        (
+            event.context_manifest_id,
+            event.model_call_id,
+            event.tool_registry_version,
+            event.model_visible_toolset_hash,
+        )
+        for event in events
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    }
+    if context_projection != {
+        (
+            item.context_manifest_id,
+            item.model_call_id,
+            item.tool_registry_version,
+            item.model_visible_toolset_hash,
+        )
+        for item in evidence.context_manifests
+    }:
+        return False
+
+    lifecycle_types = {
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
+    }
+    tool_call_refs = {
+        event.tool_call_id
+        for event in events
+        if event.event_type in lifecycle_types
+    }
+    if tool_call_refs != {item.tool_call_id for item in evidence.tool_calls}:
+        return False
+
+    observation_refs = {
+        event.observation_ref
+        for event in events
+        if event.event_type is TraceEventType.OBSERVATION_RECORDED
+    }
+    if observation_refs != {
+        item.observation_id for item in evidence.observations
+    }:
+        return False
+
+    gate_events = tuple(
+        event
+        for event in events
+        if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+    )
+    if len(gate_events) != len(evidence.gate_decisions):
+        return False
+    if Counter(
+        (event.gate_decision, event.gate_reason_code)
+        for event in gate_events
+    ) != Counter(
+        (decision.decision, decision.reason_code)
+        for decision in evidence.gate_decisions
+    ):
+        return False
+    return True
 
 
 class GradingOutcome(AuditOnlyModel):
@@ -325,9 +965,77 @@ def grader_registry() -> Mapping[str, DeterministicGrader]:
     return _GRADER_REGISTRY
 
 
+_CRITICAL_BY_GRADER: Mapping[str, tuple[CriticalFailureCode, ...]] = (
+    MappingProxyType(
+        {
+            "SchemaGrader": (CriticalFailureCode.CF_12,),
+            "IdentityBoundaryGrader": (
+                CriticalFailureCode.CF_01,
+                CriticalFailureCode.CF_02,
+            ),
+            "RequestUnderstandingGrader": (
+                CriticalFailureCode.CF_02,
+                CriticalFailureCode.CF_04,
+                CriticalFailureCode.CF_14,
+            ),
+            "InputBindingGrader": (
+                CriticalFailureCode.CF_04,
+                CriticalFailureCode.CF_14,
+            ),
+            "TaskStateGrader": (
+                CriticalFailureCode.CF_12,
+                CriticalFailureCode.CF_14,
+            ),
+            "ToolCallGrader": (
+                CriticalFailureCode.CF_10,
+                CriticalFailureCode.CF_14,
+            ),
+            "ObservationGrader": (
+                CriticalFailureCode.CF_03,
+                CriticalFailureCode.CF_04,
+                CriticalFailureCode.CF_10,
+            ),
+            "DisclosureGrader": (
+                CriticalFailureCode.CF_01,
+                CriticalFailureCode.CF_03,
+                CriticalFailureCode.CF_13,
+            ),
+            "RendererFactGrader": (CriticalFailureCode.CF_13,),
+            "ErrorMappingGrader": (CriticalFailureCode.CF_10,),
+            "TraceCompletenessGrader": (CriticalFailureCode.CF_12,),
+            "PersistenceGrader": (
+                CriticalFailureCode.CF_03,
+                CriticalFailureCode.CF_12,
+            ),
+            "ToolsetReplayGrader": (
+                CriticalFailureCode.CF_12,
+                CriticalFailureCode.CF_14,
+            ),
+        }
+    )
+)
+
+
+def _derive_critical_failures(
+    results: Sequence[EvalGraderResult],
+    expectations: EvalCaseExpectations,
+) -> tuple[CriticalFailureCode, ...]:
+    applicable = set(expectations.applicable_critical_failures)
+    triggered: set[CriticalFailureCode] = set()
+    for result in results:
+        if result.status is EvalGraderStatus.FAIL:
+            triggered.update(_CRITICAL_BY_GRADER[result.grader_name])
+    return tuple(
+        code
+        for code in CriticalFailureCode
+        if code in applicable and code in triggered
+    )
+
+
 def grade_evidence(
     configured_grader_names: Sequence[str],
     evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
 ) -> GradingOutcome:
     if isinstance(configured_grader_names, (str, bytes)):
         raise GradingConfigurationError("grader configuration must be a sequence")
@@ -339,12 +1047,15 @@ def grade_evidence(
         or any(name not in _GRADER_REGISTRY for name in names)
     ):
         raise GradingConfigurationError("grader configuration is not closed")
-    results = tuple(_GRADER_REGISTRY[name].grade(evidence) for name in names)
-    status = determine_result_status(results, evidence.critical_failures)
+    results = tuple(
+        _GRADER_REGISTRY[name].grade(evidence, expectations) for name in names
+    )
+    critical_failures = _derive_critical_failures(results, expectations)
+    status = determine_result_status(results, critical_failures)
     return GradingOutcome(
         status=status,
         grader_results=results,
-        critical_failures=evidence.critical_failures,
+        critical_failures=critical_failures,
     )
 
 
