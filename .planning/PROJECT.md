@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；Runtime、Infra、Eval串行合并后的 exact head 为 `eee1c0e46e1bca1160dea54d586d477c173daadc`。historical Runtime / Infra feature仍以`c35687d...`为只读证据；replacement Runtime / Infra分别从`64992cf...`与`fb607019...`执行并已合并。
+- 当前 integration branch：`integration/e2e01-thin`；01-07A Runtime Trace alignment与三项active-owner状态对齐后的 exact head 为 `8544137cfbcaebda603cd3000312fb5d2406327c`。historical Runtime / Infra feature仍以`c35687d...`为只读证据；replacement Runtime / Infra分别从`64992cf...`与`fb607019...`执行并已合并。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
-- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。当前post-merge为191 Eval focused、40 migration、936 full（1 deselected），三者均有exact-head / overlay review与Graphify证据。
-- 当前 immediate gate：通过本planning-status PR签发`01-07A` exact two-file Runtime Trace alignment，关闭真实grader核查发现的Context Manifest purpose、fixed-result ResponseRendered与stale-state active-run identity gap。其reviewed merge和post-merge gate通过后，才从新的exact integration SHA签发01-08 Composition Root。当前证据仍不证明真实HTTP Trajectory/E2E、credentialed Qwen baseline或产品完成。
+- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`，通过100 Runtime focused、40 migration、936 full（1 deselected）与Graphify gate；Business、Eval、项目规则状态PR #39–#41随后形成当前exact head，lifecycle仍为0/8。
+- 当前 immediate gate：通过本planning-status PR签发`01-07B` exact six-file Eval boundary Packet，关闭完整Case/Script、output-side semantic `case_id`答案暴露与variant-scoped安全因果Trace重排仍PASS的阻断。Preflight同时确认当前Scripted Provider会让invalid-RU `ValidationError`逃逸、Qwen Adapter会把同类错误折叠为`ProviderProtocolError`，不能得到Thin Slice §10.3规定的`INPUT_INVALID`；01-07B不拥有外部`ModelProvider`合同，该缺口由后续01-07I/J/L分别按Application Port、Runtime、Eval-owned Provider consumer边界关闭。01-07B reviewed merge后，按`{01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling} → {01-07D RU exact mapping, 01-07H Core/Order DTO} → {01-07E persistence codec, 01-07F RU Core} → 01-07I Application Evidence Port / Provider failure contract → 01-07J Runtime / INPUT_INVALID mapping → {01-07K Infra reader, 01-07L Eval mapper / Scripted-Qwen consumers} → 01-08 → 01-08A`逐级签发；每组必须全部串行合并形成共同exact barrier后才进入下一组。当前证据仍不证明真实HTTP Trajectory/E2E、credentialed Qwen baseline或产品完成。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -77,7 +77,20 @@
 | 01-05R Runtime replacement | planning PR #33 + Runtime PR #34；reviewed head `05f0182...`、merge `fb607019...`、100 focused / 660 full、38 migration与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
 | 01-06R Infra replacement | planning PR #35 + Infra PR #36；reviewed head `377f837...`、merge `8e21652...`、83 focused / 40 migration / 745 full与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
 | 01-07 Eval | PR #29 head `b8ecbb0...`经post-Infra overlay `ee46f38...`复验并merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、双preflight与Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
-| 01-07A Runtime Trace alignment | exact base `eee1c0e...`；two-file Runtime ownership关闭real Eval purpose/render/hook blockers；01-08等待其reviewed merge | `PLANNED / PLANNING_PR_PENDING` |
+| 01-07A Runtime Trace alignment | planning PR #37、Runtime PR #38；merge `4cfac0a...`；100 Runtime focused / 40 migration / 936 full（1 deselected）、双路feature/overlay review与Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
+| 01-07B Eval evidence boundary | exact base `8544137...`；six-file Eval ownership关闭Case/Script/nested/output-side oracle，以zero-argument non-semantic nonce correlation绑定结果，并加入variant-scoped safety-causal Trace precedence | `PLANNED / PLANNING_PR_PENDING` |
+| 01-07C RU semantic ruling | Request Understanding owner裁决contextualization/candidates/created_at/base-result versions的exact durable shape、logical version evolution、compatibility与rollback | `BLOCKED_BY_01-07B` |
+| 01-07D Thin Slice RU exact mapping | scoped owner把01-07C映射为exact model-output/record version、registry/closure语义；与01-07G共享Thin Slice owner文件，必须等C/G串行合并后从同一exact SHA签发；只写active mapping | `BLOCKED_BY_01-07C/G` |
+| 01-07E Application persistence codec | codec sole writer消费01-07D，落实per-record version registry/encode/decode与tests；不修改active docs或RU DTO；只从01-07D/H共同merge barrier签发 | `BLOCKED_BY_01-07D/H` |
+| 01-07F RU Core implementation | RU owner消费01-07D，持久化actual output/candidates并区分logical record version与model-output schema；不修改codec；只从01-07D/H共同merge barrier签发 | `BLOCKED_BY_01-07D/H` |
+| 01-07G Thin Slice `get_order` source-version ruling | scoped owner定义server-private version唯一来源/算法、FOUND必填、Observation/Manifest exact copy与禁止schema fallback；不实现Core DTO | `BLOCKED_BY_01-07B` |
+| 01-07H Core/Order DTO consumer | 独立Python source owner把01-07G映射到`GetOrderResult`合同与Component tests；与01-07D一起只从C/G merge barrier后的同一exact SHA签发，不修改Runtime/Infra/docs | `BLOCKED_BY_01-07C/G` |
+| 01-07I Application exact-Run Evidence Port / Provider failure contract | 定义expectation-free、owner-scoped、transactionally-consistent closure DTO/Port及partial/torn fail-closed；同时由Port declaration owner冻结fresh parameterless、raw-free RU candidate-invalid signal及`ModelProvider`异常分类；不构造`EvalEvidence`、不实现Runtime或Adapter | `BLOCKED_BY_01-07E/F/H` |
+| 01-07J Runtime consumer / INPUT_INVALID mapping | 消费01-07E/F/H/I，写canonical RU record、传播P0 source version且Manifest不fallback；只捕获01-07I bounded signal并映射`COMPLETED / INPUT_INVALID`，不得catch raw Pydantic/ValueError/Exception或泄露诊断 | `BLOCKED_BY_01-07E/F/H/I` |
+| 01-07K Infra strict reader | 实现01-07I Port的一致snapshot与01-07G/H order version物理适配；不得定义DTO/Port/Eval语义 | `BLOCKED_BY_01-07J` |
+| 01-07L Eval mapper / Scripted-Qwen consumers | 把真实HTTP结果与Application closure映射为`EvalEvidence`；只消费持久化RU output，不从script/expectations补造；按01-07 Eval ownership让Scripted与Qwen只将RU output Pydantic拒绝映射为01-07I signal，协议/Presentation分支仍是raw-free `ProviderProtocolError`，并以Component/real-Runtime tests防止分类漂移 | `BLOCKED_BY_01-07I/J` |
+| 01-08 vertical integration | 等待01-07K/01-07L reviewed merge；Integrator只装配真实HTTP→Runtime→PostgreSQL→Eval链 | `BLOCKED_BY_01-07K/L` |
+| 01-08A credentialed Qwen runner | 等待01-08 reviewed merge后由Eval owner签发；缺凭据只能记录`NOT_RUN / SKIPPED` | `BLOCKED_BY_01-08` |
 
 ## 完成证据规则
 

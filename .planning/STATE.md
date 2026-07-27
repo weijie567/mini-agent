@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "07A"
+current_plan: "07B"
 status: "in_progress"
-last_updated: "2026-07-27T16:00:00+08:00"
-last_activity: "2026-07-27 — 01-06R merge 8e21652 and 01-07 merge eee1c0e passed post-merge gates; 01-07A exact-base planning issued"
+last_updated: "2026-07-27T17:55:09+08:00"
+last_activity: "2026-07-27 — 01-07A and status PRs #38–#41 merged to 8544137; 01-08 preflight issued 01-07B and decomposed the owner-safe B→C–L→08→08A chain"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,30 +33,32 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 07A
+Current Plan: 07B
 Total Phases: 6
 Total Plans in Phase: 8
-Status: 01-07A Runtime Trace alignment planning
+Status: 01-07B Eval evidence boundary planning
 Last Activity: 2026-07-27
-Last Activity Description: 01-06R planning/Infra PR #35/#36与01-07 PR #29均已reviewed merge；integration为`eee1c0e...`且191 Eval focused、40 migration、936 full（1 deselected）与Graphify通过；新01-07A Plan固定该base与two-file Runtime Trace alignment
+Last Activity Description: 01-07A planning/Runtime PR #37/#38与Business/Eval/project-rule状态PR #39–#41均已reviewed merge；integration为`8544137...`且100 Runtime focused、40 migration、936 full（1 deselected）与Graphify通过；新01-07B Plan固定该base与six-file Eval evidence boundary
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R与01-07均已evidence-indexed；01-07A已签发等待planning merge/execution；01-08等待新的exact integration SHA）
-Status: `ACTIVE / 01-07A_PLANNED`
-Last activity: 2026-07-27 — integration `eee1c0e...`；目标Packet完成口径12/16、正式签发15个Plan（01-08未签发）；canonical lifecycle仍为0/8
+Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07与01-07A均已evidence-indexed；01-07B已签发等待planning merge/execution；01-07C–01-07L/01-08/01-08A等待各自前置exact integration SHA）
+Status: `ACTIVE / 01-07B_PLANNED`
+Last activity: 2026-07-27 — integration `8544137...`；新增依赖后目标Packet完成口径13/28、正式签发16个Plan；canonical lifecycle仍为0/8
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 对当前 dedicated planning-status branch中的01-06R/01-07 Summary、01-07A Plan与十文件cross-file alignment运行GSD Plan Checker、exact-head review并通过PR合并。
-2. 从Plan固定的exact base `eee1c0e...`创建`codex/e2e01-01-runtime-trace-alignment` / `e2e01-01-runtime-trace-alignment`，记录planning merge Plan blob并完成一个真实test-only RED → GREEN。
-3. 01-07A执行期间并行准备独立owner status-alignment PR，纠正business / Eval active owners仍停留在W1的实现状态；只更新证据状态，不推进Case lifecycle。
-4. 01-07A exact-head / latest-overlay review、merge、full/migration/Graphify与owner status alignment通过后，从新的exact integration SHA签发01-08 Composition Root与纵向证据Plan。
-5. 执行并review/merge 01-08，取得真实HTTP→Runtime→PostgreSQL→Eval evidence。
-6. 01-08后依次执行受控GSD code review/fix/validation/Eval/security/UAT与integration→main release PR。
+1. 对当前 dedicated planning-status branch中的01-07A Summary、01-07B Plan与九文件cross-file alignment运行受控GSD Plan Checker、exact-head review并通过PR合并。
+2. 从Plan固定的exact base `8544137...`创建`codex/e2e01-01-eval-evidence-boundary` / `e2e01-01-eval-evidence-boundary`，记录planning merge Plan blob并完成一个真实test-only RED → GREEN。
+3. 01-07B执行期间由Project Direction owner在独立PR中只对齐已实现证据状态，不推进产品、Case或Requirement lifecycle。
+4. 01-07B reviewed merge后，从同一新exact SHA分别签发01-07C RU semantic ruling与01-07G Thin Slice `get_order` source-version ruling；active owner PR仍由Integrator串行合并。
+5. Integrator先串行合并01-07C与01-07G形成同一新exact SHA，再从该barrier签发01-07D RU exact mapping与01-07H Core/Order DTO；D/H也必须全部串行合并形成共同的新exact barrier，之后才签发ownership不重叠的01-07E persistence codec与01-07F RU Core。
+6. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`，再从新的exact SHA并行签发01-07K Infra reader与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
+7. 01-07K/L reviewed merge后签发01-08 Composition Root与真实纵向证据；01-08 reviewed merge后签发01-08A Eval-owner credentialed Qwen runner，缺凭据只能形成`NOT_RUN / SKIPPED`。
+8. 01-08A后依次执行受控GSD code review/fix/validation/Eval/security/UAT与integration→main release PR。
 
 ## Decisions
 
@@ -70,7 +72,13 @@ Progress: `░░░░░░░░░░` 0%
 - 01-04H integration merge `64992cf...`是01-05R唯一execution base；01-05R planning/Runtime PR #33/#34已通过reviewed merge形成`fb607019...`。
 - `fb607019...`是01-06R唯一execution base；01-06R通过reviewed merge形成`8e21652...`，Eval latest overlay随后通过并merge为`eee1c0e...`。published PR #30继续保持历史证据。
 - `eee1c0e...`是01-07A唯一execution base；Plan只授权`agent_run_service.py`及其Component test，关闭real Eval Trace alignment，不把Runtime修改隐含塞入01-08。
-- Qwen Responses Provider Adapter属于01-07 exact ownership；默认离线W4不依赖Qwen。当前没有credentialed Qwen runner，缺凭据必须保持`NOT_RUN / SKIPPED`；任何真实Qwen执行声明需要后续独立Eval-owner Packet。
+- 01-07A planning/Runtime PR #37/#38已reviewed merge为`4cfac0a...`；Business/Eval/project-rule状态PR #39–#41随后形成status-aligned exact base `8544137...`，lifecycle保持0/8。
+- `8544137...`是01-07B唯一execution base；Plan只授权Harness、Grader、ScriptedProvider及对应三份测试的exact six-file Packet，隔离SUT Case/Script输入与output-side semantic `case_id`，并增加closed nested projections、one-time execution correlation及variant-scoped safety-causal Trace precedence。
+- RU闭环必须保持四轴ownership：01-07C仅RU semantic ruling，01-07D仅Thin Slice exact mapping，01-07E仅Application persistence codec，01-07F仅RU Core implementation；不得在一个Packet同时裁决version并实现自己的codec。
+- Observation version闭环同样分离：01-07G只裁决P0 `get_order` source-version语义，01-07H只消费为Core/Order DTO，01-07J Runtime不得修改Core contract或猜测fallback。
+- Eval evidence闭环由01-07I Application定义expectation-free exact-Run closure DTO/Port，01-07K Infra实现一致snapshot，01-07L Eval映射真实HTTP+closure；01-08只装配，不能定义Port、Reader或补造RU output/版本/Trace/evidence。
+- Thin Slice §10.3已经拥有Provider failure语义：Request Understanding output Pydantic/source/authority/InputBinding/trusted-field拒绝必须是`INPUT_INVALID`，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍是`PROVIDER_PROTOCOL_ERROR`。01-07I只定义bounded signal/Port contract，01-07J只做Runtime mapping，01-07L按01-07 Eval ownership适配Scripted与Qwen并清除raw cause/context；不得由01-07B、01-07F、01-07K或01-08越权修补。
+- Qwen Responses Provider Adapter属于01-07 exact ownership；默认离线W4不依赖Qwen。01-08A是01-08之后的独立Eval-owner credentialed runner Packet；缺凭据必须保持`NOT_RUN / SKIPPED`，只有01-08A的实际配置运行证据才能形成真实Qwen执行声明。
 
 ## Blockers
 
@@ -83,6 +91,10 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / 01-06R_COMPLETE`: planning PR #35与Infra PR #36 reviewed merge `8e21652...`；exact 13 files、五个RED/GREEN repair pairs、83 focused / 40 migration / 745 full、feature/overlay `PASS / NOT_FOUND`与post-merge Graphify通过。
 - `CONFIRMED / 01-07_COMPLETE`: Eval PR #29 reviewed head `b8ecbb0...`经post-Infra overlay `ee46f38...`复验并merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、双zero-network preflight、双review与Graphify通过。
 - `CONFIRMED / 01-07A_ISSUED`: GSD planner/checker确认real Eval不得补造三个Runtime Trace缺口；新Plan固定base `eee1c0e...`、new branch/worktree与exact two-file ownership。planning PR merge前不得写Runtime。
+- `CONFIRMED / 01-07A_COMPLETE`: planning PR #37与Runtime PR #38 reviewed merge `4cfac0a...`；27 directed / 100 focused / 40 migration / 936 full（1 deselected）、feature/overlay双路`PASS / NOT_FOUND`与post-merge Graphify通过。
+- `CONFIRMED / ACTIVE_OWNER_STATUS_ALIGNED`: Business PR #39、Eval PR #40与project-rule PR #41仅对齐W2/01-07A证据状态并形成current exact head `8544137...`；Case lifecycle仍为0/8。
+- `CONFIRMED / 01-08_PREFLIGHT_BLOCKED`: 安全/Eval核查确认Case/Script/output oracle exposure、variant-scoped Trace precedence、RU semantic/mapping/codec/Core、P0 source-version/Core DTO、Application Evidence Port、strict PG reader、Eval mapper、invalid-RU failure taxonomy/Runtime/Scripted-Qwen consumers及credentialed Qwen runner缺口；不能从`8544137...`直接签发01-08。
+- `CONFIRMED / 01-07B_ISSUED`: 新Plan固定base `8544137...`、new branch/worktree与exact six-file Eval ownership；planning PR merge前不得写Eval。
 - `CONFIRMED / W2_PLAN_REVISION_APPLIED`: 首个published head `436ce5b...`的双路review发现Provider参数替换、not-found终态、Eval lane identity、Worktree事实、full-gate preflight与canonical执行owner状态问题；当前published revision已逐项修正。后续checker audit又识别出旧approval与第二条零网络命令两项MAJOR，均已修正。
 - `CONFIRMED / GSD_REVISION_CAP_REACHED`: 初始loop-3 approval已supersede；三轮revision cap后不再启动第5个planner loop，最终planning gate转为当前published exact head的双路独立review。
 - `CONFIRMED / GRAPHIFY_SERIAL_GATE_PASS`: `c35687d...`已完成AST refresh；最终3353 nodes、5999 links、50 hyperedges，graph health error为0、stale marker清除、tracked integration tree clean。
@@ -93,9 +105,11 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / HISTORICAL_RUNTIME_SUPERSEDED`: PR #28 current exact head仍保留terminal-turn HIGH历史证据；01-05R已通过PR #33/#34在新execution identity中关闭并合并，旧PR不再是merge candidate。
 - `CONFIRMED / INFRA_FINDINGS_CLOSED`: PR #30的bounded decode、late ToolCall及后续finalization/Trace/concurrency findings均在01-06R独立RED/GREEN lineage中关闭并reviewed merge。
 - `CONFIRMED / EVAL_FEATURE_AND_OVERLAY_PASS`: PR #29 head `b8ecbb0...`与latest overlay `ee46f38...`均获独立`PASS / NOT_FOUND`；merge与post-merge gate完成。
-- `OPEN / REAL_EVAL_RUNTIME_TRACE_ALIGNMENT`: 当前Runtime缺少ContextManifest purpose、fixed-result ResponseRendered与explicit active-run hook identity；01-07A必须关闭，Eval SUT禁止合成。
-- `OPEN / ACTIVE_OWNER_STATUS_ALIGNMENT`: `docs/business-capabilities.md`、Eval Strategy / Coverage Matrix及`AGENTS.md`的实现状态说明仍停留在W1；当前十文件planning allowlist不能静默改写这些owners。01-07A执行期间由对应owner在独立PR中只对齐已合并组件证据，01-08签发前必须关闭且lifecycle保持0/8。
-- `OPEN / 01-08_ISSUANCE`: 只有01-07A reviewed merge与post-merge gate形成新的exact integration SHA后，才签发Composition Root Packet；当前目标Packet完成12/16、正式签发15个Plan。
+- `CONFIRMED / REAL_EVAL_RUNTIME_TRACE_ALIGNMENT_CLOSED`: 01-07A已关闭ContextManifest purpose、fixed-result ResponseRendered与explicit active-run hook identity；Eval reader仍禁止合成。
+- `OPEN / PROJECT_DIRECTION_STATUS_ALIGNMENT`: `PROJECT_DIRECTION.md`实现状态段仍停留在W1；由其owner在独立PR只对齐已合并证据，不把状态修订解释为纵向Case或产品完成。
+- `OPEN / 01-07B_EXECUTION`: 只有本planning-status PR reviewed merge后，才从exact base启动Eval writer。
+- `OPEN / 01-07C_TO_01-07L_ISSUANCE`: 只有01-07B reviewed merge后才启动C/G owner rulings；C/G必须由Integrator串行合并形成共同barrier，D/H只能从该同一exact SHA签发；D/H也必须全部串行合并形成下一共同barrier，E/F只能从该barrier签发；I冻结Evidence Port与Provider failure signal，J映射Runtime，K只实现reader而L实现mapper与Eval-owned Scripted/Qwen consumers，再严格按上述exact predecessor依赖推进，不使用未来SHA或跨owner allowlist。
+- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。新增依赖后当前目标Packet完成13/28、正式签发16个Plan。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -105,5 +119,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-27
-Stopped At: 01-06R/01-07 reviewed merge与post-merge gate完成；01-07A planning-status PR待checker/review/merge
-Resume File: [phases/01-cycle-1-e2e-01/01-07A-PLAN.md](phases/01-cycle-1-e2e-01/01-07A-PLAN.md)
+Stopped At: 01-07A与active-owner status alignment reviewed merge完成；01-07B planning-status PR待checker/review/merge
+Resume File: [phases/01-cycle-1-e2e-01/01-07B-PLAN.md](phases/01-cycle-1-e2e-01/01-07B-PLAN.md)
