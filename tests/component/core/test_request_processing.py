@@ -256,6 +256,22 @@ def test_source_quote_must_be_an_exact_current_message_provenance() -> None:
         )
 
 
+def test_source_quote_cannot_match_order_id_as_a_longer_id_prefix() -> None:
+    message_ref = uuid4()
+    output = _output(
+        message_ref=message_ref,
+        source_quote="订单 O-10010",
+        candidate_order_id="O-1001",
+    )
+
+    with pytest.raises(RequestProcessingError, match="source quote"):
+        _decision(
+            output=output,
+            message_ref=message_ref,
+            message="请查询订单 O-10010 的状态",
+        )
+
+
 def test_input_contract_rejects_trusted_fields_without_runtime_bypass() -> None:
     with pytest.raises(ValidationError, match="trusted field"):
         NextMove(

@@ -41,6 +41,9 @@ PositiveStateVersion = Annotated[int, Field(ge=1)]
 OrderId = Annotated[str, Field(pattern=r"^O-[0-9]{4,20}$")]
 
 _ORDER_ID_PATTERN = re.compile(r"^O-[0-9]{4,20}$")
+_ORDER_ID_IN_TEXT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:O|o)-[0-9]{4,20}(?![A-Za-z0-9])"
+)
 
 
 class RequestProcessingError(ValueError):
@@ -119,6 +122,16 @@ def _candidate_order_id_or_none(arguments: Mapping[str, object]) -> str | None:
         return None
 
 
+def _source_quote_contains_exact_order_id(
+    source_quote: str,
+    normalized_order_id: str,
+) -> bool:
+    return any(
+        _normalize_order_id(match.group()) == normalized_order_id
+        for match in _ORDER_ID_IN_TEXT_PATTERN.finditer(source_quote)
+    )
+
+
 def validate_and_reduce_initial_request(
     *,
     output: RequestUnderstandingOutput,
@@ -171,10 +184,10 @@ def validate_and_reduce_initial_request(
         raise RequestProcessingError("source quote is not in current message")
 
     normalized_binding_value = _normalize_order_id(candidate.candidate_value)
-    normalized_quote = candidate.source_quote.strip()
-    if normalized_quote[:2].casefold() == "o-":
-        normalized_quote = f"O-{normalized_quote[2:]}"
-    if normalized_binding_value not in normalized_quote.upper():
+    if not _source_quote_contains_exact_order_id(
+        candidate.source_quote,
+        normalized_binding_value,
+    ):
         raise RequestProcessingError("source quote does not contain order_id")
 
     next_move = output.next_move_candidate
