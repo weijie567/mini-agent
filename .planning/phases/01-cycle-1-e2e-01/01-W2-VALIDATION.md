@@ -1,17 +1,17 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-04H-01-07G-complete-with-01-05R-01-06R
-status: execution_evidence_complete_through_01_07C_01_07G
+scope: 01-04H-01-07G-complete-with-01-07D-01-07H-planned
+status: planning_evidence_complete_through_01_07D_01_07H
 nyquist_compliant: true
-wave_0_complete: true
+wave_0_complete: false
 created: "2026-07-27"
 ---
 
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A/01-07B，以及01-07C/01-07G owner-document execution feedback sampling。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试和owner ruling不能替代01-08真实纵向证据或post-execution quality gate。
+> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A/01-07B、01-07C/01-07G owner-document execution feedback sampling，以及已签发但尚未执行的01-07D/01-07H验证合同。早期Wave的RED/GREEN与reviewed merge仍是历史绿色证据；由于当前scope已包含planned Wave 16 D/H，整体`wave_0_complete`保持`false`，直到D/H feature的RED / contract feedback、GREEN与reviewed merge全部完成。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；Plan review、绿色测试和owner ruling不能替代D/H feature执行、01-08真实纵向证据或post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -22,7 +22,8 @@ created: "2026-07-27"
 | Quick command | 每个 Task Packet 的 exact focused pytest command |
 | Full suite | `uv run pytest` |
 | Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
-| Current reviewed evidence | C/G common barrier `327b39d...`; `1493 full, 1 deselected, 12 warnings`; C/G exact-head / overlay双review；Graphify全量安全重建`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`并记录health warning |
+| Current reviewed evidence | C/G common barrier `327b39d...`；D/H Plan PR #56/#57均final `0/0/0/0`并reviewed merge，planning overlay分别为`1493 passed, 1 deselected, 12 warnings in 87.91s`与`1493 passed, 1 deselected, 12 warnings in 86.92s`；这些不是D/H feature test，Wave 16 RED / contract feedback与GREEN均未执行 |
+| Graphify freshness | 最近一次完成点为`676980e7244fcb1af670b66abdde205fe17cb65a`，早于PR #56/#57；D/H Plan与本次状态变更的semantic refresh是Integrator post-merge gate，当前不声称图已覆盖 |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
 
 仓库当前没有 canonical lint、type-check、build 或 app-start命令，也没有 pinned Ruff dependency；不得编造。允许的附加机械检查为 `compileall`、`git diff --check`、artifact SHA 与 changed-file containment。
@@ -34,6 +35,7 @@ created: "2026-07-27"
 - 每个 Packet handoff 前：运行 Packet 全部 focused tests、`uv run pytest` 和机械 containment。
 - 每个 feature PR 最新 head：独立 reviewer 读取 exact diff和测试证据；finding修复后重新运行受影响 focused + full suite。
 - 每次串行合并前：在 latest integration overlay / merge candidate上重复 full suite。
+- 01-07D / 01-07H dispatch前：记录official Plan merge/blob但保持feature base为`B_CG`，机械证明D/H allowlist交集为0；两个feature均从该base创建独立Worktree / branch。
 - 01-08 前：Runtime、Infra、Eval、01-07A、01-07B及后续owner-ruling / implementation Packet都必须有 reviewed exact-head和latest-integration compatibility证据；01-08A credentialed runner在01-08之后独立执行。
 
 ## Per-Task Verification Map
@@ -63,12 +65,16 @@ created: "2026-07-27"
 | 01-07C-02 | 01-07C | 15 | E2E01-01/04 | RUS-D01/RUS-I01 | exact-version、compatibility、migration与rollback fail-closed裁决；跨文件只读影响扫描 | Owner-document contract | `git diff --check`；focused compatibility scan；`uv run pytest`；latest-integration overlay | ✅ owner exists | ✅ green |
 | 01-07G-01 | 01-07G | 15 | E2E01-01/04 | OSV-S01/OSV-T01/OSV-R01/OSV-I01/OSV-E01 | trusted owner-scoped authority、strict safe projection、canonical content hash、fixed vector及runtime-private exposure裁决 | Owner-document contract | exact one-file containment；algorithm/vector scan；independent exact-head review | ✅ owner exists | ✅ green |
 | 01-07G-02 | 01-07G | 15 | E2E01-01/04 | OSV-D01/OSV-I01 | final FOUND/non-found/system-failure closed matrix、H additive→J fail-closed→K producer→M Core contract green migration、exact-copy、compatibility/ABA及rollback裁决 | Owner-document contract | `git diff --check`；outcome/staged-propagation scan；`uv run pytest`；latest-integration overlay | ✅ owner exists | ✅ green |
+| 01-07D-01 | 01-07D | 16 | E2E01-01/04 | RUM-S01/RUM-T01/RUM-R01/RUM-I01/RUM-E01 | Thin Slice exact schema axes、parent/local-child identity、actual candidate closure与无v1 fallback mapping | Scoped owner contract | Plan-defined exact field / relation scan、one-file containment、`git diff --check`、`uv run pytest` | ✅ owner exists | ⬜ planned |
+| 01-07D-02 | 01-07D | 16 | E2E01-01/04 | RUM-D01/RUM-I01 | marker-bounded 17/70/8/11 rows、49 reference rules、synthetic compatibility mutations与B_CG negative reason fail closed | Scoped owner contract | Plan-defined marker parser与compatibility mutation suite；latest-integration overlay | ✅ owner exists | ⬜ planned |
+| 01-07H-01 | 01-07H | 16 | E2E01-01/04 | OSVA-T01/OSVA-R01/OSVA-I01/OSVA-D01 | RED冻结strict optional `source_version`、legacy `FOUND + None`、non-FOUND prohibition与六个synthetic stub | Component contract | `uv run pytest tests/component/core/test_memory_trace_presentation_contract.py tests/component/application/test_read_tool_executor.py tests/component/application/test_agent_run_service.py -q` | ✅ existing | ⬜ planned |
+| 01-07H-02 | 01-07H | 16 | E2E01-01/04 | OSVA-S01/OSVA-T01/OSVA-E01 | GREEN只扩展Core DTO representation，不暴露ToolSpec、不提前实现J/K/M并保持PostgreSQL legacy producer兼容 | Component + Integration | 三文件focused、ToolSpec absence、`tests/integration/test_postgres_get_order.py`与`uv run pytest` | ✅ existing | ⬜ planned |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
 ## Wave 0 Requirements
 
-Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
+Wave 0 是各 Packet的首个测试或合同反馈提交，不新增共享 bootstrap。以下01-04H至01-07G条目保留历史绿色证据；当前scope还包含planned Wave 16 D/H，因此整体Wave 0仍未完成：
 
 - 01-04H：扩展两个既有 Application contract test files，RED/GREEN与reviewed merge均已完成。
 - historical 01-05：7个allowlisted Component test files与RED/GREEN保留在donor history；01-05R新增terminal aggregate RED并已完成reviewed merge。
@@ -78,9 +84,11 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 - 01-07B：扩展既有Grader、ScriptedProvider与Harness三份tests，以两条独立命令取得Case/Script oracle和Trace precedence RED，再修改对应三份Eval source；不创建real SUT或PG reader。
 - 01-07C：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task使用exact one-file containment、focused owner / compatibility scan、`git diff --check`、full suite与latest overlay，已通过reviewed merge和post-merge gate。
 - 01-07G：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task使用exact one-file containment、algorithm/vector / outcome scan、`git diff --check`、full suite与latest overlay，已通过reviewed merge和post-merge gate。
+- 01-07D：Plan已签发但feature未开始；未来只修改Thin Slice implementation spec，以Plan-defined B_CG negative / feature positive parser与mutation suite取得合同反馈，再完成GREEN owner mapping和reviewed merge；这些反馈目前均未执行，不创建测试或bootstrap，不把Plan review冒充feature通过。
+- 01-07H：Plan已签发但feature未开始；未来RED只修改三份owned Component tests，GREEN只修改`src/mini_agent/core/order.py`，保持legacy PostgreSQL producer/test不变并独立运行full suite；RED、GREEN与reviewed merge目前均未执行。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
-原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环，因此当前scope的`wave_0_complete=true`。该状态只表示测试先行证据完整，不推进Case lifecycle。
+原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环。这些只构成早期Wave的历史绿色证据。当前scope还包含planned Wave 16 D/H，而D的contract feedback / GREEN与H的test-only RED / GREEN均未执行、两个feature也未reviewed merge，因此`wave_0_complete=false`；只有上述D/H反馈、GREEN与reviewed merge全部完成后才能改为`true`。该字段不推进Case lifecycle。
 
 ## Packet Full Gates
 
@@ -268,6 +276,16 @@ graphify update .
 - Graphify diagnostic必须保留`699` dangling endpoint、`687` directed与`713` undirected collapse candidate、`0` missing endpoint、`0` self-loop；这些warning不阻断图可用性，但禁止把health描述为全绿；
 - [01-07C Summary](01-07C-SUMMARY.md)与[01-07G Summary](01-07G-SUMMARY.md)只索引证据；Case lifecycle仍为`0/8`。
 
+### 01-07D / 01-07H Plan issuance and feature dispatch gate
+
+- 01-07D Plan [PR #56](https://github.com/weijie567/mini-agent/pull/56)的reviewed transport为`7098670bd90f2e2fc2fef654b4f4064f919790d0`，final finding为`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`；squash merge为`5d72cb70bf5dc97ae2f74ab1697a61e77a23b725` / tree `a2aaccc3881038003eb61ab9ef7ace27c116520a`，final Plan blob为`e63b844301f8d74da80bc8a1d01bbf3eea689de8`，latest overlay full为`1493 passed, 1 deselected, 12 warnings in 87.91s`。
+- 01-07H Plan [PR #57](https://github.com/weijie567/mini-agent/pull/57)的reviewed non-force latest-integration transport为`3016969b2863349e7673515fdd88971df56d55c3`，final finding为`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`；squash merge为`e6c8cbaf782ac64e0fced492b9b552f246d0e940` / tree `8c0132f444cd079f50c1b4222f6f4bd9703c1e50`，final Plan blob为`52ffe6652284d75b8f2546d50439762b63dfdfa0`，latest overlay full为`1493 passed, 1 deselected, 12 warnings in 86.92s`。
+- 两个Plan的feature `base_sha` / tree都仍为`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669` / `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`；planning merge SHA只作为official Plan provenance，不能替换execution base。
+- D feature allowlist恰为Thin Slice implementation spec；H feature allowlist恰为Core/Order source与三份owned Component tests，机械交集为0。Integrator下一步从`B_CG`创建两个feature Worktree / branch，可并行写入但必须exact-head review、latest-integration overlay并串行merge。
+- 当前没有D/H Summary、feature branch、feature commit或feature PR；Plan review与overlay full只证明签发输入兼容，不证明mapping / DTO已实现。01-07E/F只有在D/H两个reviewed feature merge形成共同exact barrier后才可签发。
+- H必须保持additive与legacy `FOUND + None`；J才在Observation前fail closed，K负责trusted producer，M最终收紧Core contract。D只拥有Thin Slice mapping，E只拥有Application codec，F只拥有RU Core；不得跨owner吸收。
+- 最近一次Graphify完成点为`676980e7244fcb1af670b66abdde205fe17cb65a`，早于PR #56/#57；本状态对齐merge后的semantic refresh是Integrator gate，本文件不声称图已覆盖D/H Plan或本次状态变更。
+
 ## Manual-only Verification
 
 | Behavior | Requirement | Why manual | Instructions |
@@ -306,5 +324,9 @@ graphify update .
 - [x] 01-07C blocked lineage保持不可变；r1 Plan / one-file owner、双review、latest overlay与PR #53 merge已关闭finding。
 - [x] C/G共同barrier`327b39d...`通过1493-test post-merge full与Graphify全量安全重建；dangling / collapsed warning已显式保留，Case lifecycle仍为0/8。
 - [x] Project Direction过期C状态已由独立one-file owner PR #54关闭并merge `ffcc562...`；没有把派生状态夹入owner PR，也没有改变`B_CG`。
+- [x] 01-07D / 01-07H独立Plan已通过PR #56/#57以final `0/0/0/0` review签发；Plan merge/blob provenance、同一`B_CG` feature base与D/H allowlist交集0均已机械确认。
+- [ ] 当前scope的Wave 0尚未完成：01-07D contract feedback / GREEN与01-07H test-only RED / GREEN均未执行；两个feature reviewed merge完成前`wave_0_complete`保持`false`。
+- [ ] 01-07D / 01-07H feature尚未创建或执行；两个feature均reviewed merge并形成共同barrier前，01-07E/F保持blocked，且不得创建D/H Summary。
+- [ ] Graphify semantic refresh等待本状态对齐merge后由Integrator执行；最近完成点仍为`676980e...`，不得提前声明fresh。
 
-**Approval:** `W2_THROUGH_01-07C_01-07G_SERIAL_MERGE_COMPLETE / OWNER_STATUS_ALIGNED_FFCC562 / B_CG_327B39D / 01-07D_01-07H_PLANNING_NEXT`。01-07C与01-07G已从共同execution base完成独立owner写入、exact-head双review、latest-integration overlay与串行merge；共同barrier为`327b39d...` / tree `49ad0f3...`。Project Direction状态对齐PR #54随后merge为`ffcc562...`，但只改变证据快照。下一步必须通过两个独立single-target planning PR分别固定01-07D与01-07H的同一`B_CG` execution base，不能把mapping与DTO合并签发；两个planning PR reviewed merge后才创建feature Worktree。之后按既定顺序推进codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID`和version fail-closed mapping、Infra reader/version producer、Eval mapper/Scripted-Qwen consumers，以及K/L共同barrier后的01-07M Core contract closure。01-07M reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论；当前Task Packet完成为16/29，canonical lifecycle仍为0/8。
+**Approval:** `W2_THROUGH_01-07C_01-07G_SERIAL_MERGE_COMPLETE / 01-07D_01-07H_PLANNED / FEATURE_DISPATCH_NEXT / WAVE_0_PENDING / B_CG_327B39D`。01-07D / 01-07H Plan已由PR #56/#57独立reviewed merge，official Plan provenance完整且feature allowlist交集为0；两者的feature execution base继续是`327b39d...` / tree `49ad0f3...`，planning merge不能替换。当前scope的`wave_0_complete=false`：D contract feedback / GREEN、H test-only RED / GREEN与两个reviewed feature merge均未发生。下一步从该base创建两个独立feature Worktree / branch并执行；只有两个feature都取得exact-head review、latest-integration overlay并由Integrator串行merge形成共同barrier，才可签发01-07E/F。之后按既定顺序推进codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID`和version fail-closed mapping、Infra reader/version producer、Eval mapper/Scripted-Qwen consumers，以及K/L共同barrier后的01-07M Core contract closure。本文件不批准D/H feature、Case、credentialed Baseline、release或lifecycle结论；当前Task Packet完成证据仍为16/29，numbered Plan evidence仍为7/8，正式签发为20个Plan，canonical lifecycle仍为0/8。Graphify最近完成点`676980e...`不覆盖PR #56/#57或本次状态对齐，semantic refresh留给Integrator post-merge gate。
