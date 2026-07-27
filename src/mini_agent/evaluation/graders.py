@@ -11,6 +11,13 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from mini_agent.application.persistence import (
+    P0PersistenceEnvelope,
+    P0PersistenceIntegrityError,
+    P0RecordCode,
+    P0RecordReference,
+    decode_persistence_record,
+)
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
@@ -252,6 +259,7 @@ class EvalEvidence(AuditOnlyModel):
     tool_calls: tuple[ToolCallRecord, ...] = ()
     tool_attempts: tuple[ToolAttemptRecord, ...] = ()
     observations: tuple[OrderObservation, ...] = ()
+    observation_persistence_envelopes: tuple[P0PersistenceEnvelope, ...] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
 
@@ -274,6 +282,9 @@ class EvalEvidence(AuditOnlyModel):
             tuple(item.tool_call_id for item in self.tool_calls),
             tuple((item.tool_call_id, item.attempt_no) for item in self.tool_attempts),
             tuple(item.observation_id for item in self.observations),
+            tuple(
+                item.logical_identity for item in self.observation_persistence_envelopes
+            ),
             tuple(item.context_manifest_id for item in self.context_manifests),
             tuple(
                 item.model_visible_toolset_hash
@@ -634,7 +645,8 @@ def _request_understanding_graph_reason(
         or conversation_link.schema_version != "conversation_task_link_record.p0.v1"
         or conversation_link.conversation_id != conversation.conversation_id
         or conversation_link.task_id != task.task_id
-        or conversation_link.link_reason != "CURRENT_MESSAGE_ACCEPTED_DELTA"
+        or type(conversation_link.link_reason) is not str
+        or not conversation_link.link_reason
         or conversation_link.ended_at is not None
         or run_link.schema_version != "run_task_link_record.p0.v1"
         or run_link.run_id != evidence.run_record.run_id
@@ -676,6 +688,105 @@ def _request_unit_observation_graph_reason(
     return None
 
 
+def _p0_reference(
+    relation: str,
+    target_record_code: P0RecordCode,
+    identity_field: str,
+    identity_value: UUID,
+) -> P0RecordReference:
+    return P0RecordReference(
+        relation=relation,
+        target_record_code=target_record_code,
+        target_logical_identity=((identity_field, str(identity_value)),),
+    )
+
+
+def _observation_persistence_graph_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    count_reason = _closed_record_count_reason(
+        len(evidence.observation_persistence_envelopes),
+        len(evidence.observations),
+    )
+    if count_reason is not None:
+        return count_reason
+    if not evidence.observations:
+        return None
+    if (
+        len(evidence.observations) != 1
+        or len(evidence.observation_persistence_envelopes) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if (
+        evidence.run_record is None
+        or not evidence.task_records
+        or not evidence.request_units
+        or not evidence.tool_calls
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+    if (
+        len(evidence.task_records) != 1
+        or len(evidence.request_units) != 1
+        or len(evidence.tool_calls) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    observation = evidence.observations[0]
+    envelope = evidence.observation_persistence_envelopes[0]
+    task = evidence.task_records[0]
+    request_unit = evidence.request_units[0]
+    tool_call = evidence.tool_calls[0]
+    expected_references = (
+        _p0_reference(
+            "source_request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "request_unit_id",
+            request_unit.request_unit_id,
+        ),
+        _p0_reference(
+            "source_run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+            "run_id",
+            evidence.run_record.run_id,
+        ),
+        _p0_reference(
+            "source_task_id",
+            P0RecordCode.TASK_RECORD,
+            "task_id",
+            task.task_id,
+        ),
+        _p0_reference(
+            "source_tool_call_id",
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_id",
+            tool_call.tool_call_id,
+        ),
+    )
+    if (
+        envelope.record_code is not P0RecordCode.OBSERVATION_RECORD
+        or envelope.direct_owner_customer_id is not None
+        or envelope.logical_identity
+        != (("observation_id", str(observation.observation_id)),)
+        or envelope.record_references != expected_references
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    try:
+        decoded = decode_persistence_record(
+            envelope,
+            expected_record_code=P0RecordCode.OBSERVATION_RECORD,
+            correlation_ref=evidence.trace_ref,
+        )
+    except (P0PersistenceIntegrityError, TypeError, ValueError, AttributeError):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if (
+        decoded.record_code is not P0RecordCode.OBSERVATION_RECORD
+        or type(decoded.source_record) is not OrderObservation
+        or decoded.source_record != observation
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 def _tool_attempt_graph_reason(
     evidence: EvalEvidence,
 ) -> EvalGraderReasonCode | None:
@@ -686,6 +797,15 @@ def _tool_attempt_graph_reason(
     )
     if count_reason is not None:
         return count_reason
+    if (
+        sum(
+            call.attempt_count
+            for call in evidence.tool_calls
+            if call.canonical_tool_name == "get_order"
+        )
+        > 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
 
     attempts_by_call: dict[UUID, list[ToolAttemptRecord]] = {
         call.tool_call_id: [] for call in evidence.tool_calls
@@ -1051,9 +1171,10 @@ class ObservationGrader:
                 else EvalGraderReasonCode.ASSERTION_FAILED
             )
             return _failed(self.name, reason)
+        provenance_reason = _observation_persistence_graph_reason(evidence)
+        if provenance_reason is not None:
+            return _failed(self.name, provenance_reason)
         if not evidence.observations:
-            if any(call.result_ref is not None for call in evidence.tool_calls):
-                return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
             return _passed(self.name)
         observation = evidence.observations[0]
         if not evidence.tool_calls:
@@ -1069,7 +1190,6 @@ class ObservationGrader:
             != expectations.expected_binding_order_id
             or observation.visibility is ObservationVisibility.AUDIT_ONLY
             or call.status is not ToolCallStatus.SUCCEEDED
-            or call.result_ref != observation.observation_id
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         return _passed(self.name)
@@ -1316,6 +1436,9 @@ class PersistenceGrader:
         )
         if request_unit_observation_reason is not None:
             return _failed(self.name, request_unit_observation_reason)
+        provenance_reason = _observation_persistence_graph_reason(evidence)
+        if provenance_reason is not None:
+            return _failed(self.name, provenance_reason)
         manifest_reason = _context_manifest_graph_reason(
             evidence,
             expectations,
@@ -1363,13 +1486,6 @@ class PersistenceGrader:
                 )
             ):
                 return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
-        observation_ids = {item.observation_id for item in evidence.observations}
-        if {
-            call.result_ref
-            for call in evidence.tool_calls
-            if call.result_ref is not None
-        } != observation_ids:
-            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         return _passed(self.name)
 
 
@@ -1464,6 +1580,7 @@ def _trace_references_match_typed_records(
     if (
         _request_understanding_graph_reason(evidence, expectations) is not None
         or _request_unit_observation_graph_reason(evidence) is not None
+        or _observation_persistence_graph_reason(evidence) is not None
         or _tool_attempt_graph_reason(evidence) is not None
     ):
         return False

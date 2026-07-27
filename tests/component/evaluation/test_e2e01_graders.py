@@ -6,6 +6,12 @@ from uuid import UUID
 
 import pytest
 
+from mini_agent.application.persistence import (
+    P0PersistenceEnvelope,
+    P0RecordCode,
+    P0RecordReference,
+    encode_persistence_record,
+)
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
@@ -106,6 +112,7 @@ CONTEXT_2 = UUID("00000000-0000-4000-8000-000000000511")
 GATE_ID = UUID("00000000-0000-4000-8000-000000000512")
 TOOL_CALL_ID = UUID("00000000-0000-4000-8000-000000000513")
 OBSERVATION_ID = UUID("00000000-0000-4000-8000-000000000514")
+TOOL_RESULT_REF = UUID("00000000-0000-4000-8000-000000000517")
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 TOOLSET_HASH = compute_model_visible_toolset_hash((get_order_tool_spec(),))
 
@@ -248,6 +255,54 @@ def _observation(*, order_id: str = "O-1001") -> OrderObservation:
         observed_at=NOW,
         recorded_at=NOW,
         visibility=ObservationVisibility.MODEL_VISIBLE,
+    )
+
+
+def _record_reference(
+    relation: str,
+    target_record_code: P0RecordCode,
+    identity_field: str,
+    identity_value: UUID,
+) -> P0RecordReference:
+    return P0RecordReference(
+        relation=relation,
+        target_record_code=target_record_code,
+        target_logical_identity=((identity_field, str(identity_value)),),
+    )
+
+
+def _observation_envelope(
+    observation: OrderObservation,
+) -> P0PersistenceEnvelope:
+    return encode_persistence_record(
+        P0RecordCode.OBSERVATION_RECORD,
+        observation,
+        external_references=(
+            _record_reference(
+                "source_tool_call_id",
+                P0RecordCode.TOOL_CALL_RECORD,
+                "tool_call_id",
+                TOOL_CALL_ID,
+            ),
+            _record_reference(
+                "source_run_id",
+                P0RecordCode.AGENT_RUN_RECORD,
+                "run_id",
+                RUN_ID,
+            ),
+            _record_reference(
+                "source_task_id",
+                P0RecordCode.TASK_RECORD,
+                "task_id",
+                TASK_ID,
+            ),
+            _record_reference(
+                "source_request_unit_id",
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                "request_unit_id",
+                REQUEST_UNIT_ID,
+            ),
+        ),
     )
 
 
@@ -581,7 +636,7 @@ def _evidence(**overrides: object) -> EvalEvidence:
                 status=ToolCallStatus.SUCCEEDED,
                 started_at=NOW,
                 finished_at=NOW + timedelta(milliseconds=500),
-                result_ref=OBSERVATION_ID,
+                result_ref=TOOL_RESULT_REF,
             ),
         ),
         "tool_attempts": (
@@ -594,6 +649,7 @@ def _evidence(**overrides: object) -> EvalEvidence:
             ),
         ),
         "observations": (observation,),
+        "observation_persistence_envelopes": (_observation_envelope(observation),),
         "context_manifests": (
             _manifest(
                 context_id=CONTEXT_1,
@@ -798,6 +854,7 @@ def test_each_grader_rejects_directed_typed_evidence_tamper(
         "conversation_task_links",
         "run_task_links",
         "tool_attempts",
+        "observation_persistence_envelopes",
     ),
 )
 def test_persistence_grader_requires_complete_authoritative_record_graph(
@@ -853,6 +910,207 @@ def test_persistence_rejects_foreign_request_unit_observation_ref() -> None:
     assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
+def _assert_observation_provenance_fails(evidence: EvalEvidence) -> None:
+    for grader_name in (
+        "ObservationGrader",
+        "PersistenceGrader",
+        "TraceCompletenessGrader",
+    ):
+        result = grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.FAIL
+
+
+def test_observation_provenance_uses_canonical_refs_not_tool_result_ref() -> None:
+    evidence = _evidence()
+
+    assert evidence.tool_calls[0].result_ref == TOOL_RESULT_REF
+    assert evidence.tool_calls[0].result_ref != evidence.observations[0].observation_id
+    for grader_name in (
+        "ObservationGrader",
+        "PersistenceGrader",
+        "TraceCompletenessGrader",
+    ):
+        result = grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.PASS
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.PASS
+
+
+def test_payload_correlation_ref_does_not_imply_an_observation_record() -> None:
+    evidence = _evidence(
+        observations=(),
+        observation_persistence_envelopes=(),
+    )
+
+    assert evidence.tool_calls[0].result_ref == TOOL_RESULT_REF
+    result = grader_registry()["ObservationGrader"].grade(
+        evidence,
+        _expectations(expected_observations=0),
+    )
+    assert result.status is EvalGraderStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "relation",
+    (
+        "source_tool_call_id",
+        "source_run_id",
+        "source_task_id",
+        "source_request_unit_id",
+    ),
+)
+def test_observation_provenance_rejects_foreign_external_owner_ref(
+    relation: str,
+) -> None:
+    evidence = _evidence()
+    envelope = evidence.observation_persistence_envelopes[0]
+    references = tuple(
+        reference.model_copy(
+            update={
+                "target_logical_identity": (
+                    (
+                        reference.target_logical_identity[0][0],
+                        str(UUID(int=940)),
+                    ),
+                )
+            }
+        )
+        if reference.relation == relation
+        else reference
+        for reference in envelope.record_references
+    )
+    forged = envelope.model_copy(update={"record_references": references})
+
+    _assert_observation_provenance_fails(
+        _evidence(observation_persistence_envelopes=(forged,))
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    (
+        ("relation", "source_untrusted_id"),
+        ("target_record_code", P0RecordCode.MESSAGE_RECORD),
+        ("direct_owner_customer_id", "customer-A"),
+    ),
+)
+def test_observation_provenance_rejects_envelope_contract_tamper(
+    field_name: str,
+    field_value: object,
+) -> None:
+    evidence = _evidence()
+    envelope = evidence.observation_persistence_envelopes[0]
+    if field_name == "direct_owner_customer_id":
+        forged = envelope.model_copy(update={field_name: field_value})
+    else:
+        first_reference = envelope.record_references[0].model_copy(
+            update={field_name: field_value}
+        )
+        forged = envelope.model_copy(
+            update={
+                "record_references": (
+                    first_reference,
+                    *envelope.record_references[1:],
+                )
+            }
+        )
+
+    _assert_observation_provenance_fails(
+        _evidence(observation_persistence_envelopes=(forged,))
+    )
+
+
+@pytest.mark.parametrize(
+    "reference_mutation",
+    (
+        lambda references: references[:-1],
+        lambda references: (*references, references[-1]),
+    ),
+    ids=("missing-reference", "duplicate-reference"),
+)
+def test_observation_provenance_requires_exactly_four_external_refs(
+    reference_mutation: Callable[
+        [tuple[P0RecordReference, ...]],
+        tuple[P0RecordReference, ...],
+    ],
+) -> None:
+    evidence = _evidence()
+    envelope = evidence.observation_persistence_envelopes[0]
+    forged = envelope.model_copy(
+        update={
+            "record_references": reference_mutation(envelope.record_references),
+        }
+    )
+
+    _assert_observation_provenance_fails(
+        _evidence(observation_persistence_envelopes=(forged,))
+    )
+
+
+def test_coordinated_observation_id_swap_cannot_replace_persistence_owner() -> None:
+    evidence = _evidence()
+    foreign_observation_id = UUID(int=941)
+    observation = evidence.observations[0].model_copy(
+        update={"observation_id": foreign_observation_id}
+    )
+    request_unit = evidence.request_units[0].model_copy(
+        update={"observation_refs": (foreign_observation_id,)}
+    )
+    tool_call = evidence.tool_calls[0].model_copy(
+        update={"result_ref": foreign_observation_id}
+    )
+    manifests = tuple(
+        manifest.model_copy(
+            update={
+                "observation_refs_and_versions": (
+                    VersionedRecordRef(
+                        record_ref=foreign_observation_id,
+                        version=observation.source_version,
+                    ),
+                )
+            }
+        )
+        if manifest.observation_refs_and_versions
+        else manifest
+        for manifest in evidence.context_manifests
+    )
+    trace_events = tuple(
+        event.model_copy(update={"observation_ref": foreign_observation_id})
+        if event.event_type is TraceEventType.OBSERVATION_RECORDED
+        else event
+        for event in evidence.trace_events
+    )
+
+    _assert_observation_provenance_fails(
+        _evidence(
+            observations=(observation,),
+            request_units=(request_unit,),
+            tool_calls=(tool_call,),
+            context_manifests=manifests,
+            trace_events=trace_events,
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "grader_name",
     ("ToolCallGrader", "PersistenceGrader"),
@@ -870,6 +1128,116 @@ def test_tool_attempt_graph_must_match_authoritative_attempt_count(
 
     assert result.status is EvalGraderStatus.FAIL
     assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+@pytest.mark.parametrize(
+    ("first_outcome", "first_finished_at", "second_started_at"),
+    (
+        (
+            ToolResultOutcome.SYSTEM_FAILURE,
+            NOW + timedelta(milliseconds=100),
+            NOW + timedelta(milliseconds=200),
+        ),
+        (
+            ToolResultOutcome.SUCCESS,
+            NOW + timedelta(milliseconds=100),
+            NOW + timedelta(milliseconds=200),
+        ),
+        (
+            ToolResultOutcome.BUSINESS_FAILURE,
+            NOW + timedelta(milliseconds=100),
+            NOW + timedelta(milliseconds=200),
+        ),
+        (
+            ToolResultOutcome.SYSTEM_FAILURE,
+            NOW + timedelta(milliseconds=300),
+            NOW + timedelta(milliseconds=200),
+        ),
+    ),
+    ids=(
+        "system-failure-then-success",
+        "success-then-success",
+        "business-failure-then-success",
+        "overlapping-attempt-windows",
+    ),
+)
+def test_e2e01_thin_slice_rejects_fully_closed_retry_graphs(
+    first_outcome: ToolResultOutcome,
+    first_finished_at: datetime,
+    second_started_at: datetime,
+) -> None:
+    evidence = _evidence()
+    tool_call = evidence.tool_calls[0].model_copy(update={"attempt_count": 2})
+    attempts = (
+        ToolAttemptRecord(
+            tool_call_id=TOOL_CALL_ID,
+            attempt_no=1,
+            started_at=NOW,
+            finished_at=first_finished_at,
+            outcome=first_outcome,
+            failure_code=(
+                None
+                if first_outcome is ToolResultOutcome.SUCCESS
+                else "ORDER_LOOKUP_FAILED"
+            ),
+        ),
+        ToolAttemptRecord(
+            tool_call_id=TOOL_CALL_ID,
+            attempt_no=2,
+            started_at=second_started_at,
+            finished_at=tool_call.finished_at,
+            outcome=ToolResultOutcome.SUCCESS,
+        ),
+    )
+    tampered = _evidence(
+        tool_calls=(tool_call,),
+        tool_attempts=attempts,
+    )
+
+    for grader_name in (
+        "ToolCallGrader",
+        "PersistenceGrader",
+        "TraceCompletenessGrader",
+    ):
+        result = grader_registry()[grader_name].grade(
+            tampered,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        tampered,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.FAIL
+
+
+def test_nonempty_alternative_conversation_task_link_reason_is_legal() -> None:
+    evidence = _evidence()
+    link = evidence.conversation_task_links[0].model_copy(
+        update={"link_reason": "RESTORED_TASK_CONTEXT"}
+    )
+    alternative = _evidence(conversation_task_links=(link,))
+
+    for grader_name in (
+        "RequestUnderstandingGrader",
+        "PersistenceGrader",
+        "TraceCompletenessGrader",
+    ):
+        result = grader_registry()[grader_name].grade(
+            alternative,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.PASS
+
+    canonical = grade_evidence(
+        GRADER_NAMES,
+        alternative,
+        _expectations(),
+    )
+    assert canonical.status is EvalResultStatus.PASS
 
 
 @pytest.mark.parametrize(

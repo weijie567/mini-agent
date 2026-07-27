@@ -9,6 +9,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 
+from mini_agent.application.persistence import (
+    P0PersistenceEnvelope,
+    P0RecordCode,
+    P0RecordReference,
+    encode_persistence_record,
+)
 from mini_agent.application.ports import EvalResultPort, ModelProvider
 from mini_agent.application.records import (
     AgentRunResult,
@@ -258,6 +264,59 @@ class InMemoryTraceCallbacks:
 
 def _case_uuid(case_id: str, label: str) -> UUID:
     return uuid5(NAMESPACE_URL, f"synthetic:{case_id}:{label}")
+
+
+def _record_reference(
+    relation: str,
+    target_record_code: P0RecordCode,
+    identity_field: str,
+    identity_value: UUID,
+) -> P0RecordReference:
+    return P0RecordReference(
+        relation=relation,
+        target_record_code=target_record_code,
+        target_logical_identity=((identity_field, str(identity_value)),),
+    )
+
+
+def _observation_envelope(
+    *,
+    observation: OrderObservation,
+    run_id: UUID,
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+    tool_call: ToolCallRecord,
+) -> P0PersistenceEnvelope:
+    return encode_persistence_record(
+        P0RecordCode.OBSERVATION_RECORD,
+        observation,
+        external_references=(
+            _record_reference(
+                "source_tool_call_id",
+                P0RecordCode.TOOL_CALL_RECORD,
+                "tool_call_id",
+                tool_call.tool_call_id,
+            ),
+            _record_reference(
+                "source_run_id",
+                P0RecordCode.AGENT_RUN_RECORD,
+                "run_id",
+                run_id,
+            ),
+            _record_reference(
+                "source_task_id",
+                P0RecordCode.TASK_RECORD,
+                "task_id",
+                task.task_id,
+            ),
+            _record_reference(
+                "source_request_unit_id",
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                "request_unit_id",
+                request_unit.request_unit_id,
+            ),
+        ),
+    )
 
 
 def _synthetic_trace(
@@ -674,7 +733,9 @@ class SyntheticSut:
                     else "NOT_FOUND_OR_NOT_ACCESSIBLE"
                 ),
                 result_ref=(
-                    observation.observation_id if observation is not None else None
+                    _case_uuid(case.case_id, "tool-result")
+                    if observation is not None
+                    else None
                 ),
             )
             attempt_outcome = {
@@ -742,6 +803,20 @@ class SyntheticSut:
             observation=observation,
             manifests=manifests,
         )
+        observation_envelopes: tuple[P0PersistenceEnvelope, ...] = ()
+        if observation is not None:
+            assert task is not None
+            assert request_unit is not None
+            assert tool_call is not None
+            observation_envelopes = (
+                _observation_envelope(
+                    observation=observation,
+                    run_id=run_id,
+                    task=task,
+                    request_unit=request_unit,
+                    tool_call=tool_call,
+                ),
+            )
         self.traces.seed(trace_ref, initial_trace)
         observable_values: dict[str, object] = {
             "case_id": case.case_id,
@@ -811,6 +886,7 @@ class SyntheticSut:
             "tool_calls": (tool_call,) if tool_call is not None else (),
             "tool_attempts": ((tool_attempt,) if tool_attempt is not None else ()),
             "observations": ((observation,) if observation is not None else ()),
+            "observation_persistence_envelopes": observation_envelopes,
             "context_manifests": manifests,
             "model_visible_toolset_artifacts": (
                 ModelVisibleToolsetArtifact(
@@ -933,6 +1009,32 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     assert [event.event_type for event in final_trace].count(
         TraceEventType.EVAL_CASE_GRADED
     ) == 1
+
+
+def test_missing_observation_provenance_fails_canonical_harness_grading() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides={"observation_persistence_envelopes": ()},
+    )
+    harness, *_ = _harness(sut=sut, traces=traces)
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    result = outcome.results[0]
+    assert result.status is EvalResultStatus.FAIL
+    by_name = {item.grader_name: item for item in result.grader_results}
+    expected_reasons = {
+        "ObservationGrader": EvalGraderReasonCode.MISSING_RECORD,
+        "PersistenceGrader": EvalGraderReasonCode.MISSING_RECORD,
+        "TraceCompletenessGrader": EvalGraderReasonCode.ASSERTION_FAILED,
+    }
+    for grader_name, reason_code in expected_reasons.items():
+        assert by_name[grader_name].status is EvalGraderStatus.FAIL
+        assert by_name[grader_name].reason_code is reason_code
 
 
 def test_authenticated_expectations_pin_message_and_toolset_projection() -> None:
@@ -1140,6 +1242,36 @@ def test_injected_grader_runner_cannot_replace_canonical_grading(
         traces=traces,
         grader_runner=untrusted_grader,
     )
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.GRADING
+    )
+
+
+def test_injected_runner_raw_string_enums_from_model_construct_fail_closed() -> None:
+    def raw_enum_grader(
+        configured: Sequence[str],
+        _evidence: EvalEvidence,
+        _expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        return GradingOutcome.model_construct(
+            status="PASS",
+            grader_results=tuple(
+                EvalGraderResult.model_construct(
+                    grader_name=name,
+                    status="PASS",
+                    reason_code=None,
+                )
+                for name in configured
+            ),
+            critical_failures=(),
+        )
+
+    harness, *_ = _harness(grader_runner=raw_enum_grader)
     outcome = _run(harness)
 
     assert outcome.command_passed is False

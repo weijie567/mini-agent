@@ -1141,6 +1141,31 @@ def _validate_grading_output(
 ) -> None:
     if type(outcome) is not GradingOutcome:
         raise GradingConfigurationError("grader output is incomplete")
+    if (
+        type(outcome.status) is not EvalResultStatus
+        or type(outcome.grader_results) is not tuple
+        or type(outcome.critical_failures) is not tuple
+        or any(
+            type(result) is not EvalGraderResult
+            or type(result.grader_name) is not str
+            or not result.grader_name
+            or type(result.status) is not EvalGraderStatus
+            or (
+                result.reason_code is not None
+                and type(result.reason_code) is not EvalGraderReasonCode
+            )
+            or (
+                (result.status is EvalGraderStatus.FAIL)
+                != (result.reason_code is not None)
+            )
+            for result in outcome.grader_results
+        )
+        or any(
+            type(failure) is not CriticalFailureCode
+            for failure in outcome.critical_failures
+        )
+    ):
+        raise GradingConfigurationError("grader output is incomplete")
     if tuple(result.grader_name for result in outcome.grader_results) != tuple(
         configured_names
     ):
