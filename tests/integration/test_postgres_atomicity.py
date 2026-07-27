@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
 from datetime import timedelta
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -32,8 +35,20 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordReferenceModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
-from tests.component.application.test_persistence_contract import _record_cases
-from tests.component.application.test_record_contracts import _initial_graph
+
+_COMPONENT_APPLICATION_TESTS = (
+    Path(__file__).parents[1] / "component" / "application"
+)
+sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
+from test_persistence_contract import _record_cases  # noqa: E402
+from test_record_contracts import _initial_graph  # noqa: E402
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 def _encoded_record_set_for_dispatch(*, effect: ToolEffect):
@@ -204,6 +219,7 @@ async def test_task_transition_uses_exact_projection_cas_and_one_atomic_child(
             decoded = decode_persistence_record(
                 row.envelope,
                 expected_record_code=P0RecordCode.TASK_RECORD,
+                correlation_ref=UUID(int=820),
             )
             assert decoded.source_record == next_task
             assert decoded.logical_children == (command.task_state_transition,)
@@ -257,6 +273,7 @@ async def test_read_dispatch_fence_is_durable_and_replay_conflicts(
             decoded = decode_persistence_record(
                 row.envelope,
                 expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+                correlation_ref=UUID(int=821),
             )
             assert decoded.source_record == running
             assert decoded.logical_children == (attempt,)

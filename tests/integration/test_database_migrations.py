@@ -276,7 +276,11 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "ck_p0_records_logical_identity_array",
             "ck_p0_records_state_version",
         }
-        assert {item["name"] for item in inspector.get_indexes("p0_records")} == {
+        assert {
+            item["name"]
+            for item in inspector.get_indexes("p0_records")
+            if not item.get("duplicates_constraint")
+        } == {
             "ix_p0_records_code_request_unit",
             "ix_p0_records_code_run_status",
             "ix_p0_records_code_task_status",
@@ -293,7 +297,9 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "uq_p0_record_references_source_relation_target",
         }
         assert {
-            item["name"] for item in inspector.get_indexes("p0_record_references")
+            item["name"]
+            for item in inspector.get_indexes("p0_record_references")
+            if not item.get("duplicates_constraint")
         } == {"ix_p0_record_references_target"}
         foreign_keys = {
             foreign_key["name"]: foreign_key

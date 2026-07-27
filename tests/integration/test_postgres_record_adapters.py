@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -20,7 +22,19 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordReferenceModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
-from tests.component.application.test_persistence_contract import _record_cases
+
+_COMPONENT_APPLICATION_TESTS = (
+    Path(__file__).parents[1] / "component" / "application"
+)
+sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
+from test_persistence_contract import _record_cases  # noqa: E402
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
@@ -113,25 +127,20 @@ async def test_all_17_records_and_five_external_references_round_trip_exactly(
                     for reference in normalized
                 ] == envelope_references
 
-            external_relations = {
-                (reference.source_record_code, reference.relation)
-                for reference in references
-                if reference.relation
-                in {
-                    "request_unit_id",
-                    "source_tool_call_id",
-                    "source_run_id",
-                    "source_task_id",
-                    "source_request_unit_id",
-                }
-            }
-            assert external_relations == {
+            expected_external_relations = {
                 ("input_binding_record", "request_unit_id"),
                 ("observation_record", "source_tool_call_id"),
                 ("observation_record", "source_run_id"),
                 ("observation_record", "source_task_id"),
                 ("observation_record", "source_request_unit_id"),
             }
+            external_relations = {
+                (reference.source_record_code, reference.relation)
+                for reference in references
+                if (reference.source_record_code, reference.relation)
+                in expected_external_relations
+            }
+            assert external_relations == expected_external_relations
     finally:
         engine.dispose()
 

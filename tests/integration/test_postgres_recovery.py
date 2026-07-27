@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import event, func, select
@@ -29,11 +31,23 @@ from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
 )
-from tests.component.application.test_persistence_contract import _record_cases
-from tests.component.application.test_record_contracts import (
+
+_COMPONENT_APPLICATION_TESTS = (
+    Path(__file__).parents[1] / "component" / "application"
+)
+sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
+from test_persistence_contract import _record_cases  # noqa: E402
+from test_record_contracts import (  # noqa: E402
     _created_restart_recovery_closure,
     _recovery_trace_events,
 )
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 def _recovery_command(closure):
