@@ -803,9 +803,10 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
         event.startswith("task_transition:") for event in events
     )
     _assert_no_standalone_terminal_writes(events)
-    assert _index(events, "trace:RESPONSE_RENDERED") < _index(
-        events, "run_finalized"
-    )
+    assert _index(
+        events,
+        f"trace:{TraceEventType.RESPONSE_RENDERED.value}",
+    ) < _index(events, "run_finalized")
     assert _index(events, "run_finalized") < _index(
         events, "terminal_aggregate_applied"
     )
@@ -844,6 +845,11 @@ def test_model_visible_schema_drift_is_rejected_before_tool_execution() -> None:
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.observation_commands == []
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 @pytest.mark.parametrize("order_id", ["O-2001", "O-9999"])
@@ -876,6 +882,11 @@ def test_foreign_and_nonexistent_are_identical_and_skip_presentation(
     assert runtime.task_history[-1].status is TaskStatus.COMPLETED
     assert runtime.task_history[-1].state_version == 2
     assert runtime.run_record.stop_reason is StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 @pytest.mark.parametrize("replacement", ["O-2001", "O-9999"])
@@ -899,6 +910,11 @@ def test_argument_replacement_stops_at_gateway_with_zero_tool_side_effect(
     assert runtime.observation_commands == []
     assert runtime.task_history[-1].status is TaskStatus.BLOCKED
     assert runtime.task_history[-1].state_version == 2
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_unknown_tool_stops_at_gateway_with_zero_tool_side_effect() -> None:
@@ -916,6 +932,11 @@ def test_unknown_tool_stops_at_gateway_with_zero_tool_side_effect() -> None:
     assert order.queries == []
     assert runtime.observation_commands == []
     assert runtime.task_history[-1].state_version == 2
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
@@ -967,6 +988,11 @@ def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
         event.event_type is TraceEventType.TASK_STATE_CHANGED
         for event in runtime.trace_events
     ) == 3
+    _assert_complete_terminal_aggregate(
+        terminal_command,
+        result=result,
+        with_task=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -999,6 +1025,11 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.run_record.stop_reason is expected_stop
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=False,
+    )
 
 
 def test_no_task_completion_commits_result_message_and_run_stopped_once() -> None:
@@ -1049,6 +1080,11 @@ def test_order_system_failure_has_one_read_no_observation_or_presentation() -> N
     assert runtime.observation_commands == []
     assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
     assert "private-upstream-detail" not in result.message
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
@@ -1091,6 +1127,11 @@ def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
         for event in runtime.trace_events
     ) == 1
     assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_cancelled_order_read_closes_tool_and_run_before_reraising() -> None:
@@ -1162,6 +1203,11 @@ def test_presentation_protocol_failure_retains_observation_without_plan_trace() 
         for event in runtime.trace_events
     )
     assert runtime.run_record.stop_reason is StopReason.PROVIDER_PROTOCOL_ERROR
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_presentation_policy_rejection_never_reaches_renderer(
@@ -1193,6 +1239,11 @@ def test_presentation_policy_rejection_never_reaches_renderer(
     assert runtime.run_record.stop_reason is (
         StopReason.PRESENTATION_PLAN_REJECTED
     )
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_renderer_invariant_failure_returns_no_partial_fact_message() -> None:
@@ -1207,6 +1258,11 @@ def test_renderer_invariant_failure_returns_no_partial_fact_message() -> None:
     assert result.message == "当前无法安全处理该请求，请稍后重试。"
     assert renderer.render_calls == 1
     assert runtime.run_record.stop_reason is StopReason.RENDERER_INVARIANT_FAILED
+    _assert_complete_terminal_aggregate(
+        runtime.finalize_run_commands[-1],
+        result=result,
+        with_task=True,
+    )
 
 
 def test_conditional_graph_conflict_finalizes_failed_then_reraises() -> None:
@@ -1449,6 +1505,46 @@ def test_terminal_aggregate_failure_has_zero_success_and_zero_partial_projection
     assert not any(
         event.startswith("task_transition:") for event in events
     )
+    _assert_no_standalone_terminal_writes(events)
+
+
+def test_failed_cleanup_error_adds_only_bounded_type_note() -> None:
+    events: list[str] = []
+    runtime = RuntimeSpy(
+        events,
+        finalize_run_effects=[
+            ConditionalWriteResult.PROJECTION_CONFLICT,
+            RuntimeError("private failed-cleanup detail"),
+        ],
+    )
+    model = ModelSpy(events)
+    service, _events, _model, runtime, conversation, _order, _artifact = _build(
+        model=model,
+        runtime=runtime,
+    )
+
+    with pytest.raises(AgentRunExecutionError) as captured:
+        _run(service)
+
+    assert getattr(captured.value, "__notes__", []) == [
+        "Run failure finalization raised RuntimeError"
+    ]
+    assert "private failed-cleanup detail" not in repr(
+        getattr(captured.value, "__notes__", [])
+    )
+    assert len(runtime.finalize_run_commands) == 2
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[-1]
+    )
+    assert runtime.run_record.status is AgentRunStatus.RUNNING
+    assert runtime.task is not None
+    assert runtime.task.status is TaskStatus.ACTIVE
+    assert runtime.task.state_version == 1
+    assert runtime.aggregate_messages == []
+    assert runtime.aggregate_trace_events == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
     _assert_no_standalone_terminal_writes(events)
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
@@ -96,7 +95,6 @@ _CONVERSATION_SCHEMA_VERSION = "conversation_record.p0.v1"
 _MESSAGE_SCHEMA_VERSION = "message_record.p0.v1"
 _CONVERSATION_TASK_LINK_SCHEMA_VERSION = "conversation_task_link_record.p0.v1"
 _RUN_TASK_LINK_SCHEMA_VERSION = "run_task_link_record.p0.v1"
-_LOGGER = logging.getLogger(__name__)
 
 
 class AgentRunExecutionError(RuntimeError):
@@ -299,8 +297,7 @@ class AgentRunService:
             raise
         except Exception as error:
             if failure_state.committed_result is not None:
-                # The terminal CAS is authoritative and cannot be reversed.
-                # A later projection failure must not make that result look failed.
+                # APPLIED already committed the complete terminal aggregate.
                 return failure_state.committed_result
             await self._finalize_failed_run_after_error(
                 failure_state=failure_state,
@@ -852,6 +849,10 @@ class AgentRunService:
                         expected_active_links=expected_active_links,
                         terminal_links=terminal_links,
                         result_task_records=result_task_records,
+                        task_transition=None,
+                        terminal_result=None,
+                        assistant_message=None,
+                        terminal_trace_events=(),
                     )
                 )
             )
@@ -988,10 +989,27 @@ class AgentRunService:
             run_id=running_run.run_id,
             stop_reason=stop_reason,
         )
+        completed_at = self._clock()
         terminal_run = _project_run(
             running_run,
             status=AgentRunStatus.COMPLETED,
-            completed_at=self._clock(),
+            completed_at=completed_at,
+            stop_reason=stop_reason,
+        )
+        assistant_message = MessageRecord(
+            schema_version=_MESSAGE_SCHEMA_VERSION,
+            message_id=self._uuid_factory(),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content=result.message,
+            received_at=completed_at,
+        )
+        run_stopped = TraceEvent(
+            trace_event_id=self._uuid_factory(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=running_run.run_id,
+            user_outcome=result.outcome,
             stop_reason=stop_reason,
         )
         write_result = await self._runtime_record_port.finalize_run_if_active(
@@ -1001,19 +1019,16 @@ class AgentRunService:
                 expected_active_links=(),
                 terminal_links=(),
                 result_task_records=(),
+                task_transition=None,
+                terminal_result=result,
+                assistant_message=assistant_message,
+                terminal_trace_events=(run_stopped,),
             )
         )
         if write_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Run finalization conflict")
-        # Everything below is a projection of this authoritative terminal CAS.
         failure_state.committed_result = result
         failure_state.running_run = None
-        await self._publish_committed_result(
-            conversation_id=conversation.conversation_id,
-            result=result,
-            run_id=running_run.run_id,
-            stop_reason=stop_reason,
-        )
         return result
 
     async def _finish_with_task(
@@ -1071,22 +1086,6 @@ class AgentRunService:
                 changed_at=changed_at,
             ),
         )
-        transition_result = (
-            await self._runtime_record_port.apply_task_transition_if_current(
-                transition
-            )
-        )
-        if transition_result is not ConditionalWriteResult.APPLIED:
-            raise AgentRunExecutionError("Task transition conflict")
-        if failure_state is not None:
-            failure_state.result_task = next_task
-        await self._append_trace(
-            event_type=TraceEventType.TASK_STATE_CHANGED,
-            run_id=running_run.run_id,
-            task_id=next_task.task_id,
-            request_unit_id=next_unit.request_unit_id,
-        )
-
         terminal_link = RunTaskLinkRecord(
             schema_version=active_link.schema_version,
             run_id=active_link.run_id,
@@ -1094,10 +1093,35 @@ class AgentRunService:
             base_task_state_version=active_link.base_task_state_version,
             result_task_state_version=next_task.state_version,
         )
+        completed_at = self._clock()
         terminal_run = _project_run(
             running_run,
             status=AgentRunStatus.COMPLETED,
-            completed_at=self._clock(),
+            completed_at=completed_at,
+            stop_reason=stop_reason,
+        )
+        assistant_message = MessageRecord(
+            schema_version=_MESSAGE_SCHEMA_VERSION,
+            message_id=self._uuid_factory(),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content=result.message,
+            received_at=completed_at,
+        )
+        task_state_changed = TraceEvent(
+            trace_event_id=self._uuid_factory(),
+            event_type=TraceEventType.TASK_STATE_CHANGED,
+            occurred_at=changed_at,
+            run_id=running_run.run_id,
+            task_id=next_task.task_id,
+            request_unit_id=next_unit.request_unit_id,
+        )
+        run_stopped = TraceEvent(
+            trace_event_id=self._uuid_factory(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=running_run.run_id,
+            user_outcome=result.outcome,
             stop_reason=stop_reason,
         )
         finalize_result = (
@@ -1108,67 +1132,20 @@ class AgentRunService:
                     expected_active_links=(active_link,),
                     terminal_links=(terminal_link,),
                     result_task_records=(next_task,),
+                    task_transition=transition,
+                    terminal_result=result,
+                    assistant_message=assistant_message,
+                    terminal_trace_events=(
+                        task_state_changed,
+                        run_stopped,
+                    ),
                 )
             )
         )
         if finalize_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Run finalization conflict")
         if failure_state is not None:
-            # Everything below is a projection of this authoritative terminal CAS.
+            failure_state.result_task = next_task
             failure_state.committed_result = result
             failure_state.running_run = None
-        await self._publish_committed_result(
-            conversation_id=conversation.conversation_id,
-            result=result,
-            run_id=running_run.run_id,
-            stop_reason=stop_reason,
-        )
         return result
-
-    async def _publish_committed_result(
-        self,
-        *,
-        conversation_id: UUID,
-        result: AgentRunResult,
-        run_id: UUID,
-        stop_reason: StopReason,
-    ) -> None:
-        try:
-            await self._append_assistant_message(
-                conversation_id=conversation_id,
-                result=result,
-            )
-        except Exception:
-            _LOGGER.warning(
-                "Committed Run projection degraded: "
-                "ASSISTANT_MESSAGE_PERSISTENCE_FAILED"
-            )
-        try:
-            await self._append_trace(
-                event_type=TraceEventType.RUN_STOPPED,
-                run_id=run_id,
-                user_outcome=result.outcome,
-                stop_reason=stop_reason,
-            )
-        except Exception:
-            _LOGGER.warning(
-                "Committed Run projection degraded: "
-                "RUN_STOPPED_TRACE_PERSISTENCE_FAILED"
-            )
-
-    async def _append_assistant_message(
-        self,
-        *,
-        conversation_id: UUID,
-        result: AgentRunResult,
-    ) -> None:
-        await self._conversation_record_port.append_message(
-            MessageRecord(
-                schema_version=_MESSAGE_SCHEMA_VERSION,
-                message_id=self._uuid_factory(),
-                conversation_id=conversation_id,
-                direction=MessageDirection.ASSISTANT,
-                content=result.message,
-                received_at=self._clock(),
-            )
-        )
