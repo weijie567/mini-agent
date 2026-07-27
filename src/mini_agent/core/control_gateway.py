@@ -19,6 +19,7 @@ from .tool_system import (
     RegistrySnapshot,
     ToolEffect,
     ToolRegistration,
+    ToolSpec,
     get_order_tool_spec,
 )
 
@@ -47,13 +48,34 @@ def _resolve_registration(
     return canonical_name, registrations[0]
 
 
+def _registration_matches_visible_spec(
+    *,
+    registration: ToolRegistration | None,
+    provider_visible_spec: ToolSpec | None,
+) -> bool:
+    if registration is None or provider_visible_spec is None:
+        return False
+    return provider_visible_spec == ToolSpec(
+        name=registration.provider_visible_name,
+        description=registration.tool_spec.description,
+        input_schema=registration.tool_spec.input_schema,
+        output_schema=registration.tool_spec.output_schema,
+    )
+
+
 def _closed_get_order_schema_is_valid(
     *,
     arguments: Mapping[str, object],
     normalized_candidate_order_id: str | None,
     registration: ToolRegistration | None,
+    provider_visible_spec: ToolSpec | None,
 ) -> bool:
     if registration is None or registration.tool_spec != get_order_tool_spec():
+        return False
+    if not _registration_matches_visible_spec(
+        registration=registration,
+        provider_visible_spec=provider_visible_spec,
+    ):
         return False
     if set(arguments) != {"order_id"}:
         return False
@@ -67,6 +89,50 @@ def _closed_get_order_schema_is_valid(
         _ORDER_ID_PATTERN.fullmatch(normalized_raw_order_id) is not None
         and normalized_raw_order_id == normalized_candidate_order_id
     )
+
+
+def _resolve_provider_visible_spec(
+    snapshot: RegistrySnapshot,
+    requested_provider_name: str,
+) -> ToolSpec | None:
+    matching_specs = tuple(
+        spec
+        for spec in snapshot.provider_visible_toolset
+        if spec.name == requested_provider_name
+    )
+    if len(matching_specs) != 1:
+        return None
+    return matching_specs[0]
+
+
+def resolve_validated_get_order_registration(
+    *,
+    registry_snapshot: RegistrySnapshot,
+    requested_provider_name: str,
+) -> ToolRegistration | None:
+    """Return only the registration whose actual visible projection was gated."""
+
+    resolved_name, registration = _resolve_registration(
+        registry_snapshot,
+        requested_provider_name,
+    )
+    visible_spec = _resolve_provider_visible_spec(
+        registry_snapshot,
+        requested_provider_name,
+    )
+    if (
+        resolved_name != "get_order"
+        or requested_provider_name != "get_order"
+        or registration is None
+        or registration.provider_visible_name != requested_provider_name
+        or registration.tool_spec != get_order_tool_spec()
+        or not _registration_matches_visible_spec(
+            registration=registration,
+            provider_visible_spec=visible_spec,
+        )
+    ):
+        return None
+    return registration
 
 
 def evaluate_control_gateway(
@@ -98,11 +164,16 @@ def evaluate_control_gateway(
         registry_snapshot,
         revalidated_move.requested_provider_tool_name,
     )
+    provider_visible_spec = _resolve_provider_visible_spec(
+        registry_snapshot,
+        revalidated_move.requested_provider_tool_name,
+    )
     registration_valid = (
         resolved_name == "get_order"
         and revalidated_move.requested_provider_tool_name == "get_order"
         and registration is not None
         and registration.provider_visible_name == "get_order"
+        and provider_visible_spec is not None
     )
     trusted_field_valid = (
         find_trusted_argument_field(revalidated_move.candidate_arguments) is None
@@ -113,6 +184,7 @@ def evaluate_control_gateway(
             revalidated_move.normalized_candidate_order_id
         ),
         registration=registration,
+        provider_visible_spec=provider_visible_spec,
     )
 
     graph_binding_valid = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -45,7 +46,10 @@ from mini_agent.application.records import (
     TransitionRunCommand,
     TrustedOwnerScope,
 )
-from mini_agent.core.control_gateway import evaluate_control_gateway
+from mini_agent.core.control_gateway import (
+    evaluate_control_gateway,
+    resolve_validated_get_order_registration,
+)
 from mini_agent.core.memory import (
     ContextManifest,
     TaskStateRefAndVersion,
@@ -152,6 +156,17 @@ def _project_request_unit(
     return RequestUnitRecord(**values)
 
 
+class _RunFailureState:
+    """Mutable local cursor used only to close an exceptional active Run."""
+
+    __slots__ = ("active_link", "result_task", "running_run")
+
+    def __init__(self) -> None:
+        self.running_run: AgentRunRecord | None = None
+        self.active_link: RunTaskLinkRecord | None = None
+        self.result_task: TaskRecord | None = None
+
+
 class AgentRunService:
     """Coordinate one bounded controlled-ReAct read trajectory."""
 
@@ -169,8 +184,11 @@ class AgentRunService:
         uuid_factory: Callable[[], UUID],
         provider_lane: str,
         redaction_policy_version: str,
+        run_time_budget_ms: int = 30_000,
         after_revalidation_hook: AfterRevalidationHook | None = None,
     ) -> None:
+        if type(run_time_budget_ms) is not int or run_time_budget_ms <= 0:
+            raise ValueError("run_time_budget_ms must be a positive integer")
         self._model_provider = model_provider
         self._registry_snapshot = registry_snapshot
         self._toolset_artifact_port = toolset_artifact_port
@@ -182,6 +200,7 @@ class AgentRunService:
         self._uuid_factory = uuid_factory
         self._provider_lane = provider_lane
         self._redaction_policy_version = redaction_policy_version
+        self._run_time_budget_ms = run_time_budget_ms
         self._after_revalidation_hook = (
             after_revalidation_hook or _noop_after_revalidation
         )
@@ -258,6 +277,28 @@ class AgentRunService:
         return manifest
 
     async def handle(self, command: AgentRunCommand) -> AgentRunResult:
+        failure_state = _RunFailureState()
+        try:
+            return await self._handle(command, failure_state=failure_state)
+        except asyncio.CancelledError as error:
+            await self._finalize_failed_run_after_error(
+                failure_state=failure_state,
+                original_error=error,
+            )
+            raise
+        except Exception as error:
+            await self._finalize_failed_run_after_error(
+                failure_state=failure_state,
+                original_error=error,
+            )
+            raise
+
+    async def _handle(
+        self,
+        command: AgentRunCommand,
+        *,
+        failure_state: _RunFailureState,
+    ) -> AgentRunResult:
         if type(command) is not AgentRunCommand:
             raise AgentRunExecutionError("canonical AgentRunCommand required")
         owner_scope = TrustedOwnerScope.from_customer_context(
@@ -313,6 +354,7 @@ class AgentRunService:
         )
         if start_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Run start conflict")
+        failure_state.running_run = running_run
 
         await self._append_trace(
             event_type=TraceEventType.MESSAGE_ACCEPTED,
@@ -341,9 +383,11 @@ class AgentRunService:
             message_ref=user_message.message_id,
             original_query=command.message,
             provider_visible_tool_specs=(
-                artifact.provider_visible_tool_specs
+                resolved_artifact.provider_visible_tool_specs
             ),
-            model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+            model_visible_toolset_hash=(
+                resolved_artifact.model_visible_toolset_hash
+            ),
             output_constraints=(
                 "Return exactly one current-message ADD_GOAL candidate.",
                 "Never provide trusted identity fields.",
@@ -422,6 +466,8 @@ class AgentRunService:
         )
         if graph_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("initial Task graph conflict")
+        failure_state.active_link = initial_run_task_link
+        failure_state.result_task = decision.task
 
         await self._append_initial_decision_trace(
             run_id=running_run.run_id,
@@ -471,6 +517,7 @@ class AgentRunService:
         )
         if current_task is None or current_unit is None:
             raise AgentRunExecutionError("current Task graph unavailable")
+        failure_state.result_task = current_task
 
         gate = evaluate_control_gateway(
             revalidated_move=revalidated_move,
@@ -512,8 +559,17 @@ class AgentRunService:
                 stop_reason=StopReason.GATE_REJECTED,
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=gate.gate_decision_id,
+                failure_state=failure_state,
             )
 
+        registration = resolve_validated_get_order_registration(
+            registry_snapshot=self._registry_snapshot,
+            requested_provider_name=gate.requested_provider_tool_name,
+        )
+        if registration is None:
+            raise AgentRunExecutionError(
+                "accepted Gate lacks a validated registration"
+            )
         authorized = AuthorizedToolCommand(
             gate_decision_id=gate.gate_decision_id,
             canonical_tool_name="get_order",
@@ -539,6 +595,10 @@ class AgentRunService:
             tool_registry_version=(
                 self._registry_snapshot.tool_registry_version
             ),
+            execution_policy=registration.execution_policy,
+            remaining_run_time_budget_ms=self._remaining_run_time_budget_ms(
+                running_run
+            ),
         )
         if (
             execution.terminal_tool_call is None
@@ -561,6 +621,7 @@ class AgentRunService:
                 stop_reason=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
                 target_status=TaskStatus.COMPLETED,
                 reason_ref=self._uuid_factory(),
+                failure_state=failure_state,
             )
         if execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE:
             return await self._finish_with_task(
@@ -572,6 +633,7 @@ class AgentRunService:
                 stop_reason=StopReason.ORDER_SERVICE_UNAVAILABLE,
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=self._uuid_factory(),
+                failure_state=failure_state,
             )
 
         observation = execution.observation
@@ -617,6 +679,7 @@ class AgentRunService:
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=self._uuid_factory(),
                 observation_ref=observation.observation_id,
+                failure_state=failure_state,
             )
 
         presentation_plan_ref = self._uuid_factory()
@@ -646,6 +709,7 @@ class AgentRunService:
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=presentation_plan_ref,
                 observation_ref=observation.observation_id,
+                failure_state=failure_state,
             )
         try:
             rendered_message = (
@@ -665,6 +729,7 @@ class AgentRunService:
                 target_status=TaskStatus.BLOCKED,
                 reason_ref=presentation_plan_ref,
                 observation_ref=observation.observation_id,
+                failure_state=failure_state,
             )
         await self._append_trace(
             event_type=TraceEventType.RESPONSE_RENDERED,
@@ -685,7 +750,85 @@ class AgentRunService:
             reason_ref=self._uuid_factory(),
             observation_ref=observation.observation_id,
             rendered_message=rendered_message,
+            failure_state=failure_state,
         )
+
+    def _remaining_run_time_budget_ms(
+        self,
+        running_run: AgentRunRecord,
+    ) -> int:
+        elapsed_ms = max(
+            0.0,
+            (self._clock() - running_run.started_at).total_seconds() * 1000,
+        )
+        remaining_ms = int(self._run_time_budget_ms - elapsed_ms)
+        if remaining_ms <= 0:
+            raise AgentRunExecutionError("Run time budget exhausted")
+        return remaining_ms
+
+    async def _finalize_failed_run_after_error(
+        self,
+        *,
+        failure_state: _RunFailureState,
+        original_error: BaseException,
+    ) -> None:
+        running_run = failure_state.running_run
+        if running_run is None:
+            return
+        active_link = failure_state.active_link
+        result_task = failure_state.result_task
+        if (active_link is None) != (result_task is None):
+            original_error.add_note(
+                "Run failure finalization skipped: incomplete local graph cursor"
+            )
+            return
+
+        expected_active_links: tuple[RunTaskLinkRecord, ...] = ()
+        terminal_links: tuple[RunTaskLinkRecord, ...] = ()
+        result_task_records: tuple[TaskRecord, ...] = ()
+        if active_link is not None and result_task is not None:
+            expected_active_links = (active_link,)
+            terminal_links = (
+                RunTaskLinkRecord(
+                    schema_version=active_link.schema_version,
+                    run_id=active_link.run_id,
+                    task_id=active_link.task_id,
+                    base_task_state_version=(
+                        active_link.base_task_state_version
+                    ),
+                    result_task_state_version=result_task.state_version,
+                ),
+            )
+            result_task_records = (result_task,)
+
+        terminal_run = _project_run(
+            running_run,
+            status=AgentRunStatus.FAILED,
+            completed_at=self._clock(),
+            stop_reason=None,
+        )
+        try:
+            finalize_result = (
+                await self._runtime_record_port.finalize_run_if_active(
+                    FinalizeRunCommand(
+                        expected_active_record=running_run,
+                        terminal_record=terminal_run,
+                        expected_active_links=expected_active_links,
+                        terminal_links=terminal_links,
+                        result_task_records=result_task_records,
+                    )
+                )
+            )
+        except Exception as finalization_error:
+            original_error.add_note(
+                "Run failure finalization raised "
+                f"{type(finalization_error).__name__}"
+            )
+            return
+        if finalize_result is not ConditionalWriteResult.APPLIED:
+            original_error.add_note(
+                "Run failure finalization was not applied"
+            )
 
     async def _append_initial_decision_trace(
         self,
@@ -767,11 +910,17 @@ class AgentRunService:
             tool_call_id=created.tool_call_id,
             tool_call_terminal_status=ToolCallStatus.RUNNING,
         )
-        terminal_event_type = (
-            TraceEventType.TOOL_CALL_SUCCEEDED
-            if terminal.status is ToolCallStatus.SUCCEEDED
-            else TraceEventType.TOOL_CALL_FAILED
-        )
+        terminal_event_by_status = {
+            ToolCallStatus.SUCCEEDED: TraceEventType.TOOL_CALL_SUCCEEDED,
+            ToolCallStatus.FAILED: TraceEventType.TOOL_CALL_FAILED,
+            ToolCallStatus.TIMED_OUT: TraceEventType.TOOL_CALL_TIMED_OUT,
+            ToolCallStatus.INTERRUPTED: TraceEventType.TOOL_CALL_INTERRUPTED,
+        }
+        terminal_event_type = terminal_event_by_status.get(terminal.status)
+        if terminal_event_type is None:
+            raise AgentRunExecutionError(
+                "terminal ToolCall status required for Trace"
+            )
         await self._append_trace(
             event_type=terminal_event_type,
             run_id=created.run_id,
@@ -844,6 +993,7 @@ class AgentRunService:
         reason_ref: UUID,
         observation_ref: UUID | None = None,
         rendered_message: str | None = None,
+        failure_state: _RunFailureState | None = None,
     ) -> AgentRunResult:
         result = self._deterministic_renderer.map_result(
             run_id=running_run.run_id,
@@ -892,6 +1042,8 @@ class AgentRunService:
         )
         if transition_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("Task transition conflict")
+        if failure_state is not None:
+            failure_state.result_task = next_task
         await self._append_trace(
             event_type=TraceEventType.TASK_STATE_CHANGED,
             run_id=running_run.run_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -30,12 +31,15 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
+    ExecutionPolicy,
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolTimeoutPhase,
 )
+from mini_agent.core.trace import TraceEvent, TraceEventType
 
 
 class ReadToolExecutionError(RuntimeError):
@@ -53,6 +57,7 @@ class ReadToolExecution(RuntimePrivateModel):
     finalized_attempt: ToolAttemptRecord | None = None
     get_order_outcome: GetOrderOutcome | None = None
     observation: OrderObservation | None = None
+    effective_timeout_ms: int | None = None
 
 
 def _project_tool_call(
@@ -83,6 +88,68 @@ class ReadToolExecutor:
         self._clock = clock
         self._uuid_factory = uuid_factory
 
+    async def _finalize_running_attempt(
+        self,
+        *,
+        running: ToolCallRecord,
+        attempt: ToolAttemptRecord,
+        terminal_status: ToolCallStatus,
+        tool_outcome: ToolResultOutcome,
+        safe_failure_code: str | None,
+        result_ref: UUID | None = None,
+        timeout_phase: ToolTimeoutPhase | None = None,
+        interruption_reason: str | None = None,
+    ) -> tuple[ToolCallRecord, ToolAttemptRecord]:
+        finished_at = self._clock()
+        terminal = _project_tool_call(
+            running,
+            status=terminal_status,
+            finished_at=finished_at,
+            failure_code=safe_failure_code,
+            timeout_phase=timeout_phase,
+            interruption_reason=interruption_reason,
+            result_ref=result_ref,
+        )
+        finalized_attempt = ToolAttemptRecord(
+            tool_call_id=running.tool_call_id,
+            attempt_no=attempt.attempt_no,
+            started_at=attempt.started_at,
+            finished_at=finished_at,
+            outcome=tool_outcome,
+            failure_code=safe_failure_code,
+        )
+        finalize_result = (
+            await self._runtime_record_port.finalize_tool_call_attempt_if_running(
+                FinalizeToolCallCommand(
+                    expected_running_record=running,
+                    expected_started_attempt=attempt,
+                    terminal_record=terminal,
+                    finalized_attempt=finalized_attempt,
+                )
+            )
+        )
+        if finalize_result is not ConditionalWriteResult.APPLIED:
+            raise ReadToolExecutionError("ToolCall finalization conflict")
+        return terminal, finalized_attempt
+
+    async def _append_interrupted_trace(
+        self,
+        *,
+        terminal: ToolCallRecord,
+    ) -> None:
+        await self._runtime_record_port.append_trace_event(
+            TraceEvent(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.TOOL_CALL_INTERRUPTED,
+                occurred_at=terminal.finished_at,
+                run_id=terminal.run_id,
+                task_id=terminal.task_id,
+                request_unit_id=terminal.request_unit_id,
+                tool_call_id=terminal.tool_call_id,
+                tool_call_terminal_status=ToolCallStatus.INTERRUPTED,
+            )
+        )
+
     async def execute_get_order(
         self,
         *,
@@ -95,11 +162,30 @@ class ReadToolExecutor:
         context_manifest_id: UUID,
         provider_tool_call_id: str | None,
         tool_registry_version: str,
+        execution_policy: ExecutionPolicy,
+        remaining_run_time_budget_ms: int,
     ) -> ReadToolExecution:
         if type(owner_scope) is not TrustedOwnerScope:
             raise ReadToolExecutionError("trusted owner scope required")
         if type(authorized_command) is not AuthorizedToolCommand:
             raise ReadToolExecutionError("authorized command required")
+        if (
+            type(execution_policy) is not ExecutionPolicy
+            or execution_policy.max_attempts != 1
+            or execution_policy.interrupt_behavior != "MARK_INTERRUPTED"
+        ):
+            raise ReadToolExecutionError(
+                "validated single-attempt execution policy required"
+            )
+        if (
+            type(remaining_run_time_budget_ms) is not int
+            or remaining_run_time_budget_ms <= 0
+        ):
+            raise ReadToolExecutionError("positive remaining Run budget required")
+        effective_timeout_ms = min(
+            execution_policy.timeout_ms,
+            remaining_run_time_budget_ms,
+        )
         if (
             authorized_command.canonical_tool_name != "get_order"
             or authorized_command.registry_snapshot_ref != tool_registry_version
@@ -160,15 +246,54 @@ class ReadToolExecutor:
             return ReadToolExecution(
                 created_tool_call=created,
                 dispatch_fence_result=fence_result,
+                effective_timeout_ms=effective_timeout_ms,
             )
 
-        result = await self._get_order_port.get_order(
-            GetOrderQuery(
-                customer_id=owner_scope.customer_id,
-                order_id=order_id,
+        try:
+            async with asyncio.timeout(effective_timeout_ms / 1000):
+                result = await self._get_order_port.get_order(
+                    GetOrderQuery(
+                        customer_id=owner_scope.customer_id,
+                        order_id=order_id,
+                    )
+                )
+        except TimeoutError:
+            terminal, finalized_attempt = await self._finalize_running_attempt(
+                running=running,
+                attempt=attempt,
+                terminal_status=ToolCallStatus.TIMED_OUT,
+                tool_outcome=ToolResultOutcome.TIMEOUT,
+                safe_failure_code="TOOL_CALL_TIMEOUT",
+                timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
             )
-        )
-        finished_at = self._clock()
+            return ReadToolExecution(
+                created_tool_call=created,
+                dispatch_fence_result=fence_result,
+                terminal_tool_call=terminal,
+                finalized_attempt=finalized_attempt,
+                get_order_outcome=GetOrderOutcome.SYSTEM_FAILURE,
+                effective_timeout_ms=effective_timeout_ms,
+            )
+        except asyncio.CancelledError as cancellation:
+            terminal, _finalized_attempt = (
+                await self._finalize_running_attempt(
+                    running=running,
+                    attempt=attempt,
+                    terminal_status=ToolCallStatus.INTERRUPTED,
+                    tool_outcome=ToolResultOutcome.INTERRUPTED,
+                    safe_failure_code="TOOL_CALL_CANCELLED",
+                    interruption_reason="TOOL_CALL_CANCELLED",
+                )
+            )
+            try:
+                await self._append_interrupted_trace(terminal=terminal)
+            except Exception as trace_error:
+                cancellation.add_note(
+                    "ToolCallInterrupted Trace append raised "
+                    f"{type(trace_error).__name__}"
+                )
+            raise
+
         observation: OrderObservation | None = None
         if result.outcome is GetOrderOutcome.FOUND:
             summary = result.order_summary
@@ -189,33 +314,15 @@ class ReadToolExecutor:
             tool_outcome = ToolResultOutcome.SYSTEM_FAILURE
             result_ref = None
 
-        terminal = _project_tool_call(
-            running,
-            status=terminal_status,
-            finished_at=finished_at,
-            failure_code=safe_failure_code,
+        terminal, finalized_attempt = await self._finalize_running_attempt(
+            running=running,
+            attempt=attempt,
+            terminal_status=terminal_status,
+            tool_outcome=tool_outcome,
+            safe_failure_code=safe_failure_code,
             result_ref=result_ref,
         )
-        finalized_attempt = ToolAttemptRecord(
-            tool_call_id=running.tool_call_id,
-            attempt_no=1,
-            started_at=attempt.started_at,
-            finished_at=finished_at,
-            outcome=tool_outcome,
-            failure_code=safe_failure_code,
-        )
-        finalize_result = (
-            await self._runtime_record_port.finalize_tool_call_attempt_if_running(
-                FinalizeToolCallCommand(
-                    expected_running_record=running,
-                    expected_started_attempt=attempt,
-                    terminal_record=terminal,
-                    finalized_attempt=finalized_attempt,
-                )
-            )
-        )
-        if finalize_result is not ConditionalWriteResult.APPLIED:
-            raise ReadToolExecutionError("ToolCall finalization conflict")
+        finished_at = terminal.finished_at
 
         if result.outcome is GetOrderOutcome.FOUND:
             summary = result.order_summary
@@ -251,4 +358,5 @@ class ReadToolExecutor:
             finalized_attempt=finalized_attempt,
             get_order_outcome=result.outcome,
             observation=observation,
+            effective_timeout_ms=effective_timeout_ms,
         )
