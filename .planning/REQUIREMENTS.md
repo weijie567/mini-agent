@@ -16,7 +16,7 @@
 - [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
 - [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
 
-当前八个 numbered slot 中 `01-01`–`01-04` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D/E/F/G/H` 也均已完成并合并。01-04H由planning PR #31与owner PR #32建立完整normal terminal-turn Application aggregate，reviewed integration merge `64992cf...`通过560-test与Graphify gate；历史Runtime / Infra Plans与Draft PR #28/#30继续冻结为不可复用证据。本次新签发`01-05R`，以`64992cf...`为exact base、新branch/worktree及原14-file ownership消费01-04H；只有其reviewed merge后才签发`01-06R`。Eval PR #29已修复至`b8ecbb0...`并取得独立`PASS / NOT_FOUND`，但仍须post-Runtime/Infra latest-integration replay/review。当前目标Packet口径完成`9/14`，磁盘上正式签发13个Plan（7 numbered + 5 inserted D–H + 1 replacement），`01-08`仍是未签发slot。Canonical lifecycle与本文件复选框保持`0/8`。
+当前八个 numbered slot 中 `01-01`–`01-05R` 已形成 evidence-indexed Summary；插入式 dependency Packet `01-04D/E/F/G/H` 也均已完成并合并。01-05R通过planning PR #33与Runtime PR #34消费完整normal terminal aggregate，reviewed integration merge `fb607019...`通过660-test、38 migration与Graphify gate；historical Runtime / Infra Plans与Draft PR #28/#30继续冻结为不可复用证据。本次新签发`01-06R`，以`fb607019...`为exact base、新branch/worktree及原13-file ownership关闭raw validation disclosure、late orphan ToolCall与physical terminal transaction rollback。Eval PR #29 head `b8ecbb0...`已取得独立`PASS / NOT_FOUND`，但仍须post-Infra latest-integration replay/review。当前目标Packet口径完成`10/15`，磁盘上正式签发14个Plan（7 numbered + 5 inserted D–H + 2 replacements），`01-08`仍是未签发slot。Canonical lifecycle与本文件复选框保持`0/8`。
 
 ## Phase 2｜Cycle 2：完成 E2E-01（PLANNED MAPPING ONLY）
 

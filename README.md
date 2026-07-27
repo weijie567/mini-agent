@@ -9,7 +9,7 @@ W1 基础骨架已经进入 `integration/e2e01-thin`：
 - Python / uv 工具链、固定版本 PostgreSQL + pgvector、Alembic 与隔离测试 namespace；
 - Core / Application 的身份、Request Understanding、Task、Tool、Observation、Trace 等 contract；
 - `e2e01-thin-fixture-v1`、E2E01-01/04 与安全故障场景的 versioned Eval artifacts；
-- 根目录默认离线测试在 Packet 01-04H 合并 `64992cf...` 后为 `560 passed`。
+- 根目录默认离线测试在 Packet 01-05R 合并 `fb607019...` 后为 `660 passed`；migration regression为 `38 passed`。
 
 这不表示首条纵向切片已经可运行。HTTP API、完整持久化 Adapter、`get_order` 执行链、Provider、Harness、Trajectory / E2E Eval 与 Qwen Baseline 仍未实现，Case 生命周期继续是 `CONTRACT_DEFINED`。
 
@@ -62,7 +62,7 @@ integration PR → main
 
 写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。一个 GSD Plan 只映射一个精确 Task Packet；Packet 不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令、契约变化、安全 / Eval 影响、回滚和交接格式；禁止直接 push `main` 或 integration。
 
-`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04G的planning与owner链已通过PR #11–#25依序合并；01-04H又通过planning [PR #31](https://github.com/weijie567/mini-agent/pull/31)与owner [PR #32](https://github.com/weijie567/mini-agent/pull/32)完成，reviewed integration merge `64992cf3bdc6205e00d0c36433309b1657a57531`通过560项离线测试与Graphify gate。历史Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) head `a27141b...`与Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) head `054dcaf...`保留为review-blocked evidence，不rebase/force-push。本次GSD受控planning签发01-05R：exact base `64992cf...`、新branch/worktree与原14-file ownership只消费01-04H terminal aggregate；其reviewed merge后才签发01-06R。Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29)已修复至`b8ecbb0...`，150 grader+harness / 657 full（1 deselected）并取得独立`PASS / NOT_FOUND`，但保持Draft等待post-Runtime/Infra latest-integration replay。当前目标Packet完成`9/14`，正式签发13个Plan，尚无`01-08-PLAN.md`；Case lifecycle保持`0/8`。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04H的planning与owner链已通过PR #11–#32依序合并；01-05R又通过planning [PR #33](https://github.com/weijie567/mini-agent/pull/33)与Runtime [PR #34](https://github.com/weijie567/mini-agent/pull/34)完成，reviewed integration merge `fb607019130843c94825a47d7822518cbdb2143c`通过100项focused、660项离线、38项migration与Graphify gate。historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) head `a27141b...`与Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) head `054dcaf...`保留为review evidence，不rebase/force-push。本次GSD受控planning签发01-06R：exact base `fb607019...`、新branch/worktree与原13-file ownership受控replay donor，只允许`postgres.py`与三份integration tests改变，用于关闭raw validation disclosure、late orphan ToolCall与physical terminal transaction rollback。Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29) head `b8ecbb0...`已取得独立`PASS / NOT_FOUND`，但保持Draft等待post-Infra latest-integration replay。当前目标Packet完成`10/15`，正式签发14个Plan，尚无`01-08-PLAN.md`；Case lifecycle保持`0/8`。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## GSD
 

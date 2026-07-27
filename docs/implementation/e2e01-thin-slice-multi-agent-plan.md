@@ -405,6 +405,26 @@ docs/implementation/e2e01-thin-slice-multi-agent-plan.md
 
 它不修改历史01-05/01-06 Plans、GOVERNANCE、AGENTS、Thin Slice/Architecture/Business/Eval canonical owners或Case lifecycle。Planning PR本身不证明Runtime已开始或完成；merge后Executor另行记录`PLANNING_CONTRACT_SHA`与Plan/Summary blob，并证明14个Runtime owned paths在`64992cf...`与planning merge之间均不存在。
 
+01-05R随后完成了“planning → execution → exact-head review → latest-integration overlay → serial merge → post-merge verification”闭环。Planning PR [#33](https://github.com/weijie567/mini-agent/pull/33) reviewed head为`db7659b57f326b5da85df388d00dffbb3ec04536`，squash merge为`0f94827386a749cb9f1c20392f95a22c8d4b5c08`，Plan / predecessor Summary blobs分别为`db83429a2025a6fe858ff1629e4db8c95e00b331` / `2e4932be6d7ce7594efaa64815cc3708f640e035`。Runtime feature PR [#34](https://github.com/weijie567/mini-agent/pull/34) exact head / tree为`05f01828f57a106575058d7571ddf31aa1d9a78c` / `a8e0ccb700ae45da5d261850dba01f9ff0dfa8ee`；test-only RED在26项中得到1个预期失败，GREEN后paired / focused / migration / full分别为27 / 100 / 38 / 660项通过。Latest-integration overlay head / tree为`26756ccee19d0cc178f58a686a5fd184d41881b2` / `4b6432082a6c022ae4edee15264c83339fd444a0`，local与GitHub transport review均为`PASS / NOT_FOUND`；squash merge `fb607019130843c94825a47d7822518cbdb2143c`保持相同tree。Post-merge再次取得`660 passed`、migration `38 passed`、compileall / exact-diff通过，Graphify为3788 nodes / 8309 edges / 1353 communities且structural diagnostic为0、无stale marker、tracked tree clean。01-05R因此是`COMPLETE / EVIDENCE_INDEXED`。
+
+现在由新的single-writer planning-status PR签发`01-06R`。Execution base固定为`fb607019130843c94825a47d7822518cbdb2143c`，branch为`codex/e2e01-w2-infra-r`，worktree为`/Users/ming/projects/mini-agent-worktrees/e2e01-w2-infra-r`，ownership仍为历史Infra精确13文件。历史donor head / tree `054dcaf2d4101b0bd422ddb3b3eb47b734523bc1` / `b0ec302de8dce6f3740c7f9a78fcc4aaa43c85d9`只作受控replay与RED/review lineage；移植后仅`postgres.py`、`test_postgres_record_adapters.py`、`test_postgres_atomicity.py`与`test_postgres_recovery.py`允许因关闭审查发现和消费01-04H而不同，其余9个owned blobs必须与donor byte-identical。Replacement必须同时关闭物理错误解码最小披露、locked RUNNING parent Run fence，以及完整终态Task / RequestUnit / Run / link / Message / Trace同一个PostgreSQL事务与任一child fault全回滚。
+
+本次01-06R planning-status PR精确allowlist为：
+
+```text
+README.md
+.planning/PROJECT.md
+.planning/REQUIREMENTS.md
+.planning/ROADMAP.md
+.planning/STATE.md
+.planning/phases/01-cycle-1-e2e-01/01-05R-SUMMARY.md
+.planning/phases/01-cycle-1-e2e-01/01-06R-PLAN.md
+.planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md
+docs/implementation/e2e01-thin-slice-multi-agent-plan.md
+```
+
+它不修改历史01-05/01-06 Plans、GOVERNANCE、AGENTS、Thin Slice/Architecture/Business/Eval canonical owners或Case lifecycle。Planning PR本身不证明Infra已开始或完成；merge后Executor必须记录新的`PLANNING_CONTRACT_SHA`与Plan/Summary blob，并证明13个Infra owned paths在`fb607019...`与planning merge之间均未改变。
+
 Eval PR #29已从`c4eca0d...`经isolated fix推进到`b8ecbb0a7d69761911213a8433b50c6062116c79`；typed evidence graph、grader-runner、retry/provenance、raw enum/supersedes、strict Observation storage与datetime/UUID subclass findings均已关闭，150 grader+harness / 657 full（1 deselected）及两条zero-network preflight通过，bounded independent review为`PASS / NOT_FOUND`。它仍保持Draft，只能在01-05R/01-06R merge后通过latest-integration overlay/review再进入串行合并。
 
 ### W2：组件实现（并行）
@@ -429,7 +449,7 @@ Eval PR #29已从`c4eca0d...`经isolated fix推进到`b8ecbb0a7d69761911213a8433
 
 Gate：三方只通过冻结的 Port / DTO / Fixture contract 对接；不得修改其他 Workstream 的 owned files。
 
-三个原始分支对应historical Plans 01-05/06与current 01-07。planning PR #26与post-merge preflight证明了当时的Plan provenance、branch/path和ownership；三个Worktree从01-04G merge `c35687d...`并行开发。Fresh review暴露01-04H共享owner blocker后，原始Runtime / Infra PR只保留实现与审查证据，不再作为可合并head；01-05R已从01-04H exact merge `64992cf...`签发，01-06R必须再从01-05R reviewed merge创建并先通过新的exact Task Packet planning PR。完成后仍按`W2-RUNTIME-R` → `W2-INFRA-R` → `W2-EVAL`串行集成，每次合并后后续分支都必须基于latest integration重新验证并取得新的exact-head review。不得调用stock `gsd-execute-phase`创建、合并或清理这些Worktree。
+三个原始分支对应historical Plans 01-05/06与current 01-07。planning PR #26与post-merge preflight证明了当时的Plan provenance、branch/path和ownership；三个Worktree从01-04G merge `c35687d...`并行开发。Fresh review暴露01-04H共享owner blocker后，原始Runtime / Infra PR只保留实现与审查证据，不再作为可合并head；01-05R replacement已从01-04H exact merge `64992cf...`完成并串行合并为`fb607019...`，01-06R现在从该exact integration SHA签发并等待新的Task Packet planning PR。后续仍按`W2-INFRA-R` → `W2-EVAL`串行集成，每次合并后后续分支都必须基于latest integration重新验证并取得新的exact-head review。不得调用stock `gsd-execute-phase`创建、合并或清理这些Worktree。
 
 受控 Planner 初审已确认三个边界条件：
 
@@ -547,7 +567,7 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成Draft PR #28/#30/#29。受控adapter随后以planning PR #31和owner PR #32完成01-04H，current exact integration为`64992cf3bdc6205e00d0c36433309b1657a57531`。本次继续用GSD planner/checker只读建议与Integrator single-writer planning-status PR签发01-05R；01-06R exact base仍只能在01-05R reviewed merge后固化，不使用未来SHA占位符或自引用。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成Draft PR #28/#30/#29。受控adapter随后以planning PR #31和owner PR #32完成01-04H，并以planning PR #33和Runtime PR #34完成01-05R，current exact integration为`fb607019130843c94825a47d7822518cbdb2143c`。本次继续用GSD planner/checker只读建议与Integrator single-writer planning-status PR签发01-06R；execution base已从01-05R reviewed merge固化，不使用未来SHA占位符或自引用。
 
 ### 11.1 Activation Gate（`COMPLETE / EFFECTIVE`）
 
@@ -605,13 +625,13 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；当前 integration head 为 `64992cf3bdc6205e00d0c36433309b1657a57531`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / 01-05R_PLANNED` | activation PR #10生效；01-01至01-04H已evidence-indexed；01-05R受控Plan固定`64992cf...`/new branch/worktree/14 files并等待planning PR review/merge；01-06R exact-base gate与serial integration待完成 |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；当前 integration head 为 `fb607019130843c94825a47d7822518cbdb2143c`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
+| GSD | `ACTIVE / EFFECTIVE / 01-06R_PLANNED` | activation PR #10生效；01-01至01-05R已evidence-indexed；01-06R受控Plan固定`fb607019...`/new branch/worktree/13 files并等待planning PR review/merge；Infra execution与后续serial integration待完成 |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / CONTRACT_DEFINED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并；5 个 versioned JSON artifacts、20 个 focused consistency tests；尚无 Provider Adapter、Harness、Eval Result 或 Baseline |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `REPLACEMENT_RUNTIME_PLANNED / INFRA_EXACT_BASE_GATE / EVAL_FEATURE_PASS` | historical Runtime PR #28 `a27141b...`与Infra PR #30 `054dcaf...`保留review-blocked evidence；01-05R新execution identity已固定；Eval PR #29 current `b8ecbb0...` exact 11 files / 150 grader+harness / 657 full、1 deselected、两条zero-network preflight及independent PASS，latest replay待完成 |
+| W2 dispatch | `RUNTIME_REPLACEMENT_MERGED / INFRA_REPLACEMENT_PLANNED / EVAL_FEATURE_PASS` | Runtime PR #34已按exact-head与latest-integration review串行合并为`fb607019...`；historical Runtime PR #28 `a27141b...`与Infra PR #30 `054dcaf...`保留review-blocked evidence；01-06R新execution identity已固定；Eval PR #29 current `b8ecbb0...` exact 11 files / 150 grader+harness / 657 full、1 deselected、两条zero-network preflight及independent PASS，latest replay待完成 |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04与 inserted Packets 01-04D/E/F/G/H已完成；numbered Plan evidence口径是4/8，当前目标Task Packet完成口径是9/14，磁盘上正式签发13个Plan（7 numbered + 5 inserted D–H + 1 replacement 05R，`01-08-PLAN.md`尚不存在），canonical lifecycle与派生checkbox仍保持0/8。01-05R等待planning review/merge与execution，01-06R等待exact predecessor，Eval feature head已PASS但latest replay/serial merge待完成。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted Packets 01-04D/E/F/G/H与replacement 01-05R已完成；numbered Plan evidence口径是5/8，当前目标Task Packet完成口径是10/15，磁盘上正式签发14个Plan（7 numbered + 5 inserted D–H + 2 replacements 05R/06R，`01-08-PLAN.md`尚不存在），canonical lifecycle与派生checkbox仍保持0/8。01-06R等待planning review/merge与execution，Eval feature head已PASS但latest replay/serial merge待完成。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。
