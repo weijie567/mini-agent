@@ -210,8 +210,6 @@ class ScriptedModelProvider:
     def take_runtime_fault_directive(self) -> RuntimeFaultDirective | None:
         if self._runtime_fault is None or self._runtime_fault_taken:
             return None
-        if self._cursor == 0:
-            return None
         self._runtime_fault_taken = True
         return self._runtime_fault
 

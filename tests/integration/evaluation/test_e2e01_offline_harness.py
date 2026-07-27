@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 
@@ -119,7 +119,7 @@ def _presentation_input() -> PresentationInput:
 
 
 class InMemoryResultPort:
-    def __init__(self) -> None:
+    def __init__(self, timeline: list[str] | None = None) -> None:
         self.results: dict[
             tuple[UUID, str, str, int],
             EvalResultRecord,
@@ -129,12 +129,14 @@ class InMemoryResultPort:
         self.fail_result_append = False
         self.fail_failure_append = False
         self.fail_load = False
+        self.timeline = timeline if timeline is not None else []
 
     async def append_eval_result(
         self,
         record: EvalResultRecord,
     ) -> InsertOnlyWriteResult:
         self.events.append("result_append")
+        self.timeline.append("result_append")
         if self.fail_result_append:
             raise RuntimeError("raw-result-store-secret")
         key = (
@@ -176,6 +178,7 @@ class InMemoryResultPort:
         record: EvalExecutionFailureRecord,
     ) -> None:
         self.events.append("failure_append")
+        self.timeline.append("failure_append")
         if self.fail_failure_append:
             raise RuntimeError("raw-failure-store-secret")
         self.failures.append(record)
@@ -193,13 +196,14 @@ class InMemoryResultPort:
 
 
 class InMemoryTraceCallbacks:
-    def __init__(self) -> None:
+    def __init__(self, timeline: list[str] | None = None) -> None:
         self.events_by_ref: dict[UUID, list[TraceEvent]] = {}
         self.trace_ref_by_run: dict[UUID, UUID] = {}
         self.events: list[str] = []
         self.fail_append = False
         self.fail_reload = False
         self.drop_append = False
+        self.timeline = timeline if timeline is not None else []
 
     def seed(self, trace_ref: UUID, events: Sequence[TraceEvent]) -> None:
         self.events_by_ref[trace_ref] = list(events)
@@ -208,6 +212,7 @@ class InMemoryTraceCallbacks:
 
     async def append_eval_case_graded(self, event: TraceEvent) -> None:
         self.events.append("trace_append")
+        self.timeline.append("trace_append")
         if self.fail_append:
             raise RuntimeError("raw-trace-secret")
         if self.drop_append:
@@ -225,6 +230,7 @@ class InMemoryTraceCallbacks:
 
     async def reload_trace(self, trace_ref: UUID) -> tuple[TraceEvent, ...]:
         self.events.append("trace_reload")
+        self.timeline.append("trace_reload")
         if self.fail_reload:
             raise RuntimeError("raw-trace-store-secret")
         return tuple(self.events_by_ref[trace_ref])
@@ -244,6 +250,7 @@ class SyntheticSut:
         self.evidence_overrides = dict(evidence_overrides or {})
         self.observable_overrides = dict(observable_overrides or {})
         self.calls = 0
+        self.last_runtime_fault: RuntimeFaultDirective | None = None
 
     async def execute_case(
         self,
@@ -253,6 +260,7 @@ class SyntheticSut:
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None:
         self.calls += 1
+        self.last_runtime_fault = runtime_fault
         if self.fault == "sut":
             raise RuntimeError("raw-sut-secret customer-A O-1001")
         if self.fault == "missing":
@@ -272,29 +280,39 @@ class SyntheticSut:
             if case.case_id == "E2E01-01"
             else StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE
         )
+        run_id = (
+            RUN_ID
+            if case.case_id == "E2E01-01"
+            else uuid5(NAMESPACE_URL, f"synthetic-run:{case.case_id}")
+        )
+        trace_ref = (
+            TRACE_REF
+            if case.case_id == "E2E01-01"
+            else uuid5(NAMESPACE_URL, f"synthetic-trace:{case.case_id}")
+        )
         initial_trace = (
             TraceEvent(
                 trace_event_id=UUID(int=810),
                 event_type=TraceEventType.RUN_STARTED,
                 occurred_at=NOW,
-                run_id=RUN_ID,
+                run_id=run_id,
                 case_id=case.case_id,
             ),
             TraceEvent(
                 trace_event_id=UUID(int=811),
                 event_type=TraceEventType.RUN_STOPPED,
                 occurred_at=NOW + timedelta(seconds=1),
-                run_id=RUN_ID,
+                run_id=run_id,
                 case_id=case.case_id,
                 user_outcome=outcome,
                 stop_reason=stop_reason,
             ),
         )
-        self.traces.seed(TRACE_REF, initial_trace)
+        self.traces.seed(trace_ref, initial_trace)
         evidence_values: dict[str, object] = {
             "case_id": case.case_id,
             "observed_outcome": outcome,
-            "trace_ref": TRACE_REF,
+            "trace_ref": trace_ref,
             "trace_events": initial_trace,
             "required_trace_events": (
                 TraceEventType.RUN_STARTED,
@@ -308,7 +326,7 @@ class SyntheticSut:
                 },
             ),
             "run_record": AgentRunRecord(
-                run_id=RUN_ID,
+                run_id=run_id,
                 status=AgentRunStatus.COMPLETED,
                 provider_lane="offline_gate",
                 started_at=NOW,
@@ -316,7 +334,7 @@ class SyntheticSut:
                 stop_reason=stop_reason,
             ),
             "agent_result": AgentRunResult(
-                run_id=RUN_ID,
+                run_id=run_id,
                 outcome=outcome,
                 message="合成结果",
             ),
@@ -354,8 +372,11 @@ def _harness(
     InMemoryTraceCallbacks,
     InMemoryResultPort,
 ]:
-    traces = traces or InMemoryTraceCallbacks()
-    port = port or InMemoryResultPort()
+    timeline = traces.timeline if traces is not None else []
+    traces = traces or InMemoryTraceCallbacks(timeline)
+    port = port or InMemoryResultPort(timeline)
+    traces.timeline = timeline
+    port.timeline = timeline
     sut = sut or SyntheticSut(traces)
     harness = OfflineEvalHarness(
         artifacts=ARTIFACTS,
@@ -374,12 +395,13 @@ def _run(
     case_ids: Sequence[str] = ("E2E01-01",),
     script_ref_by_case: Mapping[str, str] | None = None,
     lane: str = "offline_gate",
+    attempt: int = 1,
 ):
     return asyncio.run(
         harness.run_lane(
             eval_run_id=EVAL_RUN_ID,
             lane=lane,
-            attempt=1,
+            attempt=attempt,
             case_ids=case_ids,
             script_ref_by_case=script_ref_by_case,
         )
@@ -387,7 +409,22 @@ def _run(
 
 
 def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
-    harness, _sut, traces, port = _harness()
+    timeline: list[str] = []
+    traces = InMemoryTraceCallbacks(timeline)
+    port = InMemoryResultPort(timeline)
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+    ) -> GradingOutcome:
+        timeline.append(f"grade:{','.join(configured)}")
+        return grade_evidence(configured, evidence)
+
+    harness, _sut, traces, port = _harness(
+        traces=traces,
+        port=port,
+        grader_runner=recording_grader,
+    )
     outcome = _run(harness)
 
     assert outcome.command_passed is True
@@ -403,6 +440,13 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     assert result.latency_summary is None
     assert traces.events == ["trace_append", "trace_reload"]
     assert port.events == ["result_append"]
+    assert timeline[0].startswith("grade:SchemaGrader")
+    assert timeline[-4:] == [
+        "trace_append",
+        "trace_reload",
+        "grade:TraceCompletenessGrader",
+        "result_append",
+    ]
     final_trace = traces.events_by_ref[TRACE_REF]
     assert [event.event_type for event in final_trace].count(
         TraceEventType.EVAL_CASE_GRADED
@@ -555,6 +599,16 @@ def test_exact_same_lane_replay_returns_loaded_record_without_overwrite() -> Non
     assert port.events.count("result_append") == 2
 
 
+def test_incremented_attempt_is_appended_under_a_distinct_identity() -> None:
+    harness, _sut, _traces, port = _harness()
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert first.results[0].attempt == 1
+    assert second.results[0].attempt == 2
+    assert len(port.results) == 2
+
+
 def test_conflicting_duplicate_attempt_routes_result_persistence_failure() -> None:
     harness, _sut, _traces, port = _harness()
     first = _run(harness)
@@ -633,6 +687,21 @@ def test_incomplete_e2e01_04_pair_persists_no_partial_pass() -> None:
     )
 
 
+def test_complete_equal_e2e01_04_pair_persists_both_passes() -> None:
+    harness, _sut, _traces, port = _harness()
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-04-A", "E2E01-04-B"),
+    )
+
+    assert outcome.command_passed is True
+    assert len(outcome.results) == 2
+    assert {result.status for result in outcome.results} == {
+        EvalResultStatus.PASS
+    }
+    assert len(port.results) == 2
+
+
 def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
     class PairSut(SyntheticSut):
         async def execute_case(self, **kwargs):
@@ -661,3 +730,27 @@ def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
             if item.grader_name == "DisclosureGrader"
         )
         assert disclosure.status is EvalGraderStatus.FAIL
+
+
+def test_runtime_fault_directive_is_passed_through_the_closed_sut_seam() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides={"error_mapping_assertions_pass": False},
+    )
+    harness, sut, _traces, _port = _harness(sut=sut, traces=traces)
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-01+FAULT-PROVIDER-PROTOCOL",),
+        script_ref_by_case={
+            "E2E01-01+FAULT-PROVIDER-PROTOCOL": (
+                "script:fault-runtime:state-advanced-before-gate"
+            )
+        },
+    )
+
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    assert sut.last_runtime_fault == RuntimeFaultDirective(
+        behavior="ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE",
+        boundary="AFTER_REVALIDATION_BEFORE_GATE",
+    )
