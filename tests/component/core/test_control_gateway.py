@@ -199,8 +199,8 @@ def test_exact_bound_get_order_candidate_is_approved() -> None:
     assert gate.resolved_canonical_tool_name == "get_order"
     assert gate.argument_binding_refs == (decision.input_binding.binding_id,)
     assert gate.validated_task_state_version == 1
-    assert "tool_call_id" not in gate.model_fields
-    assert "order_number" not in gate.model_fields
+    assert "tool_call_id" not in type(gate).model_fields
+    assert "order_number" not in type(gate).model_fields
 
 
 @pytest.mark.parametrize("replacement", ["O-2001", "O-9999"])
@@ -215,7 +215,7 @@ def test_provider_argument_replacement_is_rejected_before_toolcall(
     assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
     assert gate.argument_binding_valid is False
     assert gate.argument_binding_refs == (decision.input_binding.binding_id,)
-    assert "tool_call_id" not in gate.model_fields
+    assert "tool_call_id" not in type(gate).model_fields
 
 
 def test_unknown_tool_is_rejected_without_authorized_execution_identity() -> None:
@@ -227,7 +227,7 @@ def test_unknown_tool_is_rejected_without_authorized_execution_identity() -> Non
     assert gate.reason_code is GateReasonCode.TOOL_NOT_REGISTERED
     assert gate.registration_valid is False
     assert gate.resolved_canonical_tool_name is None
-    assert "tool_call_id" not in gate.model_fields
+    assert "tool_call_id" not in type(gate).model_fields
 
 
 @pytest.mark.parametrize(
@@ -322,7 +322,7 @@ def test_gateway_revalidates_every_fail_closed_boundary(
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.reason_code is expected_reason
-    assert "tool_call_id" not in gate.model_fields
+    assert "tool_call_id" not in type(gate).model_fields
 
 
 def test_stale_revalidated_v1_against_current_v2_is_rejected() -> None:

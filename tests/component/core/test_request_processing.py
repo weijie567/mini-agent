@@ -43,7 +43,7 @@ def _output(
     candidate_order_id: str = "o-1001",
     proposed_order_id: object = " O-1001 ",
     source_ref: UUID | None = None,
-    source_quote: str = "订单 o-1001",
+    source_quote: str | None = None,
     requested_tool_name: str = "get_order",
 ) -> RequestUnderstandingOutput:
     return RequestUnderstandingOutput(
@@ -61,7 +61,7 @@ def _output(
                         authority=InputAuthority.USER_CLAIM,
                         source_kind=InputSourceKind.CURRENT_MESSAGE,
                         source_ref=source_ref or message_ref,
-                        source_quote=source_quote,
+                        source_quote=source_quote or f"订单 {candidate_order_id}",
                         confidence=0.99,
                     ),
                 ),
@@ -312,4 +312,3 @@ def test_revalidation_rejects_owner_or_graph_substitution() -> None:
             current_request_unit=unrelated_unit,
             current_input_binding=decision.input_binding,
         )
-
