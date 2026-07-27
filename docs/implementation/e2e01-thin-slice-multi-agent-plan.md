@@ -510,23 +510,27 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 
 ```text
 {01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling}
-→ {01-07D RU exact mapping, 01-07H Core/Order DTO consumer}
+→ {01-07D RU exact mapping, 01-07H Core/Order additive DTO}
 → {01-07E Application persistence codec, 01-07F RU Core implementation}
 → 01-07I Application exact-Run Evidence Port + ModelProvider failure contract
-→ 01-07J Runtime consumer + INPUT_INVALID mapping
-→ {01-07K Infra strict reader, 01-07L Eval mapper + Scripted/Qwen consumers}
+→ 01-07J Runtime consumer + INPUT_INVALID / source-version fail-closed mapping
+→ {01-07K Infra strict reader + order-version producer, 01-07L Eval mapper + Scripted/Qwen consumers}
+→ 01-07M Core source-version contract closure
 → 01-08 Composition Root
 → 01-08A credentialed Qwen runner
 ```
 
-箭头表示前一花括号内所有Packet必须由Integrator串行review/merge，形成一个共同的新exact integration SHA，下一组才能签发；同一花括号只表示文件/ownership不重叠时可以并行写入，Integrator仍串行合并。特别是01-07D与01-07G都消费/写入Thin Slice owner文件，因此D/H只能在C/G均合并后的同一barrier上启动，不能各用不同predecessor；同理E/F必须等D/H全部合并形成下一共同barrier后才签发。01-07C/D、01-07G/H分别保留semantic/mapping与Python-source consumer边界；01-07D/E沿用01-03 mapping→01-04 codec precedent。若owner ruling要求额外migration、全局Memory version升级或新的外部契约，停止并新增Packet/分母，不扩大既有allowlist。
+箭头表示前一花括号内所有Packet必须由Integrator串行review/merge，形成一个共同的新exact integration SHA，下一组才能签发；同一花括号只表示文件/ownership不重叠时可以并行写入，Integrator仍串行合并。特别是01-07D与01-07G都消费/写入Thin Slice owner文件，因此D/H只能在C/G均合并后的同一barrier上启动，不能各用不同predecessor；同理E/F必须等D/H全部合并形成下一共同barrier后才签发。01-07C/D、01-07G/H分别保留semantic/mapping与Python-source consumer边界；01-07D/E沿用01-03 mapping→01-04 codec precedent。PR #48 review确认source-version不能在physical producer前一次性收紧Core validator，故新增01-07M并将目标分母从28改为29；若owner ruling要求其他migration、全局Memory version升级或新的外部契约，停止并继续新增Packet/分母，不扩大既有allowlist。
 
 - 01-07I以Application Port declaration owner身份同时冻结exact-Run Evidence Port和fresh parameterless、raw-diagnostic-free的Request Understanding candidate-invalid signal；`ModelProvider`合同明确只有Request Understanding output的Pydantic/trusted-field拒绝使用该signal，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍使用fresh `ProviderProtocolError`。建议精确owner files为`src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`及现有records/ports contract tests；它不得实现Runtime catch或Adapter。
-- 01-07J只在Runtime的`propose_next_move`边界消费01-07I signal并形成`COMPLETED / INPUT_INVALID`，不得直接catch raw `pydantic.ValidationError`、`ValueError`或`Exception`，不得记录raw diagnostics，也不得创建Task / RequestUnit / GateDecision / ToolCall；`ProviderProtocolError`仍映射`PROVIDER_PROTOCOL_ERROR`。建议精确owner files为`src/mini_agent/application/agent_run_service.py`及其Component test。
+- 01-07H只做additive expand：增加optional且present时strict-pattern的`GetOrderResult.source_version`，non-FOUND继续禁止；它不得在01-07K producer前拒绝legacy `FOUND + None`，也不得声称final matrix已完成。相关FOUND test stubs可在其精确allowlist内前置迁移为显式合法test token，但test token不构成authority。
+- 01-07J除既有`INPUT_INVALID`职责外，在任何Observation/Manifest前把缺失、空、坏格式或不可用source version的FOUND映射为bounded SYSTEM_FAILURE；不得fallback、重算、retry或创建半成品Evidence。只在Runtime的`propose_next_move`边界消费01-07I signal并形成`COMPLETED / INPUT_INVALID`，不得直接catch raw `pydantic.ValidationError`、`ValueError`或`Exception`，不得记录raw diagnostics，也不得创建Task / RequestUnit / GateDecision / ToolCall；`ProviderProtocolError`仍映射`PROVIDER_PROTOCOL_ERROR`。建议精确owner files为`src/mini_agent/application/agent_run_service.py`、read execution consumer及其Component tests。
+- 01-07K在同一次owner-scoped PostgreSQL读取与strict safe-projection校验后生成并返回deterministic source version；不得二次查询、扩大predicate、把test/fixture/schema version当authority或放松01-07J fail-closed gate。
 - 01-07L在HTTP/closure mapper之外消费01-07I signal：Scripted Provider与Qwen Adapter都只把Request Understanding output Pydantic拒绝映射为该signal，Presentation校验与transport/HTTP/JSON/zero-or-multiple/wrong-name继续映射`ProviderProtocolError`，并清除raw exception cause/context。它必须覆盖`invalid-request-understanding-schema`和`trusted-field-override`的真实Runtime `INPUT_INVALID`结果及协议分支不漂移；其Qwen ownership沿用01-07 Plan §Task Packet Scope明确的“sole Infra path is Eval-owned Qwen ModelProvider Adapter”，不推广为通用Infrastructure/model ownership。建议消费files包括两个Provider实现、对应Component tests与必要的offline Harness test。01-07K继续只拥有strict reader/order physical adapter。
+- 01-07M只在01-07K/01-07L共同barrier后由Core owner收紧`GetOrderResult.FOUND` validator为non-empty exact-pattern source version必填，保留non-FOUND prohibition并运行full suite；不得修改Infra/Runtime或把persisted historical `OrderObservation.source_version?`全局升级为required。01-07M reviewed merge前01-08保持blocked。
 - I/J/L的STRIDE gate同时防止Tampering/Spoofing（Adapter不得用错误类型自行改写canonical stop classification）与Information Disclosure（signal必须fresh、parameterless，`str`/`repr`/`args`不含raw value，`__cause__`/`__context__`为`None`，Run/Trace/response不保留原始Pydantic/Provider诊断）；每个consumer test都必须分别断言分类和清除边界。
-- 上述I/J/L是三个不同ownership boundary，必须各自形成Plan、RED/GREEN、exact-head review与串行merge；它们都是尚未签发的既有slot，所以目标总数仍为28。只有发现I无法在同一Application owner Packet拥有Port declaration与bounded signal source时，才新增Packet并同步分母。
-- 只在 `bootstrap.py` 装配具体 Adapter；01-07K拥有strict evidence reader、01-07L拥有HTTP/closure mapper及上述Eval-owned Provider consumers，01-08不重复实现。
+- 上述H/J/K/M green migration与I/J/L failure taxonomy跨不同ownership boundary，必须各自形成Plan、可独立通过的focused/full gate、exact-head review与串行merge；新增M后目标总数为29。只有发现I无法在同一Application owner Packet拥有Port declaration与bounded signal source时，才继续新增Packet并同步分母。
+- 只在 `bootstrap.py` 装配具体 Adapter；01-07K拥有strict evidence reader/order-version producer、01-07L拥有HTTP/closure mapper及上述Eval-owned Provider consumers，01-08不重复实现。
 - 按 Spec 第 10.1 节逐项验证完整写入门禁：
   1. 原始 `Message` 可靠保存后才运行 Request Understanding；
   2. accepted Delta、Task / RequestUnit 与 `InputBinding` 在 Gateway 接受候选前持久化；
@@ -546,7 +550,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 4. 真实 Qwen 配置存在时才运行 `qwen_baseline`；缺失时必须是 `SKIPPED / NOT_RUN`。
 5. 只有所有 DoD 有可复现证据后，才更新 Coverage Matrix 生命周期和 `AGENTS.md` canonical 命令。
 
-W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、01-07A–01-07L与01-08A只作为阻断依赖 Packet记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
+W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、01-07A–01-07M与01-08A只作为阻断依赖 Packet记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
 
 ## 8. 集成门禁
 
@@ -700,4 +704,4 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY REVIEWED_MERGED` | Runtime PR #34 merge `fb607019...`、Infra PR #36 merge `8e21652...`、Eval PR #29 merge `eee1c0e...`、01-07A PR #38 merge `4cfac0a...`、01-07B PR #44 merge `ccdafe87...`；historical PR #28/#30保留review evidence；post-01-07B为762 Plan focused / 40 migration / 1493 full（1 deselected）与Graphify PASS |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted Packets 01-04D/E/F/G/H/07A/07B、replacement 01-05R/01-06R与01-07已完成；numbered Plan evidence口径是7/8，新增依赖后当前目标Task Packet完成口径是14/28，磁盘上正式签发18个Plan（7 numbered + 9 inserted D–H/07A/07B/07C/07G + 2 replacements 05R/06R），canonical lifecycle与派生checkbox仍保持0/8。01-07C/01-07G Plans已签发但feature execution均未开始；本planning PR reviewed merge后从同一`3f0753f7...`并行dispatch独立Worktree，Integrator串行合并形成共同barrier；01-07D–01-07L/01-08/01-08A等待各自前置exact base。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted Packets 01-04D/E/F/G/H/07A/07B、replacement 01-05R/01-06R与01-07已完成；numbered Plan evidence口径是7/8，新增01-07M后当前目标Task Packet完成口径是14/29，磁盘上正式签发仍为18个Plan（7 numbered + 9 inserted D–H/07A/07B/07C/07G + 2 replacements 05R/06R），canonical lifecycle与派生checkbox仍保持0/8。01-07C/01-07G Plans已签发但feature execution均未开始；本planning PR reviewed merge后从同一`3f0753f7...`并行dispatch独立Worktree，Integrator串行合并形成共同barrier；01-07D–01-07M/01-08/01-08A等待各自前置exact base。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。

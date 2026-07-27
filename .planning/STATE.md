@@ -6,8 +6,8 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "07G"
 status: "in_progress"
-last_updated: "2026-07-28T00:49:36+08:00"
-last_activity: "2026-07-28 — 01-07G single-owner Plan signed from the same exact execution base 3f0753f7 as 01-07C; both feature executions not started"
+last_updated: "2026-07-28T01:17:54+08:00"
+last_activity: "2026-07-28 — PR #48 review added staged H/J/K/M source-version migration and raised the target denominator to 29; C/G feature executions not started"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -38,15 +38,15 @@ Total Phases: 6
 Total Plans in Phase: 8
 Status: 01-07C and 01-07G issued / feature dispatch next
 Last Activity: 2026-07-28
-Last Activity Description: 01-07G Plan固定与01-07C相同的execution base `3f0753f7...`及Thin Slice owner单文件ownership；两个feature execution均未开始，本planning PR reviewed merge后才dispatch
+Last Activity Description: 01-07G Plan固定与01-07C相同的execution base `3f0753f7...`及Thin Slice owner单文件ownership；PR #48 review后新增H/J/K/M green migration与01-07M denominator，两个feature execution均未开始，本planning PR reviewed merge后才dispatch
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07、01-07A与01-07B均已evidence-indexed；01-07C与01-07G已签发但未执行，01-07D–01-07L/01-08/01-08A等待各自前置exact integration SHA）
+Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07、01-07A与01-07B均已evidence-indexed；01-07C与01-07G已签发但未执行，01-07D–01-07M/01-08/01-08A等待各自前置exact integration SHA）
 Status: `ACTIVE / 01-07C_01-07G_ISSUED / FEATURE_DISPATCH_NEXT`
-Last activity: 2026-07-28 — 01-07C/01-07G Plans已签发、implementation均未开始；新增依赖后目标Packet完成口径14/28、正式签发18个Plan；canonical lifecycle仍为0/8
+Last activity: 2026-07-28 — PR #48 review识别并修复H-before-K无法保持green的问题，新增未签发01-07M；目标Packet完成口径14/29、正式签发18个Plan；canonical lifecycle仍为0/8
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
@@ -54,10 +54,10 @@ Progress: `░░░░░░░░░░` 0%
 1. 通过当前01-07G dedicated planning-status PR；只签发Thin Slice owner单文件Packet并同步派生状态，不写canonical owner或推进Case lifecycle。
 2. 01-07G planning PR reviewed merge后，从同一个exact execution base `3f0753f7...`为01-07C与01-07G分别建立独立feature Worktree；两个writer并行写入互不重叠的Intent与Thin Slice owner文件。
 3. 对C/G各自exact feature head完成机械检查、full suite与双路独立review；Integrator按PR逐个串行合并，第二个使用latest-integration overlay复验，不rebase/force-push，形成共同barrier。
-4. 从C/G共同barrier签发01-07D RU exact mapping与01-07H Core/Order DTO；D/H全部串行合并后，才签发ownership不重叠的01-07E persistence codec与01-07F RU Core。
+4. 从C/G共同barrier签发01-07D RU exact mapping与01-07H Core/Order additive DTO；H只增加optional/pattern-validated表示能力，不得在producer前收紧legacy FOUND+None。D/H全部串行合并后，才签发ownership不重叠的01-07E persistence codec与01-07F RU Core。
 5. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
-6. 从01-07J的新exact SHA并行签发01-07K Infra reader与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
-7. 01-07K/L reviewed merge后签发01-08 Composition Root与真实纵向证据；01-08 reviewed merge后签发01-08A Eval-owner credentialed Qwen runner，缺凭据只能形成`NOT_RUN / SKIPPED`。
+6. 01-07J除现有职责外必须在Observation前把缺失/损坏source version的FOUND fail closed；随后从新exact SHA并行签发01-07K Infra reader/version producer与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
+7. 01-07K/L共同barrier后签发01-07M Core source-version contract closure并收紧FOUND validator；01-07M reviewed merge后才签发01-08，01-08 reviewed merge后签发01-08A，缺凭据只能形成`NOT_RUN / SKIPPED`。
 8. 全部实现与真实证据完成后才执行受控code review/fix、validation、Eval review、安全审计、UAT与integration-to-main release PR。
 
 ## Decisions
@@ -74,9 +74,9 @@ Progress: `░░░░░░░░░░` 0%
 - `eee1c0e...`是01-07A唯一execution base；Plan只授权`agent_run_service.py`及其Component test，关闭real Eval Trace alignment，不把Runtime修改隐含塞入01-08。
 - 01-07A planning/Runtime PR #37/#38已reviewed merge为`4cfac0a...`；Business/Eval/project-rule状态PR #39–#41随后形成status-aligned exact base `8544137...`，lifecycle保持0/8。
 - `8544137...`是01-07B唯一execution base；Plan只授权Harness、Grader、ScriptedProvider及对应三份测试的exact six-file Packet，隔离SUT Case/Script输入与output-side semantic `case_id`，并增加closed nested projections、one-time execution correlation及variant-scoped safety-causal Trace precedence。
-- 01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；exact six files、双review、latest-integration overlay、1493-test post-merge full与Graphify gate均通过。Task Packet口径为14/28，lifecycle仍为0/8。
+- 01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；exact six files、双review、latest-integration overlay、1493-test post-merge full与Graphify gate均通过。当时Task Packet口径为14/28；PR #48 review新增01-07M后current口径为14/29，lifecycle仍为0/8。
 - RU闭环必须保持四轴ownership：01-07C仅RU semantic ruling，01-07D仅Thin Slice exact mapping，01-07E仅Application persistence codec，01-07F仅RU Core implementation；不得在一个Packet同时裁决version并实现自己的codec。
-- Observation version闭环同样分离：01-07G只裁决P0 `get_order` source-version语义，01-07H只消费为Core/Order DTO，01-07J Runtime不得修改Core contract或猜测fallback。
+- Observation version闭环采用显式green migration：01-07G只裁决P0语义；01-07H additive-expand Core DTO；01-07J在Observation前对缺/坏version fail closed且不得猜fallback；01-07K由Infra producer生成；01-07M最后收紧Core FOUND validator。任何中间Packet都不得越过owner或以失败full suite换取一次性强制。
 - Eval evidence闭环由01-07I Application定义expectation-free exact-Run closure DTO/Port，01-07K Infra实现一致snapshot，01-07L Eval映射真实HTTP+closure；01-08只装配，不能定义Port、Reader或补造RU output/版本/Trace/evidence。
 - Thin Slice §10.3已经拥有Provider failure语义：Request Understanding output Pydantic/source/authority/InputBinding/trusted-field拒绝必须是`INPUT_INVALID`，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍是`PROVIDER_PROTOCOL_ERROR`。01-07I只定义bounded signal/Port contract，01-07J只做Runtime mapping，01-07L按01-07 Eval ownership适配Scripted与Qwen并清除raw cause/context；不得由01-07B、01-07F、01-07K或01-08越权修补。
 - Qwen Responses Provider Adapter属于01-07 exact ownership；默认离线W4不依赖Qwen。01-08A是01-08之后的独立Eval-owner credentialed runner Packet；缺凭据必须保持`NOT_RUN / SKIPPED`，只有01-08A的实际配置运行证据才能形成真实Qwen执行声明。
@@ -111,7 +111,8 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / PROJECT_DIRECTION_VOLATILE_COUNT_REMOVED`: Project Direction owner alignment PR #47 reviewed merge `f16eda358a7eb92eb3495ef36d2c19ef5f1d2867`；active owner不再复制易漂移的signed-Plan/Task Packet派生计数，current derived counts只由本STATE与ROADMAP索引。
 - `CONFIRMED / 01-07C_ISSUED`: [01-07C Plan](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)固定execution base `3f0753f7...`、Intent owner单文件allowlist、完整version/closure/threat/rollback gate；feature execution尚未开始。
 - `CONFIRMED / 01-07G_ISSUED`: [01-07G Plan](phases/01-cycle-1-e2e-01/01-07G-PLAN.md)固定同一execution base `3f0753f7...`、Thin Slice owner单文件allowlist、deterministic content-version/outcome/exact-copy/threat/rollback gate；feature execution尚未开始。
-- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。新增依赖后当前目标Packet完成14/28、正式签发18个Plan。
+- `CONFIRMED / 01-07G_REVIEW_MIGRATION_FIX`: PR #48首个canonical/security review在head `ac8cdb2...`发现H强制字段早于K producer会破坏per-Packet full gate，以及公开绝对Worktree path；修订采用H additive→J fail-closed→K produce→M contract并只持久化logical worktree_id。新增01-07M使目标Packet完成口径为14/29，signed Plan仍为18。
+- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge并完成01-07M Core contract closure后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。当前目标Packet完成14/29、正式签发18个Plan。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
