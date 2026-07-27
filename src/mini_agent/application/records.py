@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Self, TypeVar
 from uuid import UUID
 
 from pydantic import (
+    BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -46,6 +48,7 @@ from mini_agent.core.trace import (
     AgentRunRecord,
     AgentRunStatus,
     StopReason,
+    TimingAndUsageSummary,
     TraceEvent,
     TraceEventType,
 )
@@ -326,6 +329,82 @@ class TransitionRunCommand(_StrictRuntimePrivateRecord):
         return self
 
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def _canonical_model_field_projection(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise ValueError(error_message)
+    field_names = frozenset(expected_type.model_fields)
+    if (
+        frozenset(vars(value)) != field_names
+        or not value.model_fields_set.issubset(field_names)
+        or value.__pydantic_extra__ is not None
+        or value.__pydantic_private__ is not None
+    ):
+        raise ValueError(error_message)
+    return {
+        field_name: getattr(value, field_name)
+        for field_name in expected_type.model_fields
+    }
+
+
+def _strict_validate_canonical_projection(
+    expected_type: type[_ModelT],
+    projection: Mapping[str, object],
+    *,
+    error_message: str,
+) -> _ModelT:
+    try:
+        return expected_type.model_validate(projection, strict=True)
+    except ValidationError:
+        raise ValueError(error_message) from None
+
+
+def _strict_rebuild_exact_model(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> _ModelT:
+    projection = _canonical_model_field_projection(
+        value,
+        expected_type,
+        error_message=error_message,
+    )
+    return _strict_validate_canonical_projection(
+        expected_type,
+        projection,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_terminal_trace_event(value: object) -> TraceEvent:
+    error_message = "terminal TraceEvent must be canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        TraceEvent,
+        error_message=error_message,
+    )
+    timing_summary = projection["timing_and_usage_summary"]
+    if timing_summary is not None:
+        projection["timing_and_usage_summary"] = _strict_rebuild_exact_model(
+            timing_summary,
+            TimingAndUsageSummary,
+            error_message=error_message,
+        )
+    return _strict_validate_canonical_projection(
+        TraceEvent,
+        projection,
+        error_message=error_message,
+    )
+
+
 _COMPLETED_FINALIZATION_ROWS = frozenset(
     {
         (
@@ -404,6 +483,8 @@ _TERMINAL_TRACE_ALLOWED_FIELDS = {
 class FinalizeRunCommand(_StrictRuntimePrivateRecord):
     """One validated aggregate for a normal terminal turn."""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     expected_active_record: AgentRunRecord
     terminal_record: AgentRunRecord
     expected_active_links: Annotated[
@@ -426,38 +507,51 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
         Field(max_length=2),
     ] = ()
 
+    @field_validator("task_transition")
+    @classmethod
+    def task_transition_is_recursively_canonical(
+        cls,
+        value: ApplyTaskTransitionCommand | None,
+    ) -> ApplyTaskTransitionCommand | None:
+        if value is None:
+            return None
+        return _strict_rebuild_task_transition(value)
+
+    @field_validator("terminal_result")
+    @classmethod
+    def terminal_result_is_canonical(
+        cls,
+        value: AgentRunResult | None,
+    ) -> AgentRunResult | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_model(
+            value,
+            AgentRunResult,
+            error_message="terminal result must be canonical",
+        )
+
+    @field_validator("assistant_message")
+    @classmethod
+    def assistant_message_is_canonical(
+        cls,
+        value: MessageRecord | None,
+    ) -> MessageRecord | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_model(
+            value,
+            MessageRecord,
+            error_message="ASSISTANT Message must be canonical",
+        )
+
     @field_validator("terminal_trace_events")
     @classmethod
     def terminal_trace_events_are_canonical(
         cls,
         events: tuple[TraceEvent, ...],
     ) -> tuple[TraceEvent, ...]:
-        canonical_events: list[TraceEvent] = []
-        for event in events:
-            if type(event) is not TraceEvent:
-                raise ValueError("terminal Trace requires exact TraceEvent records")
-            event_field_names = frozenset(vars(event))
-            has_only_known_fields = event.model_fields_set.issubset(
-                _TRACE_EVENT_FIELD_NAMES
-            )
-            has_no_hidden_storage = (
-                event.__pydantic_extra__ is None and event.__pydantic_private__ is None
-            )
-            if (
-                event_field_names != _TRACE_EVENT_FIELD_NAMES
-                or not has_only_known_fields
-                or not has_no_hidden_storage
-            ):
-                raise ValueError(
-                    "terminal TraceEvent records must contain only canonical fields"
-                )
-            canonical_events.append(
-                TraceEvent.model_validate(
-                    dict(vars(event)),
-                    strict=True,
-                )
-            )
-        return tuple(canonical_events)
+        return tuple(_strict_rebuild_terminal_trace_event(event) for event in events)
 
     @model_validator(mode="after")
     def terminal_projection_is_exact_and_graph_closed(self) -> Self:
@@ -595,6 +689,17 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
             ):
                 raise ValueError(
                     "Task transition expected and next Task must equal the link Task"
+                )
+            active_link_base_version = expected_by_task[
+                link_task_id
+            ].base_task_state_version
+            if (
+                active_link_base_version is not None
+                and transition.expected_task_record.state_version
+                < active_link_base_version
+            ):
+                raise ValueError(
+                    "Task transition cannot precede active link base Task version"
                 )
             next_task = transition.next_task_record
             next_unit = transition.next_request_unit_record
@@ -977,6 +1082,35 @@ class ApplyTaskTransitionCommand(_StrictRuntimePrivateRecord):
                 "next projections must use the transition change timestamp"
             )
         return self
+
+
+def _strict_rebuild_task_transition(
+    value: object,
+) -> ApplyTaskTransitionCommand:
+    error_message = "Task transition must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        ApplyTaskTransitionCommand,
+        error_message=error_message,
+    )
+    nested_types: dict[str, type[BaseModel]] = {
+        "expected_task_record": TaskRecord,
+        "next_task_record": TaskRecord,
+        "expected_request_unit_record": RequestUnitRecord,
+        "next_request_unit_record": RequestUnitRecord,
+        "task_state_transition": TaskStateTransition,
+    }
+    for field_name, expected_type in nested_types.items():
+        projection[field_name] = _strict_rebuild_exact_model(
+            projection[field_name],
+            expected_type,
+            error_message=error_message,
+        )
+    return _strict_validate_canonical_projection(
+        ApplyTaskTransitionCommand,
+        projection,
+        error_message=error_message,
+    )
 
 
 FinalizeRunCommand.model_rebuild()

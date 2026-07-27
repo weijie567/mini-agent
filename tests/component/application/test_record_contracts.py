@@ -412,29 +412,30 @@ def _terminal_task_transition(
     task_id: UUID,
     request_unit_id: UUID,
     terminal_status: TaskStatus,
+    base_state_version: int = 1,
     changed_at: datetime = UTC_NOW + timedelta(milliseconds=1),
 ) -> ApplyTaskTransitionCommand:
     expected_task = _task(
         task_id=task_id,
         status=TaskStatus.ACTIVE,
-        state_version=1,
+        state_version=base_state_version,
     )
     expected_unit = _request_unit(
         request_unit_id=request_unit_id,
         task_id=task_id,
         status=TaskStatus.ACTIVE,
-        state_version=1,
+        state_version=base_state_version,
     )
     next_task = _rebuild(
         expected_task,
         status=terminal_status,
-        state_version=2,
+        state_version=base_state_version + 1,
         updated_at=changed_at,
     )
     next_unit = _rebuild(
         expected_unit,
         status=terminal_status,
-        state_version=2,
+        state_version=base_state_version + 1,
         updated_at=changed_at,
     )
     transition = _task_transition(
@@ -442,8 +443,8 @@ def _terminal_task_transition(
         request_unit_id=request_unit_id,
         from_status=TaskStatus.ACTIVE,
         to_status=terminal_status,
-        base_state_version=1,
-        result_state_version=2,
+        base_state_version=base_state_version,
+        result_state_version=base_state_version + 1,
         changed_at=changed_at,
     )
     return ApplyTaskTransitionCommand(
@@ -498,6 +499,8 @@ def _completed_finalization(
     outcome: AgentOutcome = AgentOutcome.COMPLETED,
     with_task: bool = True,
     task_status: TaskStatus | None = TaskStatus.COMPLETED,
+    active_link_base_state_version: int | None = 1,
+    transition_base_state_version: int = 1,
 ) -> FinalizeRunCommand:
     if with_task != (task_status is not None):
         raise ValueError("task_status must be present exactly when with_task is true")
@@ -537,11 +540,12 @@ def _completed_finalization(
             task_id=task_id,
             request_unit_id=request_unit_id,
             terminal_status=task_status,
+            base_state_version=transition_base_state_version,
         )
         active_link = _run_task_link(
             run_id=run_id,
             task_id=task_id,
-            base_task_state_version=1,
+            base_task_state_version=active_link_base_state_version,
         )
         expected_active_links = (active_link,)
         terminal_links = (
@@ -578,7 +582,12 @@ def _completed_finalization(
     )
 
 
-def _failed_finalization(*, with_task: bool = True) -> FinalizeRunCommand:
+def _failed_finalization(
+    *,
+    with_task: bool = True,
+    active_link_base_state_version: int | None = 1,
+    current_task_state_version: int = 1,
+) -> FinalizeRunCommand:
     run_id = uuid4()
     running = _run(
         run_id=run_id,
@@ -596,16 +605,19 @@ def _failed_finalization(*, with_task: bool = True) -> FinalizeRunCommand:
         current_task = _task(
             task_id=task_id,
             status=TaskStatus.ACTIVE,
-            state_version=1,
+            state_version=current_task_state_version,
         )
         active_link = _run_task_link(
             run_id=run_id,
             task_id=task_id,
-            base_task_state_version=1,
+            base_task_state_version=active_link_base_state_version,
         )
         expected_active_links = (active_link,)
         terminal_links = (
-            _rebuild(active_link, result_task_state_version=1),
+            _rebuild(
+                active_link,
+                result_task_state_version=current_task_state_version,
+            ),
         )
         result_task_records = (current_task,)
     else:
@@ -2558,6 +2570,191 @@ def test_failed_run_rejects_all_four_terminal_turn_projections() -> None:
                 stop_reason=StopReason.GOAL_COMPLETED,
             ),
         )
+
+
+def test_terminal_turn_revalidates_coupled_result_and_message_content() -> None:
+    command = _completed_finalization()
+    tampered_result = command.terminal_result.model_copy(update={"message": ""})
+    tampered_message = command.assistant_message.model_copy(update={"content": ""})
+
+    with pytest.raises(ValidationError):
+        _rebuild(tampered_result)
+    with pytest.raises(ValidationError):
+        _rebuild(tampered_message)
+    with pytest.raises(ValidationError, match="canonical"):
+        _rebuild(
+            command,
+            terminal_result=tampered_result,
+            assistant_message=tampered_message,
+        )
+
+
+def test_terminal_turn_revalidates_message_identity_without_disclosure() -> None:
+    command = _completed_finalization()
+    secret = "customer-A SECRET"
+    tampered_message = command.assistant_message.model_copy(
+        update={"message_id": secret}
+    )
+
+    with pytest.raises(ValidationError):
+        _rebuild(tampered_message)
+    with pytest.raises(ValidationError, match="canonical") as error:
+        _rebuild(command, assistant_message=tampered_message)
+    assert secret not in str(error.value)
+
+
+def test_terminal_turn_recursively_revalidates_nested_task_transition() -> None:
+    command = _completed_finalization()
+    secret = "customer-A SECRET"
+    transition = command.task_transition
+    tampered_state_transition = transition.task_state_transition.model_copy(
+        update={"reason_ref": secret}
+    )
+    tampered_transition = transition.model_copy(
+        update={"task_state_transition": tampered_state_transition}
+    )
+
+    with pytest.raises(ValidationError):
+        _rebuild(tampered_state_transition)
+    with pytest.raises(ValidationError, match="canonical") as error:
+        _rebuild(command, task_transition=tampered_transition)
+    assert secret not in str(error.value)
+
+
+def test_terminal_turn_rejects_non_exact_new_projection_model_types() -> None:
+    command = _completed_finalization()
+
+    class ResultSubclass(AgentRunResult):
+        pass
+
+    class MessageSubclass(MessageRecord):
+        pass
+
+    class TaskTransitionSubclass(ApplyTaskTransitionCommand):
+        pass
+
+    class TraceEventSubclass(TraceEvent):
+        pass
+
+    forged_result = ResultSubclass(
+        **{
+            field_name: getattr(command.terminal_result, field_name)
+            for field_name in AgentRunResult.model_fields
+        }
+    )
+    forged_message = MessageSubclass(
+        **{
+            field_name: getattr(command.assistant_message, field_name)
+            for field_name in MessageRecord.model_fields
+        }
+    )
+    forged_transition = TaskTransitionSubclass(
+        **{
+            field_name: getattr(command.task_transition, field_name)
+            for field_name in ApplyTaskTransitionCommand.model_fields
+        }
+    )
+    task_changed, run_stopped = command.terminal_trace_events
+    forged_task_changed = TraceEventSubclass(
+        **{
+            field_name: getattr(task_changed, field_name)
+            for field_name in TraceEvent.model_fields
+        }
+    )
+
+    for field_name, value in (
+        ("terminal_result", forged_result),
+        ("assistant_message", forged_message),
+        ("task_transition", forged_transition),
+        (
+            "terminal_trace_events",
+            (forged_task_changed, run_stopped),
+        ),
+    ):
+        with pytest.raises(ValidationError, match="canonical|exact"):
+            _rebuild(command, **{field_name: value})
+
+
+def test_terminal_turn_rejects_hidden_outer_and_nested_model_storage() -> None:
+    command = _completed_finalization()
+    secret = "customer-A SECRET"
+    tampered_result = command.terminal_result.model_copy(update={"secret": secret})
+    tampered_message = command.assistant_message.model_copy(update={"secret": secret})
+    tampered_next_task = command.task_transition.next_task_record.model_copy(
+        update={"secret": secret}
+    )
+    tampered_transition = command.task_transition.model_copy(
+        update={"next_task_record": tampered_next_task}
+    )
+    tampered_next_unit = (
+        command.task_transition.next_request_unit_record.model_copy(
+            update={"secret": secret}
+        )
+    )
+    tampered_unit_transition = command.task_transition.model_copy(
+        update={"next_request_unit_record": tampered_next_unit}
+    )
+    task_changed, run_stopped = command.terminal_trace_events
+    tampered_task_changed = task_changed.model_copy(update={"secret": secret})
+
+    for field_name, value in (
+        ("terminal_result", tampered_result),
+        ("assistant_message", tampered_message),
+        ("task_transition", tampered_transition),
+        ("task_transition", tampered_unit_transition),
+        (
+            "terminal_trace_events",
+            (tampered_task_changed, run_stopped),
+        ),
+    ):
+        with pytest.raises(ValidationError, match="canonical") as error:
+            _rebuild(command, **{field_name: value})
+        assert secret not in str(error.value)
+
+
+def test_completed_task_transition_respects_active_link_base_lower_bound() -> None:
+    with pytest.raises(ValidationError, match="active link base Task version"):
+        _completed_finalization(
+            active_link_base_state_version=2,
+            transition_base_state_version=1,
+        )
+
+    equal_base = _completed_finalization(
+        active_link_base_state_version=2,
+        transition_base_state_version=2,
+    )
+    advanced_before_terminal_turn = _completed_finalization(
+        active_link_base_state_version=2,
+        transition_base_state_version=3,
+    )
+    newly_created_task = _completed_finalization(
+        active_link_base_state_version=None,
+        transition_base_state_version=1,
+    )
+    failed_with_current_projection = _failed_finalization(
+        active_link_base_state_version=2,
+        current_task_state_version=3,
+    )
+
+    assert equal_base.task_transition.expected_task_record.state_version == 2
+    assert equal_base.task_transition.next_task_record.state_version == 3
+    assert (
+        advanced_before_terminal_turn.task_transition.expected_task_record.state_version
+        == 3
+    )
+    assert (
+        advanced_before_terminal_turn.task_transition.next_task_record.state_version
+        == 4
+    )
+    assert newly_created_task.expected_active_links[
+        0
+    ].base_task_state_version is None
+    assert (
+        failed_with_current_projection.terminal_links[
+            0
+        ].result_task_state_version
+        == 3
+    )
 
 
 def test_run_finalization_preserves_existing_run_link_and_task_closure() -> None:
