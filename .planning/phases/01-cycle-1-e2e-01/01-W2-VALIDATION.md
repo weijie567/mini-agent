@@ -1,7 +1,7 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-04H-01-07-with-01-05R-01-06R
+scope: 01-04H-01-07A-with-01-05R-01-06R
 status: execution_evidence_in_progress
 nyquist_compliant: true
 wave_0_complete: true
@@ -11,7 +11,7 @@ created: "2026-07-27"
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义已完成01-04H/01-05R、historical 01-05/06、replacement 01-06R与current 01-07 execution feedback sampling。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
+> 本文件只定义已完成01-04H/01-05R/01-06R/01-07、historical 01-05/06与current 01-07A execution feedback sampling。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -21,8 +21,8 @@ created: "2026-07-27"
 | Config | `pyproject.toml`、`tests/conftest.py`、`compose.yaml`、`alembic.ini` |
 | Quick command | 每个 Task Packet 的 exact focused pytest command |
 | Full suite | `uv run pytest` |
-| Infra preflight | `uv sync --all-groups`；启动 disposable db / db-test；`uv run alembic upgrade head` |
-| Current exact-base evidence | `660 passed` + `38 migration passed` at 01-05R merge / 01-06R base `fb607019130843c94825a47d7822518cbdb2143c` |
+| Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
+| Current exact-base evidence | `191 Eval focused` + `40 migration` + `936 full, 1 deselected` at 01-07 merge / 01-07A base `eee1c0e46e1bca1160dea54d586d477c173daadc` |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
 
 仓库当前没有 canonical lint、type-check、build 或 app-start命令，也没有 pinned Ruff dependency；不得编造。允许的附加机械检查为 `compileall`、`git diff --check`、artifact SHA 与 changed-file containment。
@@ -34,7 +34,7 @@ created: "2026-07-27"
 - 每个 Packet handoff 前：运行 Packet 全部 focused tests、`uv run pytest` 和机械 containment。
 - 每个 feature PR 最新 head：独立 reviewer 读取 exact diff和测试证据；finding修复后重新运行受影响 focused + full suite。
 - 每次串行合并前：在 latest integration overlay / merge candidate上重复 full suite。
-- 01-08 前：三个 Packet都必须有 reviewed exact-head和latest-integration compatibility证据。
+- 01-08 前：Runtime、Infra、Eval与01-07A都必须有 reviewed exact-head和latest-integration compatibility证据。
 
 ## Per-Task Verification Map
 
@@ -46,15 +46,17 @@ created: "2026-07-27"
 | 01-05R-02 | 01-05R | 10 | E2E01-01/04 | RT-R01/RT-D01/RT-I01/RT-T03 | durable fence、no retry、fact-free plan与safe renderer保持donor blob/behavior | Component replay | `uv run pytest tests/component/core/test_presentation_policy.py tests/component/application/test_read_tool_executor.py tests/component/application/test_deterministic_renderer.py -x` | ✅ donor | ✅ green |
 | 01-05R-03 | 01-05R | 10 | E2E01-01/04 | RT-R04/RT-D02/RT-I03 | RED禁止split terminal writes；GREEN只用一个complete aggregate且APPLIED后无await | Component replacement | `uv run pytest tests/component/application/test_agent_run_service.py -x` | ✅ extend | ✅ green |
 | 01-05R-04 | 01-05R | 10 | E2E01-01/04 | RT-R03/RT-T04 | restart不resume/replay；exact recovery events保持donor blob/behavior | Component replay | `uv run pytest tests/component/application/test_restart_recovery_service.py -x` | ✅ donor | ✅ green |
-| 01-06R-01 | 01-06R | 11 | E2E01-01/04 | IF-T01/IF-T04/IF-I04 | controlled donor replay后以首个test-only RED只暴露raw disclosure与late ToolCall | Integration replacement | `uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_recovery.py -x` | ✅ donor/extend | ⬜ pending |
-| 01-06R-02 | 01-06R | 11 | E2E01-01/04 | IF-T01/IF-T04/IF-I04/IF-D02 | bounded envelope/reference error；parent Run RUNNING fence；两种无sleep顺序无orphan | Integration replacement | `uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_recovery.py -x` | ✅ donor/extend | ⬜ pending |
-| 01-06R-03 | 01-06R | 11 | E2E01-01/04 | IF-R03/IF-R04/IF-D02 | Task 2 GREEN后以第二个RED暴露partial terminal commit，再使with/no Task/FAILED complete transaction与逐child fault全回滚 | Integration replacement | `uv run pytest tests/integration/test_postgres_atomicity.py -x` | ✅ donor/extend | ⬜ pending |
-| 01-07-01 | 01-07 | 1 | E2E01-01/04 | EV-T01/EV-E01 | closed manifest/path/hash/ref loader | Component | `uv run pytest tests/component/evaluation/test_e2e01_versioned_artifact_loader.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-02 | 01-07 | 1 | E2E01-01/04 | EV-S01/EV-I01 | strict script cursor；无network；raw error丢弃 | Component | `uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-03 | 01-07 | 1 | E2E01-01/04 | EV-S02/EV-I03 | Qwen request allowlist、exact one target call、mock transport与raw error丢弃 | Component | `uv run pytest tests/component/model/test_qwen_responses_adapter.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-04 | 01-07 | 1 | E2E01-01/04 | EV-T02/EV-I02 | 13 graders均有pass与tamper-fail；CF强制FAIL | Component | `uv run pytest tests/component/evaluation/test_e2e01_graders.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-05 | 01-07 | 1 | E2E01-01/04 | EV-R01/EV-R02 | Result/Failure矩阵、run/case/lane/attempt append-only、cross-lane distinctness、paired completeness | Integration | `uv run pytest tests/integration/evaluation/test_e2e01_offline_harness.py -x` | ❌ W0 | ⬜ pending |
-| 01-07-06 | 01-07 | 1 | E2E01-01/04 | EV-I04 | marker与missing-input / real-SUT-not-wired preflight；canonical SKIPPED/NOT_RUN且零network | Baseline preflight | `env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；`DASHSCOPE_API_KEY=not-a-real-key DASHSCOPE_BASE_URL=https://example.invalid uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x` | ❌ W0 | ⬜ pending |
+| 01-06R-01 | 01-06R | 11 | E2E01-01/04 | IF-T01/IF-T04/IF-I04 | controlled donor replay后以首个test-only RED只暴露raw disclosure与late ToolCall | Integration replacement | `uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_recovery.py -x` | ✅ donor/extend | ✅ green |
+| 01-06R-02 | 01-06R | 11 | E2E01-01/04 | IF-T01/IF-T04/IF-I04/IF-D02 | bounded envelope/reference error；parent Run RUNNING fence；两种无sleep顺序无orphan | Integration replacement | `uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_recovery.py -x` | ✅ donor/extend | ✅ green |
+| 01-06R-03 | 01-06R | 11 | E2E01-01/04 | IF-R03/IF-R04/IF-D02 | Task 2 GREEN后以第二个RED暴露partial terminal commit，再使with/no Task/FAILED complete transaction与逐child fault全回滚 | Integration replacement | `uv run pytest tests/integration/test_postgres_atomicity.py -x` | ✅ donor/extend | ✅ green |
+| 01-07-01 | 01-07 | 12 | E2E01-01/04 | EV-T01/EV-E01 | closed manifest/path/hash/ref loader | Component | `uv run pytest tests/component/evaluation/test_e2e01_versioned_artifact_loader.py -x` | ✅ created | ✅ green |
+| 01-07-02 | 01-07 | 12 | E2E01-01/04 | EV-S01/EV-I01 | strict script cursor；无network；raw error丢弃 | Component | `uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py -x` | ✅ created | ✅ green |
+| 01-07-03 | 01-07 | 12 | E2E01-01/04 | EV-S02/EV-I03 | Qwen request allowlist、exact one target call、mock transport与raw error丢弃 | Component | `uv run pytest tests/component/model/test_qwen_responses_adapter.py -x` | ✅ created | ✅ green |
+| 01-07-04 | 01-07 | 12 | E2E01-01/04 | EV-T02/EV-I02 | 13 graders均有pass与tamper-fail；CF强制FAIL | Component | `uv run pytest tests/component/evaluation/test_e2e01_graders.py -x` | ✅ created | ✅ green |
+| 01-07-05 | 01-07 | 12 | E2E01-01/04 | EV-R01/EV-R02 | Result/Failure矩阵、run/case/lane/attempt append-only、cross-lane distinctness、paired completeness | Integration | `uv run pytest tests/integration/evaluation/test_e2e01_offline_harness.py -x` | ✅ created | ✅ green |
+| 01-07-06 | 01-07 | 12 | E2E01-01/04 | EV-I04 | marker与missing-input / real-SUT-not-wired preflight；canonical SKIPPED/NOT_RUN且零network | Baseline preflight | `env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；`DASHSCOPE_API_KEY=not-a-real-key DASHSCOPE_BASE_URL=https://example.invalid uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x` | ✅ created | ✅ green |
+| 01-07A-01 | 01-07A | 13 | E2E01-01/04 | RTA-T01/RTA-T02/RTA-R01 | test-only RED复现purpose、fixed-result ResponseRendered与hook active-run identity缺口 | Component alignment | `uv run pytest tests/component/application/test_agent_run_service.py -x` | ✅ extend | ⬜ pending |
+| 01-07A-02 | 01-07A | 13 | E2E01-01/04 | RTA-I01/RTA-D01/RTA-E01 | real Runtime Trace关闭缺口，保持terminal aggregate与FAILED fail-closed | Component alignment | `uv run pytest tests/component/application/test_agent_run_service.py -x`；`uv run pytest` | ✅ extend | ⬜ pending |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
@@ -65,10 +67,11 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 - 01-04H：扩展两个既有 Application contract test files，RED/GREEN与reviewed merge均已完成。
 - historical 01-05：7个allowlisted Component test files与RED/GREEN保留在donor history；01-05R新增terminal aggregate RED并已完成reviewed merge。
 - historical 01-06：扩展现有 migration test并创建5个Infra integration test files；01-06R受控replay后先扩展三份定向tests取得disclosure/fence RED，首轮GREEN后再单独扩展atomicity test取得terminal RED，继续复用byte-identical `tests/conftest.py`。
-- 01-07：创建 6 个 allowlisted Eval / model / baseline test files。
+- 01-07：创建 6 个 allowlisted Eval / model / baseline test files并已通过reviewed merge。
+- 01-07A：只扩展既有AgentRun Component test取得一个真实RED，再修改对应Runtime source。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
-原01-05/06/07三个writer、01-04H与01-05R均已展示各自RED，因此`wave_0_complete=true`。它只记录既有Wave 0 evidence，不提前证明01-06R replacement RED或latest-integration compatibility。
+原01-05/06/07三个writer、01-04H、01-05R与01-06R均已展示各自RED，因此`wave_0_complete=true`。01-07A仍须保留自己的test-only RED，不能复用历史Wave 0声明。
 
 ## Packet Full Gates
 
@@ -132,7 +135,6 @@ docker compose -p mini-agent \
 uv run alembic upgrade head
 uv run pytest tests/integration/test_database_migrations.py -x
 uv run pytest \
-  tests/integration/test_database_migrations.py \
   tests/integration/test_http_session_adapter.py \
   tests/integration/test_postgres_record_adapters.py \
   tests/integration/test_postgres_atomicity.py \
@@ -153,7 +155,7 @@ Migration tests必须包含upgrade → downgrade → upgrade；禁止对共享�
 - with/no Task/FAILED terminal projection及每个child/reference fault都证明同事务APPLIED或全回滚；
 - reviewed feature head与latest-integration overlay重复focused/full/migration/containment。
 
-### 01-07 Eval（feature PASS；latest replay pending）
+### 01-07 Eval（reviewed merge complete）
 
 ```bash
 uv sync --all-groups
@@ -192,6 +194,36 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 
 缺失 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` 或尚无 01-08 real SUT wiring时必须得到 canonical `SKIPPED / NOT_RUN`，不得生成 PASS或访问网络；这不阻塞离线 release gate。
 
+上述命令已在feature与latest overlay重复通过；post-merge为191 focused、40 migration与936 full（1 deselected）。当前仓库没有credentialed Qwen runner，因此缺凭据W4只能如实保持`NOT_RUN / SKIPPED`；真实Qwen执行需要后续独立Eval-owner Packet，不能由01-08复制Harness逻辑。
+
+### 01-07A Runtime Trace alignment
+
+```bash
+uv sync --all-groups
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  up --wait -d db
+docker compose -p mini-agent \
+  -f /Users/ming/projects/mini-agent/compose.yaml \
+  --profile test up --wait -d db-test
+uv run alembic upgrade head
+uv run pytest tests/component/application/test_agent_run_service.py -x
+uv run pytest \
+  tests/component/core/test_request_processing.py \
+  tests/component/core/test_control_gateway.py \
+  tests/component/core/test_presentation_policy.py \
+  tests/component/application/test_agent_run_service.py \
+  tests/component/application/test_read_tool_executor.py \
+  tests/component/application/test_deterministic_renderer.py \
+  tests/component/application/test_restart_recovery_service.py -x
+uv run pytest tests/integration/test_database_migrations.py -x
+uv run pytest
+uv run python -m compileall -q src tests
+git diff --check
+```
+
+01-07A必须保留一个test-only RED，随后证明Context Manifest purpose、每个normal result exactly-one ResponseRendered、pre-render FAILED zero ResponseRendered、post-render terminal failure保留一个真实reached-stage event但无result/ASSISTANT/RunStopped，以及explicit active-run hook identity；changed-file set精确为Runtime source/test pair。它不产生Eval Result，也不批准01-08。
+
 ## Manual-only Verification
 
 | Behavior | Requirement | Why manual | Instructions |
@@ -211,7 +243,7 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] `nyquist_compliant: true`。
 - [x] 01-04H 两个结构化TDD task已有RED/GREEN、269 focused / 560 full、reviewed merge与post-merge Graphify evidence；physical transaction仍明确留给未来01-06R。
 - [x] 01-05R exact base/new identity/14-file donor、真实RED、reviewed merge与post-merge gate已完成。
-- [x] 01-06R exact base/new identity/13-file donor、两个可执行RED→GREEN循环已规划；planning merge前不启动写入。
+- [x] 01-06R exact base/new identity/13-file donor、五个RED→GREEN repair pairs、reviewed merge与post-merge gate已完成。
 - [x] 01-05/06/07 每个 task 均有 exact automated command 与 allowlisted Wave 0 test。
 - [x] 初始 Plan Checker loop 3/3 `PASS` 已被 PR #26 首个 exact-head review 的 canonical/security findings 明确 supersede，不再作为 approval。
 - [x] 超出三轮 cap 后的只读 checker audit 识别出两项 `MAJOR`；对应 approval 声明与第二条零网络命令已修正，不再启动第 5 个 planner loop。
@@ -219,9 +251,11 @@ uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x
 - [x] **HISTORICAL PR #26 SIGN-OFF / SUPERSEDED FOR CURRENT INTEGRATION:** 原01-05/06/07 Wave 0 RED已进入published feature history；首轮focused/full为Runtime 83/549、Infra 68/496、Eval 111/577（1 deselected）。它们只证明当时feature形成，不批准当前合并。
 - [x] Historical Runtime/Infra heads后续测试增长至95/561与23/506并被exact-head review判定BLOCK；它们保持历史evidence。
 - [x] 01-04H planning/owner/review/merge/full/Graphify Gate通过，`wave_0_complete=true`。
-- [x] Eval `b8ecbb0...`已通过150 grader+harness / 657 full（1 deselected）、two zero-network preflights与independent `PASS / NOT_FOUND`；仍不代表latest replay/merge。
+- [x] Eval `b8ecbb0...`及latest overlay `ee46f38...`已通过191 focused / 936 full（1 deselected）、two zero-network preflights、independent `PASS / NOT_FOUND`并merge为`eee1c0e...`。
 - [x] 01-05R已在exact predecessor merge后完成planning、实现、review与merge。
-- [ ] 01-06R在exact predecessor merge后完成planning、实现、review与merge。
-- [ ] Runtime → Infra → Eval latest-integration compatibility、serial merge与post-merge gates全部PASS。
+- [x] 01-06R在exact predecessor merge后完成planning、实现、review与merge。
+- [x] Runtime → Infra → Eval latest-integration compatibility、serial merge与post-merge gates全部PASS。
+- [x] 01-07A exact base/new identity/two-file ownership与真实RED→GREEN已规划；planning merge前不启动写入。
+- [ ] 01-07A完成planning、实现、review、merge与post-merge gate。
 
-**Approval:** `01-05R_COMPLETE / 01-06R_PLANNING_REVIEW_PENDING`。PR #26只批准historical 01-05/06/07 Packet从`c35687d...`创建，不能据旧approval合并PR #30。当前01-06R必须先通过本planning PR、implementation exact-head review与merge；随后依次通过Eval latest-integration replay、01-08与post-execution quality gate。本文件不批准Case、Baseline、release或lifecycle结论。
+**Approval:** `W2_SERIAL_MERGE_COMPLETE / 01-07A_PLANNING_REVIEW_PENDING`。PR #26只批准historical 01-05/06/07 Packet从`c35687d...`创建，不能批准新Runtime alignment。当前01-07A必须先通过本planning PR、implementation exact-head/overlay review与merge；随后才签发01-08并进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论。

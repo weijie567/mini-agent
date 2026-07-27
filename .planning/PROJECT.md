@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；01-05R Runtime PR #34 reviewed merge后的 exact head 为 `fb607019130843c94825a47d7822518cbdb2143c`。原W2 Runtime / Infra feature仍以`c35687d...`为历史execution base并被冻结；新01-06R Infra Packet以`fb607019...`为独立exact base。
+- 当前 integration branch：`integration/e2e01-thin`；Runtime、Infra、Eval串行合并后的 exact head 为 `eee1c0e46e1bca1160dea54d586d477c173daadc`。historical Runtime / Infra feature仍以`c35687d...`为只读证据；replacement Runtime / Infra分别从`64992cf...`与`fb607019...`执行并已合并。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
-- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R又通过planning PR #33与Runtime PR #34完成，reviewed merge `fb607019...`取得100 focused / 660 full、38 migration、independent feature/overlay `PASS / NOT_FOUND`与Graphify gate。历史Runtime / Infra PR #28/#30保持Draft evidence；Eval PR #29已修复至`b8ecbb0...`并取得独立`PASS / NOT_FOUND`，仍等待latest-integration replay。
-- 当前 immediate gate：通过本planning-status PR签发01-06R exact-base Infra replacement，受控 replay historical `054dcaf...`并关闭两项review HIGH与01-04H physical transaction rollback。随后把Eval `b8ecbb0...`移植到post-Infra latest integration复验并串行合并。当前Component/Infra integration证据不证明Composition Root、完整HTTP Trajectory/E2E、credentialed Qwen baseline或产品完成；01-08仍由Integrator串行规划与集成。
+- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。当前post-merge为191 Eval focused、40 migration、936 full（1 deselected），三者均有exact-head / overlay review与Graphify证据。
+- 当前 immediate gate：通过本planning-status PR签发`01-07A` exact two-file Runtime Trace alignment，关闭真实grader核查发现的Context Manifest purpose、fixed-result ResponseRendered与stale-state active-run identity gap。其reviewed merge和post-merge gate通过后，才从新的exact integration SHA签发01-08 Composition Root。当前证据仍不证明真实HTTP Trajectory/E2E、credentialed Qwen baseline或产品完成。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -75,8 +75,9 @@
 | 01-04G recovery Trace atomicity | Application command携带Core-produced exact recovery Trace；Port contract要求compliant Adapter将APPLIED state/link/Trace同事务并拒绝跨类型payload污染 | `COMPLETE / EVIDENCE_INDEXED / PR #25` |
 | 01-04H terminal-turn contract | planning PR #31 + owner PR #32；reviewed head `c0306ef...`、merge `64992cf...`、269 focused / 560 full与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
 | 01-05R Runtime replacement | planning PR #33 + Runtime PR #34；reviewed head `05f0182...`、merge `fb607019...`、100 focused / 660 full、38 migration与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
-| 01-06R Infra replacement | exact base `fb607019...`、new branch/worktree与原13-file ownership由新Plan固定；四个allowed delta关闭两项review HIGH与physical terminal transaction rollback | `PLANNED / PLANNING_PR_PENDING` |
-| 01-07 Eval | PR #29 head `b8ecbb0...`已取得独立`PASS / NOT_FOUND`，150 grader+harness / 657 full、1 deselected；仍须post-Runtime/Infra latest-integration replay/review | `FEATURE_REVIEW_PASS / LATEST_REPLAY_PENDING` |
+| 01-06R Infra replacement | planning PR #35 + Infra PR #36；reviewed head `377f837...`、merge `8e21652...`、83 focused / 40 migration / 745 full与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
+| 01-07 Eval | PR #29 head `b8ecbb0...`经post-Infra overlay `ee46f38...`复验并merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、双preflight与Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
+| 01-07A Runtime Trace alignment | exact base `eee1c0e...`；two-file Runtime ownership关闭real Eval purpose/render/hook blockers；01-08等待其reviewed merge | `PLANNED / PLANNING_PR_PENDING` |
 
 ## 完成证据规则
 

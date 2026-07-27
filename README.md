@@ -4,14 +4,15 @@
 
 ## 当前进度
 
-W1 基础骨架已经进入 `integration/e2e01-thin`：
+W1 基础骨架与 W2 组件实现已经进入 `integration/e2e01-thin`：
 
 - Python / uv 工具链、固定版本 PostgreSQL + pgvector、Alembic 与隔离测试 namespace；
 - Core / Application 的身份、Request Understanding、Task、Tool、Observation、Trace 等 contract；
-- `e2e01-thin-fixture-v1`、E2E01-01/04 与安全故障场景的 versioned Eval artifacts；
-- 根目录默认离线测试在 Packet 01-05R 合并 `fb607019...` 后为 `660 passed`；migration regression为 `38 passed`。
+- 受控 Runtime、Session / HTTP Adapter、PostgreSQL record / `get_order` Adapter与恢复路径；
+- `e2e01-thin-fixture-v1`、versioned Eval artifacts、Scripted / Qwen Provider Adapter、Harness、Graders及结构化 Result / Failure machinery；
+- 当前 exact integration `eee1c0e...` 的门禁为 `191` 项 Eval focused、`40` 项 migration 与 `936 passed, 1 deselected` 的默认离线测试。
 
-这不表示首条纵向切片已经可运行。HTTP API、完整持久化 Adapter、`get_order` 执行链、Provider、Harness、Trajectory / E2E Eval 与 Qwen Baseline 仍未实现，Case 生命周期继续是 `CONTRACT_DEFINED`。
+这不表示首条纵向切片已经可运行或 Case 已通过。Composition Root、real `EvalCaseSut`、PostgreSQL evidence reader、真实 HTTP → Runtime → PostgreSQL → Eval 纵向装配、Trajectory / E2E Result与 credentialed Qwen runner仍未实现；Case 生命周期继续是 `CONTRACT_DEFINED`。
 
 实时范围与权威边界见：
 
@@ -62,7 +63,9 @@ integration PR → main
 
 写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。一个 GSD Plan 只映射一个精确 Task Packet；Packet 不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令、契约变化、安全 / Eval 影响、回滚和交接格式；禁止直接 push `main` 或 integration。
 
-`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04H的planning与owner链已通过PR #11–#32依序合并；01-05R又通过planning [PR #33](https://github.com/weijie567/mini-agent/pull/33)与Runtime [PR #34](https://github.com/weijie567/mini-agent/pull/34)完成，reviewed integration merge `fb607019130843c94825a47d7822518cbdb2143c`通过100项focused、660项离线、38项migration与Graphify gate。historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) head `a27141b...`与Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) head `054dcaf...`保留为review evidence，不rebase/force-push。本次GSD受控planning签发01-06R：exact base `fb607019...`、新branch/worktree与原13-file ownership受控replay donor，只允许`postgres.py`与三份integration tests改变，用于关闭raw validation disclosure、late orphan ToolCall与physical terminal transaction rollback。Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29) head `b8ecbb0...`已取得独立`PASS / NOT_FOUND`，但保持Draft等待post-Infra latest-integration replay。当前目标Packet完成`10/15`，正式签发14个Plan，尚无`01-08-PLAN.md`；Case lifecycle保持`0/8`。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04H的planning与owner链已通过PR #11–#32依序合并；01-05R Runtime又通过 [PR #33](https://github.com/weijie567/mini-agent/pull/33) / [PR #34](https://github.com/weijie567/mini-agent/pull/34)完成，01-06R Infrastructure通过 [PR #35](https://github.com/weijie567/mini-agent/pull/35) / [PR #36](https://github.com/weijie567/mini-agent/pull/36)完成，01-07 Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29)在latest-integration overlay复验后完成。当前 integration exact head为`eee1c0e46e1bca1160dea54d586d477c173daadc`，post-merge门禁为191项Eval focused、40项migration与936项默认离线测试（另1项`qwen_baseline` deselected），Graphify为4354 nodes / 12277 edges / 1376 communities。historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28)与Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30)只保留review evidence，不rebase/force-push。真实纵向接入核查发现三个Runtime-owned Trace gap，因此本次GSD受控planning先签发exact two-file `01-07A` dependency Packet；其reviewed merge后才从新的exact SHA签发`01-08` Composition Root。当前完成`12/16`目标Packet，磁盘正式签发15个Plan，Case lifecycle仍保持`0/8`，尚无真实HTTP/PostgreSQL Eval Result或完整切片通过结论。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+
+Cross-file scan同时确认 business / Eval active owners中的实现状态横幅仍停留在W1；它们必须由对应owner在独立status-alignment PR中更新，且不得借状态对齐推进Case lifecycle。当前README不把仓库描述为已经完全aligned。
 
 ## GSD
 
