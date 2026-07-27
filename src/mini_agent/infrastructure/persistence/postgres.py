@@ -59,6 +59,7 @@ from mini_agent.core.tool_system import (
     GateDecision,
     ModelVisibleToolsetArtifact,
     ToolCallRecord,
+    ToolCallStatus,
     ToolEffect,
 )
 from mini_agent.core.trace import (
@@ -99,6 +100,12 @@ _NORMAL_TERMINAL_TRACE_EVENT_TYPES = frozenset(
     {
         TraceEventType.TASK_STATE_CHANGED,
         TraceEventType.RUN_STOPPED,
+    }
+)
+_ACTIVE_TOOL_CALL_STATUSES = frozenset(
+    {
+        ToolCallStatus.CREATED,
+        ToolCallStatus.RUNNING,
     }
 )
 
@@ -964,6 +971,46 @@ class PostgresRecordAdapter:
         run_row = self._lock_rows_stably(session, (run_row,))[0]
         run_decoded = self._validate_physical_projection(session, run_row)
         if run_decoded.source_record != command.expected_active_record:
+            raise _FinalizeRunProjectionConflict() from None
+
+        active_tool_call_rows = tuple(
+            session.scalars(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.TOOL_CALL_RECORD.value,
+                    P0RecordModel.run_id
+                    == command.expected_active_record.run_id,
+                    P0RecordModel.lifecycle_status.in_(
+                        (
+                            ToolCallStatus.CREATED.value,
+                            ToolCallStatus.RUNNING.value,
+                        )
+                    ),
+                )
+                .order_by(P0RecordModel.record_id)
+                .limit(2)
+            )
+        )
+        for active_tool_call_row in active_tool_call_rows:
+            active_tool_call = self._validate_physical_projection(
+                session,
+                active_tool_call_row,
+            ).source_record
+            if type(active_tool_call) is not ToolCallRecord:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            if (
+                active_tool_call.run_id
+                != command.expected_active_record.run_id
+                or active_tool_call.status
+                not in _ACTIVE_TOOL_CALL_STATUSES
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                )
+        if active_tool_call_rows:
             raise _FinalizeRunProjectionConflict() from None
 
         link_rows = tuple(session.scalars(link_closure_statement))
@@ -1850,7 +1897,7 @@ class PostgresRecordAdapter:
                 and event_by_type[
                     TraceEventType.TASK_STATE_CHANGED
                 ].occurred_at
-                == event_by_type[TraceEventType.RUN_STOPPED].occurred_at
+                <= event_by_type[TraceEventType.RUN_STOPPED].occurred_at
                 and event_by_type[
                     TraceEventType.RUN_STOPPED
                 ].stop_reason
