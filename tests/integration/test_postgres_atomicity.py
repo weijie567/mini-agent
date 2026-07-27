@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from mini_agent.application.persistence import (
     P0RecordCode,
@@ -39,6 +40,7 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
 )
+from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
@@ -119,6 +121,53 @@ async def _seed_initial_graph_prerequisites(
     return graph
 
 
+def _empty_graph_recovery_command(closure) -> ApplyRestartRecoveryCommand:
+    completed_at = closure.active_run_record.started_at + timedelta(seconds=1)
+    run_transition = MarkRunIncompleteForRecoveryCommand(
+        expected_active_record=closure.active_run_record,
+        incomplete_record=closure.active_run_record.model_copy(
+            update={
+                "status": AgentRunStatus.INCOMPLETE,
+                "completed_at": completed_at,
+                "stop_reason": StopReason.PROCESS_RESTART_DETECTED,
+            }
+        ),
+    )
+    return ApplyRestartRecoveryCommand(
+        expected_closure=closure,
+        run_transition=run_transition,
+        tool_call_transitions=(),
+        task_transitions=(),
+        terminal_run_task_links=(),
+        recovery_trace_events=_recovery_trace_events(
+            run_transition=run_transition,
+            task_transitions=(),
+            tool_call_transitions=(),
+        ),
+    )
+
+
+def _assert_bounded_persistence_system_error(
+    error: Exception,
+    *,
+    forbidden_values: tuple[str, ...],
+) -> None:
+    safe_error_type = getattr(
+        postgres_persistence,
+        "P0PersistenceSystemError",
+        None,
+    )
+    assert safe_error_type is not None
+    with pytest.raises(TypeError):
+        safe_error_type("unsafe diagnostic")
+    assert type(error) is safe_error_type
+    assert error.args == ("PERSISTENCE_SYSTEM_FAILURE",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    projection = f"{error!s} {error!r} {error.args!r}"
+    assert all(value not in projection for value in forbidden_values)
+
+
 async def test_initial_graph_rolls_back_every_row_and_reference_on_mid_write_failure(
     eval_postgres_namespace,
     monkeypatch,
@@ -165,6 +214,52 @@ async def test_initial_graph_rolls_back_every_row_and_reference_on_mid_write_fai
         engine.dispose()
 
 
+async def test_owner_scoped_read_discards_database_failure_context(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_graph()
+    forbidden_values = (
+        "customer-A",
+        "p0-session-alice",
+        "SELECT private payload",
+    )
+
+    class ConnectionFailure(Exception):
+        sqlstate = "08006"
+
+    def fail_owner_scoped_read(*_args, **_kwargs):
+        raise OperationalError(
+            "SELECT private payload WHERE customer_id=:customer_id",
+            {
+                "customer_id": "customer-A",
+                "cookie": "p0-session-alice",
+            },
+            ConnectionFailure("p0-session-alice"),
+        )
+
+    try:
+        monkeypatch.setattr(
+            adapter,
+            "_owner_scoped_row",
+            fail_owner_scoped_read,
+        )
+        with pytest.raises(Exception) as captured:
+            await adapter.load_run_for_owner(
+                owner_scope=graph.owner_scope,
+                run_id=graph.expected_active_run_record.run_id,
+            )
+
+        _assert_bounded_persistence_system_error(
+            captured.value,
+            forbidden_values=forbidden_values,
+        )
+    finally:
+        engine.dispose()
+
+
 async def test_initial_graph_and_recovery_use_one_stable_real_transaction_lock_order(
     eval_postgres_namespace,
     monkeypatch,
@@ -181,29 +276,7 @@ async def test_initial_graph_and_recovery_use_one_stable_real_transaction_lock_o
         graph = await _seed_initial_graph_prerequisites(records)
         closure = await recovery.load_next_restart_recovery_closure()
         assert closure is not None
-        completed_at = closure.active_run_record.started_at + timedelta(seconds=1)
-        run_transition = MarkRunIncompleteForRecoveryCommand(
-            expected_active_record=closure.active_run_record,
-            incomplete_record=closure.active_run_record.model_copy(
-                update={
-                    "status": AgentRunStatus.INCOMPLETE,
-                    "completed_at": completed_at,
-                    "stop_reason": StopReason.PROCESS_RESTART_DETECTED,
-                }
-            ),
-        )
-        recovery_command = ApplyRestartRecoveryCommand(
-            expected_closure=closure,
-            run_transition=run_transition,
-            tool_call_transitions=(),
-            task_transitions=(),
-            terminal_run_task_links=(),
-            recovery_trace_events=_recovery_trace_events(
-                run_transition=run_transition,
-                task_transitions=(),
-                tool_call_transitions=(),
-            ),
-        )
+        recovery_command = _empty_graph_recovery_command(closure)
 
         original_row_for_identity = records._row_for_identity
 
@@ -273,6 +346,92 @@ async def test_initial_graph_and_recovery_use_one_stable_real_transaction_lock_o
         }
         assert first_initial_lock[0] is P0RecordCode.AGENT_RUN_RECORD
     finally:
+        engine.dispose()
+
+
+async def test_recovery_rechecks_empty_closure_after_initial_graph_commits(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    old_closure_materialized = threading.Event()
+    initial_graph_committed = threading.Event()
+    try:
+        graph = await _seed_initial_graph_prerequisites(records)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        assert closure.run_task_links == ()
+        command = _empty_graph_recovery_command(closure)
+
+        original_lock_rows_stably = recovery._lock_rows_stably
+
+        def wait_for_initial_graph_before_locking(session, rows):
+            old_closure_materialized.set()
+            assert initial_graph_committed.wait(timeout=5)
+            return original_lock_rows_stably(session, rows)
+
+        monkeypatch.setattr(
+            recovery,
+            "_lock_rows_stably",
+            wait_for_initial_graph_before_locking,
+        )
+
+        def apply_recovery():
+            return asyncio.run(
+                recovery.claim_and_apply_restart_recovery(command)
+            )
+
+        recovery_task = asyncio.create_task(asyncio.to_thread(apply_recovery))
+        assert await asyncio.to_thread(old_closure_materialized.wait, 5)
+        try:
+            initial_result = await records.create_initial_task_graph_if_current(
+                graph
+            )
+        finally:
+            initial_graph_committed.set()
+        recovery_result = await asyncio.wait_for(recovery_task, timeout=10)
+
+        assert initial_result is ConditionalWriteResult.APPLIED
+        assert recovery_result is RecoveryWriteResult.CLOSURE_CONFLICT
+
+        with session_factory() as session:
+            run_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                    P0RecordModel.run_id
+                    == graph.expected_active_run_record.run_id,
+                )
+            )
+            assert run_row is not None
+            assert run_row.lifecycle_status == AgentRunStatus.RUNNING.value
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TASK_RECORD.value
+                    )
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value
+                    )
+                )
+                == 0
+            )
+    finally:
+        initial_graph_committed.set()
         engine.dispose()
 
 

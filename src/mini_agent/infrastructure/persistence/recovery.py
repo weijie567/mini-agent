@@ -28,6 +28,7 @@ from mini_agent.core.trace import AgentRunRecord, AgentRunStatus
 from mini_agent.infrastructure.persistence.models import P0RecordModel
 from mini_agent.infrastructure.persistence.postgres import (
     PostgresRecordAdapter,
+    _bounded_database_failures,
     _integrity,
 )
 
@@ -277,6 +278,11 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             )
             for row in all_rows
         }
+        decoded_run = decoded_rows[self._row_key(run_row)].source_record
+        if not isinstance(decoded_run, AgentRunRecord):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+            )
 
         task_aggregates: tuple[TaskRecoveryAggregate, ...] = ()
         if task_rows:
@@ -315,12 +321,12 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
                 ),
             )
 
-        return RestartRecoveryClosure(
+        closure = RestartRecoveryClosure(
             closure_fence=self._closure_fence(session, all_rows),
             conversation_record=decoded_rows[
                 self._row_key(conversation_rows[0])
             ].source_record,
-            active_run_record=run_record,
+            active_run_record=decoded_run,
             conversation_task_links=tuple(
                 decoded_rows[self._row_key(row)].source_record
                 for row in conversation_link_rows
@@ -333,7 +339,19 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             request_unit_records=request_units,
             tool_call_aggregates=tool_aggregates,
         )
+        if not for_update:
+            return closure
 
+        reread = self._load_closure_in_transaction(
+            session,
+            run_id=decoded_run.run_id,
+            for_update=False,
+        )
+        if reread is None or reread != closure:
+            return reread
+        return closure
+
+    @_bounded_database_failures
     async def load_next_restart_recovery_closure(
         self,
     ) -> RestartRecoveryClosure | None:
@@ -528,6 +546,7 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             self._persist_recovery_trace(session, trace_event)
         return RecoveryWriteResult.APPLIED
 
+    @_bounded_database_failures
     async def claim_and_apply_restart_recovery(
         self,
         command: ApplyRestartRecoveryCommand,

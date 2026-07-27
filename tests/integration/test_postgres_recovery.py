@@ -25,6 +25,7 @@ from mini_agent.application.records import (
 )
 from mini_agent.core.tool_system import ToolCallStatus, ToolEffect
 from mini_agent.core.trace import AgentRunStatus, StopReason
+from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import P0RecordModel
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
@@ -99,6 +100,27 @@ def _recovery_command(closure):
             tool_call_transitions=tool_transitions,
         ),
     )
+
+
+def _assert_bounded_persistence_system_error(
+    error: Exception,
+    *,
+    forbidden_values: tuple[str, ...],
+) -> None:
+    safe_error_type = getattr(
+        postgres_persistence,
+        "P0PersistenceSystemError",
+        None,
+    )
+    assert safe_error_type is not None
+    with pytest.raises(TypeError):
+        safe_error_type("unsafe diagnostic")
+    assert type(error) is safe_error_type
+    assert error.args == ("PERSISTENCE_SYSTEM_FAILURE",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    projection = f"{error!s} {error!r} {error.args!r}"
+    assert all(value not in projection for value in forbidden_values)
 
 
 async def _seed_created_recovery_candidate(
@@ -198,6 +220,68 @@ async def test_recovery_loader_rejects_logical_child_overflow_before_decode(
 
         with pytest.raises(P0PersistenceIntegrityError):
             await recovery.load_next_restart_recovery_closure()
+    finally:
+        engine.dispose()
+
+
+async def test_recovery_apply_rereads_bounded_closure_and_fence_after_locks(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    locks_completed = False
+    post_lock_bounded_families: list[str] = []
+    post_lock_fence_count = 0
+    try:
+        await _seed_created_recovery_candidate(records)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+
+        original_lock_rows = recovery._lock_rows_stably
+        original_bounded_rows = recovery._bounded_rows
+        original_closure_fence = recovery._closure_fence
+
+        def track_locks(session, rows):
+            nonlocal locks_completed
+            locked = original_lock_rows(session, rows)
+            locks_completed = True
+            return locked
+
+        def track_bounded_rows(session, statement, *, family):
+            if locks_completed:
+                post_lock_bounded_families.append(family)
+            return original_bounded_rows(
+                session,
+                statement,
+                family=family,
+            )
+
+        def track_closure_fence(session, rows):
+            nonlocal post_lock_fence_count
+            if locks_completed:
+                post_lock_fence_count += 1
+            return original_closure_fence(session, rows)
+
+        monkeypatch.setattr(recovery, "_lock_rows_stably", track_locks)
+        monkeypatch.setattr(recovery, "_bounded_rows", track_bounded_rows)
+        monkeypatch.setattr(recovery, "_closure_fence", track_closure_fence)
+
+        assert (
+            await recovery.claim_and_apply_restart_recovery(
+                _recovery_command(closure)
+            )
+            is RecoveryWriteResult.APPLIED
+        )
+        assert post_lock_bounded_families == [
+            "conversation",
+            "conversation_task_link",
+            "run_task_link",
+            "tool_call",
+        ]
+        assert post_lock_fence_count == 2
     finally:
         engine.dispose()
 
@@ -356,6 +440,65 @@ async def test_closure_drift_and_serialization_failure_are_zero_write_conflicts(
                     )
                 )
                 == 0
+            )
+    finally:
+        engine.dispose()
+
+
+async def test_recovery_discards_nonconcurrency_database_failure_context(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    forbidden_values = (
+        "customer-A",
+        "p0-session-alice",
+        "SELECT recovery private payload",
+    )
+
+    class ConnectionFailure(Exception):
+        sqlstate = "08006"
+
+    def fail_database_operation(*_args, **_kwargs):
+        raise OperationalError(
+            "SELECT recovery private payload",
+            {
+                "customer_id": "customer-A",
+                "cookie": "p0-session-alice",
+            },
+            ConnectionFailure("p0-session-alice"),
+        )
+
+    try:
+        await _seed_created_recovery_candidate(records)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        command = _recovery_command(closure)
+
+        for target_name, operation in (
+            (
+                "_load_closure_in_transaction",
+                recovery.load_next_restart_recovery_closure,
+            ),
+            (
+                "_apply_recovery_in_transaction",
+                lambda: recovery.claim_and_apply_restart_recovery(command),
+            ),
+        ):
+            with monkeypatch.context() as context:
+                context.setattr(
+                    recovery,
+                    target_name,
+                    fail_database_operation,
+                )
+                with pytest.raises(Exception) as captured:
+                    await operation()
+            _assert_bounded_persistence_system_error(
+                captured.value,
+                forbidden_values=forbidden_values,
             )
     finally:
         engine.dispose()

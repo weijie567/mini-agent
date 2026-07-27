@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from enum import Enum
-from typing import Any, TypeVar, cast
+from functools import wraps
+from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from mini_agent.application.persistence import (
@@ -66,6 +68,8 @@ from mini_agent.infrastructure.persistence.models import (
 )
 
 _RecordT = TypeVar("_RecordT", bound=BaseModel)
+_ResultT = TypeVar("_ResultT")
+_Params = ParamSpec("_Params")
 _PRIVATE_RECORD_CODES = frozenset(
     {
         P0RecordCode.CONVERSATION_RECORD,
@@ -85,6 +89,35 @@ _PRIVATE_RECORD_CODES = frozenset(
     }
 )
 _RECORD_CODE_BY_VALUE = {code.value: code for code in P0RecordCode}
+
+
+class P0PersistenceSystemError(Exception):
+    """Bounded database failure with no caller-controlled diagnostic."""
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__("PERSISTENCE_SYSTEM_FAILURE")
+
+
+def _bounded_database_failures(
+    operation: Callable[_Params, Awaitable[_ResultT]],
+) -> Callable[_Params, Awaitable[_ResultT]]:
+    @wraps(operation)
+    async def bounded_operation(
+        *args: _Params.args,
+        **kwargs: _Params.kwargs,
+    ) -> _ResultT:
+        safe_failure: P0PersistenceSystemError | None = None
+        try:
+            result = await operation(*args, **kwargs)
+        except SQLAlchemyError:
+            safe_failure = P0PersistenceSystemError()
+        else:
+            return result
+        raise safe_failure from None
+
+    return bounded_operation
 
 
 def _integrity(
@@ -444,6 +477,29 @@ class PostgresRecordAdapter:
             locked.append(locked_row)
         return tuple(locked)
 
+    @staticmethod
+    def _touch_recovery_anchor(
+        session: Session,
+        run_row: P0RecordModel,
+    ) -> None:
+        if run_row.record_code != P0RecordCode.AGENT_RUN_RECORD.value:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        result = session.execute(
+            update(P0RecordModel)
+            .where(
+                P0RecordModel.record_id == run_row.record_id,
+                P0RecordModel.envelope == run_row.envelope,
+            )
+            .values(stored_at=P0RecordModel.stored_at)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+
     def _validate_physical_projection(
         self,
         session: Session,
@@ -735,6 +791,7 @@ class PostgresRecordAdapter:
             expected_type=ConversationRecord,
         )
 
+    @_bounded_database_failures
     async def list_messages_for_owner(
         self,
         *,
@@ -941,6 +998,7 @@ class PostgresRecordAdapter:
             ),
         )
         with self.session_factory.begin() as session:
+            locked_expected_rows: dict[P0RecordCode, P0RecordModel] = {}
             for code, identity, expected in sorted(
                 expected_rows,
                 key=lambda item: (
@@ -964,6 +1022,7 @@ class PostgresRecordAdapter:
                 )
                 if decoded.source_record != expected:
                     return ConditionalWriteResult.PROJECTION_CONFLICT
+                locked_expected_rows[code] = row
 
             request_unit = command.initial_request_unit.initial_record
             envelopes = (
@@ -1013,6 +1072,10 @@ class PostgresRecordAdapter:
                 ) is not None:
                     return ConditionalWriteResult.PROJECTION_CONFLICT
             self._persist_envelopes(session, envelopes)
+            self._touch_recovery_anchor(
+                session,
+                locked_expected_rows[P0RecordCode.AGENT_RUN_RECORD],
+            )
             return ConditionalWriteResult.APPLIED
 
     async def apply_task_transition_if_current(
@@ -1118,7 +1181,21 @@ class PostgresRecordAdapter:
             command.created_record,
         )
         with self.session_factory.begin() as session:
+            run_row = self._row_for_identity(
+                session,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=(
+                    ("run_id", command.created_record.run_id),
+                ),
+                for_update=True,
+            )
+            if run_row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
             inserted = self._persist_envelopes(session, (envelope,))[0]
+            if inserted:
+                self._touch_recovery_anchor(session, run_row)
         return (
             InsertOnlyWriteResult.INSERTED
             if inserted
@@ -1259,6 +1336,7 @@ class PostgresRecordAdapter:
         with self.session_factory.begin() as session:
             self._persist_envelopes(session, (envelope,))
 
+    @_bounded_database_failures
     async def _load_for_owner(
         self,
         *,
@@ -1283,6 +1361,7 @@ class PostgresRecordAdapter:
                 )
             return cast(_RecordT, record)
 
+    @_bounded_database_failures
     async def _list_for_owner(
         self,
         *,
@@ -1370,6 +1449,7 @@ class PostgresRecordAdapter:
             expected_type=RequestUnderstandingRecord,
         )
 
+    @_bounded_database_failures
     async def load_accepted_task_delta_for_owner(
         self,
         *,
