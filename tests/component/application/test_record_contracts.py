@@ -1,3 +1,4 @@
+import pickle
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -2672,6 +2673,110 @@ def test_terminal_turn_sanitizer_preserves_strict_json_validation() -> None:
     )
 
     assert rebuilt == command
+
+
+def test_terminal_turn_model_copy_rejects_invalid_result_and_message() -> None:
+    command = _completed_finalization()
+    empty_result = command.terminal_result.model_copy(update={"message": ""})
+    empty_message = command.assistant_message.model_copy(update={"content": ""})
+
+    for update in (
+        {"terminal_result": empty_result},
+        {"assistant_message": empty_message},
+        {
+            "terminal_result": empty_result,
+            "assistant_message": empty_message,
+        },
+    ):
+        with pytest.raises(ValidationError, match="canonical"):
+            command.model_copy(update=update)
+
+
+@pytest.mark.parametrize("strict", (False, True))
+@pytest.mark.parametrize("bypass", ("BaseModel.model_copy", "model_construct"))
+def test_terminal_turn_model_validate_rejects_low_level_invalid_instance(
+    strict: bool,
+    bypass: str,
+) -> None:
+    command = _completed_finalization()
+    secret = "customer-A 的订单 O-1001 SECRET"
+    invalid_result = command.terminal_result.model_copy(
+        update={"message": "", "secret": secret}
+    )
+    invalid_message = command.assistant_message.model_copy(
+        update={"content": ""}
+    )
+    if bypass == "BaseModel.model_copy":
+        invalid_outer = BaseModel.model_copy(
+            command,
+            update={
+                "terminal_result": invalid_result,
+                "assistant_message": invalid_message,
+            },
+        )
+    else:
+        values = {
+            field_name: getattr(command, field_name)
+            for field_name in FinalizeRunCommand.model_fields
+        }
+        values["terminal_result"] = invalid_result
+        values["assistant_message"] = invalid_message
+        invalid_outer = FinalizeRunCommand.model_construct(**values)
+
+    with pytest.raises(ValidationError, match="canonical") as error:
+        FinalizeRunCommand.model_validate(invalid_outer, strict=strict)
+    _assert_validation_error_is_sanitized(
+        error.value,
+        secret,
+        "customer-A",
+        "O-1001",
+    )
+
+
+@pytest.mark.parametrize("strict", (False, True))
+def test_terminal_turn_revalidation_rejects_hidden_outer_storage(
+    strict: bool,
+) -> None:
+    command = _completed_finalization()
+    secret = "customer-A SECRET"
+    invalid_outer = BaseModel.model_copy(
+        command,
+        update={"secret": secret},
+    )
+
+    assert vars(invalid_outer)["secret"] == secret
+    assert "secret" in invalid_outer.model_fields_set
+    with pytest.raises(ValidationError, match="canonical") as error:
+        FinalizeRunCommand.model_validate(invalid_outer, strict=strict)
+    _assert_validation_error_is_sanitized(error.value, secret)
+
+    with pytest.raises(ValidationError) as copy_error:
+        command.model_copy(update={"secret": secret})
+    _assert_validation_error_is_sanitized(copy_error.value, secret)
+
+
+def test_terminal_turn_valid_copy_revalidation_and_pickle_remain_compatible() -> None:
+    command = _completed_finalization()
+
+    shallow = command.model_copy()
+    deep = command.model_copy(deep=True)
+    revalidated = FinalizeRunCommand.model_validate(command)
+    strict_revalidated = FinalizeRunCommand.model_validate(command, strict=True)
+    restored = pickle.loads(pickle.dumps(command))
+
+    for rebuilt in (
+        shallow,
+        deep,
+        revalidated,
+        strict_revalidated,
+        restored,
+    ):
+        assert type(rebuilt) is FinalizeRunCommand
+        assert rebuilt == command
+        assert rebuilt.model_fields_set == command.model_fields_set
+    assert shallow is not command
+    assert shallow.expected_active_record is command.expected_active_record
+    assert deep.expected_active_record is not command.expected_active_record
 
 
 def test_terminal_turn_frozen_assignment_sanitizes_raw_input() -> None:

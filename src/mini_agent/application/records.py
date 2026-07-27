@@ -488,6 +488,7 @@ _FINALIZE_SAFE_VALIDATION_MESSAGES = frozenset(
         "ASSISTANT Message must be canonical",
         "Task transition must be recursively canonical",
         "terminal TraceEvent must be canonical",
+        "FinalizeRunCommand must be canonical",
         "Run finalization expects RUNNING status",
         "Run finalization rejects a dirty expected active Run",
         "Run finalization requires a terminal Run",
@@ -577,19 +578,13 @@ def _bounded_finalize_validation_message(
     return _FINALIZE_VALIDATION_FALLBACK
 
 
-def _sanitize_finalize_validation_error(
-    error: ValidationError,
-) -> ValidationError:
-    source_line_errors = error.errors(
-        include_url=False,
-        include_context=True,
-        include_input=False,
-    )
-    safe_message = (
-        _bounded_finalize_validation_message(source_line_errors[0])
-        if source_line_errors
-        else _FINALIZE_VALIDATION_FALLBACK
-    )
+def _new_finalize_validation_error(safe_message: str) -> ValidationError:
+    if (
+        safe_message != _FINALIZE_VALIDATION_FALLBACK
+        and safe_message not in _FINALIZE_SAFE_ERROR_TYPE_MESSAGES.values()
+        and safe_message not in _FINALIZE_SAFE_VALIDATION_MESSAGES
+    ):
+        safe_message = _FINALIZE_VALIDATION_FALLBACK
     return ValidationError.from_exception_data(
         "FinalizeRunCommand",
         [
@@ -603,6 +598,22 @@ def _sanitize_finalize_validation_error(
         input_type="python",
         hide_input=True,
     )
+
+
+def _sanitize_finalize_validation_error(
+    error: ValidationError,
+) -> ValidationError:
+    source_line_errors = error.errors(
+        include_url=False,
+        include_context=True,
+        include_input=False,
+    )
+    safe_message = (
+        _bounded_finalize_validation_message(source_line_errors[0])
+        if source_line_errors
+        else _FINALIZE_VALIDATION_FALLBACK
+    )
+    return _new_finalize_validation_error(safe_message)
 
 
 class _FinalizeRunCommandMeta(type(_StrictRuntimePrivateRecord)):
@@ -620,7 +631,10 @@ class FinalizeRunCommand(
 ):
     """One validated aggregate for a normal terminal turn."""
 
-    model_config = ConfigDict(hide_input_in_errors=True)
+    model_config = ConfigDict(
+        hide_input_in_errors=True,
+        revalidate_instances="always",
+    )
 
     expected_active_record: AgentRunRecord
     terminal_record: AgentRunRecord
@@ -662,12 +676,55 @@ class FinalizeRunCommand(
             return
         raise sanitized_error from None
 
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        copied_source = self.__deepcopy__() if deep else self.__copy__()
+        try:
+            complete_projection = _canonical_model_field_projection(
+                copied_source,
+                type(self),
+                error_message="FinalizeRunCommand must be canonical",
+            )
+        except ValueError:
+            sanitized_error = _new_finalize_validation_error(
+                "FinalizeRunCommand must be canonical"
+            )
+        else:
+            selected_projection = {
+                field_name: value
+                for field_name, value in complete_projection.items()
+                if field_name in copied_source.model_fields_set
+            }
+            if update:
+                selected_projection.update(update)
+            return type(self).model_validate(selected_projection)
+        raise sanitized_error from None
+
     @classmethod
     def model_validate(
         cls,
         obj: Any,
         **kwargs: Any,
     ) -> Self:
+        if isinstance(obj, cls):
+            try:
+                obj = _canonical_model_field_projection(
+                    obj,
+                    cls,
+                    error_message="FinalizeRunCommand must be canonical",
+                )
+            except ValueError:
+                sanitized_error = _new_finalize_validation_error(
+                    "FinalizeRunCommand must be canonical"
+                )
+            else:
+                sanitized_error = None
+            if sanitized_error is not None:
+                raise sanitized_error from None
         try:
             return super().model_validate(obj, **kwargs)
         except ValidationError as error:
