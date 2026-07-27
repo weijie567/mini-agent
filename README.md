@@ -9,7 +9,7 @@ W1 基础骨架已经进入 `integration/e2e01-thin`：
 - Python / uv 工具链、固定版本 PostgreSQL + pgvector、Alembic 与隔离测试 namespace；
 - Core / Application 的身份、Request Understanding、Task、Tool、Observation、Trace 等 contract；
 - `e2e01-thin-fixture-v1`、E2E01-01/04 与安全故障场景的 versioned Eval artifacts；
-- 根目录默认离线测试在 Packet 01-04D 合并后为 `344 passed`。
+- 根目录默认离线测试在 Packet 01-04H 合并 `64992cf...` 后为 `560 passed`。
 
 这不表示首条纵向切片已经可运行。HTTP API、完整持久化 Adapter、`get_order` 执行链、Provider、Harness、Trajectory / E2E Eval 与 Qwen Baseline 仍未实现，Case 生命周期继续是 `CONTRACT_DEFINED`。
 
@@ -51,11 +51,10 @@ uv run pytest
 仓库是公开的：[weijie567/mini-agent](https://github.com/weijie567/mini-agent)。`main` 与 `integration/e2e01-thin` 受 branch protection 保护，开发变更必须走 feature branch 和 PR。
 
 ```text
-同一冻结 SHA
-├── Runtime worktree / feature branch
-├── Infra worktree / feature branch
-└── Eval worktree / feature branch
-        ↓ 独立验证与只读 review
+每个 Task Packet 的 exact frozen SHA
+├── ownership / dependency 允许时：多个 worktree 并行
+└── shared contract 或 exact-base 依赖时：reviewed merge 后串行签发
+        ↓ feature branch 独立验证与只读 review
 Integrator 串行合并到 integration
         ↓ 完整 E2E gate
 integration PR → main
@@ -63,7 +62,7 @@ integration PR → main
 
 写入 Agent 必须使用不同 Git Worktree、branch 和互不重叠的文件 ownership。一个 GSD Plan 只映射一个精确 Task Packet；Packet 不得跨 repository、branch、Worktree、writer 或 ownership boundary。每个 Packet 都要包含精确 `base_sha`、repository、head/base branch、allowlist、forbidden files、依赖、验证命令、契约变化、安全 / Eval 影响、回滚和交接格式；禁止直接 push `main` 或 integration。
 
-`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04G的planning与owner链已通过PR #11–#25依序合并；01-04G merge `c35687dafa3881bb322d91515068d8d39be79df6` 是原W2 Runtime / Infra / Eval共同execution base，并已通过466 tests与Graphify gate。W2 planning [PR #26](https://github.com/weijie567/mini-agent/pull/26) reviewed head `2922308b...`经两个Codex只读Reviewer复核后merge为`968b4a9fffa446a789f69cce9f04e1c49148d40f`；Reviewer记录已作为明确标注的[canonical evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174316)与[security/process evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174609)持久化，它们不是GitHub Reviews API formal approvals。三个互斥Worktree随后发布Draft PR：Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) head `a27141b...`、Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) head `054dcaf...`、Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29) head `c4eca0d...`。Fresh review已确认Runtime terminal-turn atomicity与Infra disclosure/concurrency blocker；因此新增01-04H exact四文件Application Packet，原01-05/01-06 Plan与PR只保留历史证据，01-04H和Runtime依次merge后再分别签发exact-base 01-05R/01-06R replacement Packet。Eval current head虽通过136 focused / 602 full，但fresh review复现typed evidence/Trace graph不闭合与可注入grader runner伪造PASS两项HIGH，仍须isolated fix与复审。当前目标口径完成`8/13`：磁盘上已正式签发12个Plan，尚无`01-08-PLAN.md`；未来replacement Packet只在exact base已知时签发并加入分母。Case lifecycle保持`0/8`。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+`W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。Plan 01-01至01-04G的planning与owner链已通过PR #11–#25依序合并；01-04H又通过planning [PR #31](https://github.com/weijie567/mini-agent/pull/31)与owner [PR #32](https://github.com/weijie567/mini-agent/pull/32)完成，reviewed integration merge `64992cf3bdc6205e00d0c36433309b1657a57531`通过560项离线测试与Graphify gate。历史Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) head `a27141b...`与Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) head `054dcaf...`保留为review-blocked evidence，不rebase/force-push。本次GSD受控planning签发01-05R：exact base `64992cf...`、新branch/worktree与原14-file ownership只消费01-04H terminal aggregate；其reviewed merge后才签发01-06R。Eval [PR #29](https://github.com/weijie567/mini-agent/pull/29)已修复至`b8ecbb0...`，150 grader+harness / 657 full（1 deselected）并取得独立`PASS / NOT_FOUND`，但保持Draft等待post-Runtime/Infra latest-integration replay。当前目标Packet完成`9/14`，正式签发13个Plan，尚无`01-08-PLAN.md`；Case lifecycle保持`0/8`。实时状态与证据见[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## GSD
 
