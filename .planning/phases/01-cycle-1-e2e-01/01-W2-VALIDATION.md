@@ -4,7 +4,7 @@ slug: cycle-1-e2e-01-w2
 scope: 01-05-01-07
 status: execution_evidence_in_progress
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: "2026-07-27"
 ---
 
