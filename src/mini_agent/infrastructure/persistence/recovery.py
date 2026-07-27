@@ -115,8 +115,6 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
         )
         if run_id is not None:
             run_statement = run_statement.where(P0RecordModel.run_id == run_id)
-        if for_update:
-            run_statement = run_statement.with_for_update()
         candidate_rows = tuple(session.scalars(run_statement.limit(2)))
         if not candidate_rows:
             return None
@@ -157,14 +155,6 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             P0RecordModel.lifecycle_status.in_(("CREATED", "RUNNING")),
             P0RecordModel.scope_owner_customer_id == owner,
         )
-        if for_update:
-            conversation_statement = conversation_statement.with_for_update()
-            conversation_link_statement = (
-                conversation_link_statement.with_for_update()
-            )
-            run_link_statement = run_link_statement.with_for_update()
-            tool_statement = tool_statement.with_for_update()
-
         conversation_rows = self._bounded_rows(
             session,
             conversation_statement,
@@ -209,9 +199,6 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
                 P0RecordModel.task_id == task_id,
                 P0RecordModel.scope_owner_customer_id == owner,
             )
-            if for_update:
-                task_statement = task_statement.with_for_update()
-                unit_statement = unit_statement.with_for_update()
             task_rows = self._bounded_rows(
                 session,
                 task_statement,
@@ -252,6 +239,36 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             *unit_rows,
             *tool_rows,
         )
+        if for_update:
+            locked_by_key = {
+                self._row_key(row): row
+                for row in self._lock_rows_stably(session, all_rows)
+            }
+
+            def locked_rows(
+                rows: Iterable[P0RecordModel],
+            ) -> tuple[P0RecordModel, ...]:
+                return tuple(
+                    locked_by_key[self._row_key(row)]
+                    for row in rows
+                )
+
+            run_row = locked_by_key[self._row_key(run_row)]
+            conversation_rows = locked_rows(conversation_rows)
+            conversation_link_rows = locked_rows(conversation_link_rows)
+            run_link_rows = locked_rows(run_link_rows)
+            task_rows = locked_rows(task_rows)
+            unit_rows = locked_rows(unit_rows)
+            tool_rows = locked_rows(tool_rows)
+            all_rows = (
+                run_row,
+                *conversation_rows,
+                *conversation_link_rows,
+                *run_link_rows,
+                *task_rows,
+                *unit_rows,
+                *tool_rows,
+            )
         decoded_rows = {
             self._row_key(row): self._validate_physical_projection(
                 session,
@@ -333,12 +350,14 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
                 raise
 
     @staticmethod
-    def _is_serialization_failure(exc: OperationalError) -> bool:
+    def _is_concurrency_conflict(exc: OperationalError) -> bool:
         original = exc.orig
-        return (
-            getattr(original, "sqlstate", None) == "40001"
-            or getattr(original, "pgcode", None) == "40001"
+        sqlstate = getattr(original, "sqlstate", None) or getattr(
+            original,
+            "pgcode",
+            None,
         )
+        return sqlstate in {"40001", "40P01"}
 
     def _persist_recovery_trace(
         self,
@@ -526,7 +545,7 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
                 return result
             except OperationalError as exc:
                 session.rollback()
-                if self._is_serialization_failure(exc):
+                if self._is_concurrency_conflict(exc):
                     return RecoveryWriteResult.CLOSURE_CONFLICT
                 raise
             except Exception:

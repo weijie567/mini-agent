@@ -298,6 +298,12 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
         }
         assert {
             item["name"]
+            for item in inspector.get_check_constraints(
+                "p0_record_references"
+            )
+        } == {"ck_p0_record_references_ordinal_nonnegative"}
+        assert {
+            item["name"]
             for item in inspector.get_indexes("p0_record_references")
             if not item.get("duplicates_constraint")
         } == {"ix_p0_record_references_target"}

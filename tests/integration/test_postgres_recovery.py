@@ -321,29 +321,30 @@ async def test_closure_drift_and_serialization_failure_are_zero_write_conflicts(
             is RecoveryWriteResult.CLOSURE_CONFLICT
         )
 
-        class SerializationFailure(Exception):
-            pgcode = "40001"
-
-        def fail_serialization(*_args, **_kwargs):
-            raise OperationalError(
-                "SERIALIZABLE",
-                {},
-                SerializationFailure(),
-            )
-
-        monkeypatch.setattr(
-            recovery,
-            "_apply_recovery_in_transaction",
-            fail_serialization,
-        )
         latest_closure = await recovery.load_next_restart_recovery_closure()
         assert latest_closure is not None
-        assert (
-            await recovery.claim_and_apply_restart_recovery(
-                _recovery_command(latest_closure)
+        for conflict_code in ("40001", "40P01"):
+            class ConcurrencyFailure(Exception):
+                pgcode = conflict_code
+
+            def fail_concurrency(*_args, **_kwargs):
+                raise OperationalError(
+                    "secret customer-A Cookie p0-session-alice",
+                    {},
+                    ConcurrencyFailure(),
+                )
+
+            monkeypatch.setattr(
+                recovery,
+                "_apply_recovery_in_transaction",
+                fail_concurrency,
             )
-            is RecoveryWriteResult.CLOSURE_CONFLICT
-        )
+            assert (
+                await recovery.claim_and_apply_restart_recovery(
+                    _recovery_command(latest_closure)
+                )
+                is RecoveryWriteResult.CLOSURE_CONFLICT
+            )
         with session_factory() as session:
             assert (
                 session.scalar(

@@ -9,7 +9,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from mini_agent.application.persistence import (
@@ -83,6 +84,7 @@ _PRIVATE_RECORD_CODES = frozenset(
         P0RecordCode.TRACE_EVENT_RECORD,
     }
 )
+_RECORD_CODE_BY_VALUE = {code.value: code for code in P0RecordCode}
 
 
 def _integrity(
@@ -97,6 +99,15 @@ def _json_identity(
     return cast(
         list[list[object]],
         to_jsonable_python(logical_identity, serialize_unknown=True),
+    )
+
+
+def _canonical_identity_text(logical_identity: list[list[object]]) -> str:
+    return json.dumps(
+        logical_identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
@@ -167,14 +178,20 @@ class PostgresRecordAdapter:
 
     @staticmethod
     def _row_key(row: P0RecordModel) -> tuple[str, str]:
-        return row.record_code, repr(row.logical_identity)
+        return (
+            row.record_code,
+            _canonical_identity_text(row.logical_identity),
+        )
 
     @staticmethod
     def _envelope_key(
         envelope: P0PersistenceEnvelope,
     ) -> tuple[str, str]:
-        return envelope.record_code.value, repr(
-            _json_identity(envelope.logical_identity)
+        return (
+            envelope.record_code.value,
+            _canonical_identity_text(
+                _json_identity(envelope.logical_identity)
+            ),
         )
 
     @staticmethod
@@ -265,6 +282,12 @@ class PostgresRecordAdapter:
                 .order_by(P0RecordReferenceModel.ordinal)
             )
         )
+        if tuple(reference.ordinal for reference in references) != tuple(
+            range(len(references))
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
         return tuple(
             P0RecordReference.model_validate_json(
                 json.dumps(
@@ -288,12 +311,11 @@ class PostgresRecordAdapter:
         session: Session,
         row: P0RecordModel,
     ) -> DecodedP0PersistenceRecord:
-        try:
-            record_code = P0RecordCode(row.record_code)
-        except ValueError as exc:
+        record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+        if record_code is None:
             raise _integrity(
                 P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
-            ) from exc
+            )
         decoded = self._decode_envelope(
             row.envelope,
             expected_code=record_code,
@@ -318,10 +340,18 @@ class PostgresRecordAdapter:
         root: P0RecordModel,
         *,
         expected_owner: str | None = None,
+        validate_physical_projections: bool = True,
     ) -> str | None:
         queue = [root]
         seen: set[tuple[str, str]] = set()
         owners: set[str] = set()
+        visited: list[
+            tuple[
+                P0RecordModel,
+                P0RecordCode,
+                P0PersistenceEnvelope,
+            ]
+        ] = []
         while queue:
             row = queue.pop()
             key = self._row_key(row)
@@ -330,6 +360,12 @@ class PostgresRecordAdapter:
             seen.add(key)
             self._decode_row(session, row)
             envelope = self._parse_envelope(row.envelope)
+            record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+            if record_code is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
+                )
+            visited.append((row, record_code, envelope))
             if envelope.direct_owner_customer_id is not None:
                 owners.add(envelope.direct_owner_customer_id)
             for reference in envelope.record_references:
@@ -340,13 +376,15 @@ class PostgresRecordAdapter:
                     == _json_identity(reference.target_logical_identity),
                 )
                 if expected_owner is not None:
-                    statement = statement.where(
-                        or_(
+                    if reference.target_record_code in _PRIVATE_RECORD_CODES:
+                        statement = statement.where(
                             P0RecordModel.scope_owner_customer_id
-                            == expected_owner,
+                            == expected_owner
+                        )
+                    else:
+                        statement = statement.where(
                             P0RecordModel.scope_owner_customer_id.is_(None),
                         )
-                    )
                 target = session.scalar(statement)
                 if target is None:
                     raise _integrity(
@@ -362,7 +400,49 @@ class PostgresRecordAdapter:
             raise _integrity(
                 P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
             )
+        if validate_physical_projections:
+            for row, record_code, envelope in visited:
+                projected_owner = (
+                    derived_owner
+                    if record_code in _PRIVATE_RECORD_CODES
+                    else None
+                )
+                expected = self._projection_values(
+                    envelope,
+                    scope_owner_customer_id=projected_owner,
+                )
+                for field_name, value in expected.items():
+                    if getattr(row, field_name) != value:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                            if field_name == "scope_owner_customer_id"
+                            else P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                        )
         return derived_owner
+
+    def _lock_rows_stably(
+        self,
+        session: Session,
+        rows: Iterable[P0RecordModel],
+    ) -> tuple[P0RecordModel, ...]:
+        unique_rows = {
+            row.record_id: row
+            for row in rows
+        }
+        locked: list[P0RecordModel] = []
+        for row in sorted(unique_rows.values(), key=self._row_key):
+            locked_row = session.scalar(
+                select(P0RecordModel)
+                .where(P0RecordModel.record_id == row.record_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if locked_row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            locked.append(locked_row)
+        return tuple(locked)
 
     def _validate_physical_projection(
         self,
@@ -395,26 +475,22 @@ class PostgresRecordAdapter:
         session: Session,
         envelope: P0PersistenceEnvelope,
     ) -> bool:
-        existing = self._row_for_identity(
-            session,
-            record_code=envelope.record_code,
-            logical_identity=envelope.logical_identity,
-            for_update=True,
-        )
-        if existing is not None:
-            if existing.envelope != self._envelope_json(envelope):
-                raise _integrity(
-                    P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
-                )
-            return False
-
         values = self._projection_values(
             envelope,
             scope_owner_customer_id=envelope.direct_owner_customer_id,
         )
-        session.add(P0RecordModel(record_id=uuid4(), **values))
-        session.flush()
-        return True
+        inserted_record_id = session.scalar(
+            postgresql_insert(P0RecordModel)
+            .values(record_id=uuid4(), **values)
+            .on_conflict_do_nothing(
+                index_elements=(
+                    P0RecordModel.record_code,
+                    P0RecordModel.logical_identity,
+                )
+            )
+            .returning(P0RecordModel.record_id)
+        )
+        return inserted_record_id is not None
 
     @staticmethod
     def _reference_model(
@@ -441,12 +517,23 @@ class PostgresRecordAdapter:
         envelopes: Iterable[P0PersistenceEnvelope],
     ) -> tuple[bool, ...]:
         materialized = tuple(envelopes)
-        inserted = tuple(
-            self._persist_one_envelope(session, envelope)
-            for envelope in materialized
+        ordered = tuple(
+            sorted(
+                enumerate(materialized),
+                key=lambda item: self._envelope_key(item[1]),
+            )
         )
+        inserted_by_index = [False] * len(materialized)
+        for index, envelope in ordered:
+            inserted_by_index[index] = self._persist_one_envelope(
+                session,
+                envelope,
+            )
+        inserted = tuple(inserted_by_index)
         session.flush()
-        for envelope, was_inserted in zip(materialized, inserted, strict=True):
+        rows_by_index: dict[int, P0RecordModel] = {}
+        for index, envelope in ordered:
+            was_inserted = inserted[index]
             row = self._row_for_identity(
                 session,
                 record_code=envelope.record_code,
@@ -456,6 +543,11 @@ class PostgresRecordAdapter:
             if row is None:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.MISSING_RECORD_CODE
+                )
+            rows_by_index[index] = row
+            if row.envelope != self._envelope_json(envelope):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
                 )
             if was_inserted:
                 session.add_all(
@@ -476,18 +568,13 @@ class PostgresRecordAdapter:
                     P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
                 )
         session.flush()
-        for envelope, was_inserted in zip(materialized, inserted, strict=True):
-            row = self._row_for_identity(
+        for index, envelope in ordered:
+            row = rows_by_index[index]
+            derived_owner = self._derive_owner_from_graph(
                 session,
-                record_code=envelope.record_code,
-                logical_identity=envelope.logical_identity,
-                for_update=True,
+                row,
+                validate_physical_projections=False,
             )
-            if row is None:
-                raise _integrity(
-                    P0PersistenceIntegrityCategory.MISSING_RECORD_CODE
-                )
-            derived_owner = self._derive_owner_from_graph(session, row)
             if (
                 envelope.record_code in _PRIVATE_RECORD_CODES
                 and derived_owner is None
@@ -495,13 +582,15 @@ class PostgresRecordAdapter:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
                 )
-            if was_inserted:
+            if inserted[index]:
                 row.scope_owner_customer_id = derived_owner
-                session.flush()
             elif row.scope_owner_customer_id != derived_owner:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
                 )
+        session.flush()
+        for index, _envelope in ordered:
+            row = rows_by_index[index]
             self._validate_physical_projection(session, row)
         return inserted
 
@@ -852,7 +941,13 @@ class PostgresRecordAdapter:
             ),
         )
         with self.session_factory.begin() as session:
-            for code, identity, expected in expected_rows:
+            for code, identity, expected in sorted(
+                expected_rows,
+                key=lambda item: (
+                    item[0].value,
+                    _canonical_identity_text(_json_identity(item[1])),
+                ),
+            ):
                 row = self._row_for_identity(
                     session,
                     record_code=code,
@@ -909,17 +1004,14 @@ class PostgresRecordAdapter:
                     command.run_task_link.active_record,
                 ),
             )
-            if any(
-                self._row_for_identity(
+            for envelope in sorted(envelopes, key=self._envelope_key):
+                if self._row_for_identity(
                     session,
                     record_code=envelope.record_code,
                     logical_identity=envelope.logical_identity,
                     for_update=True,
-                )
-                is not None
-                for envelope in envelopes
-            ):
-                return ConditionalWriteResult.PROJECTION_CONFLICT
+                ) is not None:
+                    return ConditionalWriteResult.PROJECTION_CONFLICT
             self._persist_envelopes(session, envelopes)
             return ConditionalWriteResult.APPLIED
 
@@ -928,25 +1020,37 @@ class PostgresRecordAdapter:
         command: ApplyTaskTransitionCommand,
     ) -> ConditionalWriteResult:
         with self.session_factory.begin() as session:
-            task_row = self._row_for_identity(
-                session,
-                record_code=P0RecordCode.TASK_RECORD,
-                logical_identity=(
-                    ("task_id", command.expected_task_record.task_id),
+            rows: dict[P0RecordCode, P0RecordModel | None] = {}
+            identities = (
+                (
+                    P0RecordCode.TASK_RECORD,
+                    (("task_id", command.expected_task_record.task_id),),
                 ),
-                for_update=True,
-            )
-            unit_row = self._row_for_identity(
-                session,
-                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
-                logical_identity=(
+                (
+                    P0RecordCode.REQUEST_UNIT_RECORD,
                     (
-                        "request_unit_id",
-                        command.expected_request_unit_record.request_unit_id,
+                        (
+                            "request_unit_id",
+                            command.expected_request_unit_record.request_unit_id,
+                        ),
                     ),
                 ),
-                for_update=True,
             )
+            for code, identity in sorted(
+                identities,
+                key=lambda item: (
+                    item[0].value,
+                    _canonical_identity_text(_json_identity(item[1])),
+                ),
+            ):
+                rows[code] = self._row_for_identity(
+                    session,
+                    record_code=code,
+                    logical_identity=identity,
+                    for_update=True,
+                )
+            task_row = rows[P0RecordCode.TASK_RECORD]
+            unit_row = rows[P0RecordCode.REQUEST_UNIT_RECORD]
             if task_row is None or unit_row is None:
                 return ConditionalWriteResult.NOT_APPLICABLE
             task_decoded = self._validate_physical_projection(session, task_row)

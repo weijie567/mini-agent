@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
@@ -14,11 +16,14 @@ from mini_agent.application.persistence import (
     encode_persistence_record,
 )
 from mini_agent.application.records import (
+    ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     CreateRunCommand,
     DispatchToolCallCommand,
     InsertOnlyWriteResult,
+    MarkRunIncompleteForRecoveryCommand,
+    RecoveryWriteResult,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
 )
@@ -28,20 +33,26 @@ from mini_agent.core.tool_system import (
     ToolCallStatus,
     ToolEffect,
 )
-from mini_agent.core.trace import AgentRunStatus
+from mini_agent.core.trace import AgentRunStatus, StopReason
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+from mini_agent.infrastructure.persistence.recovery import (
+    PostgresRestartRecoveryAdapter,
+)
 
 _COMPONENT_APPLICATION_TESTS = (
     Path(__file__).parents[1] / "component" / "application"
 )
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_persistence_contract import _record_cases  # noqa: E402
-from test_record_contracts import _initial_graph  # noqa: E402
+from test_record_contracts import (  # noqa: E402
+    _initial_graph,
+    _recovery_trace_events,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -150,6 +161,117 @@ async def test_initial_graph_rolls_back_every_row_and_reference_on_mid_write_fai
                 )
                 == baseline_references
             )
+    finally:
+        engine.dispose()
+
+
+async def test_initial_graph_and_recovery_use_one_stable_real_transaction_lock_order(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    initial_conversation_locked = threading.Event()
+    recovery_run_selected = threading.Event()
+    start_barrier = threading.Barrier(2)
+    first_initial_lock: list[P0RecordCode] = []
+    try:
+        graph = await _seed_initial_graph_prerequisites(records)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        completed_at = closure.active_run_record.started_at + timedelta(seconds=1)
+        run_transition = MarkRunIncompleteForRecoveryCommand(
+            expected_active_record=closure.active_run_record,
+            incomplete_record=closure.active_run_record.model_copy(
+                update={
+                    "status": AgentRunStatus.INCOMPLETE,
+                    "completed_at": completed_at,
+                    "stop_reason": StopReason.PROCESS_RESTART_DETECTED,
+                }
+            ),
+        )
+        recovery_command = ApplyRestartRecoveryCommand(
+            expected_closure=closure,
+            run_transition=run_transition,
+            tool_call_transitions=(),
+            task_transitions=(),
+            terminal_run_task_links=(),
+            recovery_trace_events=_recovery_trace_events(
+                run_transition=run_transition,
+                task_transitions=(),
+                tool_call_transitions=(),
+            ),
+        )
+
+        original_row_for_identity = records._row_for_identity
+
+        def synchronized_initial_row_lock(*args, **kwargs):
+            row = original_row_for_identity(*args, **kwargs)
+            if kwargs.get("for_update"):
+                code = kwargs["record_code"]
+                if not first_initial_lock:
+                    first_initial_lock.append(code)
+                if code is P0RecordCode.CONVERSATION_RECORD:
+                    initial_conversation_locked.set()
+                    if first_initial_lock[0] is P0RecordCode.CONVERSATION_RECORD:
+                        assert recovery_run_selected.wait(timeout=5)
+            return row
+
+        original_validate = recovery._validate_physical_projection
+        first_recovery_validation = True
+
+        def synchronize_after_recovery_run_selection(*args, **kwargs):
+            nonlocal first_recovery_validation
+            if first_recovery_validation:
+                first_recovery_validation = False
+                recovery_run_selected.set()
+                assert initial_conversation_locked.wait(timeout=5)
+            return original_validate(*args, **kwargs)
+
+        monkeypatch.setattr(
+            records,
+            "_row_for_identity",
+            synchronized_initial_row_lock,
+        )
+        monkeypatch.setattr(
+            recovery,
+            "_validate_physical_projection",
+            synchronize_after_recovery_run_selection,
+        )
+
+        def apply_initial_graph():
+            start_barrier.wait(timeout=5)
+            return asyncio.run(
+                records.create_initial_task_graph_if_current(graph)
+            )
+
+        def apply_recovery():
+            start_barrier.wait(timeout=5)
+            return asyncio.run(
+                recovery.claim_and_apply_restart_recovery(recovery_command)
+            )
+
+        initial_result, recovery_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(apply_initial_graph),
+                asyncio.to_thread(apply_recovery),
+            ),
+            timeout=15,
+        )
+
+        assert initial_result in {
+            ConditionalWriteResult.APPLIED,
+            ConditionalWriteResult.PROJECTION_CONFLICT,
+            ConditionalWriteResult.NOT_APPLICABLE,
+        }
+        assert recovery_result in {
+            RecoveryWriteResult.APPLIED,
+            RecoveryWriteResult.CLOSURE_CONFLICT,
+            RecoveryWriteResult.NOT_APPLICABLE,
+        }
+        assert first_initial_lock[0] is P0RecordCode.AGENT_RUN_RECORD
     finally:
         engine.dispose()
 

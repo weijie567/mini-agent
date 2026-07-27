@@ -144,6 +144,10 @@ class P0RecordModel(Base):
 class P0RecordReferenceModel(Base):
     __tablename__ = "p0_record_references"
     __table_args__ = (
+        CheckConstraint(
+            "ordinal >= 0",
+            name="ck_p0_record_references_ordinal_nonnegative",
+        ),
         ForeignKeyConstraint(
             ("source_record_code", "source_logical_identity"),
             ("p0_records.record_code", "p0_records.logical_identity"),

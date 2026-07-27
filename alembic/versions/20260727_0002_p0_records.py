@@ -147,6 +147,10 @@ def upgrade() -> None:
         sa.Column("relation", sa.String(), nullable=False),
         sa.Column("target_record_code", sa.String(), nullable=False),
         sa.Column("target_logical_identity", postgresql.JSONB(), nullable=False),
+        sa.CheckConstraint(
+            "ordinal >= 0",
+            name="ck_p0_record_references_ordinal_nonnegative",
+        ),
         sa.ForeignKeyConstraint(
             ["source_record_code", "source_logical_identity"],
             ["p0_records.record_code", "p0_records.logical_identity"],
