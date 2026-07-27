@@ -349,6 +349,297 @@ def _rebuild(instance: BaseModel, **updates: object) -> BaseModel:
     return type(instance)(**values)
 
 
+_COMPLETED_TERMINAL_MATRIX = (
+    (
+        StopReason.GOAL_COMPLETED,
+        True,
+        AgentOutcome.COMPLETED,
+        TaskStatus.COMPLETED,
+    ),
+    (
+        StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        True,
+        AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        TaskStatus.COMPLETED,
+    ),
+    (
+        StopReason.PROVIDER_PROTOCOL_ERROR,
+        False,
+        AgentOutcome.BLOCKED,
+        None,
+    ),
+    (
+        StopReason.PROVIDER_PROTOCOL_ERROR,
+        True,
+        AgentOutcome.BLOCKED,
+        TaskStatus.BLOCKED,
+    ),
+    (
+        StopReason.INPUT_INVALID,
+        False,
+        AgentOutcome.BLOCKED,
+        None,
+    ),
+    (
+        StopReason.GATE_REJECTED,
+        True,
+        AgentOutcome.BLOCKED,
+        TaskStatus.BLOCKED,
+    ),
+    (
+        StopReason.ORDER_SERVICE_UNAVAILABLE,
+        True,
+        AgentOutcome.BLOCKED,
+        TaskStatus.BLOCKED,
+    ),
+    (
+        StopReason.PRESENTATION_PLAN_REJECTED,
+        True,
+        AgentOutcome.BLOCKED,
+        TaskStatus.BLOCKED,
+    ),
+    (
+        StopReason.RENDERER_INVARIANT_FAILED,
+        True,
+        AgentOutcome.BLOCKED,
+        TaskStatus.BLOCKED,
+    ),
+)
+
+
+def _terminal_task_transition(
+    *,
+    task_id: UUID,
+    request_unit_id: UUID,
+    terminal_status: TaskStatus,
+    changed_at: datetime = UTC_NOW + timedelta(milliseconds=1),
+) -> ApplyTaskTransitionCommand:
+    expected_task = _task(
+        task_id=task_id,
+        status=TaskStatus.ACTIVE,
+        state_version=1,
+    )
+    expected_unit = _request_unit(
+        request_unit_id=request_unit_id,
+        task_id=task_id,
+        status=TaskStatus.ACTIVE,
+        state_version=1,
+    )
+    next_task = _rebuild(
+        expected_task,
+        status=terminal_status,
+        state_version=2,
+        updated_at=changed_at,
+    )
+    next_unit = _rebuild(
+        expected_unit,
+        status=terminal_status,
+        state_version=2,
+        updated_at=changed_at,
+    )
+    transition = _task_transition(
+        task_id=task_id,
+        request_unit_id=request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=terminal_status,
+        base_state_version=1,
+        result_state_version=2,
+        changed_at=changed_at,
+    )
+    return ApplyTaskTransitionCommand(
+        expected_task_record=expected_task,
+        next_task_record=next_task,
+        expected_request_unit_record=expected_unit,
+        next_request_unit_record=next_unit,
+        task_state_transition=transition,
+    )
+
+
+def _terminal_trace_events(
+    *,
+    run_id: UUID,
+    stop_reason: StopReason,
+    outcome: AgentOutcome,
+    completed_at: datetime,
+    task_transition: ApplyTaskTransitionCommand | None,
+) -> tuple[TraceEvent, ...]:
+    task_events = (
+        (
+            TraceEvent(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.TASK_STATE_CHANGED,
+                occurred_at=task_transition.task_state_transition.changed_at,
+                run_id=run_id,
+                task_id=task_transition.next_task_record.task_id,
+                request_unit_id=(
+                    task_transition.next_request_unit_record.request_unit_id
+                ),
+            ),
+        )
+        if task_transition is not None
+        else ()
+    )
+    return (
+        *task_events,
+        TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=run_id,
+            user_outcome=outcome,
+            stop_reason=stop_reason,
+        ),
+    )
+
+
+def _completed_finalization(
+    *,
+    stop_reason: StopReason = StopReason.GOAL_COMPLETED,
+    outcome: AgentOutcome = AgentOutcome.COMPLETED,
+    with_task: bool = True,
+    task_status: TaskStatus | None = TaskStatus.COMPLETED,
+) -> FinalizeRunCommand:
+    if with_task != (task_status is not None):
+        raise ValueError("task_status must be present exactly when with_task is true")
+    run_id = uuid4()
+    conversation_id = uuid4()
+    completed_at = UTC_NOW + timedelta(milliseconds=2)
+    running = _run(
+        run_id=run_id,
+        conversation_id=conversation_id,
+        status=AgentRunStatus.RUNNING,
+    )
+    terminal = _project_run(
+        running,
+        status=AgentRunStatus.COMPLETED,
+        completed_at=completed_at,
+        stop_reason=stop_reason,
+    )
+    terminal_result = AgentRunResult(
+        run_id=run_id,
+        outcome=outcome,
+        message="这是经过确定性映射的终态回复。",
+    )
+    assistant_message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=conversation_id,
+        direction=MessageDirection.ASSISTANT,
+        content=terminal_result.message,
+        received_at=completed_at,
+    )
+
+    if with_task:
+        task_id = uuid4()
+        request_unit_id = uuid4()
+        assert task_status is not None
+        task_transition = _terminal_task_transition(
+            task_id=task_id,
+            request_unit_id=request_unit_id,
+            terminal_status=task_status,
+        )
+        active_link = _run_task_link(
+            run_id=run_id,
+            task_id=task_id,
+            base_task_state_version=1,
+        )
+        expected_active_links = (active_link,)
+        terminal_links = (
+            _rebuild(
+                active_link,
+                result_task_state_version=(
+                    task_transition.next_task_record.state_version
+                ),
+            ),
+        )
+        result_task_records = (task_transition.next_task_record,)
+    else:
+        task_transition = None
+        expected_active_links = ()
+        terminal_links = ()
+        result_task_records = ()
+
+    return FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=expected_active_links,
+        terminal_links=terminal_links,
+        result_task_records=result_task_records,
+        task_transition=task_transition,
+        terminal_result=terminal_result,
+        assistant_message=assistant_message,
+        terminal_trace_events=_terminal_trace_events(
+            run_id=run_id,
+            stop_reason=stop_reason,
+            outcome=outcome,
+            completed_at=completed_at,
+            task_transition=task_transition,
+        ),
+    )
+
+
+def _failed_finalization(*, with_task: bool = True) -> FinalizeRunCommand:
+    run_id = uuid4()
+    running = _run(
+        run_id=run_id,
+        conversation_id=uuid4(),
+        status=AgentRunStatus.RUNNING,
+    )
+    terminal = _project_run(
+        running,
+        status=AgentRunStatus.FAILED,
+        completed_at=UTC_NOW + timedelta(milliseconds=2),
+        stop_reason=None,
+    )
+    if with_task:
+        task_id = uuid4()
+        current_task = _task(
+            task_id=task_id,
+            status=TaskStatus.ACTIVE,
+            state_version=1,
+        )
+        active_link = _run_task_link(
+            run_id=run_id,
+            task_id=task_id,
+            base_task_state_version=1,
+        )
+        expected_active_links = (active_link,)
+        terminal_links = (
+            _rebuild(active_link, result_task_state_version=1),
+        )
+        result_task_records = (current_task,)
+    else:
+        expected_active_links = ()
+        terminal_links = ()
+        result_task_records = ()
+    return FinalizeRunCommand(
+        expected_active_record=running,
+        terminal_record=terminal,
+        expected_active_links=expected_active_links,
+        terminal_links=terminal_links,
+        result_task_records=result_task_records,
+        task_transition=None,
+        terminal_result=None,
+        assistant_message=None,
+        terminal_trace_events=(),
+    )
+
+
+def _updated_terminal_trace_events(
+    command: FinalizeRunCommand,
+    selected_event_type: TraceEventType,
+    **updates: object,
+) -> tuple[TraceEvent, ...]:
+    events = list(command.terminal_trace_events)
+    event_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type is selected_event_type
+    )
+    events[event_index] = events[event_index].model_copy(update=updates)
+    return tuple(events)
+
+
 def _recovery_trace_events(
     *,
     run_transition: MarkRunIncompleteForRecoveryCommand,
@@ -409,6 +700,25 @@ _RECOVERY_TRACE_ALLOWED_FIELDS = {
 _RECOVERY_TRACE_CONTAMINATION_CASES = tuple(
     (event_type, field_name)
     for event_type, allowed_fields in _RECOVERY_TRACE_ALLOWED_FIELDS.items()
+    for field_name in sorted(set(TraceEvent.model_fields) - allowed_fields)
+)
+_TERMINAL_TRACE_COMMON_FIELDS = frozenset(
+    {
+        "trace_event_id",
+        "event_type",
+        "occurred_at",
+        "run_id",
+    }
+)
+_TERMINAL_TRACE_ALLOWED_FIELDS = {
+    TraceEventType.TASK_STATE_CHANGED: _TERMINAL_TRACE_COMMON_FIELDS
+    | {"task_id", "request_unit_id"},
+    TraceEventType.RUN_STOPPED: _TERMINAL_TRACE_COMMON_FIELDS
+    | {"user_outcome", "stop_reason"},
+}
+_TERMINAL_TRACE_CONTAMINATION_CASES = tuple(
+    (event_type, field_name)
+    for event_type, allowed_fields in _TERMINAL_TRACE_ALLOWED_FIELDS.items()
     for field_name in sorted(set(TraceEvent.model_fields) - allowed_fields)
 )
 
@@ -1793,39 +2103,478 @@ def test_observation_command_requires_exact_successful_read_get_order_source() -
     }
 
 
-def test_run_finalization_closes_every_active_link_against_exact_tasks() -> None:
-    run_id = uuid4()
-    task_id = uuid4()
-    running = _run(run_id=run_id, status=AgentRunStatus.RUNNING)
-    terminal = _project_run(
-        running,
-        status=AgentRunStatus.COMPLETED,
-        completed_at=UTC_NOW + timedelta(milliseconds=1),
-        stop_reason=StopReason.GOAL_COMPLETED,
-    )
-    active_link = _run_task_link(run_id=run_id, task_id=task_id)
-    terminal_link = _rebuild(
-        active_link,
-        result_task_state_version=2,
-    )
-    result_task = _task(task_id=task_id, state_version=2)
-    command = FinalizeRunCommand(
-        expected_active_record=running,
-        terminal_record=terminal,
-        expected_active_links=(active_link,),
-        terminal_links=(terminal_link,),
-        result_task_records=(result_task,),
+@pytest.mark.parametrize(
+    ("stop_reason", "with_task", "outcome", "task_status"),
+    _COMPLETED_TERMINAL_MATRIX,
+    ids=(
+        "goal-completed-with-task",
+        "not-found-with-task",
+        "provider-protocol-without-task",
+        "provider-protocol-with-task",
+        "input-invalid-without-task",
+        "gate-rejected-with-task",
+        "order-service-unavailable-with-task",
+        "presentation-plan-rejected-with-task",
+        "renderer-invariant-failed-with-task",
+    ),
+)
+def test_run_finalization_accepts_only_the_nine_completed_terminal_rows(
+    stop_reason: StopReason,
+    with_task: bool,
+    outcome: AgentOutcome,
+    task_status: TaskStatus | None,
+) -> None:
+    command = _completed_finalization(
+        stop_reason=stop_reason,
+        outcome=outcome,
+        with_task=with_task,
+        task_status=task_status,
     )
 
-    assert command.terminal_links[0].result_task_state_version == (
-        command.result_task_records[0].state_version
+    assert command.terminal_record.status is AgentRunStatus.COMPLETED
+    assert command.terminal_result is not None
+    assert command.terminal_result.outcome is outcome
+    assert command.assistant_message is not None
+    assert command.assistant_message.content == command.terminal_result.message
+    assert command.terminal_trace_events[-1].event_type is TraceEventType.RUN_STOPPED
+    if with_task:
+        assert command.task_transition is not None
+        assert command.task_transition.next_task_record.status is task_status
+        assert command.result_task_records == (
+            command.task_transition.next_task_record,
+        )
+        assert tuple(
+            event.event_type for event in command.terminal_trace_events
+        ) == (
+            TraceEventType.TASK_STATE_CHANGED,
+            TraceEventType.RUN_STOPPED,
+        )
+    else:
+        assert command.task_transition is None
+        assert command.result_task_records == ()
+        assert tuple(
+            event.event_type for event in command.terminal_trace_events
+        ) == (TraceEventType.RUN_STOPPED,)
+
+
+def test_completed_run_requires_result_message_and_run_stopped() -> None:
+    command = _completed_finalization()
+
+    with pytest.raises(ValidationError, match="Task transition"):
+        _rebuild(command, task_transition=None)
+    with pytest.raises(ValidationError, match="terminal result"):
+        _rebuild(command, terminal_result=None)
+    with pytest.raises(ValidationError, match="ASSISTANT Message"):
+        _rebuild(command, assistant_message=None)
+    with pytest.raises(ValidationError, match="RunStopped"):
+        _rebuild(
+            command,
+            terminal_trace_events=(command.terminal_trace_events[0],),
+        )
+    no_task = _completed_finalization(
+        stop_reason=StopReason.INPUT_INVALID,
+        outcome=AgentOutcome.BLOCKED,
+        with_task=False,
+        task_status=None,
     )
-    empty = FinalizeRunCommand(
-        expected_active_record=running,
-        terminal_record=terminal,
-        expected_active_links=(),
-        terminal_links=(),
-        result_task_records=(),
+    with pytest.raises(ValidationError, match="Task transition"):
+        _rebuild(no_task, task_transition=command.task_transition)
+    with pytest.raises(ValidationError, match="RunStopped"):
+        _rebuild(no_task, terminal_trace_events=())
+
+
+def test_completed_run_rejects_omitted_reason_outcome_task_cross_products() -> None:
+    with_task = _completed_finalization()
+    without_task = _completed_finalization(
+        stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+        outcome=AgentOutcome.BLOCKED,
+        with_task=False,
+        task_status=None,
+    )
+
+    unsupported_no_task_reason = StopReason.GATE_REJECTED
+    with pytest.raises(ValidationError, match="closed terminal matrix"):
+        _rebuild(
+            without_task,
+            terminal_record=_project_run(
+                without_task.terminal_record,
+                stop_reason=unsupported_no_task_reason,
+            ),
+            terminal_trace_events=_updated_terminal_trace_events(
+                without_task,
+                TraceEventType.RUN_STOPPED,
+                stop_reason=unsupported_no_task_reason,
+            ),
+        )
+
+    unsupported_task_reason = StopReason.INPUT_INVALID
+    with pytest.raises(ValidationError, match="closed terminal matrix"):
+        _rebuild(
+            with_task,
+            terminal_record=_project_run(
+                with_task.terminal_record,
+                stop_reason=unsupported_task_reason,
+            ),
+            terminal_trace_events=_updated_terminal_trace_events(
+                with_task,
+                TraceEventType.RUN_STOPPED,
+                stop_reason=unsupported_task_reason,
+            ),
+        )
+
+    for omitted_outcome in (
+        AgentOutcome.ASK_USER,
+        AgentOutcome.NEED_HUMAN,
+        AgentOutcome.BLOCKED,
+    ):
+        with pytest.raises(ValidationError, match="closed terminal matrix"):
+            _rebuild(
+                with_task,
+                terminal_result=_rebuild(
+                    with_task.terminal_result,
+                    outcome=omitted_outcome,
+                ),
+                terminal_trace_events=_updated_terminal_trace_events(
+                    with_task,
+                    TraceEventType.RUN_STOPPED,
+                    user_outcome=omitted_outcome,
+                ),
+            )
+
+    task_id = with_task.expected_active_links[0].task_id
+    request_unit_id = (
+        with_task.task_transition.next_request_unit_record.request_unit_id
+    )
+    blocked_transition = _terminal_task_transition(
+        task_id=task_id,
+        request_unit_id=request_unit_id,
+        terminal_status=TaskStatus.BLOCKED,
+    )
+    with pytest.raises(ValidationError, match="closed terminal matrix"):
+        _rebuild(
+            with_task,
+            task_transition=blocked_transition,
+            result_task_records=(blocked_transition.next_task_record,),
+            terminal_trace_events=_updated_terminal_trace_events(
+                with_task,
+                TraceEventType.TASK_STATE_CHANGED,
+                task_id=blocked_transition.next_task_record.task_id,
+                request_unit_id=(
+                    blocked_transition.next_request_unit_record.request_unit_id
+                ),
+                occurred_at=blocked_transition.task_state_transition.changed_at,
+            ),
+        )
+
+    cancelled_transition = _terminal_task_transition(
+        task_id=task_id,
+        request_unit_id=request_unit_id,
+        terminal_status=TaskStatus.CANCELLED,
+    )
+    with pytest.raises(ValidationError, match="closed terminal matrix"):
+        _rebuild(
+            with_task,
+            task_transition=cancelled_transition,
+            result_task_records=(cancelled_transition.next_task_record,),
+            terminal_trace_events=_updated_terminal_trace_events(
+                with_task,
+                TraceEventType.TASK_STATE_CHANGED,
+                task_id=cancelled_transition.next_task_record.task_id,
+                request_unit_id=(
+                    cancelled_transition.next_request_unit_record.request_unit_id
+                ),
+                occurred_at=cancelled_transition.task_state_transition.changed_at,
+            ),
+        )
+
+
+def test_completed_run_binds_every_foreign_identity_to_one_terminal_turn() -> None:
+    command = _completed_finalization()
+
+    with pytest.raises(ValidationError, match="terminal result.*Run"):
+        _rebuild(
+            command,
+            terminal_result=_rebuild(command.terminal_result, run_id=uuid4()),
+        )
+    with pytest.raises(ValidationError, match="ASSISTANT Message.*Conversation"):
+        _rebuild(
+            command,
+            assistant_message=_rebuild(
+                command.assistant_message,
+                conversation_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="conversation_id"):
+        _rebuild(
+            command,
+            terminal_record=_project_run(
+                command.terminal_record,
+                conversation_id=None,
+            ),
+        )
+
+    foreign_transition = _terminal_task_transition(
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        terminal_status=TaskStatus.COMPLETED,
+    )
+    with pytest.raises(ValidationError, match="link Task"):
+        _rebuild(
+            command,
+            task_transition=foreign_transition,
+            result_task_records=(foreign_transition.next_task_record,),
+        )
+
+    same_task_foreign_unit = _terminal_task_transition(
+        task_id=command.expected_active_links[0].task_id,
+        request_unit_id=uuid4(),
+        terminal_status=TaskStatus.COMPLETED,
+    )
+    with pytest.raises(ValidationError, match="TaskStateChanged"):
+        _rebuild(
+            command,
+            task_transition=same_task_foreign_unit,
+            result_task_records=(same_task_foreign_unit.next_task_record,),
+        )
+
+    with pytest.raises(ValidationError, match="terminal Trace.*Run"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.TASK_STATE_CHANGED,
+                run_id=uuid4(),
+            ),
+        )
+    with pytest.raises(ValidationError, match="terminal Trace.*Run"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.RUN_STOPPED,
+                run_id=uuid4(),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"schema_version": "message_record.p0.v2"},
+        {"direction": MessageDirection.USER},
+        {"content": "被篡改的回复"},
+        {"received_at": UTC_NOW},
+    ),
+    ids=("schema", "user-direction", "content", "timestamp"),
+)
+def test_completed_run_rejects_non_exact_assistant_message(
+    updates: dict[str, object],
+) -> None:
+    command = _completed_finalization()
+
+    with pytest.raises(ValidationError, match="ASSISTANT Message"):
+        _rebuild(
+            command,
+            assistant_message=_rebuild(command.assistant_message, **updates),
+        )
+
+
+def test_completed_run_terminal_trace_is_complete_ordered_and_unique() -> None:
+    command = _completed_finalization()
+    task_changed, run_stopped = command.terminal_trace_events
+
+    with pytest.raises(ValidationError, match="ordered"):
+        _rebuild(
+            command,
+            terminal_trace_events=(run_stopped, task_changed),
+        )
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        _rebuild(
+            command,
+            terminal_trace_events=(
+                task_changed,
+                run_stopped.model_copy(
+                    update={"trace_event_id": task_changed.trace_event_id}
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="ordered"):
+        _rebuild(
+            command,
+            terminal_trace_events=(run_stopped, run_stopped),
+        )
+    with pytest.raises(ValidationError, match="ordered"):
+        _rebuild(
+            command,
+            terminal_trace_events=(
+                task_changed.model_copy(
+                    update={"event_type": TraceEventType.RESPONSE_RENDERED}
+                ),
+                run_stopped,
+            ),
+        )
+
+    no_task = _completed_finalization(
+        stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+        outcome=AgentOutcome.BLOCKED,
+        with_task=False,
+        task_status=None,
+    )
+    with pytest.raises(ValidationError, match="only RunStopped"):
+        _rebuild(
+            no_task,
+            terminal_trace_events=(
+                TraceEvent(
+                    trace_event_id=uuid4(),
+                    event_type=TraceEventType.TASK_STATE_CHANGED,
+                    occurred_at=no_task.terminal_record.completed_at,
+                    run_id=no_task.terminal_record.run_id,
+                    task_id=uuid4(),
+                    request_unit_id=uuid4(),
+                ),
+                *no_task.terminal_trace_events,
+            ),
+        )
+
+
+def test_completed_run_binds_terminal_trace_timestamps_and_transition_time() -> None:
+    command = _completed_finalization()
+
+    with pytest.raises(ValidationError, match="RunStopped.*stop reason"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.RUN_STOPPED,
+                stop_reason=StopReason.GATE_REJECTED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunStopped.*outcome"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.RUN_STOPPED,
+                user_outcome=AgentOutcome.BLOCKED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="TaskStateChanged.*timestamp"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.TASK_STATE_CHANGED,
+                occurred_at=UTC_NOW,
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunStopped.*timestamp"):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.RUN_STOPPED,
+                occurred_at=UTC_NOW,
+            ),
+        )
+
+    transition = command.task_transition
+    changed_after_completion = command.terminal_record.completed_at + timedelta(
+        milliseconds=1
+    )
+    late_transition = _terminal_task_transition(
+        task_id=transition.next_task_record.task_id,
+        request_unit_id=transition.next_request_unit_record.request_unit_id,
+        terminal_status=TaskStatus.COMPLETED,
+        changed_at=changed_after_completion,
+    )
+    with pytest.raises(ValidationError, match="cannot follow Run completion"):
+        _rebuild(
+            command,
+            task_transition=late_transition,
+            result_task_records=(late_transition.next_task_record,),
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                TraceEventType.TASK_STATE_CHANGED,
+                occurred_at=changed_after_completion,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "field_name"),
+    _TERMINAL_TRACE_CONTAMINATION_CASES,
+)
+def test_completed_run_terminal_trace_rejects_every_non_allowlisted_projection(
+    event_type: TraceEventType,
+    field_name: str,
+) -> None:
+    command = _completed_finalization()
+
+    with pytest.raises(ValidationError):
+        _rebuild(
+            command,
+            terminal_trace_events=_updated_terminal_trace_events(
+                command,
+                event_type,
+                **{field_name: _non_empty_trace_optional_value(field_name)},
+            ),
+        )
+
+
+def test_failed_run_closes_links_without_fabricating_terminal_projections() -> None:
+    with_task = _failed_finalization()
+    without_task = _failed_finalization(with_task=False)
+
+    assert with_task.terminal_record.stop_reason is None
+    assert with_task.task_transition is None
+    assert with_task.terminal_result is None
+    assert with_task.assistant_message is None
+    assert with_task.terminal_trace_events == ()
+    assert with_task.terminal_links[0].result_task_state_version == (
+        with_task.result_task_records[0].state_version
+    )
+    assert without_task.expected_active_links == ()
+    assert without_task.result_task_records == ()
+
+
+def test_failed_run_rejects_all_four_terminal_turn_projections() -> None:
+    failed = _failed_finalization()
+    completed = _completed_finalization()
+    projection_values = {
+        "task_transition": completed.task_transition,
+        "terminal_result": completed.terminal_result,
+        "assistant_message": completed.assistant_message,
+        "terminal_trace_events": completed.terminal_trace_events,
+    }
+
+    for field_name, value in projection_values.items():
+        with pytest.raises(ValidationError, match="FAILED"):
+            _rebuild(failed, **{field_name: value})
+    with pytest.raises(ValidationError, match="FAILED.*stop_reason"):
+        _rebuild(
+            failed,
+            terminal_record=_project_run(
+                failed.terminal_record,
+                stop_reason=StopReason.GOAL_COMPLETED,
+            ),
+        )
+
+
+def test_run_finalization_preserves_existing_run_link_and_task_closure() -> None:
+    command = _completed_finalization()
+    running = command.expected_active_record
+    terminal = command.terminal_record
+    active_link = command.expected_active_links[0]
+    result_task = command.result_task_records[0]
+
+    assert command.terminal_links[0].result_task_state_version == (
+        result_task.state_version
+    )
+    empty = _completed_finalization(
+        stop_reason=StopReason.INPUT_INVALID,
+        outcome=AgentOutcome.BLOCKED,
+        with_task=False,
+        task_status=None,
     )
     assert not empty.terminal_links
 
@@ -1857,7 +2606,9 @@ def test_run_finalization_closes_every_active_link_against_exact_tasks() -> None
     with pytest.raises(ValidationError, match="active RunTaskLink"):
         _rebuild(
             command,
-            expected_active_links=(_rebuild(active_link, result_task_state_version=1),),
+            expected_active_links=(
+                _rebuild(active_link, result_task_state_version=1),
+            ),
         )
     with pytest.raises(ValidationError, match="exact RunTaskLink set"):
         _rebuild(command, terminal_links=())
@@ -1865,6 +2616,13 @@ def test_run_finalization_closes_every_active_link_against_exact_tasks() -> None
         _rebuild(
             command,
             result_task_records=(_rebuild(result_task, state_version=3),),
+        )
+    with pytest.raises(ValidationError, match="exact next Task"):
+        _rebuild(
+            command,
+            result_task_records=(
+                _rebuild(result_task, owner_customer_id="customer-B"),
+            ),
         )
     with pytest.raises(ValidationError):
         _rebuild(
@@ -1956,6 +2714,10 @@ def test_application_port_declaration_models_freeze_the_exact_field_surface() ->
             "expected_active_links",
             "terminal_links",
             "result_task_records",
+            "task_transition",
+            "terminal_result",
+            "assistant_message",
+            "terminal_trace_events",
         },
         AgentRunCommand: {"customer_context", "message"},
         AgentRunResult: {"run_id", "outcome", "message"},
@@ -2022,6 +2784,9 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
     bounded_recovery_trace_fields = (
         (ApplyRestartRecoveryCommand, "recovery_trace_events"),
     )
+    bounded_terminal_trace_fields = (
+        (FinalizeRunCommand, "terminal_trace_events"),
+    )
     for model_type, field_name in exact_one_fields:
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema["minItems"] == 1
@@ -2034,6 +2799,10 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema["minItems"] == 1
         assert field_schema["maxItems"] == 3
+    for model_type, field_name in bounded_terminal_trace_fields:
+        field_schema = model_type.model_json_schema()["properties"][field_name]
+        assert field_schema.get("minItems", 0) == 0
+        assert field_schema["maxItems"] == 2
 
     graph = _initial_graph()
     child = graph.request_understanding.accepted_deltas[0]
@@ -2052,30 +2821,12 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
     with pytest.raises(ValidationError):
         _rebuild(graph, input_bindings=(binding, binding))
 
-    run_id = uuid4()
-    task_id = uuid4()
-    running = _run(run_id=run_id, status=AgentRunStatus.RUNNING)
-    terminal = _project_run(
-        running,
-        status=AgentRunStatus.COMPLETED,
-        completed_at=UTC_NOW + timedelta(milliseconds=1),
-        stop_reason=StopReason.GOAL_COMPLETED,
-    )
-    active_link = _run_task_link(run_id=run_id, task_id=task_id)
-    result_task = _task(task_id=task_id, state_version=2)
-    finalization = FinalizeRunCommand(
-        expected_active_record=running,
-        terminal_record=terminal,
-        expected_active_links=(active_link,),
-        terminal_links=(_rebuild(active_link, result_task_state_version=2),),
-        result_task_records=(result_task,),
-    )
-    empty_finalization = FinalizeRunCommand(
-        expected_active_record=running,
-        terminal_record=terminal,
-        expected_active_links=(),
-        terminal_links=(),
-        result_task_records=(),
+    finalization = _completed_finalization()
+    empty_finalization = _completed_finalization(
+        stop_reason=StopReason.INPUT_INVALID,
+        outcome=AgentOutcome.BLOCKED,
+        with_task=False,
+        task_status=None,
     )
 
     running_closure = _restart_recovery_closure()
@@ -2100,6 +2851,7 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         (empty_finalization, "expected_active_links"),
         (empty_finalization, "terminal_links"),
         (empty_finalization, "result_task_records"),
+        (empty_finalization, "terminal_trace_events"),
         (empty_task_aggregate, "task_state_transitions"),
         (empty_tool_aggregate, "tool_attempt_records"),
         (created_closure, "conversation_task_links"),
@@ -2134,6 +2886,16 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         assert len(value) == 1
         with pytest.raises(ValidationError):
             _rebuild(instance, **{field_name: (*value, value[0])})
+
+    assert len(finalization.terminal_trace_events) == 2
+    with pytest.raises(ValidationError):
+        _rebuild(
+            finalization,
+            terminal_trace_events=(
+                *finalization.terminal_trace_events,
+                finalization.terminal_trace_events[0],
+            ),
+        )
 
     for model_type, field_name in (
         (RequestUnderstandingRecord, "accepted_delta_refs"),

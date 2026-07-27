@@ -174,7 +174,15 @@ def test_run_start_and_atomic_finalization_are_separate_exact_projection_cas() -
     assert "CREATED" in (RuntimeRecordPort.start_run_if_created.__doc__ or "")
     finalize_doc = RuntimeRecordPort.finalize_run_if_active.__doc__ or ""
     assert "RunTaskLink" in finalize_doc
-    assert "atomically" in finalize_doc
+    assert "APPLIED" in finalize_doc
+    assert "one transaction" in finalize_doc
+    assert "Task" in finalize_doc
+    assert "RequestUnit" in finalize_doc
+    assert "ASSISTANT Message" in finalize_doc
+    assert "terminal Trace" in finalize_doc
+    assert "PROJECTION_CONFLICT" in finalize_doc
+    assert "NOT_APPLICABLE" in finalize_doc
+    assert "zero writes" in finalize_doc
     assert set(ConditionalWriteResult) == {
         ConditionalWriteResult.APPLIED,
         ConditionalWriteResult.PROJECTION_CONFLICT,
