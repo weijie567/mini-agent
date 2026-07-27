@@ -1663,6 +1663,75 @@ _TRACE_EDGES_BY_VARIANT: Mapping[
         ),
     }
 )
+_SAFETY_CRITICAL_TRACE_TYPES = frozenset(
+    event_type
+    for event_type in TraceEventType
+    if event_type is not TraceEventType.REQUEST_UNDERSTANDING_STARTED
+)
+
+
+def _expected_safety_event_counts(
+    variant: TraceVariant,
+) -> Counter[TraceEventType] | None:
+    edges = _TRACE_EDGES_BY_VARIANT.get(variant)
+    if edges is None:
+        return None
+    occurrence_by_type_and_purpose: dict[
+        TraceEventType,
+        dict[str | None, int],
+    ] = {}
+    for node in {
+        endpoint
+        for edge in edges
+        for endpoint in edge
+        if endpoint.event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    }:
+        by_purpose = occurrence_by_type_and_purpose.setdefault(
+            node.event_type,
+            {},
+        )
+        by_purpose[node.model_call_purpose] = max(
+            by_purpose.get(node.model_call_purpose, 0),
+            node.occurrence,
+        )
+    return Counter(
+        {
+            event_type: sum(by_purpose.values())
+            for event_type, by_purpose in (
+                occurrence_by_type_and_purpose.items()
+            )
+        }
+    )
+
+
+def _trace_safety_cardinality_reason(
+    events: tuple[TraceEvent, ...],
+    variant: TraceVariant,
+) -> EvalGraderReasonCode | None:
+    expected_counts = _expected_safety_event_counts(variant)
+    if expected_counts is None:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    actual_counts = Counter(
+        event.event_type
+        for event in events
+        if event.event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    )
+    ordered_safety_types = tuple(
+        event_type
+        for event_type in TraceEventType
+        if event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    )
+    if any(
+        actual_counts[event_type] < expected_counts[event_type]
+        for event_type in ordered_safety_types
+    ):
+        return EvalGraderReasonCode.TRACE_EVENT_MISSING
+    if any(
+        actual_counts[event_type] > expected_counts[event_type]
+        for event_type in ordered_safety_types
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
 
 
 def _trace_node_index(
@@ -1744,6 +1813,12 @@ class TraceCompletenessGrader:
         event_ids = tuple(event.trace_event_id for event in events)
         if len(event_ids) != len(set(event_ids)):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        cardinality_reason = _trace_safety_cardinality_reason(
+            events,
+            expectations.trace_variant,
+        )
+        if cardinality_reason is not None:
+            return _failed(self.name, cardinality_reason)
         precedence_reason = _trace_precedence_reason(
             events,
             expectations.trace_variant,
@@ -1954,6 +2029,281 @@ def _fixed_message(response_policy: str) -> str | None:
     return _FIXED_MESSAGES.get(response_policy)
 
 
+def _tool_lifecycle_references_match(
+    events: tuple[TraceEvent, ...],
+    tool_calls: tuple[ToolCallRecord, ...],
+) -> bool:
+    lifecycle_status_by_type = {
+        TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+        TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+        TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
+    }
+    lifecycle_types = frozenset(lifecycle_status_by_type)
+    lifecycle_events = tuple(
+        event for event in events if event.event_type in lifecycle_types
+    )
+    tool_call_refs = {
+        event.tool_call_id for event in lifecycle_events
+    }
+    if tool_call_refs != {item.tool_call_id for item in tool_calls}:
+        return False
+    if any(
+        event.tool_call_terminal_status
+        is not lifecycle_status_by_type[event.event_type]
+        for event in lifecycle_events
+    ):
+        return False
+    expected_lifecycle_by_status: dict[
+        ToolCallStatus,
+        tuple[TraceEventType, ...],
+    ] = {
+        ToolCallStatus.CREATED: (TraceEventType.TOOL_CALL_CREATED,),
+        ToolCallStatus.RUNNING: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+        ),
+        ToolCallStatus.SUCCEEDED: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_SUCCEEDED,
+        ),
+        ToolCallStatus.FAILED: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_FAILED,
+        ),
+        ToolCallStatus.TIMED_OUT: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_TIMED_OUT,
+        ),
+    }
+    for tool_call in tool_calls:
+        actual_lifecycle = tuple(
+            event.event_type
+            for event in lifecycle_events
+            if event.tool_call_id == tool_call.tool_call_id
+        )
+        expected_lifecycle = expected_lifecycle_by_status.get(
+            tool_call.status
+        )
+        if tool_call.status is ToolCallStatus.INTERRUPTED:
+            expected_lifecycle = (
+                (
+                    TraceEventType.TOOL_CALL_CREATED,
+                    TraceEventType.TOOL_CALL_INTERRUPTED,
+                )
+                if tool_call.attempt_count == 0
+                else (
+                    TraceEventType.TOOL_CALL_CREATED,
+                    TraceEventType.TOOL_CALL_STARTED,
+                    TraceEventType.TOOL_CALL_INTERRUPTED,
+                )
+            )
+        if actual_lifecycle != expected_lifecycle:
+            return False
+    return True
+
+
+def _normalized_tool_result_matches_typed_records(
+    evidence: EvalEvidence,
+) -> bool:
+    normalized_by_call: dict[UUID, tuple[int, ToolResultOutcome]] = {}
+    for index, event in enumerate(evidence.trace_events):
+        if event.event_type is not TraceEventType.TOOL_RESULT_NORMALIZED:
+            continue
+        if (
+            event.tool_call_id is None
+            or event.safe_tool_outcome is None
+            or event.tool_call_id in normalized_by_call
+        ):
+            return False
+        normalized_by_call[event.tool_call_id] = (
+            index,
+            event.safe_tool_outcome,
+        )
+
+    tool_call_by_id = {
+        tool_call.tool_call_id: tool_call
+        for tool_call in evidence.tool_calls
+    }
+    attempts_by_call: dict[UUID, list[ToolAttemptRecord]] = {
+        tool_call_id: [] for tool_call_id in tool_call_by_id
+    }
+    for attempt in evidence.tool_attempts:
+        attempts = attempts_by_call.get(attempt.tool_call_id)
+        if attempts is None:
+            return False
+        attempts.append(attempt)
+
+    terminal_outcomes: Mapping[
+        ToolCallStatus,
+        frozenset[ToolResultOutcome],
+    ] = {
+        ToolCallStatus.SUCCEEDED: frozenset(
+            {ToolResultOutcome.SUCCESS}
+        ),
+        ToolCallStatus.FAILED: frozenset(
+            {
+                ToolResultOutcome.BUSINESS_FAILURE,
+                ToolResultOutcome.SYSTEM_FAILURE,
+            }
+        ),
+        ToolCallStatus.TIMED_OUT: frozenset(
+            {ToolResultOutcome.TIMEOUT}
+        ),
+        ToolCallStatus.INTERRUPTED: frozenset(
+            {ToolResultOutcome.INTERRUPTED}
+        ),
+    }
+    expected_observations = 0
+    for tool_call_id, tool_call in tool_call_by_id.items():
+        attempts = tuple(
+            sorted(
+                attempts_by_call[tool_call_id],
+                key=lambda attempt: attempt.attempt_no,
+            )
+        )
+        if (
+            len(attempts) != tool_call.attempt_count
+            or tuple(attempt.attempt_no for attempt in attempts)
+            != tuple(range(1, tool_call.attempt_count + 1))
+        ):
+            return False
+        normalized = normalized_by_call.get(tool_call_id)
+        if tool_call.status in {
+            ToolCallStatus.CREATED,
+            ToolCallStatus.RUNNING,
+        }:
+            if normalized is not None:
+                return False
+            continue
+        if normalized is None:
+            return False
+        _, normalized_outcome = normalized
+        allowed_outcomes = terminal_outcomes.get(tool_call.status)
+        if (
+            allowed_outcomes is None
+            or normalized_outcome not in allowed_outcomes
+        ):
+            return False
+        if (
+            tool_call.status is ToolCallStatus.INTERRUPTED
+            and tool_call.attempt_count == 0
+        ):
+            if attempts:
+                return False
+        elif tool_call.status is ToolCallStatus.INTERRUPTED:
+            if (
+                not attempts
+                or attempts[-1].outcome
+                not in {None, ToolResultOutcome.INTERRUPTED}
+                or (
+                    attempts[-1].outcome is None
+                    and attempts[-1].finished_at is not None
+                )
+                or (
+                    attempts[-1].outcome
+                    is ToolResultOutcome.INTERRUPTED
+                    and attempts[-1].finished_at is None
+                )
+            ):
+                return False
+        else:
+            if (
+                not attempts
+                or attempts[-1].outcome is not normalized_outcome
+            ):
+                return False
+        if tool_call.status is ToolCallStatus.SUCCEEDED:
+            expected_observations += 1
+
+    terminal_call_ids = {
+        tool_call.tool_call_id
+        for tool_call in evidence.tool_calls
+        if tool_call.status
+        not in {ToolCallStatus.CREATED, ToolCallStatus.RUNNING}
+    }
+    if (
+        set(normalized_by_call) != terminal_call_ids
+        or len(evidence.observations) != expected_observations
+    ):
+        return False
+
+    for index, event in enumerate(evidence.trace_events):
+        if (
+            event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED
+            or event.safe_tool_outcome is None
+        ):
+            continue
+        if event.tool_call_id is None:
+            return False
+        normalized = normalized_by_call.get(event.tool_call_id)
+        if (
+            normalized is None
+            or index <= normalized[0]
+            or event.safe_tool_outcome is not normalized[1]
+        ):
+            return False
+    return True
+
+
+def _trace_projection_fields_match_typed_records(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> bool:
+    for event in evidence.trace_events:
+        if event.event_type is not TraceEventType.GATE_DECISION_RECORDED and (
+            event.gate_decision is not None
+            or event.gate_reason_code is not None
+        ):
+            return False
+        if event.event_type is not TraceEventType.RUN_STOPPED and (
+            event.user_outcome is not None
+            or event.stop_reason is not None
+        ):
+            return False
+
+    gate_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+    )
+    if Counter(
+        (event.gate_decision, event.gate_reason_code)
+        for event in gate_events
+    ) != Counter(
+        (decision.decision, decision.reason_code)
+        for decision in evidence.gate_decisions
+    ):
+        return False
+
+    stopped_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    if (
+        len(stopped_events) != 1
+        or evidence.run_record is None
+        or evidence.agent_result is None
+    ):
+        return False
+    stopped = stopped_events[0]
+    return (
+        stopped.user_outcome
+        is evidence.observed_outcome
+        is evidence.agent_result.outcome
+        is expectations.expected_outcome
+        and stopped.stop_reason
+        is evidence.run_record.stop_reason
+        is expectations.expected_stop_reason
+    )
+
+
 def _trace_references_match_typed_records(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
@@ -2126,18 +2476,14 @@ def _trace_references_match_typed_records(
     ):
         return False
 
-    lifecycle_types = {
-        TraceEventType.TOOL_CALL_CREATED,
-        TraceEventType.TOOL_CALL_STARTED,
-        TraceEventType.TOOL_CALL_SUCCEEDED,
-        TraceEventType.TOOL_CALL_FAILED,
-        TraceEventType.TOOL_CALL_TIMED_OUT,
-        TraceEventType.TOOL_CALL_INTERRUPTED,
-    }
-    tool_call_refs = {
-        event.tool_call_id for event in events if event.event_type in lifecycle_types
-    }
-    if tool_call_refs != {item.tool_call_id for item in evidence.tool_calls}:
+    if not _tool_lifecycle_references_match(events, evidence.tool_calls):
+        return False
+    if not _normalized_tool_result_matches_typed_records(evidence):
+        return False
+    if not _trace_projection_fields_match_typed_records(
+        evidence,
+        expectations,
+    ):
         return False
 
     observation_refs = {

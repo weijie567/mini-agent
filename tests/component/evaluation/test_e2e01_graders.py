@@ -4,6 +4,7 @@ from collections.abc import Callable
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -71,6 +72,7 @@ from mini_agent.core.tool_system import (
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolTimeoutPhase,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -94,6 +96,12 @@ from mini_agent.evaluation.graders import (
     grade_evidence,
     grader_registry,
     ordinary_trace_shape,
+    _normalized_tool_result_matches_typed_records,
+    _tool_lifecycle_references_match,
+)
+from mini_agent.evaluation.artifacts import load_e2e01_artifacts
+from mini_agent.evaluation.harness import (
+    build_authenticated_case_expectations,
 )
 
 
@@ -119,6 +127,7 @@ TOOL_RESULT_REF = UUID("00000000-0000-4000-8000-000000000517")
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 TOOLSET_HASH = compute_model_visible_toolset_hash((get_order_tool_spec(),))
 LEAKY_DATETIME_SECRET = "leaky-datetime-secret"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class LeakyDatetime(datetime):
@@ -1792,6 +1801,480 @@ def test_trace_precedence_allows_unrelated_legal_event_insertion(
     )
 
     assert outcome.status is EvalResultStatus.PASS
+
+
+def _authenticated_success_expectations() -> EvalCaseExpectations:
+    artifacts = load_e2e01_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:c35687d",
+    )
+    return build_authenticated_case_expectations(
+        artifacts=artifacts,
+        case=artifacts.case_by_id("E2E01-01"),
+        script=artifacts.script_by_ref("script:e2e01-01:success"),
+    )
+
+
+def _insert_trace_event_after(
+    events: tuple[TraceEvent, ...],
+    *,
+    after: TraceEventType,
+    inserted: TraceEvent,
+) -> tuple[TraceEvent, ...]:
+    updated = list(events)
+    index = next(
+        index
+        for index, event in enumerate(updated)
+        if event.event_type is after
+    )
+    updated.insert(index + 1, inserted)
+    return tuple(
+        event.model_copy(
+            update={"occurred_at": NOW + timedelta(milliseconds=index)}
+        )
+        for index, event in enumerate(updated)
+    )
+
+
+def test_authenticated_success_trace_rejects_conflicting_tool_terminal() -> None:
+    events = _insert_trace_event_after(
+        _trace_events(),
+        after=TraceEventType.TOOL_RESULT_NORMALIZED,
+        inserted=_trace(
+            TraceEventType.TOOL_CALL_TIMED_OUT,
+            offset=850,
+        ),
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+
+
+def test_authenticated_trace_mixed_missing_and_extra_has_stable_reason() -> None:
+    without_started = tuple(
+        event
+        for event in _trace_events()
+        if event.event_type is not TraceEventType.TOOL_CALL_STARTED
+    )
+    expectations = _authenticated_success_expectations()
+    expectations = expectations.model_copy(
+        update={
+            "required_trace_events": tuple(
+                event_type
+                for event_type in expectations.required_trace_events
+                if event_type is not TraceEventType.TOOL_CALL_STARTED
+            )
+        }
+    )
+    outcomes = tuple(
+        grade_evidence(
+            ("TraceCompletenessGrader",),
+            _evidence(
+                trace_events=_insert_trace_event_after(
+                    without_started,
+                    after=insertion_point,
+                    inserted=_trace(
+                        TraceEventType.TOOL_CALL_TIMED_OUT,
+                        offset=851,
+                    ),
+                )
+            ),
+            expectations,
+        )
+        for insertion_point in (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_RESULT_NORMALIZED,
+        )
+    )
+
+    assert {outcome.status for outcome in outcomes} == {
+        EvalResultStatus.FAIL
+    }
+    assert {
+        outcome.grader_results[0].reason_code
+        for outcome in outcomes
+    } == {EvalGraderReasonCode.TRACE_EVENT_MISSING}
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.RESPONSE_RENDERED,
+    ),
+)
+def test_authenticated_success_trace_rejects_duplicate_safety_event(
+    event_type: TraceEventType,
+) -> None:
+    canonical = _trace_events()
+    source = next(
+        event for event in canonical if event.event_type is event_type
+    )
+    duplicate = source.model_copy(
+        update={"trace_event_id": UUID(int=860 + len(event_type.value))}
+    )
+    events = _insert_trace_event_after(
+        canonical,
+        after=event_type,
+        inserted=duplicate,
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+
+
+def test_authenticated_success_trace_allows_unrelated_non_safety_event() -> None:
+    canonical = _trace_events()
+    source = next(
+        event
+        for event in canonical
+        if event.event_type is TraceEventType.REQUEST_UNDERSTANDING_STARTED
+    )
+    events = _insert_trace_event_after(
+        canonical,
+        after=TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+        inserted=source.model_copy(
+            update={"trace_event_id": UUID(int=899)}
+        ),
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.PASS
+
+
+def test_tool_lifecycle_allows_direct_pre_dispatch_interruption() -> None:
+    source_call = _evidence().tool_calls[0]
+    interrupted_call = ToolCallRecord.model_validate(
+        {
+            **source_call.model_dump(),
+            "attempt_count": 0,
+            "status": ToolCallStatus.INTERRUPTED,
+            "finished_at": NOW + timedelta(milliseconds=2),
+            "interruption_reason": "RECOVERY_BEFORE_DISPATCH",
+            "result_ref": None,
+        }
+    )
+    events = (
+        _trace(TraceEventType.TOOL_CALL_CREATED, offset=1),
+        _trace(TraceEventType.TOOL_CALL_INTERRUPTED, offset=2),
+    )
+
+    assert _tool_lifecycle_references_match(
+        events,
+        (interrupted_call,),
+    )
+
+
+def _tool_result_mapping_evidence(
+    *,
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    include_normalized: bool,
+    normalized_outcome: ToolResultOutcome | None,
+) -> EvalEvidence:
+    base = _evidence()
+    source_call = base.tool_calls[0]
+    terminal = status not in {
+        ToolCallStatus.CREATED,
+        ToolCallStatus.RUNNING,
+    }
+    call = ToolCallRecord.model_validate(
+        {
+            **source_call.model_dump(),
+            "attempt_count": attempt_count,
+            "status": status,
+            "finished_at": (
+                NOW + timedelta(milliseconds=500)
+                if terminal
+                else None
+            ),
+            "failure_code": None,
+            "timeout_phase": (
+                ToolTimeoutPhase.AFTER_DISPATCH
+                if status is ToolCallStatus.TIMED_OUT
+                else None
+            ),
+            "interruption_reason": (
+                "RECOVERY_INTERRUPTED"
+                if status is ToolCallStatus.INTERRUPTED
+                else None
+            ),
+            "result_ref": (
+                TOOL_RESULT_REF
+                if status is ToolCallStatus.SUCCEEDED
+                else None
+            ),
+        }
+    )
+    attempts = (
+        (
+            ToolAttemptRecord(
+                tool_call_id=TOOL_CALL_ID,
+                attempt_no=1,
+                started_at=NOW,
+                finished_at=(
+                    None
+                    if attempt_outcome is None
+                    else NOW + timedelta(milliseconds=500)
+                ),
+                outcome=attempt_outcome,
+            ),
+        )
+        if attempt_count == 1
+        else ()
+    )
+    trace_events = (
+        (
+            _trace(
+                TraceEventType.TOOL_RESULT_NORMALIZED,
+                offset=3,
+            ).model_copy(
+                update={"safe_tool_outcome": normalized_outcome}
+            ),
+        )
+        if include_normalized
+        else ()
+    )
+    return _evidence(
+        trace_events=trace_events,
+        tool_calls=(call,),
+        tool_attempts=attempts,
+        observations=(
+            base.observations
+            if status is ToolCallStatus.SUCCEEDED
+            else ()
+        ),
+    )
+
+
+_TERMINAL_NORMALIZED_STATUS_CASES = (
+    (
+        ToolCallStatus.SUCCEEDED,
+        1,
+        ToolResultOutcome.SUCCESS,
+        ToolResultOutcome.SUCCESS,
+    ),
+    (
+        ToolCallStatus.FAILED,
+        1,
+        ToolResultOutcome.BUSINESS_FAILURE,
+        ToolResultOutcome.BUSINESS_FAILURE,
+    ),
+    (
+        ToolCallStatus.FAILED,
+        1,
+        ToolResultOutcome.SYSTEM_FAILURE,
+        ToolResultOutcome.SYSTEM_FAILURE,
+    ),
+    (
+        ToolCallStatus.TIMED_OUT,
+        1,
+        ToolResultOutcome.TIMEOUT,
+        ToolResultOutcome.TIMEOUT,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        0,
+        None,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        1,
+        ToolResultOutcome.INTERRUPTED,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        1,
+        None,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "attempt_count",
+        "attempt_outcome",
+        "authoritative_outcome",
+    ),
+    _TERMINAL_NORMALIZED_STATUS_CASES,
+    ids=(
+        "succeeded",
+        "business-failure",
+        "system-failure",
+        "timed-out",
+        "interrupted-before-dispatch",
+        "interrupted-after-dispatch-finalized",
+        "interrupted-after-dispatch-recovery",
+    ),
+)
+def test_terminal_tool_result_normalization_matches_authoritative_attempt(
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    authoritative_outcome: ToolResultOutcome,
+) -> None:
+    evidence = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=attempt_outcome,
+        include_normalized=True,
+        normalized_outcome=authoritative_outcome,
+    )
+
+    assert _normalized_tool_result_matches_typed_records(evidence)
+
+
+_INVALID_TERMINAL_NORMALIZED_CASES = tuple(
+    (
+        status,
+        attempt_count,
+        attempt_outcome,
+        authoritative_outcome,
+        replacement,
+    )
+    for (
+        status,
+        attempt_count,
+        attempt_outcome,
+        authoritative_outcome,
+    ) in _TERMINAL_NORMALIZED_STATUS_CASES
+    for replacement in (None, *tuple(ToolResultOutcome))
+    if replacement is not authoritative_outcome
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "attempt_count",
+        "attempt_outcome",
+        "authoritative_outcome",
+        "replacement",
+    ),
+    _INVALID_TERMINAL_NORMALIZED_CASES,
+    ids=tuple(
+        (
+            f"{status.value}-{attempt_count}-"
+            f"{authoritative_outcome.value}-to-"
+            f"{replacement.value if replacement is not None else 'NONE'}"
+        )
+        for (
+            status,
+            attempt_count,
+            attempt_outcome,
+            authoritative_outcome,
+            replacement,
+        ) in _INVALID_TERMINAL_NORMALIZED_CASES
+    ),
+)
+def test_terminal_tool_result_normalization_rejects_every_substitute(
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    authoritative_outcome: ToolResultOutcome,
+    replacement: ToolResultOutcome | None,
+) -> None:
+    evidence = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=attempt_outcome,
+        include_normalized=True,
+        normalized_outcome=replacement,
+    )
+
+    assert not _normalized_tool_result_matches_typed_records(evidence)
+
+
+@pytest.mark.parametrize(
+    ("status", "attempt_count"),
+    (
+        (ToolCallStatus.CREATED, 0),
+        (ToolCallStatus.RUNNING, 1),
+    ),
+)
+def test_active_tool_call_forbids_normalized_result_and_observation(
+    status: ToolCallStatus,
+    attempt_count: int,
+) -> None:
+    canonical = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=None,
+        include_normalized=False,
+        normalized_outcome=None,
+    )
+    with_normalized = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=None,
+        include_normalized=True,
+        normalized_outcome=ToolResultOutcome.SUCCESS,
+    )
+    with_observation = canonical.model_copy(
+        update={"observations": _evidence().observations}
+    )
+
+    assert _normalized_tool_result_matches_typed_records(canonical)
+    assert not _normalized_tool_result_matches_typed_records(with_normalized)
+    assert not _normalized_tool_result_matches_typed_records(with_observation)
+
+
+def test_taskless_trace_forbids_orphan_normalized_result_and_observation() -> None:
+    canonical = _evidence(
+        trace_events=(),
+        tool_calls=(),
+        tool_attempts=(),
+        observations=(),
+    )
+    orphan_normalized = canonical.model_copy(
+        update={
+            "trace_events": (
+                _trace(
+                    TraceEventType.TOOL_RESULT_NORMALIZED,
+                    offset=3,
+                ),
+            )
+        }
+    )
+    orphan_observation = canonical.model_copy(
+        update={"observations": _evidence().observations}
+    )
+
+    assert _normalized_tool_result_matches_typed_records(canonical)
+    assert not _normalized_tool_result_matches_typed_records(
+        orphan_normalized
+    )
+    assert not _normalized_tool_result_matches_typed_records(
+        orphan_observation
+    )
 
 
 def test_trace_precedence_selects_context_manifest_by_authenticated_purpose() -> None:
