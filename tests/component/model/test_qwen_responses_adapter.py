@@ -156,9 +156,7 @@ def _run_with_handler(
     operation: Callable[[QwenResponsesAdapter], object],
 ) -> object:
     async def run() -> object:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = QwenResponsesAdapter(
                 base_url="https://qwen.invalid/compatible-mode/v1/",
                 api_key="synthetic-secret",
@@ -205,9 +203,7 @@ def test_request_understanding_uses_exact_closed_one_function_request() -> None:
     assert "x-dashscope-session-cache" not in request.headers
     assert "previous_response_id" not in body
     assert "conversation" not in body
-    assert {
-        tool.get("type") for tool in body["tools"]
-    }.isdisjoint(
+    assert {tool.get("type") for tool in body["tools"]}.isdisjoint(
         {"web_search", "web_extractor", "code_interpreter", "file_search", "MCP"}
     )
     serialized = json.dumps(body)

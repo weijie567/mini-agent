@@ -221,8 +221,6 @@ def test_scripted_provider_reads_no_credentials_and_opens_no_network(
     monkeypatch.setattr(os, "getenv", forbidden_getenv)
     monkeypatch.setattr(socket.socket, "connect", forbidden_connect)
     output = asyncio.run(
-        _provider("script:e2e01-04-b:nonexistent-order").propose_next_move(
-            _request()
-        )
+        _provider("script:e2e01-04-b:nonexistent-order").propose_next_move(_request())
     )
     assert output.next_move_candidate.arguments == {"order_id": "O-9999"}

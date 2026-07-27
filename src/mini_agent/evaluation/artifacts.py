@@ -22,9 +22,7 @@ MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-thin-slice.v1.json"
 EXPECTED_MANIFEST_SHA256 = (
     "ffd9d3f130813e3acec347c4ab23fc4372a0969288c35120e72aa8650fa7b8bd"
 )
-_RUNTIME_VERSION_PLACEHOLDER = (
-    "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
-)
+_RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
 _EXPECTED_ARTIFACTS: Mapping[str, tuple[str, str, str]] = {
     "e2e01-thin-fixture": (
@@ -255,9 +253,7 @@ class LoadedE2E01Artifacts(AuditOnlyModel):
 
 
 def _expect_mapping(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ArtifactContractError("artifact object shape is invalid")
     return value
 
@@ -347,10 +343,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     if (
         manifest.get("artifact_type") != "EVAL_VERSION_MANIFEST"
         or manifest.get("artifact_id") != _MANIFEST_ARTIFACT_ID
-        or manifest.get("schema_version")
-        != "e2e01-thin-version-manifest-schema-v1"
-        or manifest.get("manifest_version")
-        != "e2e01-thin-version-manifest-v1"
+        or manifest.get("schema_version") != "e2e01-thin-version-manifest-schema-v1"
+        or manifest.get("manifest_version") != "e2e01-thin-version-manifest-v1"
         or manifest.get("created_from_base_sha")
         != "6c6d041cf20db6ff268c8bca129cc19b521cb568"
         or manifest.get("hash_algorithm") != "SHA-256"
@@ -388,9 +382,10 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         raise ArtifactContractError("manifest artifact identity set is invalid")
     if len(artifact_ids) != len(set(artifact_ids)):
         raise ArtifactContractError("manifest artifact identities are duplicated")
-    if _expect_nonempty_strings(
-        manifest.get("default_offline_artifact_refs")
-    ) != artifact_ids:
+    if (
+        _expect_nonempty_strings(manifest.get("default_offline_artifact_refs"))
+        != artifact_ids
+    ):
         raise ArtifactContractError("default artifact references are invalid")
 
     for entry in entries:
@@ -447,10 +442,9 @@ def _validate_fixture(document: dict[str, Any]) -> None:
     all_refs = tuple(
         item.get("fixture_ref") for item in (*sessions, *orders, *sentinels)
     )
-    if (
-        not all(isinstance(ref, str) and ref for ref in all_refs)
-        or len(all_refs) != len(set(all_refs))
-    ):
+    if not all(isinstance(ref, str) and ref for ref in all_refs) or len(
+        all_refs
+    ) != len(set(all_refs)):
         raise ArtifactContractError("fixture references are invalid")
 
 
@@ -523,10 +517,8 @@ def _validate_scripts(
     if (
         document.get("artifact_type") != "SCRIPTED_SCENARIO_CATALOG"
         or document.get("artifact_id") != "e2e01-thin-model-scripts"
-        or document.get("schema_version")
-        != "e2e01-thin-model-script-schema-v1"
-        or document.get("model_script_catalog_version")
-        != "e2e01-thin-model-scripts-v1"
+        or document.get("schema_version") != "e2e01-thin-model-script-schema-v1"
+        or document.get("model_script_catalog_version") != "e2e01-thin-model-scripts-v1"
         or document.get("provider") != "ScriptedModelProvider"
         or document.get("network_access") != "FORBIDDEN"
         or document.get("credential_inputs") != []
@@ -543,8 +535,7 @@ def _validate_scripts(
             optional=frozenset({"runtime_fault"}),
         )
         steps = tuple(
-            _expect_mapping(step)
-            for step in _expect_list(script.get("steps"))
+            _expect_mapping(step) for step in _expect_list(script.get("steps"))
         )
         if not steps:
             raise ArtifactContractError("model script cannot be empty")
@@ -663,9 +654,7 @@ def _validate_reference_closure(
 
     expected_case_refs_by_script: dict[str, set[str]] = {}
     for case in cases:
-        if case.version_manifest.get("dataset_version") != (
-            "e2e01-thin-dataset-v1"
-        ):
+        if case.version_manifest.get("dataset_version") != ("e2e01-thin-dataset-v1"):
             raise ArtifactContractError("case dataset version is invalid")
         case_fixture_refs = {
             case.input.get("trusted_context_fixture_ref"),
@@ -682,15 +671,14 @@ def _validate_reference_closure(
         ):
             raise ArtifactContractError("case model script reference is invalid")
         for script_ref in model_script_refs:
-            expected_case_refs_by_script.setdefault(script_ref, set()).add(
-                case.case_id
-            )
+            expected_case_refs_by_script.setdefault(script_ref, set()).add(case.case_id)
     if set(expected_case_refs_by_script) != script_refs:
         raise ArtifactContractError("model script closure is incomplete")
     for script in scripts:
-        if set(script.case_refs) != expected_case_refs_by_script[
-            script.model_script_ref
-        ]:
+        if (
+            set(script.case_refs)
+            != expected_case_refs_by_script[script.model_script_ref]
+        ):
             raise ArtifactContractError("model script Case closure is invalid")
     for lane in lanes:
         if not set(lane.case_refs) <= case_ids:

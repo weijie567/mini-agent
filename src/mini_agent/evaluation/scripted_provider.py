@@ -12,13 +12,10 @@ from mini_agent.application.records import ProviderProtocolError
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     InputAuthority,
-    InputCandidate,
     InputSourceKind,
-    NextMove,
     NextMoveKind,
     RequestUnderstandingInput,
     RequestUnderstandingOutput,
-    TaskDeltaCandidate,
     TaskDeltaOperation,
 )
 from mini_agent.evaluation.artifacts import (
@@ -54,9 +51,7 @@ class ScriptedModelProvider:
             raise ArtifactContractError(
                 "ScriptedModelProvider requires authenticated artifacts"
             )
-        self._script: ModelScriptArtifact = artifacts.script_by_ref(
-            model_script_ref
-        )
+        self._script: ModelScriptArtifact = artifacts.script_by_ref(model_script_ref)
         self._cursor = 0
         self._runtime_fault_taken = False
         runtime_fault = self._script.runtime_fault
@@ -65,8 +60,7 @@ class ScriptedModelProvider:
         elif (
             runtime_fault.get("behavior")
             == "ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE"
-            and runtime_fault.get("boundary")
-            == "AFTER_REVALIDATION_BEFORE_GATE"
+            and runtime_fault.get("boundary") == "AFTER_REVALIDATION_BEFORE_GATE"
         ):
             self._runtime_fault = RuntimeFaultDirective(
                 behavior="ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE",

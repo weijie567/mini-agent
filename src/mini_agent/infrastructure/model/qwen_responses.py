@@ -19,9 +19,7 @@ from mini_agent.core.request_understanding import (
 
 QWEN_MODEL_SNAPSHOT = "qwen3.7-plus-2026-05-26"
 _OutputModel = TypeVar("_OutputModel", bound=BaseModel)
-_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = (
-    RequestUnderstandingOutput.model_json_schema()
-)
+_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = RequestUnderstandingOutput.model_json_schema()
 _PRESENTATION_PLAN_SCHEMA = PresentationPlan.model_json_schema()
 
 
@@ -54,11 +52,7 @@ class QwenResponsesAdapter:
             raise ValueError("base_url must be a valid HTTP URL") from None
         if parsed_url.scheme not in {"http", "https"} or parsed_url.host is None:
             raise ValueError("base_url must be a valid HTTP URL")
-        if (
-            not isinstance(api_key, str)
-            or not api_key
-            or api_key != api_key.strip()
-        ):
+        if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
             raise ValueError("api_key must be a concrete injected value")
         if not isinstance(client, httpx.AsyncClient):
             raise TypeError("client must be an injected httpx.AsyncClient")
@@ -141,8 +135,7 @@ class QwenResponsesAdapter:
             function_calls = [
                 item
                 for item in raw_output
-                if isinstance(item, dict)
-                and item.get("type") == "function_call"
+                if isinstance(item, dict) and item.get("type") == "function_call"
             ]
             if len(function_calls) != 1:
                 raise ValueError
