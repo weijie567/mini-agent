@@ -1,6 +1,6 @@
 # 消费者订单与配送售后 Agent｜Intent / Request Understanding Design Reference
 
-更新日期：2026-07-26  
+更新日期：2026-07-28
 文档状态：P0 规范性目标设计  
 适用读者：Agent、应用、业务、测试和 Eval 研发人员
 
@@ -82,7 +82,7 @@ P0 的六项强制原则：
 | 概念 | 作用域 | 产生者 | 是否可直接写入权威状态 |
 |---|---|---|---:|
 | `original_query` | 当前消息 | Conversation API / Store | 原文可保存，但不证明业务事实 |
-| `contextualized_query` | 当前 Request Understanding | 模型候选 + Runtime 校验 | 否，是可丢弃的语言理解投影 |
+| `contextualized_query` | 当前 Request Understanding | 模型候选 + Runtime 校验 | 否；是 durable audit projection，但可从受控来源重建且不是权威状态 |
 | `TaskDeltaCandidate` | 当前用户消息 | 模型 | 否 |
 | `AcceptedTaskDelta` | 当前状态变更 | Candidate Validator | 只能交给确定性 Reducer |
 | `RequestUnit` | L2 Task Working Context | Task State Reducer | 是，对任务推进状态有权威性 |
@@ -218,6 +218,8 @@ RequestUnderstandingInput
 ```
 
 `run_id` 和记录引用用于 Trace 与绑定，不代表模型可以自行加载对应私有记录。
+
+这里的 `RequestUnderstandingInput.schema_version` 表示本次模型实际接收的 **model input schema version**。它不是持久化逻辑记录的 `record_schema_version`，也不能从模型输出版本、Prompt 版本或 Task `state_version` 推断；第 13 节要求将它作为独立审计维度保存。
 
 ## 6. Query 上下文化
 
@@ -361,6 +363,8 @@ TaskDeltaCandidate
 - `constraints` 保留用户说出的条件，例如“如果符合条件”。
 - `dependency_candidates` 只描述目标之间的顺序或条件关系，不包含 Tool 顺序。
 - `confidence` 只用于诊断和歧义处理，不构成授权、事实或确认。
+
+这里的 `RequestUnderstandingOutput.schema_version` 表示通过严格校验的 **model output schema version**。它不是 `RequestUnderstandingRecord` 的逻辑 `record_schema_version`；即使两个版本在某个切片中碰巧使用相同字符串，实现也必须把它们当作两个独立版本轴。
 
 ### 7.3 黄金场景候选示例
 
@@ -777,28 +781,173 @@ task_delta_candidates[]
 
 ## 13. Trace 与持久化
 
-每次 Request Understanding 至少记录：
+本节拥有 `RequestUnderstandingRecord` 的逻辑聚合语义、闭包与演进规则；Memory Design Reference 继续拥有通用 persistence integrity、owner-scoped read、startup recovery 与 readiness 规则。下列名称表达 canonical 语义角色，不分配第一薄切片的 exact version string、Python DTO 字段、codec、table、column 或 JSONB layout。
+
+`RequestUnderstandingRecord` 是一次 Request Understanding 的 durable audit aggregate。它保存的是通过结构校验和确定性校验后形成的 canonical projection，不是 Provider 原始响应，也不是业务事实权威源。
+
+### 13.1 Durable aggregate 与 identity
+
+逻辑聚合至少覆盖：
 
 ```text
+RequestUnderstandingRecord
 request_understanding_record_id
 run_id
 message_ref
-schema_version
-contextualization_candidate
+record_schema_version
+model_input_schema_version
+model_output_schema_version
+contextualization
 task_delta_candidates[]
-candidate_validation_results[]
+candidate_validation[]
 accepted_delta_refs[]
-rejected_candidate_reasons[]
-base_task_state_versions[]
-result_task_state_versions[]
+accepted_task_deltas[]
+task_state_version_bindings[]
 next_move_candidate_ref?
 created_at
 ```
 
-记录规则：
+其中 `accepted_task_deltas[]` 可以编码为父记录的 logical children，但无论物理落点如何，它们都属于同一个必须闭合验证的聚合。`next_move_candidate_ref` 只关联独立的 NextMove / Gateway 审计，不把 NextMove 变成 Task Delta。
+
+Identity 与 retry / replay 规则：
+
+1. `request_understanding_record_id` 是由可信 Runtime 为一次逻辑 Request Understanding invocation 生成的不可变 identity。用户、模型、Provider payload 和持久化数据都不能生成、覆盖或扩大该 identity。
+2. 父记录的 `run_id` 与 `message_ref` 必须来自服务端已接受的本次 Run / Message，并与模型输出中的回显精确匹配；模型回显本身不成为 authority。
+3. `run_id` 是关联 Run 的 correlation，不是记录 identity。一个 Run 是否暂时只产生一个 Request Understanding 记录属于切片行为，不能升级为 `request_understanding_record_id == run_id` 或一对一通用不变量；`message_ref` 同样不是记录 identity。
+4. Provider transport / framing retry 在形成 canonical aggregate 之前复用同一个逻辑 invocation identity；整体输出仍不合法时不创建伪记录。持久化写重试必须复用同一个 `request_understanding_record_id`。
+5. 同一 identity 的幂等 replay 只有在完整 canonical aggregate 精确相等时才返回既有记录；它不新增记录、不刷新 `created_at`。同一 identity 携带不同 projection、版本、引用、decision、child、Task version binding 或时间时属于冲突，必须 fail closed，不能覆盖旧记录。
+6. 新消息、新的业务重理解或显式 superseding invocation 使用新的 `request_understanding_record_id`，并保留旧记录；不得通过原地改写伪装成 replay。
+
+### 13.2 四个不可替代的版本语义
+
+Request Understanding durable aggregate 同时携带三个独立 schema 版本轴和一个 Task State concurrency 版本轴；Task State 轴又按实际 Task effect 逐项出现：
+
+| 版本语义 | Authority 与含义 | 不可替代规则 |
+|---|---|---|
+| `record_schema_version` | 可信 Runtime 写入；标识本 durable aggregate 的逻辑结构、字段语义和闭包不变量 | 不得取自模型输出，也不得由 model input / output 版本或 Task 版本推断 |
+| `model_input_schema_version` | 本次模型调用实际接收并通过组装校验的 Request Understanding input contract 版本 | 必须直接记录实际值，不能从 output、Prompt 名称或当前代码默认值反推 |
+| `model_output_schema_version` | 本次 Provider 输出经过 exact schema validation 后的 output contract 版本 | 不能充当 `record_schema_version`；unknown / mismatched output version 不产生 canonical record |
+| `base_task_state_version` / `result_task_state_version` | 某个 accepted delta 对某个 Task 的 optimistic-concurrency 输入与已提交结果版本 | 必须通过第 13.6 节的 keyed binding 关联，不能用一个全局值或两个平行数组表示 |
+
+四者名称相近、字符串碰巧相等或落在同一 storage row，都不会合并语义。`artifact_schema_version`、`tool_registry_version`、Prompt / Model 配置版本和 Eval `version_manifest` 也不能代替上述任一轴。
+
+Unknown、future 或 mismatched model input schema 必须在 Provider 调用前阻断，不能用当前默认 Schema 猜测输入；unknown、future 或 mismatched model output schema 不进入 candidate-level 校验，也不创建 canonical record。Runtime 只能记录实际通过对应 exact gate 的 input / output 版本。
+
+Model input 或 output schema 可以在 durable projection 与闭包语义不变时独立演进，不自动推进 `record_schema_version`；反之，只要 durable shape、identity、authority、cardinality 或 closure 发生 breaking change，即使 model schema 没变也必须推进新的逻辑记录版本。Task `state_version` 只表示工作投影并发，不参与 schema compatibility 判断。
+
+### 13.3 Canonical projection 与最小保留
+
+Durable aggregate 只允许保存 owner 批准的 canonical projection：
+
+- `message_ref` 指向 Conversation Store 中不可变的 `original_query`；聚合不复制整条消息来制造第二个原文权威源。
+- `contextualization`、`task_delta_candidates[]` 和 `candidate_validation[]` 保存实际参与确定性裁决的安全、严格类型化 projection，而不是重建、摘要或根据最终 Task State 反推的内容。
+- Candidate 的来源证据优先保存消息引用、受控范围 / span 或 hash。只有专项保留策略明确需要时才保存有界 `source_quote`；不得为了调试复制无界原文或不必要 PII。
+- `customer_id`、授权范围、Cookie、secret、完整 `CustomerContext`、Runtime private binding、原始 ToolResult 和未经归属验证的私有资源不得进入该聚合。
+
+以下内容一律不得持久化到 `RequestUnderstandingRecord`：
+
+```text
+raw Provider payload / SDK response object
+完整 Prompt 或 Provider request body
+原始 Token、隐藏思维链或私有推理
+exception、stack trace、diagnostic text 或 caller-controlled error message
+```
+
+内部故障可以进入独立受限诊断域的稳定分类和 opaque correlation reference，但不能把原始内容塞回该聚合或普通 Trace。
+
+模型输出只有在 outer / inner model output schema、版本、禁止字段和基本引用结构全部通过后，才存在可供 candidate-level 校验的 canonical projection。整体 schema-invalid、unknown-version 或无法安全投影的输出不创建 `RequestUnderstandingRecord`，也不以空 Candidate、全 REJECT 或占位版本伪装成功；其下游有界失败分类由 Application / Runtime / Eval 专项 owner 另行定义。
+
+### 13.4 Contextualization 的 durable 语义
+
+`contextualization` 在 canonical aggregate 中必须恰好出现一次，并保存第 6 节定义的 `text`、`resolved_reference_candidates[]`、`uncertainties[]` 与 `source_message_refs[]` 的安全 projection。即使当前消息不需要补全，其 `text` 也可以与原文语义等价，但不能省略、写成隐式“同原文”或在读取时从 `original_query` 猜回。
+
+缺失 contextualization、引用了本轮模型不可见来源、引入可信私有字段、把 Claim 提升为业务事实或不能通过第 6.3 节规则时，整体 output 不能形成 canonical record。后续切片若要允许显式 absence，必须先用新的 model output contract 和 breaking logical record version 定义唯一的 absence discriminator 与 Eval 语义；`null`、空对象和缺字段不能互相替代。
+
+Contextualization 仍是 Model Inference。保存它是为了重放、Eval 与审计“模型实际如何理解”，不会把它升级为 Observation、Evidence、确认或授权。
+
+### 13.5 Candidate、validation 与 accepted / rejected closure
+
+聚合必须满足以下 exact-set 规则：
+
+1. `task_delta_candidates[]` 字段始终存在，可以是零个、一个或多个 Candidate；同一聚合内 `candidate_id` 必须唯一。重复 ID 使整体 output 无法形成 canonical record。
+2. `candidate_validation[]` 以 `candidate_ref` 绑定 Candidate，引用集合必须与 emitted `task_delta_candidates[].candidate_id` 集合精确相等。每个 Candidate 恰好一条 final decision；不能遗漏、重复或为未 emitted Candidate 造 decision。
+3. `ACCEPT` 必须绑定恰好一个 `AcceptedTaskDelta`，其 `candidate_ref` 回指该 Candidate；接受 decision 不携带 rejection reason。
+4. `REJECT` 必须携带稳定、有界的 `reason_code`，不得绑定 Accepted Delta 或 Task State effect。不得保存 caller-controlled rejection 文本；`rejected_candidate_reasons[]` 之类不带 Candidate key 的平行数组不是 canonical 表达。
+5. `accepted_delta_refs[]` 必须唯一，并与 `accepted_task_deltas[].accepted_delta_id` 以及全部 `ACCEPT` decision 所绑定的 children 三者精确同集；任何 missing、extra、duplicate、wrong-candidate 或 dangling reference 都使整个聚合 invalid。
+6. 每个 Accepted Delta 的 `message_ref` 必须等于父记录，identity 由可信 Runtime 生成；它只能引用本聚合中恰好一个 `ACCEPT` Candidate。每个 `ACCEPT` Candidate 也只能被一个 child 消费。
+7. 零 Candidate 的合法结果必须形成 `candidates = validation = accepted refs = accepted children = Task version bindings = empty` 的闭包。全部 REJECT 时 Candidate 与 keyed rejection decision 保留，但 accepted / Task effect 集合为空。多 Candidate 与部分接受时仍逐项满足上述 exact-set 规则。
+
+“部分接受”表示独立 Candidate 已分别完成最终确定性裁决和相应状态提交，不允许先写一条 ACCEPT 再把缺失 child 或版本留给异步补齐。第一薄切片若只允许一个 accepted child，那是 scoped mapping 约束，不是这里的通用 cardinality。
+
+### 13.6 按 accepted delta / Task 关联的状态版本
+
+每个 Accepted Delta 必须通过如下语义关联保存它实际产生的完整 Task State effect；具体编码可以内嵌在 child 或形成 closed binding collection：
+
+```text
+TaskStateVersionBinding
+  accepted_delta_ref
+  task_id
+  base_task_state_version?
+  result_task_state_version
+```
+
+强制规则：
+
+- `(accepted_delta_ref, task_id)` 在聚合内唯一，`accepted_delta_ref` 必须解析到本聚合的 accepted child；REJECT Candidate 不得拥有 binding。
+- 每个 Accepted Delta 至少绑定一个实际提交的 Task effect。当前稳定 Operation 若只允许影响一个 Task，就必须恰好一条；未来若允许一个 Delta 原子影响多个 Task，必须用新的 model / logical contract 定义完整 cardinality 和原子性，不能在旧版本中自行扩展。
+- 新建 Task 时 `base_task_state_version = null`，且必须与 Context Manifest 未加载既有 Task 的事实一致；`result_task_state_version` 是真实提交的正整数初始版本。不得用 sentinel `0` 表示不存在的 base。
+- 更新既有 Task 时，base 是确定性 Validator / Reducer 实际比较的 exact current version，result 是该 Delta 提交后的 exact version，并满足 Task State owner 的迁移与 CAS 不变量。
+- 同一聚合中多个 Delta 顺序更新同一 Task 时，后一个 binding 的 base 必须等于前一个 binding 的 result，并保留确定性应用顺序；不能形成并行分叉、重复 base 或回退版本。
+- 一个全局 `base_task_state_version`、一个全局 `result_task_state_version`，或两个无法逐项关联的平行数组，都不能表示多 Candidate / 多 Task 闭包。
+
+NextMove 上的 proposed / validated Task version 是 Control Gateway 的独立审计语义：它可以引用同一个 Task，但不能替代上述 Accepted Delta state effects，也不能被 `record_schema_version` 或 model schema version 推断。
+
+### 13.7 可信时间、提交与 replay
+
+`created_at` 由可信服务端 UTC clock 在 canonical decision closure 时生成，必须带时区；用户消息、模型、Provider 时间、未由受控 Runtime 绑定到本 invocation 的数据库 default 或 persisted payload 都不能提供或覆盖它。Runtime 对同一闭包只取一次可信时间：
+
+- 父记录 `created_at` 与本聚合全部 Accepted Delta 的 `accepted_at` 必须等于这一次 clock sample。
+- 零 accepted child 时仍保存父记录的可信 `created_at`。
+- Task / RequestUnit 自身的时间继续服从 Task State owner；不得从它们反推本记录时间。
+- 幂等 persistence retry / replay 返回原 `created_at` 和 child `accepted_at`，不能以重试时钟刷新。
+
+Canonical record、Candidate decisions、accepted children、accepted refs 与 Task version bindings 必须作为一个逻辑原子闭包持久化：读取者不得观察到 ACCEPT 已存在而 child、result version 或 exact-set relation 尚未完成。CAS conflict 或 commit failure 发生在闭包提交前时，不创建半成品 record；Runtime 必须从新的受控状态重新裁决，而不是补写、覆盖或伪造 result version。
+
+### 13.8 Compatibility、migration 与 rollback
+
+`RequestUnderstandingRecord` 遵循 Memory owner 的 `exact-version-only` 规则。读取时必须先验证预期 record identity、非空 `record_schema_version`、metadata / payload 版本一致和完整 owner model / closure；unknown、future、missing、unsupported 或 mismatched version 全部 fail closed。不得：
+
+```text
+fallback-to-latest
+best-effort decode
+read-time upgrade / rewrite
+silent downgrade
+以 model schema version 或 Task state_version 代替 record_schema_version
+```
+
+新增 / 删除必填字段，改变 identity、authority、contextualization 表达、Candidate / validation / child cardinality、Task version binding、可信时间或任何 closure 语义，都是 breaking durable-shape change，必须由本文先批准新的逻辑记录版本。具体 P0 version string 与 Thin Slice field mapping 由 scoped implementation owner 决定；codec 只能消费批准后的 mapping，Core source 只能实现已批准的 DTO / Validator / Reducer，任一实现层都不能自行发明 compatibility。
+
+任何 future migration 都必须在实施前由 semantic owner 明确：
+
+| 必备项 | 约束 |
+|---|---|
+| Source / target | 写明唯一 source 与 target `record_schema_version`、适用记录集合和禁止跳过的版本 |
+| Identity / time | 保留 `request_understanding_record_id`、`run_id`、`message_ref`、`created_at` 与 accepted child 时间，不把 migration 当成新 invocation |
+| Closure invariants | 迁移后重新验证 contextualization、Candidate / decision exact set、accepted refs / children、keyed Task versions 与全部 cross-reference |
+| 不可推断数据 | Source 缺少实际 Candidate、decision、model version 或 keyed Task effect 且无法从同一受控审计闭包精确取得时，migration 必须失败；不得从当前 Task State、最终回复或 raw Provider 数据补造历史 |
+| Security impact | 证明没有引入可信身份、私有字段、raw Provider / Prompt / Token、诊断文本或额外 PII，并复核最小披露与保留策略 |
+| Eval impact | 说明哪些 Dataset / Grader / replay 读取器受影响，并用迁移前后 closure 证据验证，而不是只比较最终回复 |
+| Atomic failure | version、payload、children 与引用必须原子切换；失败不能留下可被普通 reader 消费的部分 target record |
+| Rollback / readiness | 在 target 数据通过 exact decode、closure 与批准验证前，新 runtime 不得 ready；不能读取 target version 的旧 runtime 在 rollback 后也不得报告 ready |
+
+Rollback 若要恢复旧 runtime，必须先通过批准的反向 migration 或经验证备份原子恢复到旧 runtime 能 exact-read 的 source version，并重新通过 closure / security / Eval gate。只回滚代码、静默降级 payload、保留 future-version 数据后忽略它，或把 unreadable record 当成 absent 都不构成可用 rollback。
+
+以上是目标行为契约，不主张当前 DTO、codec、数据库 migration、Runtime、Trace reader 或 Eval mapper 已经实现。
+
+### 13.9 Trace 与引用规则
 
 - `original_query` 的权威副本保存在 Conversation Store；Trace 使用消息引用。
-- Contextualization 是可丢弃、可重建的 Model Inference。
+- Contextualization 是持久化的 canonical Model Inference projection，但不是业务事实；普通模型上下文仍可从受控来源重建。
 - 每个 Accepted Delta 必须能追溯到消息和 Candidate。
 - `source_quote` 可以在当前 Run 内用于精确来源校验；普通 Trace 只保留消息引用、范围、摘要或哈希，不重复保存不必要的原文与 PII。
 - 不记录隐藏思维链、原始 Token、RuntimePrivateContext 或不必要 PII。
@@ -957,12 +1106,22 @@ on_tool_result(tool_result):
 
 这些选择必须由实现和 Eval 证据裁决，不能反向引入 Intent / Capability 静态路由。
 
+`RequestUnderstandingRecord` 的 logical durable aggregate、identity、独立版本轴、closure、可信时间和 compatibility / migration 语义已经由第 13 节裁决，不再属于 `OPEN`。仍待 scoped implementation 决定的只是 exact version string、Thin Slice 字段映射、Python DTO / codec、物理存储与 migration mechanics；这些实现不得缩窄或改写第 13 节语义。
+
 `E2E01-01/04` 第一最薄切片选择在同一个结构化输出中携带 `TaskDeltaCandidate` 与 `next_move_candidate`，具体编码见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。该选择只约束该切片，不把合并调用升级为完整 P0 的通用要求；模型看到的 `base_task_state_version` 与 Runtime 写入后的 `validated_task_state_version` 必须按第 11.3 节分开记录。
 
 ## 19. P0 验收清单
 
 - [ ] 原始消息与上下文化 Query 分开保存。
 - [ ] 指代补全均有来源，歧义不会被改写成事实。
+- [ ] `request_understanding_record_id` 独立于 `run_id`，幂等 replay 不覆盖记录或刷新可信时间。
+- [ ] `record_schema_version`、model input / output schema version 与 keyed Task State concurrency version 互不替代。
+- [ ] Durable aggregate 保存实际 contextualization、全部 Candidate、每项唯一 validation decision 和 accepted / rejected exact closure，不保存 raw Provider / Prompt / Token / 诊断文本。
+- [ ] 零 Candidate、多 Candidate、全部拒绝和部分接受均无 missing、extra、duplicate 或 dangling reference。
+- [ ] 每个 Accepted Delta 的 base / result Task State version 按 accepted delta 与 `task_id` 关联；新 Task base 使用 `null` 而不是 `0`。
+- [ ] 整体 schema-invalid 或 unknown model-output-version 不创建伪 `RequestUnderstandingRecord`。
+- [ ] `created_at` 与 Accepted Delta 时间来自同一次可信 UTC clock sample，幂等 retry 不刷新。
+- [ ] Request Understanding record exact-version fail closed；breaking change、migration、rollback 和 readiness 服从第 13.8 节。
 - [ ] 模型输出 `TaskDeltaCandidate[]`，不输出业务 Intent 分类。
 - [ ] 黄金场景形成两个持久用户目标，而不是按 Tool / 判断步骤拆分。
 - [ ] Task Delta 不包含 `capability`、`required_arguments`、`allowed_tools` 或固定 Workflow。
