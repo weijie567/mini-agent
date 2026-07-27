@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -62,12 +65,14 @@ from mini_agent.core.task_state import (
 from mini_agent.core.tool_system import (
     GateDecision,
     GateDecisionValue,
+    GateReasonCode,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolTimeoutPhase,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -91,6 +96,12 @@ from mini_agent.evaluation.graders import (
     grade_evidence,
     grader_registry,
     ordinary_trace_shape,
+    _normalized_tool_result_matches_typed_records,
+    _tool_lifecycle_references_match,
+)
+from mini_agent.evaluation.artifacts import load_e2e01_artifacts
+from mini_agent.evaluation.harness import (
+    build_authenticated_case_expectations,
 )
 
 
@@ -116,6 +127,7 @@ TOOL_RESULT_REF = UUID("00000000-0000-4000-8000-000000000517")
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 TOOLSET_HASH = compute_model_visible_toolset_hash((get_order_tool_spec(),))
 LEAKY_DATETIME_SECRET = "leaky-datetime-secret"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class LeakyDatetime(datetime):
@@ -133,14 +145,22 @@ class DerivedUUID(UUID):
 REQUIRED_EVENTS = (
     TraceEventType.MESSAGE_ACCEPTED,
     TraceEventType.RUN_STARTED,
+    TraceEventType.REQUEST_UNDERSTANDING_STARTED,
     TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    TraceEventType.NEXT_MOVE_PROPOSED,
+    TraceEventType.TASK_DELTA_VALIDATED,
     TraceEventType.TASK_DELTA_ACCEPTED,
     TraceEventType.INPUT_BINDING_RECORDED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.NEXT_MOVE_REVALIDATED,
     TraceEventType.GATE_DECISION_RECORDED,
     TraceEventType.TOOL_CALL_CREATED,
     TraceEventType.TOOL_CALL_STARTED,
     TraceEventType.TOOL_CALL_SUCCEEDED,
+    TraceEventType.TOOL_RESULT_NORMALIZED,
     TraceEventType.OBSERVATION_RECORDED,
+    TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    TraceEventType.RESPONSE_RENDERED,
     TraceEventType.RUN_STOPPED,
     TraceEventType.EVAL_CASE_GRADED,
 )
@@ -189,11 +209,16 @@ def _expectations(**overrides: object) -> EvalCaseExpectations:
         "expected_message_content": "订单 O-1001 状态怎么样？",
         "expected_tool_registry_version": "e2e01-thin-tools-v1",
         "expected_model_visible_toolset_hash": TOOLSET_HASH,
+        "trace_variant": "SUCCESS",
         "required_trace_events": REQUIRED_EVENTS,
         "forbidden_trace_events": (TraceEventType.TOOL_CALL_FAILED,),
         "expected_event_counts": (
             TraceEventCountExpectation(
                 event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
+                count=2,
+            ),
+            TraceEventCountExpectation(
+                event_type=TraceEventType.TASK_STATE_CHANGED,
                 count=2,
             ),
             TraceEventCountExpectation(
@@ -371,6 +396,11 @@ def _trace(
     offset: int,
     context_index: int | None = None,
     case_id: str = "E2E01-01",
+    outcome: AgentOutcome = AgentOutcome.COMPLETED,
+    stop_reason: StopReason = StopReason.GOAL_COMPLETED,
+    gate_decision: GateDecisionValue = GateDecisionValue.ACCEPT,
+    gate_reason: GateReasonCode | None = None,
+    safe_tool_outcome: ToolResultOutcome = ToolResultOutcome.SUCCESS,
 ) -> TraceEvent:
     values: dict[str, object] = {
         "trace_event_id": UUID(int=600 + offset),
@@ -404,17 +434,37 @@ def _trace(
         )
     elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
         values["input_binding_ref"] = BINDING_ID
+    elif event_type is TraceEventType.TASK_STATE_CHANGED:
+        values.update(
+            {
+                "task_id": TASK_ID,
+                "request_unit_id": REQUEST_UNIT_ID,
+            }
+        )
+    elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
+        values["validated_task_state_version"] = 1
     elif event_type is TraceEventType.GATE_DECISION_RECORDED:
-        values["gate_decision"] = GateDecisionValue.ACCEPT
+        values.update(
+            {
+                "gate_decision": gate_decision,
+                "gate_reason_code": gate_reason,
+            }
+        )
     elif event_type in {
         TraceEventType.TOOL_CALL_CREATED,
         TraceEventType.TOOL_CALL_STARTED,
         TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
     }:
         status_by_type = {
             TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
             TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
             TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+            TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+            TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+            TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
         }
         values.update(
             {
@@ -422,13 +472,20 @@ def _trace(
                 "tool_call_terminal_status": status_by_type[event_type],
             }
         )
+    elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+        values.update(
+            {
+                "tool_call_id": TOOL_CALL_ID,
+                "safe_tool_outcome": safe_tool_outcome,
+            }
+        )
     elif event_type is TraceEventType.OBSERVATION_RECORDED:
         values["observation_ref"] = OBSERVATION_ID
     elif event_type is TraceEventType.RUN_STOPPED:
         values.update(
             {
-                "user_outcome": AgentOutcome.COMPLETED,
-                "stop_reason": StopReason.GOAL_COMPLETED,
+                "user_outcome": outcome,
+                "stop_reason": stop_reason,
             }
         )
     return TraceEvent(**values)
@@ -438,26 +495,801 @@ def _trace_events() -> tuple[TraceEvent, ...]:
     return (
         _trace(TraceEventType.MESSAGE_ACCEPTED, offset=0),
         _trace(TraceEventType.RUN_STARTED, offset=1),
+        _trace(TraceEventType.REQUEST_UNDERSTANDING_STARTED, offset=2),
         _trace(
             TraceEventType.CONTEXT_MANIFEST_RECORDED,
-            offset=2,
+            offset=3,
             context_index=1,
         ),
-        _trace(TraceEventType.TASK_DELTA_ACCEPTED, offset=3),
-        _trace(TraceEventType.INPUT_BINDING_RECORDED, offset=4),
-        _trace(TraceEventType.GATE_DECISION_RECORDED, offset=5),
-        _trace(TraceEventType.TOOL_CALL_CREATED, offset=6),
-        _trace(TraceEventType.TOOL_CALL_STARTED, offset=7),
-        _trace(TraceEventType.TOOL_CALL_SUCCEEDED, offset=8),
-        _trace(TraceEventType.OBSERVATION_RECORDED, offset=9),
+        _trace(TraceEventType.NEXT_MOVE_PROPOSED, offset=4),
+        _trace(TraceEventType.TASK_DELTA_VALIDATED, offset=5),
+        _trace(TraceEventType.TASK_DELTA_ACCEPTED, offset=6),
+        _trace(TraceEventType.INPUT_BINDING_RECORDED, offset=7),
+        _trace(TraceEventType.TASK_STATE_CHANGED, offset=8),
+        _trace(TraceEventType.NEXT_MOVE_REVALIDATED, offset=9),
+        _trace(TraceEventType.GATE_DECISION_RECORDED, offset=10),
+        _trace(TraceEventType.TOOL_CALL_CREATED, offset=11),
+        _trace(TraceEventType.TOOL_CALL_STARTED, offset=12),
+        _trace(TraceEventType.TOOL_CALL_SUCCEEDED, offset=13),
+        _trace(TraceEventType.TOOL_RESULT_NORMALIZED, offset=14),
+        _trace(TraceEventType.OBSERVATION_RECORDED, offset=15),
         _trace(
             TraceEventType.CONTEXT_MANIFEST_RECORDED,
-            offset=10,
+            offset=16,
             context_index=2,
         ),
-        _trace(TraceEventType.RUN_STOPPED, offset=11),
-        _trace(TraceEventType.EVAL_CASE_GRADED, offset=12),
+        _trace(TraceEventType.PRESENTATION_PLAN_PROPOSED, offset=17),
+        _trace(TraceEventType.RESPONSE_RENDERED, offset=18),
+        _trace(TraceEventType.TASK_STATE_CHANGED, offset=19),
+        _trace(TraceEventType.RUN_STOPPED, offset=20),
+        _trace(TraceEventType.EVAL_CASE_GRADED, offset=21),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _TraceOccurrence:
+    event_type: TraceEventType
+    occurrence: int = 1
+
+
+_SUCCESS_SAFETY_PRECEDENCE_EDGES = (
+    (
+        _TraceOccurrence(TraceEventType.MESSAGE_ACCEPTED),
+        _TraceOccurrence(TraceEventType.RUN_STARTED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RUN_STARTED),
+        _TraceOccurrence(TraceEventType.REQUEST_UNDERSTANDING_STARTED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.REQUEST_UNDERSTANDING_STARTED),
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED, 1),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED, 1),
+        _TraceOccurrence(TraceEventType.NEXT_MOVE_PROPOSED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.NEXT_MOVE_PROPOSED),
+        _TraceOccurrence(TraceEventType.TASK_DELTA_VALIDATED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_DELTA_VALIDATED),
+        _TraceOccurrence(TraceEventType.TASK_DELTA_ACCEPTED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_DELTA_ACCEPTED),
+        _TraceOccurrence(TraceEventType.INPUT_BINDING_RECORDED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.INPUT_BINDING_RECORDED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 1),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 1),
+        _TraceOccurrence(TraceEventType.NEXT_MOVE_REVALIDATED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.NEXT_MOVE_REVALIDATED),
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_CREATED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_CREATED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_STARTED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_STARTED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_SUCCEEDED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_SUCCEEDED),
+        _TraceOccurrence(TraceEventType.TOOL_RESULT_NORMALIZED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_RESULT_NORMALIZED),
+        _TraceOccurrence(TraceEventType.OBSERVATION_RECORDED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.OBSERVATION_RECORDED),
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED, 2),
+        _TraceOccurrence(TraceEventType.PRESENTATION_PLAN_PROPOSED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.PRESENTATION_PLAN_PROPOSED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+        _TraceOccurrence(TraceEventType.EVAL_CASE_GRADED),
+    ),
+)
+
+
+_COMMON_PREFIX = (
+    TraceEventType.MESSAGE_ACCEPTED,
+    TraceEventType.RUN_STARTED,
+    TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+)
+_CANDIDATE_PREFIX = (
+    TraceEventType.NEXT_MOVE_PROPOSED,
+    TraceEventType.TASK_DELTA_VALIDATED,
+    TraceEventType.TASK_DELTA_ACCEPTED,
+    TraceEventType.INPUT_BINDING_RECORDED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.NEXT_MOVE_REVALIDATED,
+)
+_COMMON_PREFIX_EDGES = _SUCCESS_SAFETY_PRECEDENCE_EDGES[:3]
+_CANDIDATE_EDGES = _SUCCESS_SAFETY_PRECEDENCE_EDGES[3:10]
+_TERMINAL_EDGE = (
+    (
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+        _TraceOccurrence(TraceEventType.EVAL_CASE_GRADED),
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _TraceVariant:
+    variant_id: str
+    script_refs: tuple[str, ...]
+    sequence: tuple[TraceEventType, ...]
+    edges: tuple[tuple[_TraceOccurrence, _TraceOccurrence], ...]
+    outcome: AgentOutcome
+    stop_reason: StopReason
+    response_policy: str
+    task_status: TaskStatus | None
+    task_state_version: int | None
+    gate_decision: GateDecisionValue | None
+    gate_reason: GateReasonCode | None
+    tool_status: ToolCallStatus | None
+    safe_tool_outcome: ToolResultOutcome
+    observations: int
+    model_calls: int
+    presentation_model_calls: int
+
+
+_TASKLESS_SEQUENCE = (
+    *_COMMON_PREFIX,
+    TraceEventType.RESPONSE_RENDERED,
+    TraceEventType.RUN_STOPPED,
+    TraceEventType.EVAL_CASE_GRADED,
+)
+_TASKLESS_EDGES = (
+    *_COMMON_PREFIX_EDGES,
+    (
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    *_TERMINAL_EDGE,
+)
+_GATEWAY_SEQUENCE = (
+    *_COMMON_PREFIX,
+    *_CANDIDATE_PREFIX,
+    TraceEventType.GATE_DECISION_RECORDED,
+    TraceEventType.RESPONSE_RENDERED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.RUN_STOPPED,
+    TraceEventType.EVAL_CASE_GRADED,
+)
+_GATEWAY_EDGES = (
+    *_COMMON_PREFIX_EDGES,
+    *_CANDIDATE_EDGES,
+    (
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    *_TERMINAL_EDGE,
+)
+_STALE_SEQUENCE = (
+    *_COMMON_PREFIX,
+    TraceEventType.NEXT_MOVE_PROPOSED,
+    TraceEventType.TASK_DELTA_VALIDATED,
+    TraceEventType.TASK_DELTA_ACCEPTED,
+    TraceEventType.INPUT_BINDING_RECORDED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.NEXT_MOVE_REVALIDATED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.GATE_DECISION_RECORDED,
+    TraceEventType.RESPONSE_RENDERED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.RUN_STOPPED,
+    TraceEventType.EVAL_CASE_GRADED,
+)
+_STALE_EDGES = (
+    *_COMMON_PREFIX_EDGES,
+    *_CANDIDATE_EDGES[:-1],
+    (
+        _TraceOccurrence(TraceEventType.NEXT_MOVE_REVALIDATED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 3),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 3),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    *_TERMINAL_EDGE,
+)
+_FAILED_TOOL_SEQUENCE = (
+    *_COMMON_PREFIX,
+    *_CANDIDATE_PREFIX,
+    TraceEventType.GATE_DECISION_RECORDED,
+    TraceEventType.TOOL_CALL_CREATED,
+    TraceEventType.TOOL_CALL_STARTED,
+    TraceEventType.TOOL_CALL_FAILED,
+    TraceEventType.TOOL_RESULT_NORMALIZED,
+    TraceEventType.RESPONSE_RENDERED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.RUN_STOPPED,
+    TraceEventType.EVAL_CASE_GRADED,
+)
+_FAILED_TOOL_EDGES = (
+    *_COMMON_PREFIX_EDGES,
+    *_CANDIDATE_EDGES,
+    (
+        _TraceOccurrence(TraceEventType.GATE_DECISION_RECORDED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_CREATED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_CREATED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_STARTED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_STARTED),
+        _TraceOccurrence(TraceEventType.TOOL_CALL_FAILED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_CALL_FAILED),
+        _TraceOccurrence(TraceEventType.TOOL_RESULT_NORMALIZED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TOOL_RESULT_NORMALIZED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    *_TERMINAL_EDGE,
+)
+_PRESENTATION_FAULT_SEQUENCE = (
+    *_COMMON_PREFIX,
+    *_CANDIDATE_PREFIX,
+    TraceEventType.GATE_DECISION_RECORDED,
+    TraceEventType.TOOL_CALL_CREATED,
+    TraceEventType.TOOL_CALL_STARTED,
+    TraceEventType.TOOL_CALL_SUCCEEDED,
+    TraceEventType.TOOL_RESULT_NORMALIZED,
+    TraceEventType.OBSERVATION_RECORDED,
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    TraceEventType.RESPONSE_RENDERED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.RUN_STOPPED,
+    TraceEventType.EVAL_CASE_GRADED,
+)
+_PRESENTATION_FAULT_EDGES = (
+    *_SUCCESS_SAFETY_PRECEDENCE_EDGES[:16],
+    (
+        _TraceOccurrence(TraceEventType.CONTEXT_MANIFEST_RECORDED, 2),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.OBSERVATION_RECORDED),
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.RESPONSE_RENDERED),
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+    ),
+    (
+        _TraceOccurrence(TraceEventType.TASK_STATE_CHANGED, 2),
+        _TraceOccurrence(TraceEventType.RUN_STOPPED),
+    ),
+    *_TERMINAL_EDGE,
+)
+
+
+_TRACE_VARIANTS = (
+    _TraceVariant(
+        variant_id="SUCCESS",
+        script_refs=("script:e2e01-01:success",),
+        sequence=tuple(event.event_type for event in _trace_events()),
+        edges=_SUCCESS_SAFETY_PRECEDENCE_EDGES,
+        outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReason.GOAL_COMPLETED,
+        response_policy="DETERMINISTIC_ORDER_SUMMARY_V1",
+        task_status=TaskStatus.COMPLETED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_status=ToolCallStatus.SUCCEEDED,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=1,
+        model_calls=2,
+        presentation_model_calls=1,
+    ),
+    _TraceVariant(
+        variant_id="FOREIGN_ORDER",
+        script_refs=("script:e2e01-04-a:foreign-order",),
+        sequence=_FAILED_TOOL_SEQUENCE,
+        edges=_FAILED_TOOL_EDGES,
+        outcome=AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        stop_reason=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        response_policy="FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        task_status=TaskStatus.COMPLETED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_status=ToolCallStatus.FAILED,
+        safe_tool_outcome=ToolResultOutcome.BUSINESS_FAILURE,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="NONEXISTENT_ORDER",
+        script_refs=("script:e2e01-04-b:nonexistent-order",),
+        sequence=_FAILED_TOOL_SEQUENCE,
+        edges=_FAILED_TOOL_EDGES,
+        outcome=AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        stop_reason=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        response_policy="FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        task_status=TaskStatus.COMPLETED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_status=ToolCallStatus.FAILED,
+        safe_tool_outcome=ToolResultOutcome.BUSINESS_FAILURE,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="ARGUMENT_BINDING_REJECTED",
+        script_refs=(
+            "script:sec-argument-binding:foreign-order",
+            "script:sec-argument-binding:nonexistent-order",
+        ),
+        sequence=_GATEWAY_SEQUENCE,
+        edges=_GATEWAY_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.GATE_REJECTED,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=TaskStatus.BLOCKED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason=GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+        tool_status=None,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="PROVIDER_PROTOCOL_BEFORE_CANDIDATE",
+        script_refs=(
+            "script:fault-provider:zero-target-functions",
+            "script:fault-provider:multiple-target-functions",
+        ),
+        sequence=_TASKLESS_SEQUENCE,
+        edges=_TASKLESS_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=None,
+        task_state_version=None,
+        gate_decision=None,
+        gate_reason=None,
+        tool_status=None,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="INPUT_VALIDATION_REJECTED",
+        script_refs=(
+            "script:fault-provider:invalid-request-understanding-schema",
+            "script:fault-provider:source-authority-mismatch",
+            "script:fault-provider:trusted-field-override",
+        ),
+        sequence=_TASKLESS_SEQUENCE,
+        edges=_TASKLESS_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.INPUT_INVALID,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=None,
+        task_state_version=None,
+        gate_decision=None,
+        gate_reason=None,
+        tool_status=None,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="UNKNOWN_TOOL_GATEWAY_REJECTED",
+        script_refs=("script:fault-provider:unknown-tool-name",),
+        sequence=_GATEWAY_SEQUENCE,
+        edges=_GATEWAY_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.GATE_REJECTED,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=TaskStatus.BLOCKED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason=GateReasonCode.TOOL_NOT_REGISTERED,
+        tool_status=None,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="STALE_STATE_GATEWAY_REJECTED",
+        script_refs=("script:fault-runtime:state-advanced-before-gate",),
+        sequence=_STALE_SEQUENCE,
+        edges=_STALE_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.GATE_REJECTED,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=TaskStatus.BLOCKED,
+        task_state_version=3,
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason=GateReasonCode.STATE_VERSION_MISMATCH,
+        tool_status=None,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=0,
+        model_calls=1,
+        presentation_model_calls=0,
+    ),
+    _TraceVariant(
+        variant_id="PRESENTATION_PROTOCOL_REJECTED",
+        script_refs=(
+            "script:fault-presentation:zero-target-functions",
+            "script:fault-presentation:multiple-target-functions",
+            "script:fault-presentation:invalid-schema",
+            "script:fault-presentation:fact-bearing-envelope",
+        ),
+        sequence=_PRESENTATION_FAULT_SEQUENCE,
+        edges=_PRESENTATION_FAULT_EDGES,
+        outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+        response_policy="FIXED_SAFE_PROCESSING_ERROR",
+        task_status=TaskStatus.BLOCKED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_status=ToolCallStatus.SUCCEEDED,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+        observations=1,
+        model_calls=2,
+        presentation_model_calls=1,
+    ),
+)
+
+
+def _occurrence_index(
+    events: tuple[TraceEvent, ...],
+    target: _TraceOccurrence,
+) -> int:
+    matches = tuple(
+        index
+        for index, event in enumerate(events)
+        if event.event_type is target.event_type
+    )
+    return matches[target.occurrence - 1]
+
+
+def _swap_precedence_edge(
+    events: tuple[TraceEvent, ...],
+    before: _TraceOccurrence,
+    after: _TraceOccurrence,
+) -> tuple[TraceEvent, ...]:
+    reordered = list(events)
+    before_index = _occurrence_index(events, before)
+    after_index = _occurrence_index(events, after)
+    reordered[before_index], reordered[after_index] = (
+        reordered[after_index],
+        reordered[before_index],
+    )
+    return tuple(
+        event.model_copy(
+            update={"occurred_at": NOW + timedelta(milliseconds=index)}
+        )
+        for index, event in enumerate(reordered)
+    )
+
+
+def _variant_trace_events(variant: _TraceVariant) -> tuple[TraceEvent, ...]:
+    context_occurrence = 0
+    events: list[TraceEvent] = []
+    for index, event_type in enumerate(variant.sequence):
+        context_index: int | None = None
+        if event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
+            context_occurrence += 1
+            context_index = context_occurrence
+        events.append(
+            _trace(
+                event_type,
+                offset=index,
+                context_index=context_index,
+                outcome=variant.outcome,
+                stop_reason=variant.stop_reason,
+                gate_decision=(
+                    variant.gate_decision
+                    if variant.gate_decision is not None
+                    else GateDecisionValue.ACCEPT
+                ),
+                gate_reason=variant.gate_reason,
+                safe_tool_outcome=variant.safe_tool_outcome,
+            )
+        )
+    return tuple(events)
+
+
+def _variant_expectations(variant: _TraceVariant) -> EvalCaseExpectations:
+    event_counts = Counter(variant.sequence)
+    counted_types = (
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )
+    optional_safety_types = (
+        TraceEventType.NEXT_MOVE_PROPOSED,
+        TraceEventType.TASK_DELTA_VALIDATED,
+        TraceEventType.TASK_DELTA_ACCEPTED,
+        TraceEventType.INPUT_BINDING_RECORDED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.NEXT_MOVE_REVALIDATED,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+    )
+    values: dict[str, object] = {
+        "expected_outcome": variant.outcome,
+        "expected_stop_reason": variant.stop_reason,
+        "expected_response_policy": variant.response_policy,
+        "request_understanding_required": variant.task_status is not None,
+        "expected_binding_order_id": (
+            "O-1001" if variant.task_status is not None else None
+        ),
+        "expected_next_move_order_id": (
+            "O-1001" if variant.task_status is not None else None
+        ),
+        "expected_requested_tool_name": (
+            "get_order" if variant.task_status is not None else None
+        ),
+        "expected_task_status": variant.task_status,
+        "expected_request_unit_status": variant.task_status,
+        "expected_task_state_version": variant.task_state_version,
+        "expected_request_unit_state_version": variant.task_state_version,
+        "expected_gate_decision": variant.gate_decision,
+        "expected_gate_reason": variant.gate_reason,
+        "expected_validated_task_state_version": (
+            1 if variant.gate_decision is not None else None
+        ),
+        "expected_tool_call_status": variant.tool_status,
+        "expected_tool_calls": 1 if variant.tool_status is not None else 0,
+        "expected_observations": variant.observations,
+        "expected_model_calls": variant.model_calls,
+        "expected_presentation_model_calls": (
+            variant.presentation_model_calls
+        ),
+        "required_trace_events": tuple(dict.fromkeys(variant.sequence)),
+        "forbidden_trace_events": tuple(
+            event_type
+            for event_type in optional_safety_types
+            if event_counts[event_type] == 0
+        ),
+        "expected_event_counts": tuple(
+            TraceEventCountExpectation(
+                event_type=event_type,
+                count=event_counts[event_type],
+            )
+            for event_type in counted_types
+        ),
+    }
+    if "trace_variant" in EvalCaseExpectations.model_fields:
+        values["trace_variant"] = variant.variant_id
+    return _expectations(**values)
+
+
+def _variant_evidence(
+    variant: _TraceVariant,
+    *,
+    trace_events: tuple[TraceEvent, ...] | None = None,
+) -> EvalEvidence:
+    base = _evidence()
+    events = trace_events or _variant_trace_events(variant)
+    run_record = base.run_record.model_copy(
+        update={"stop_reason": variant.stop_reason}
+    )
+    agent_result = base.agent_result.model_copy(
+        update={
+            "outcome": variant.outcome,
+            "message": (
+                _rendered_message(base.observations[0])
+                if variant.response_policy == "DETERMINISTIC_ORDER_SUMMARY_V1"
+                else "当前无法安全处理该请求，请稍后重试。"
+            ),
+        }
+    )
+    observable = SafeCaseObservable(
+        case_id="E2E01-01",
+        http_status=200,
+        user_outcome=variant.outcome,
+        response_policy=variant.response_policy,
+        ordinary_trace_shape=ordinary_trace_shape(events),
+        model_calls=variant.model_calls,
+    )
+    common: dict[str, object] = {
+        "observed_outcome": variant.outcome,
+        "trace_events": events,
+        "safe_observable": observable,
+        "run_record": run_record,
+        "agent_result": agent_result,
+        "context_manifests": base.context_manifests[: variant.model_calls],
+    }
+    if variant.task_status is None:
+        common.update(
+            {
+                "request_understanding_output": None,
+                "request_understanding_records": (),
+                "accepted_task_deltas": (),
+                "input_bindings": (),
+                "task_records": (),
+                "request_units": (),
+                "conversation_task_links": (),
+                "run_task_links": (),
+                "gate_decisions": (),
+                "tool_calls": (),
+                "tool_attempts": (),
+                "observations": (),
+                "observation_persistence_envelopes": (),
+            }
+        )
+        return _evidence(**common)
+
+    assert variant.task_state_version is not None
+    task = base.task_records[0].model_copy(
+        update={
+            "status": variant.task_status,
+            "state_version": variant.task_state_version,
+        }
+    )
+    unit = base.request_units[0].model_copy(
+        update={
+            "status": variant.task_status,
+            "state_version": variant.task_state_version,
+            "observation_refs": (
+                (OBSERVATION_ID,) if variant.observations == 1 else ()
+            ),
+        }
+    )
+    run_link = base.run_task_links[0].model_copy(
+        update={"result_task_state_version": variant.task_state_version}
+    )
+    gate_decisions: tuple[GateDecision, ...] = ()
+    if variant.gate_decision is not None:
+        failed_check_by_reason = {
+            GateReasonCode.ARGUMENT_BINDING_MISMATCH: "argument_binding_valid",
+            GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
+            GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
+        }
+        gate_updates: dict[str, object] = {
+            "decision": variant.gate_decision,
+            "reason_code": variant.gate_reason,
+        }
+        if variant.gate_decision is GateDecisionValue.REJECT:
+            assert variant.gate_reason in failed_check_by_reason
+            gate_updates[failed_check_by_reason[variant.gate_reason]] = False
+        gate_decisions = (
+            base.gate_decisions[0].model_copy(
+                update=gate_updates
+            ),
+        )
+    tool_calls: tuple[ToolCallRecord, ...] = ()
+    tool_attempts: tuple[ToolAttemptRecord, ...] = ()
+    if variant.tool_status is not None:
+        failure_code = (
+            None
+            if variant.tool_status is ToolCallStatus.SUCCEEDED
+            else "NOT_FOUND_OR_NOT_ACCESSIBLE"
+        )
+        result_ref = (
+            TOOL_RESULT_REF
+            if variant.tool_status is ToolCallStatus.SUCCEEDED
+            else None
+        )
+        tool_calls = (
+            base.tool_calls[0].model_copy(
+                update={
+                    "status": variant.tool_status,
+                    "failure_code": failure_code,
+                    "result_ref": result_ref,
+                }
+            ),
+        )
+        tool_attempts = (
+            base.tool_attempts[0].model_copy(
+                update={
+                    "outcome": variant.safe_tool_outcome,
+                    "failure_code": failure_code,
+                }
+            ),
+        )
+    common.update(
+        {
+            "task_records": (task,),
+            "request_units": (unit,),
+            "run_task_links": (run_link,),
+            "gate_decisions": gate_decisions,
+            "tool_calls": tool_calls,
+            "tool_attempts": tool_attempts,
+            "observations": (
+                base.observations if variant.observations == 1 else ()
+            ),
+            "observation_persistence_envelopes": (
+                base.observation_persistence_envelopes
+                if variant.observations == 1
+                else ()
+            ),
+        }
+    )
+    return _evidence(**common)
 
 
 def _rendered_message(observation: OrderObservation) -> str:
@@ -812,6 +1644,672 @@ def _tampered(grader_name: str) -> EvalEvidence:
         )
         return _evidence(context_manifests=(evidence.context_manifests[0], manifest))
     raise AssertionError(f"unhandled grader {grader_name}")
+
+
+_TRACE_VARIANT_SCRIPT_CASES = tuple(
+    (variant, script_ref)
+    for variant in _TRACE_VARIANTS
+    for script_ref in variant.script_refs
+)
+_TRACE_VARIANT_EDGE_CASES = tuple(
+    (variant, before, after)
+    for variant in _TRACE_VARIANTS
+    for before, after in variant.edges
+)
+
+
+@pytest.mark.parametrize(
+    ("variant", "script_ref"),
+    _TRACE_VARIANT_SCRIPT_CASES,
+    ids=tuple(
+        f"{variant.variant_id}:{script_ref}"
+        for variant, script_ref in _TRACE_VARIANT_SCRIPT_CASES
+    ),
+)
+def test_trace_precedence_canonical_passes_for_every_authenticated_script_ref(
+    variant: _TraceVariant,
+    script_ref: str,
+) -> None:
+    all_refs = tuple(
+        ref for item in _TRACE_VARIANTS for ref in item.script_refs
+    )
+    assert len(_TRACE_VARIANTS) == 9
+    assert len(all_refs) == len(set(all_refs)) == 16
+    assert script_ref in variant.script_refs
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _variant_evidence(variant),
+        _variant_expectations(variant),
+    )
+
+    assert outcome.status is EvalResultStatus.PASS
+
+
+@pytest.mark.parametrize(
+    ("variant", "before", "after"),
+    _TRACE_VARIANT_EDGE_CASES,
+    ids=tuple(
+        (
+            f"{variant.variant_id}:"
+            f"{before.event_type.value}#{before.occurrence}-before-"
+            f"{after.event_type.value}#{after.occurrence}"
+        )
+        for variant, before, after in _TRACE_VARIANT_EDGE_CASES
+    ),
+)
+def test_reordered_trace_precedence_fails_for_every_structural_variant(
+    variant: _TraceVariant,
+    before: _TraceOccurrence,
+    after: _TraceOccurrence,
+) -> None:
+    canonical = _variant_trace_events(variant)
+    reordered = _swap_precedence_edge(canonical, before, after)
+
+    assert {event.trace_event_id for event in reordered} == {
+        event.trace_event_id for event in canonical
+    }
+    assert tuple(event.event_type for event in reordered).count(
+        before.event_type
+    ) == tuple(event.event_type for event in canonical).count(before.event_type)
+    assert tuple(event.occurred_at for event in reordered) == tuple(
+        sorted(event.occurred_at for event in reordered)
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _variant_evidence(variant, trace_events=reordered),
+        _variant_expectations(variant),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    _TRACE_VARIANTS,
+    ids=tuple(item.variant_id for item in _TRACE_VARIANTS),
+)
+def test_trace_precedence_missing_endpoint_fails_closed(
+    variant: _TraceVariant,
+) -> None:
+    without_response = tuple(
+        event
+        for event in _variant_trace_events(variant)
+        if event.event_type is not TraceEventType.RESPONSE_RENDERED
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _variant_evidence(variant, trace_events=without_response),
+        _variant_expectations(variant).model_copy(
+            update={
+                "required_trace_events": tuple(
+                    event_type
+                    for event_type in _variant_expectations(
+                        variant
+                    ).required_trace_events
+                    if event_type is not TraceEventType.RESPONSE_RENDERED
+                )
+            }
+        ),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.TRACE_EVENT_MISSING
+    )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    _TRACE_VARIANTS,
+    ids=tuple(item.variant_id for item in _TRACE_VARIANTS),
+)
+def test_trace_precedence_allows_unrelated_legal_event_insertion(
+    variant: _TraceVariant,
+) -> None:
+    canonical = list(_variant_trace_events(variant))
+    insertion_index = next(
+        index
+        for index, event in enumerate(canonical)
+        if event.event_type is TraceEventType.REQUEST_UNDERSTANDING_STARTED
+    )
+    canonical.insert(
+        insertion_index + 1,
+        _trace(
+            TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+            offset=900,
+            outcome=variant.outcome,
+            stop_reason=variant.stop_reason,
+        ),
+    )
+    with_extra = tuple(
+        event.model_copy(
+            update={"occurred_at": NOW + timedelta(milliseconds=index)}
+        )
+        for index, event in enumerate(canonical)
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _variant_evidence(variant, trace_events=with_extra),
+        _variant_expectations(variant),
+    )
+
+    assert outcome.status is EvalResultStatus.PASS
+
+
+def _authenticated_success_expectations() -> EvalCaseExpectations:
+    artifacts = load_e2e01_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:c35687d",
+    )
+    return build_authenticated_case_expectations(
+        artifacts=artifacts,
+        case=artifacts.case_by_id("E2E01-01"),
+        script=artifacts.script_by_ref("script:e2e01-01:success"),
+    )
+
+
+def _insert_trace_event_after(
+    events: tuple[TraceEvent, ...],
+    *,
+    after: TraceEventType,
+    inserted: TraceEvent,
+) -> tuple[TraceEvent, ...]:
+    updated = list(events)
+    index = next(
+        index
+        for index, event in enumerate(updated)
+        if event.event_type is after
+    )
+    updated.insert(index + 1, inserted)
+    return tuple(
+        event.model_copy(
+            update={"occurred_at": NOW + timedelta(milliseconds=index)}
+        )
+        for index, event in enumerate(updated)
+    )
+
+
+def test_authenticated_success_trace_rejects_conflicting_tool_terminal() -> None:
+    events = _insert_trace_event_after(
+        _trace_events(),
+        after=TraceEventType.TOOL_RESULT_NORMALIZED,
+        inserted=_trace(
+            TraceEventType.TOOL_CALL_TIMED_OUT,
+            offset=850,
+        ),
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+
+
+def test_authenticated_trace_mixed_missing_and_extra_has_stable_reason() -> None:
+    without_started = tuple(
+        event
+        for event in _trace_events()
+        if event.event_type is not TraceEventType.TOOL_CALL_STARTED
+    )
+    expectations = _authenticated_success_expectations()
+    expectations = expectations.model_copy(
+        update={
+            "required_trace_events": tuple(
+                event_type
+                for event_type in expectations.required_trace_events
+                if event_type is not TraceEventType.TOOL_CALL_STARTED
+            )
+        }
+    )
+    outcomes = tuple(
+        grade_evidence(
+            ("TraceCompletenessGrader",),
+            _evidence(
+                trace_events=_insert_trace_event_after(
+                    without_started,
+                    after=insertion_point,
+                    inserted=_trace(
+                        TraceEventType.TOOL_CALL_TIMED_OUT,
+                        offset=851,
+                    ),
+                )
+            ),
+            expectations,
+        )
+        for insertion_point in (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_RESULT_NORMALIZED,
+        )
+    )
+
+    assert {outcome.status for outcome in outcomes} == {
+        EvalResultStatus.FAIL
+    }
+    assert {
+        outcome.grader_results[0].reason_code
+        for outcome in outcomes
+    } == {EvalGraderReasonCode.TRACE_EVENT_MISSING}
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.RESPONSE_RENDERED,
+    ),
+)
+def test_authenticated_success_trace_rejects_duplicate_safety_event(
+    event_type: TraceEventType,
+) -> None:
+    canonical = _trace_events()
+    source = next(
+        event for event in canonical if event.event_type is event_type
+    )
+    duplicate = source.model_copy(
+        update={"trace_event_id": UUID(int=860 + len(event_type.value))}
+    )
+    events = _insert_trace_event_after(
+        canonical,
+        after=event_type,
+        inserted=duplicate,
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+
+
+def test_authenticated_success_trace_allows_unrelated_non_safety_event() -> None:
+    canonical = _trace_events()
+    source = next(
+        event
+        for event in canonical
+        if event.event_type is TraceEventType.REQUEST_UNDERSTANDING_STARTED
+    )
+    events = _insert_trace_event_after(
+        canonical,
+        after=TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+        inserted=source.model_copy(
+            update={"trace_event_id": UUID(int=899)}
+        ),
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _evidence(trace_events=events),
+        _authenticated_success_expectations(),
+    )
+
+    assert outcome.status is EvalResultStatus.PASS
+
+
+def test_tool_lifecycle_allows_direct_pre_dispatch_interruption() -> None:
+    source_call = _evidence().tool_calls[0]
+    interrupted_call = ToolCallRecord.model_validate(
+        {
+            **source_call.model_dump(),
+            "attempt_count": 0,
+            "status": ToolCallStatus.INTERRUPTED,
+            "finished_at": NOW + timedelta(milliseconds=2),
+            "interruption_reason": "RECOVERY_BEFORE_DISPATCH",
+            "result_ref": None,
+        }
+    )
+    events = (
+        _trace(TraceEventType.TOOL_CALL_CREATED, offset=1),
+        _trace(TraceEventType.TOOL_CALL_INTERRUPTED, offset=2),
+    )
+
+    assert _tool_lifecycle_references_match(
+        events,
+        (interrupted_call,),
+    )
+
+
+def _tool_result_mapping_evidence(
+    *,
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    include_normalized: bool,
+    normalized_outcome: ToolResultOutcome | None,
+) -> EvalEvidence:
+    base = _evidence()
+    source_call = base.tool_calls[0]
+    terminal = status not in {
+        ToolCallStatus.CREATED,
+        ToolCallStatus.RUNNING,
+    }
+    call = ToolCallRecord.model_validate(
+        {
+            **source_call.model_dump(),
+            "attempt_count": attempt_count,
+            "status": status,
+            "finished_at": (
+                NOW + timedelta(milliseconds=500)
+                if terminal
+                else None
+            ),
+            "failure_code": None,
+            "timeout_phase": (
+                ToolTimeoutPhase.AFTER_DISPATCH
+                if status is ToolCallStatus.TIMED_OUT
+                else None
+            ),
+            "interruption_reason": (
+                "RECOVERY_INTERRUPTED"
+                if status is ToolCallStatus.INTERRUPTED
+                else None
+            ),
+            "result_ref": (
+                TOOL_RESULT_REF
+                if status is ToolCallStatus.SUCCEEDED
+                else None
+            ),
+        }
+    )
+    attempts = (
+        (
+            ToolAttemptRecord(
+                tool_call_id=TOOL_CALL_ID,
+                attempt_no=1,
+                started_at=NOW,
+                finished_at=(
+                    None
+                    if attempt_outcome is None
+                    else NOW + timedelta(milliseconds=500)
+                ),
+                outcome=attempt_outcome,
+            ),
+        )
+        if attempt_count == 1
+        else ()
+    )
+    trace_events = (
+        (
+            _trace(
+                TraceEventType.TOOL_RESULT_NORMALIZED,
+                offset=3,
+            ).model_copy(
+                update={"safe_tool_outcome": normalized_outcome}
+            ),
+        )
+        if include_normalized
+        else ()
+    )
+    return _evidence(
+        trace_events=trace_events,
+        tool_calls=(call,),
+        tool_attempts=attempts,
+        observations=(
+            base.observations
+            if status is ToolCallStatus.SUCCEEDED
+            else ()
+        ),
+    )
+
+
+_TERMINAL_NORMALIZED_STATUS_CASES = (
+    (
+        ToolCallStatus.SUCCEEDED,
+        1,
+        ToolResultOutcome.SUCCESS,
+        ToolResultOutcome.SUCCESS,
+    ),
+    (
+        ToolCallStatus.FAILED,
+        1,
+        ToolResultOutcome.BUSINESS_FAILURE,
+        ToolResultOutcome.BUSINESS_FAILURE,
+    ),
+    (
+        ToolCallStatus.FAILED,
+        1,
+        ToolResultOutcome.SYSTEM_FAILURE,
+        ToolResultOutcome.SYSTEM_FAILURE,
+    ),
+    (
+        ToolCallStatus.TIMED_OUT,
+        1,
+        ToolResultOutcome.TIMEOUT,
+        ToolResultOutcome.TIMEOUT,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        0,
+        None,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        1,
+        ToolResultOutcome.INTERRUPTED,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+    (
+        ToolCallStatus.INTERRUPTED,
+        1,
+        None,
+        ToolResultOutcome.INTERRUPTED,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "attempt_count",
+        "attempt_outcome",
+        "authoritative_outcome",
+    ),
+    _TERMINAL_NORMALIZED_STATUS_CASES,
+    ids=(
+        "succeeded",
+        "business-failure",
+        "system-failure",
+        "timed-out",
+        "interrupted-before-dispatch",
+        "interrupted-after-dispatch-finalized",
+        "interrupted-after-dispatch-recovery",
+    ),
+)
+def test_terminal_tool_result_normalization_matches_authoritative_attempt(
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    authoritative_outcome: ToolResultOutcome,
+) -> None:
+    evidence = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=attempt_outcome,
+        include_normalized=True,
+        normalized_outcome=authoritative_outcome,
+    )
+
+    assert _normalized_tool_result_matches_typed_records(evidence)
+
+
+_INVALID_TERMINAL_NORMALIZED_CASES = tuple(
+    (
+        status,
+        attempt_count,
+        attempt_outcome,
+        authoritative_outcome,
+        replacement,
+    )
+    for (
+        status,
+        attempt_count,
+        attempt_outcome,
+        authoritative_outcome,
+    ) in _TERMINAL_NORMALIZED_STATUS_CASES
+    for replacement in (None, *tuple(ToolResultOutcome))
+    if replacement is not authoritative_outcome
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "attempt_count",
+        "attempt_outcome",
+        "authoritative_outcome",
+        "replacement",
+    ),
+    _INVALID_TERMINAL_NORMALIZED_CASES,
+    ids=tuple(
+        (
+            f"{status.value}-{attempt_count}-"
+            f"{authoritative_outcome.value}-to-"
+            f"{replacement.value if replacement is not None else 'NONE'}"
+        )
+        for (
+            status,
+            attempt_count,
+            attempt_outcome,
+            authoritative_outcome,
+            replacement,
+        ) in _INVALID_TERMINAL_NORMALIZED_CASES
+    ),
+)
+def test_terminal_tool_result_normalization_rejects_every_substitute(
+    status: ToolCallStatus,
+    attempt_count: int,
+    attempt_outcome: ToolResultOutcome | None,
+    authoritative_outcome: ToolResultOutcome,
+    replacement: ToolResultOutcome | None,
+) -> None:
+    evidence = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=attempt_outcome,
+        include_normalized=True,
+        normalized_outcome=replacement,
+    )
+
+    assert not _normalized_tool_result_matches_typed_records(evidence)
+
+
+@pytest.mark.parametrize(
+    ("status", "attempt_count"),
+    (
+        (ToolCallStatus.CREATED, 0),
+        (ToolCallStatus.RUNNING, 1),
+    ),
+)
+def test_active_tool_call_forbids_normalized_result_and_observation(
+    status: ToolCallStatus,
+    attempt_count: int,
+) -> None:
+    canonical = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=None,
+        include_normalized=False,
+        normalized_outcome=None,
+    )
+    with_normalized = _tool_result_mapping_evidence(
+        status=status,
+        attempt_count=attempt_count,
+        attempt_outcome=None,
+        include_normalized=True,
+        normalized_outcome=ToolResultOutcome.SUCCESS,
+    )
+    with_observation = canonical.model_copy(
+        update={"observations": _evidence().observations}
+    )
+
+    assert _normalized_tool_result_matches_typed_records(canonical)
+    assert not _normalized_tool_result_matches_typed_records(with_normalized)
+    assert not _normalized_tool_result_matches_typed_records(with_observation)
+
+
+def test_taskless_trace_forbids_orphan_normalized_result_and_observation() -> None:
+    canonical = _evidence(
+        trace_events=(),
+        tool_calls=(),
+        tool_attempts=(),
+        observations=(),
+    )
+    orphan_normalized = canonical.model_copy(
+        update={
+            "trace_events": (
+                _trace(
+                    TraceEventType.TOOL_RESULT_NORMALIZED,
+                    offset=3,
+                ),
+            )
+        }
+    )
+    orphan_observation = canonical.model_copy(
+        update={"observations": _evidence().observations}
+    )
+
+    assert _normalized_tool_result_matches_typed_records(canonical)
+    assert not _normalized_tool_result_matches_typed_records(
+        orphan_normalized
+    )
+    assert not _normalized_tool_result_matches_typed_records(
+        orphan_observation
+    )
+
+
+def test_trace_precedence_selects_context_manifest_by_authenticated_purpose() -> None:
+    variant = next(
+        item for item in _TRACE_VARIANTS if item.variant_id == "SUCCESS"
+    )
+    canonical = list(_variant_trace_events(variant))
+    manifest_indexes = tuple(
+        index
+        for index, event in enumerate(canonical)
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    )
+    assert len(manifest_indexes) == 2
+    first_index, second_index = manifest_indexes
+    canonical[first_index], canonical[second_index] = (
+        canonical[second_index],
+        canonical[first_index],
+    )
+    reordered = tuple(
+        event.model_copy(
+            update={"occurred_at": NOW + timedelta(milliseconds=index)}
+        )
+        for index, event in enumerate(canonical)
+    )
+
+    outcome = grade_evidence(
+        ("TraceCompletenessGrader",),
+        _variant_evidence(variant, trace_events=reordered),
+        _variant_expectations(variant),
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
 
 
 def test_registry_membership_is_exactly_the_13_artifact_names() -> None:

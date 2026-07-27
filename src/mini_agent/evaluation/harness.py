@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Protocol
-from uuid import NAMESPACE_URL, UUID, uuid5
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from math import isfinite
+from types import MappingProxyType
+from typing import Annotated, Literal, Protocol, get_args
+from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid4, uuid5
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic_core import TzInfo
 
 from mini_agent.application.ports import EvalResultPort
 from mini_agent.application.records import (
@@ -24,7 +28,11 @@ from mini_agent.application.records import (
     EvalVersionManifest,
     InsertOnlyWriteResult,
 )
-from mini_agent.core.common import AuditOnlyModel
+from mini_agent.core.common import (
+    AuditOnlyModel,
+    FrozenJsonDict,
+    FrozenJsonList,
+)
 from mini_agent.core.task_state import TaskStatus
 from mini_agent.core.tool_system import (
     GateDecisionValue,
@@ -53,6 +61,8 @@ from mini_agent.evaluation.graders import (
     GradingConfigurationError,
     GradingOutcome,
     SafeCaseObservable,
+    SafeTraceShapeEntry,
+    TraceVariant,
     TraceEventCountExpectation,
     derive_grading_outcome,
     e2e01_04_safe_observables_match,
@@ -74,26 +84,206 @@ class EvalHarnessCommandError(RuntimeError):
         super().__init__("EVAL_HARNESS_COMMAND_FAILED")
 
 
-class EvalCaseSutResult(AuditOnlyModel):
-    evidence: EvalEvidence
-    safe_observable: SafeCaseObservable
+class EvalExecutionMessage(AuditOnlyModel):
+    role: Literal["user"]
+    content: Annotated[str, Field(min_length=1)]
 
-    @model_validator(mode="after")
-    def observable_matches_evidence(self) -> "EvalCaseSutResult":
+
+class EvalCaseExecutionInput(AuditOnlyModel):
+    execution_ref: UUID
+    messages: Annotated[
+        tuple[EvalExecutionMessage, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    trusted_context_fixture_ref: Annotated[str, Field(min_length=1)]
+
+
+class UnboundSafeCaseObservable(AuditOnlyModel):
+    http_status: Annotated[int, Field(ge=100, le=599)]
+    user_outcome: AgentOutcome
+    response_policy: str
+    ordinary_trace_shape: tuple[SafeTraceShapeEntry, ...]
+    model_calls: Annotated[int, Field(ge=0)]
+
+
+_UNBOUND_EVIDENCE_FIELD_ALLOWLIST = (
+    "observed_outcome",
+    "trace_ref",
+    "trace_events",
+    "schema_assertions_pass",
+    "identity_boundary_assertions_pass",
+    "request_understanding_assertions_pass",
+    "input_binding_assertions_pass",
+    "task_state_assertions_pass",
+    "tool_call_assertions_pass",
+    "observation_assertions_pass",
+    "disclosure_assertions_pass",
+    "renderer_fact_assertions_pass",
+    "error_mapping_assertions_pass",
+    "persistence_assertions_pass",
+    "toolset_replay_assertions_pass",
+    "run_record",
+    "agent_result",
+    "conversation_records",
+    "message_records",
+    "request_understanding_output",
+    "request_understanding_records",
+    "accepted_task_deltas",
+    "input_bindings",
+    "task_records",
+    "request_units",
+    "conversation_task_links",
+    "run_task_links",
+    "gate_decisions",
+    "tool_calls",
+    "tool_attempts",
+    "observations",
+    "observation_persistence_envelopes",
+    "context_manifests",
+    "model_visible_toolset_artifacts",
+)
+_SEMANTIC_SCHEMA_IDENTITY_FIELDS = frozenset({"case_id"})
+_SEMANTIC_IDENTITY_ENTITIES = frozenset({"case", "script"})
+_SAFE_IDENTITY_FIELD_TOKEN_TUPLES = frozenset(
+    {
+        ("case", "status"),
+        ("casefold",),
+        ("casestatus",),
+        ("customer", "case", "id"),
+        ("customercaseid",),
+        ("description",),
+        ("description", "code"),
+        ("description", "id"),
+        ("descriptioncode",),
+        ("descriptionid",),
+        ("javascript", "ref"),
+        ("javascript", "uuid"),
+        ("javascriptref",),
+        ("javascriptuuid",),
+        ("lowercase", "id"),
+        ("lowercaseid",),
+        ("script", "owner", "id"),
+        ("script", "version"),
+        ("scriptownerid",),
+        ("scripture",),
+        ("scriptversion",),
+        ("show", "case", "id"),
+        ("showcase", "code"),
+        ("showcase", "id"),
+        ("showcasecode",),
+        ("showcaseid",),
+        ("staircase", "key"),
+        ("staircase", "number"),
+        ("staircasekey",),
+        ("staircasenumber",),
+        ("transcript", "reference"),
+        ("transcript", "uuid"),
+        ("transcriptreference",),
+        ("transcriptuuid",),
+        ("uppercase", "reference"),
+        ("uppercasereference",),
+        ("use", "case", "id"),
+        ("use", "case", "label"),
+        ("usecaseid",),
+        ("usecaselabel",),
+    }
+)
+
+
+def _identity_name_tokens(field_name: str) -> tuple[str, ...]:
+    separated: list[str] = []
+    for index, character in enumerate(field_name):
+        previous = field_name[index - 1] if index else ""
+        following = (
+            field_name[index + 1]
+            if index + 1 < len(field_name)
+            else ""
+        )
+        if not character.isalnum():
+            separated.append(" ")
+            continue
         if (
-            self.evidence.case_id != self.safe_observable.case_id
-            or self.evidence.observed_outcome is not self.safe_observable.user_outcome
-            or self.evidence.safe_observable != self.safe_observable
+            character.isupper()
+            and previous.isalnum()
+            and (
+                previous.islower()
+                or previous.isdigit()
+                or (previous.isupper() and following.islower())
+            )
         ):
-            raise ValueError("safe observable must match Eval evidence")
-        return self
+            separated.append(" ")
+        separated.append(character.casefold())
+    return tuple("".join(separated).split())
+
+
+def _is_semantic_identity_field(field_name: str) -> bool:
+    tokens = _identity_name_tokens(field_name)
+    if not tokens:
+        return False
+    if tokens in _SAFE_IDENTITY_FIELD_TOKEN_TUPLES:
+        return False
+    if any(
+        token in _SEMANTIC_IDENTITY_ENTITIES
+        for token in tokens
+    ):
+        return True
+    compact = "".join(tokens)
+    return any(
+        entity in compact
+        for entity in _SEMANTIC_IDENTITY_ENTITIES
+    )
+
+
+def _build_unbound_evidence_model() -> type[AuditOnlyModel]:
+    bound_fields = frozenset(EvalEvidence.model_fields)
+    expected_bound_fields = frozenset(
+        {
+            *_UNBOUND_EVIDENCE_FIELD_ALLOWLIST,
+            "case_id",
+            "safe_observable",
+        }
+    )
+    if bound_fields != expected_bound_fields:
+        raise RuntimeError("EvalEvidence changed without explicit SUT-boundary review")
+    if any(
+        field_name in _SEMANTIC_SCHEMA_IDENTITY_FIELDS
+        for field_name in _UNBOUND_EVIDENCE_FIELD_ALLOWLIST
+    ):
+        raise RuntimeError(
+            "semantic Case/Script identity entered unbound evidence"
+        )
+    field_definitions: dict[str, tuple[object, object]] = {}
+    for field_name in _UNBOUND_EVIDENCE_FIELD_ALLOWLIST:
+        field_info = EvalEvidence.model_fields[field_name]
+        if field_info.is_required():
+            default: object = ...
+        elif field_info.default_factory is not None:
+            default = Field(default_factory=field_info.default_factory)
+        else:
+            default = field_info.default
+        field_definitions[field_name] = (field_info.annotation, default)
+    return create_model(
+        "UnboundEvalEvidence",
+        __base__=AuditOnlyModel,
+        __module__=__name__,
+        **field_definitions,
+    )
+
+
+UnboundEvalEvidence = _build_unbound_evidence_model()
+
+
+class EvalCaseSutResult(AuditOnlyModel):
+    execution_ref: UUID
+    evidence: UnboundEvalEvidence
+    safe_observable: UnboundSafeCaseObservable
 
 
 class EvalCaseSut(Protocol):
     async def execute_case(
         self,
         *,
-        case: EvalCaseArtifact,
+        execution_input: EvalCaseExecutionInput,
         scripted_provider: ScriptedModelProvider,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None: ...
@@ -159,6 +349,9 @@ class _StagedCase:
     safe_observable: SafeCaseObservable
 
 
+_ReplayCacheKey = tuple[UUID, str, str, int, str]
+
+
 _FAILURE_CODE_BY_PHASE = {
     EvalExecutionFailurePhase.HARNESS_SETUP: (
         EvalExecutionSafeErrorCode.HARNESS_SETUP_FAILED
@@ -198,6 +391,23 @@ _NO_CANONICAL_REQUEST_OUTPUT = frozenset(
 _EXPECTED_MODEL_VISIBLE_TOOLSET_HASH = compute_model_visible_toolset_hash(
     (get_order_tool_spec(),)
 )
+_BASE_TRACE_VARIANT_BY_CASE_ID: Mapping[str, TraceVariant] = {
+    "E2E01-01": "SUCCESS",
+    "E2E01-04-A": "FOREIGN_ORDER",
+    "E2E01-04-B": "NONEXISTENT_ORDER",
+    "E2E01-01+SEC-ARGUMENT-BINDING": "ARGUMENT_BINDING_REJECTED",
+}
+_TRACE_VARIANT_FROM_ARTIFACT_NAME: Mapping[str, TraceVariant] = {
+    "PROVIDER_PROTOCOL_BEFORE_CANDIDATE": (
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE"
+    ),
+    "INPUT_VALIDATION_REJECTED": "INPUT_VALIDATION_REJECTED",
+    "CONTROL_GATEWAY_REJECTED": "UNKNOWN_TOOL_GATEWAY_REJECTED",
+    "CONTROL_GATEWAY_STALE_STATE_REJECTED": (
+        "STALE_STATE_GATEWAY_REJECTED"
+    ),
+    "PRESENTATION_PROTOCOL_REJECTED": "PRESENTATION_PROTOCOL_REJECTED",
+}
 
 
 def _case_trace_expectations(
@@ -208,6 +418,7 @@ def _case_trace_expectations(
     tuple[TraceEventType, ...],
     tuple[TraceEventType, ...],
     tuple[TraceEventCountExpectation, ...],
+    TraceVariant,
 ]:
     selected: Mapping[str, object] = case.expectations
     variants = case.expectations.get("trace_expectation_variants", ())
@@ -221,8 +432,17 @@ def _case_trace_expectations(
     )
     if len(matches) > 1:
         raise ArtifactContractError("model script matches multiple Trace variants")
+    trace_variant = _BASE_TRACE_VARIANT_BY_CASE_ID.get(case.case_id)
     if matches:
         selected = matches[0]
+        artifact_variant = selected.get("variant")
+        if not isinstance(artifact_variant, str):
+            raise ArtifactContractError("Trace variant identity is invalid")
+        trace_variant = _TRACE_VARIANT_FROM_ARTIFACT_NAME.get(
+            artifact_variant
+        )
+    if trace_variant is None:
+        raise ArtifactContractError("Case/script Trace variant is not closed")
     required = tuple(
         TraceEventType(value) for value in tuple(selected.get("required_events", ()))
     )
@@ -243,7 +463,7 @@ def _case_trace_expectations(
                 count=item["count"],
             )
         )
-    return required, forbidden, tuple(counts)
+    return required, forbidden, tuple(counts), trace_variant
 
 
 def _terminal_state_version(
@@ -297,6 +517,25 @@ def _trusted_message_content_for_case(case: EvalCaseArtifact) -> str:
     if not isinstance(content, str) or not content:
         raise ArtifactContractError("Case user message content is invalid")
     return content
+
+
+def _normalized_selected_script_ref(
+    case: EvalCaseArtifact,
+    selected_script_ref: str | None,
+) -> str:
+    script_refs = tuple(case.input.get("model_script_refs", ()))
+    if selected_script_ref is None:
+        if len(script_refs) != 1:
+            raise ArtifactContractError(
+                "multi-script Case requires explicit script selection"
+            )
+        selected_script_ref = script_refs[0]
+    if (
+        type(selected_script_ref) is not str
+        or selected_script_ref not in script_refs
+    ):
+        raise ArtifactContractError("selected script is not bound to Case")
+    return selected_script_ref
 
 
 def build_authenticated_case_expectations(
@@ -396,7 +635,7 @@ def build_authenticated_case_expectations(
         else None
     )
 
-    required, forbidden, counts = _case_trace_expectations(
+    required, forbidden, counts, trace_variant = _case_trace_expectations(
         case,
         model_script_ref=script.model_script_ref,
     )
@@ -441,11 +680,949 @@ def build_authenticated_case_expectations(
         expected_message_content=_trusted_message_content_for_case(case),
         expected_tool_registry_version=version,
         expected_model_visible_toolset_hash=(_EXPECTED_MODEL_VISIBLE_TOOLSET_HASH),
+        trace_variant=trace_variant,
         required_trace_events=required,
         forbidden_trace_events=forbidden,
         expected_event_counts=counts,
         applicable_critical_failures=critical_values,
     )
+
+
+def _model_storage_is_closed(
+    value: BaseModel,
+    expected_type: type[BaseModel],
+) -> bool:
+    if type(value) is not expected_type:
+        return False
+    storage = value.__dict__
+    fields_set = value.__pydantic_fields_set__
+    if type(storage) is not dict or type(fields_set) is not set:
+        return False
+    field_names = frozenset(expected_type.model_fields)
+    if (
+        len(storage) != len(field_names)
+        or len(fields_set) > len(field_names)
+    ):
+        return False
+    stored_names = tuple(dict.__iter__(storage))
+    explicit_names = tuple(set.__iter__(fields_set))
+    if any(type(name) is not str for name in (*stored_names, *explicit_names)):
+        return False
+    return (
+        frozenset(stored_names) == field_names
+        and fields_set <= field_names
+        and value.__pydantic_extra__ is None
+        and value.__pydantic_private__ is None
+    )
+
+
+def _annotation_runtime_types(
+    annotation: object,
+    *,
+    visited: set[int],
+) -> tuple[type[object], ...]:
+    annotation_id = id(annotation)
+    if annotation_id in visited:
+        return ()
+    visited.add(annotation_id)
+    discovered: list[type[object]] = []
+    if isinstance(annotation, type):
+        discovered.append(annotation)
+    elif isinstance(annotation, Enum):
+        discovered.append(type(annotation))
+    for nested in get_args(annotation):
+        discovered.extend(
+            _annotation_runtime_types(
+                nested,
+                visited=visited,
+            )
+        )
+    return tuple(discovered)
+
+
+def _reachable_result_types(
+    root_models: tuple[type[BaseModel], ...],
+) -> tuple[frozenset[type[BaseModel]], frozenset[type[Enum]]]:
+    model_types: set[type[BaseModel]] = set()
+    enum_types: set[type[Enum]] = set()
+    pending = list(root_models)
+    while pending:
+        model_type = pending.pop()
+        if model_type in model_types:
+            continue
+        model_types.add(model_type)
+        for model_field in model_type.model_fields.values():
+            for runtime_type in _annotation_runtime_types(
+                model_field.annotation,
+                visited=set(),
+            ):
+                if issubclass(runtime_type, Enum):
+                    enum_types.add(runtime_type)
+                elif (
+                    issubclass(runtime_type, BaseModel)
+                    and runtime_type not in model_types
+                ):
+                    pending.append(runtime_type)
+    return frozenset(model_types), frozenset(enum_types)
+
+
+(
+    _CANONICAL_RESULT_MODEL_TYPES,
+    _CANONICAL_RESULT_ENUM_TYPES,
+) = _reachable_result_types(
+    (
+        EvalCaseSutResult,
+        EvalEvidence,
+        SafeCaseObservable,
+    )
+)
+(
+    _ADDITIONAL_BOUNDARY_MODEL_TYPES,
+    _ADDITIONAL_BOUNDARY_ENUM_TYPES,
+) = _reachable_result_types(
+    (
+        EvalCaseExpectations,
+        EvalExecutionFailureRecord,
+        EvalResultRecord,
+        GradingOutcome,
+        LoadedE2E01Artifacts,
+    )
+)
+_CANONICAL_PAYLOAD_MODEL_TYPES = (
+    _CANONICAL_RESULT_MODEL_TYPES
+    | _ADDITIONAL_BOUNDARY_MODEL_TYPES
+)
+
+_DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS = frozenset(
+    field_name
+    for model_type in _CANONICAL_RESULT_MODEL_TYPES
+    for field_name in model_type.model_fields
+    if _is_semantic_identity_field(field_name)
+)
+if (
+    _DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS
+    != _SEMANTIC_SCHEMA_IDENTITY_FIELDS
+):
+    raise RuntimeError(
+        "canonical Eval result schema identity fields changed"
+    )
+
+
+def _canonical_scalar_is_closed(value: object) -> bool:
+    if value is None or type(value) in {bool, int, str}:
+        return True
+    return type(value) is float and isfinite(value)
+
+
+@dataclass(frozen=True, slots=True)
+class _CanonicalEnumMemberSnapshot:
+    member: Enum
+    storage_items: tuple[tuple[str, object], ...]
+
+
+_ENUM_TYPES_WITH_CLOSED_STORAGE = (
+    _CANONICAL_RESULT_ENUM_TYPES
+    | _ADDITIONAL_BOUNDARY_ENUM_TYPES
+    | frozenset({InsertOnlyWriteResult, SafeUUID})
+)
+
+
+def _build_canonical_enum_member_snapshots() -> (
+    Mapping[type[Enum], tuple[_CanonicalEnumMemberSnapshot, ...]]
+):
+    by_type: dict[
+        type[Enum],
+        tuple[_CanonicalEnumMemberSnapshot, ...],
+    ] = {}
+    for enum_type in _ENUM_TYPES_WITH_CLOSED_STORAGE:
+        snapshots: list[_CanonicalEnumMemberSnapshot] = []
+        for member in enum_type:
+            if type(member) is not enum_type:
+                raise RuntimeError(
+                    "canonical Eval result Enum member type changed"
+                )
+            storage = object.__getattribute__(member, "__dict__")
+            if type(storage) is not dict:
+                raise RuntimeError(
+                    "canonical Eval result Enum storage changed"
+                )
+            storage_items = tuple(
+                (
+                    key,
+                    dict.__getitem__(storage, key),
+                )
+                for key in dict.__iter__(storage)
+            )
+            if any(
+                type(key) is not str
+                or not (
+                    _canonical_scalar_is_closed(stored_value)
+                    or stored_value is enum_type
+                )
+                for key, stored_value in storage_items
+            ):
+                raise RuntimeError(
+                    "canonical Eval result Enum storage is not closed"
+                )
+            snapshots.append(
+                _CanonicalEnumMemberSnapshot(
+                    member=member,
+                    storage_items=storage_items,
+                )
+            )
+        by_type[enum_type] = tuple(snapshots)
+    return MappingProxyType(by_type)
+
+
+_CANONICAL_ENUM_MEMBER_SNAPSHOTS = (
+    _build_canonical_enum_member_snapshots()
+)
+
+
+def _canonical_enum_member_is_closed(value: Enum) -> bool:
+    enum_type = type(value)
+    snapshots = _CANONICAL_ENUM_MEMBER_SNAPSHOTS.get(enum_type)
+    if snapshots is None:
+        return False
+    snapshot = next(
+        (
+            candidate
+            for candidate in snapshots
+            if value is candidate.member
+        ),
+        None,
+    )
+    if snapshot is None:
+        return False
+    storage = object.__getattribute__(value, "__dict__")
+    if (
+        type(storage) is not dict
+        or len(storage) != len(snapshot.storage_items)
+    ):
+        return False
+    stored_names = tuple(dict.__iter__(storage))
+    if (
+        any(type(name) is not str for name in stored_names)
+        or stored_names
+        != tuple(name for name, _ in snapshot.storage_items)
+    ):
+        return False
+    for name, expected_value in snapshot.storage_items:
+        stored_value = dict.__getitem__(storage, name)
+        if expected_value is enum_type:
+            if stored_value is not expected_value:
+                return False
+        elif (
+            type(stored_value) is not type(expected_value)
+            or stored_value != expected_value
+        ):
+            return False
+    return True
+
+
+def _canonical_singleton_state_is_closed() -> bool:
+    return all(
+        _canonical_enum_member_is_closed(snapshot.member)
+        for snapshots in _CANONICAL_ENUM_MEMBER_SNAPSHOTS.values()
+        for snapshot in snapshots
+    )
+
+
+def _restore_canonical_singleton_state() -> bool:
+    try:
+        for snapshots in _CANONICAL_ENUM_MEMBER_SNAPSHOTS.values():
+            for snapshot in snapshots:
+                storage = object.__getattribute__(
+                    snapshot.member,
+                    "__dict__",
+                )
+                if type(storage) is not dict:
+                    return False
+                dict.clear(storage)
+                for name, stored_value in snapshot.storage_items:
+                    dict.__setitem__(
+                        storage,
+                        name,
+                        stored_value,
+                    )
+    except Exception:
+        return False
+    return _canonical_singleton_state_is_closed()
+
+
+def _datetime_is_closed(value: datetime) -> bool:
+    tz = object.__getattribute__(value, "tzinfo")
+    if tz is timezone.utc:
+        return True
+    if type(tz) is not TzInfo:
+        return False
+    offset = TzInfo.utcoffset(tz, value)
+    return type(offset) is timedelta and offset == timedelta(0)
+
+
+def _uuid_is_closed(value: UUID) -> bool:
+    integer = object.__getattribute__(value, "int")
+    safety = object.__getattribute__(value, "is_safe")
+    return (
+        type(integer) is int
+        and 0 <= integer < 1 << 128
+        and type(safety) is SafeUUID
+        and _canonical_enum_member_is_closed(
+            safety
+        )
+    )
+
+
+def _detached_closed_uuid(value: object) -> UUID | None:
+    if type(value) is not UUID or not _uuid_is_closed(value):
+        return None
+    try:
+        return UUID(
+            int=object.__getattribute__(value, "int"),
+            is_safe=object.__getattribute__(
+                value,
+                "is_safe",
+            ),
+        )
+    except Exception:
+        return None
+
+
+def _detached_closed_datetime(value: object) -> datetime | None:
+    if type(value) is not datetime or not _datetime_is_closed(value):
+        return None
+    try:
+        return datetime(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=timezone.utc,
+            fold=value.fold,
+        )
+    except Exception:
+        return None
+
+
+@dataclass(slots=True)
+class _PayloadTraversalState:
+    active_ids: set[int] = field(default_factory=set)
+    completed_ids: set[int] = field(default_factory=set)
+    validation_counts: dict[int, int] = field(default_factory=dict)
+    visited_edges: int = 0
+
+
+_MAX_PAYLOAD_DEPTH = 64
+_MAX_PAYLOAD_EDGES = 8192
+
+
+def _consume_payload_edges(
+    traversal: _PayloadTraversalState,
+    *,
+    parent_depth: int,
+    count: int,
+) -> bool:
+    if parent_depth >= _MAX_PAYLOAD_DEPTH:
+        return False
+    next_count = traversal.visited_edges + count
+    if next_count > _MAX_PAYLOAD_EDGES:
+        return False
+    traversal.visited_edges = next_count
+    return True
+
+
+def _validate_immutable_node(
+    value: object,
+    *,
+    traversal: _PayloadTraversalState,
+    validator: Callable[[], bool],
+) -> bool:
+    value_id = id(value)
+    if value_id in traversal.completed_ids:
+        return type(value) is tuple and len(value) == 0
+    if value_id in traversal.active_ids:
+        return False
+    traversal.validation_counts[value_id] = (
+        traversal.validation_counts.get(value_id, 0) + 1
+    )
+    traversal.active_ids.add(value_id)
+    try:
+        valid = validator()
+    finally:
+        traversal.active_ids.remove(value_id)
+    if valid:
+        traversal.completed_ids.add(value_id)
+    return valid
+
+
+def _json_payload_is_closed(
+    value: object,
+    *,
+    forbidden_identity_values: frozenset[str],
+    traversal: _PayloadTraversalState,
+    depth: int,
+    allow_semantic_keys: bool = False,
+) -> bool:
+    if depth > _MAX_PAYLOAD_DEPTH:
+        return False
+    if type(value) is str:
+        return value not in forbidden_identity_values
+    if value is None or type(value) in {bool, int}:
+        return True
+    if type(value) is float:
+        return isfinite(value)
+    if type(value) is FrozenJsonDict:
+        def validate_mapping() -> bool:
+            keys: set[str] = set()
+            for raw_pair in tuple.__iter__(value):
+                if not _consume_payload_edges(
+                    traversal,
+                    parent_depth=depth,
+                    count=2,
+                ):
+                    return False
+                if type(raw_pair) is not tuple or len(raw_pair) != 2:
+                    return False
+                key, item = raw_pair
+                if (
+                    type(key) is not str
+                    or key in keys
+                    or key in forbidden_identity_values
+                    or (
+                        not allow_semantic_keys
+                        and _is_semantic_identity_field(key)
+                    )
+                ):
+                    return False
+                keys.add(key)
+                if not _json_payload_is_closed(
+                    item,
+                    forbidden_identity_values=forbidden_identity_values,
+                    traversal=traversal,
+                    depth=depth + 1,
+                    allow_semantic_keys=allow_semantic_keys,
+                ):
+                    return False
+            return True
+
+        return _validate_immutable_node(
+            value,
+            traversal=traversal,
+            validator=validate_mapping,
+        )
+    if type(value) is FrozenJsonList:
+        return _validate_immutable_node(
+            value,
+            traversal=traversal,
+            validator=lambda: all(
+                _consume_payload_edges(
+                    traversal,
+                    parent_depth=depth,
+                    count=1,
+                )
+                and _json_payload_is_closed(
+                    item,
+                    forbidden_identity_values=forbidden_identity_values,
+                    traversal=traversal,
+                    depth=depth + 1,
+                    allow_semantic_keys=allow_semantic_keys,
+                )
+                for item in tuple.__iter__(value)
+            ),
+        )
+    return False
+
+
+def _payload_tree_is_closed(
+    value: object,
+    *,
+    forbidden_identity_values: frozenset[str],
+    traversal: _PayloadTraversalState | None = None,
+    depth: int = 0,
+    allowed_schema_identity_values: (
+        Mapping[str, frozenset[str]] | None
+    ) = None,
+    allow_any_schema_identity_value: bool = False,
+    allow_semantic_json_keys: bool = False,
+    _allow_current_identity_value: bool = False,
+) -> bool:
+    traversal = traversal or _PayloadTraversalState()
+    if depth > _MAX_PAYLOAD_DEPTH:
+        return False
+    value_type = type(value)
+    if (
+        value_type is str
+        and value in forbidden_identity_values
+        and not _allow_current_identity_value
+    ):
+        return False
+    if value_type in _CANONICAL_PAYLOAD_MODEL_TYPES:
+        def validate_model() -> bool:
+            if not _model_storage_is_closed(value, value_type):
+                return False
+            field_names = tuple(value_type.model_fields)
+            storage = value.__dict__
+            for field_name in field_names:
+                if not _consume_payload_edges(
+                    traversal,
+                    parent_depth=depth,
+                    count=1,
+                ):
+                    return False
+                field_value = dict.__getitem__(storage, field_name)
+                allow_field_identity = False
+                if (
+                    field_name
+                    in _DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS
+                    and field_value is not None
+                ):
+                    allowed_values = (
+                        allowed_schema_identity_values.get(
+                            field_name,
+                            frozenset(),
+                        )
+                        if allowed_schema_identity_values is not None
+                        else frozenset()
+                    )
+                    if (
+                        type(field_value) is not str
+                        or (
+                            not allow_any_schema_identity_value
+                            and field_value not in allowed_values
+                        )
+                    ):
+                        return False
+                    allow_field_identity = True
+                if not _payload_tree_is_closed(
+                    field_value,
+                    forbidden_identity_values=forbidden_identity_values,
+                    traversal=traversal,
+                    depth=depth + 1,
+                    allowed_schema_identity_values=(
+                        allowed_schema_identity_values
+                    ),
+                    allow_any_schema_identity_value=(
+                        allow_any_schema_identity_value
+                    ),
+                    allow_semantic_json_keys=(
+                        allow_semantic_json_keys
+                    ),
+                    _allow_current_identity_value=(
+                        allow_field_identity
+                    ),
+                ):
+                    return False
+            return True
+
+        return _validate_immutable_node(
+            value,
+            traversal=traversal,
+            validator=validate_model,
+        )
+    if value_type in {FrozenJsonDict, FrozenJsonList}:
+        return _json_payload_is_closed(
+            value,
+            forbidden_identity_values=forbidden_identity_values,
+            traversal=traversal,
+            depth=depth,
+            allow_semantic_keys=allow_semantic_json_keys,
+        )
+    if value_type is tuple:
+        return _validate_immutable_node(
+            value,
+            traversal=traversal,
+            validator=lambda: all(
+                _consume_payload_edges(
+                    traversal,
+                    parent_depth=depth,
+                    count=1,
+                )
+                and _payload_tree_is_closed(
+                    item,
+                    forbidden_identity_values=forbidden_identity_values,
+                    traversal=traversal,
+                    depth=depth + 1,
+                    allowed_schema_identity_values=(
+                        allowed_schema_identity_values
+                    ),
+                    allow_any_schema_identity_value=(
+                        allow_any_schema_identity_value
+                    ),
+                    allow_semantic_json_keys=(
+                        allow_semantic_json_keys
+                    ),
+                )
+                for item in tuple.__iter__(value)
+            ),
+        )
+    if value_type in _ENUM_TYPES_WITH_CLOSED_STORAGE:
+        if not _canonical_enum_member_is_closed(value):
+            return False
+        storage = object.__getattribute__(value, "__dict__")
+        enum_value = dict.__getitem__(storage, "_value_")
+        return (
+            _canonical_scalar_is_closed(enum_value)
+            and not (
+                type(enum_value) is str
+                and enum_value in forbidden_identity_values
+            )
+        )
+    if value_type is datetime:
+        return _datetime_is_closed(value)
+    if value_type is UUID:
+        return _uuid_is_closed(value)
+    if value is None or value_type in {
+        bool,
+        int,
+        str,
+        timedelta,
+    }:
+        return True
+    return value_type is float and isfinite(value)
+
+
+@dataclass(slots=True)
+class _ExactTreeComparisonState:
+    active_pairs: set[tuple[int, int]] = field(default_factory=set)
+    completed_pairs: set[tuple[int, int]] = field(default_factory=set)
+
+
+def _same_exact_value_tree(
+    original: object,
+    rebuilt: object,
+    *,
+    state: _ExactTreeComparisonState | None = None,
+) -> bool:
+    if type(original) is not type(rebuilt):
+        return False
+    if isinstance(original, Enum):
+        return original is rebuilt
+    if isinstance(original, BaseModel):
+        pair = (id(original), id(rebuilt))
+        state = state or _ExactTreeComparisonState()
+        if pair in state.completed_pairs:
+            return True
+        if pair in state.active_pairs:
+            return False
+        state.active_pairs.add(pair)
+        try:
+            field_names = tuple(type(original).model_fields)
+            valid = all(
+                _same_exact_value_tree(
+                    getattr(original, field_name),
+                    getattr(rebuilt, field_name),
+                    state=state,
+                )
+                for field_name in field_names
+            )
+        finally:
+            state.active_pairs.remove(pair)
+        if valid:
+            state.completed_pairs.add(pair)
+        return valid
+    if type(original) in {
+        tuple,
+        FrozenJsonDict,
+        FrozenJsonList,
+    }:
+        pair = (id(original), id(rebuilt))
+        state = state or _ExactTreeComparisonState()
+        if pair in state.completed_pairs:
+            return True
+        if pair in state.active_pairs:
+            return False
+        original_items = tuple(tuple.__iter__(original))
+        rebuilt_items = tuple(tuple.__iter__(rebuilt))
+        if len(original_items) != len(rebuilt_items):
+            return False
+        state.active_pairs.add(pair)
+        try:
+            valid = all(
+                _same_exact_value_tree(
+                    original_item,
+                    rebuilt_item,
+                    state=state,
+                )
+                for original_item, rebuilt_item in zip(
+                    original_items,
+                    rebuilt_items,
+                    strict=True,
+                )
+            )
+        finally:
+            state.active_pairs.remove(pair)
+        if valid:
+            state.completed_pairs.add(pair)
+        return valid
+    if original is None:
+        return True
+    if type(original) in {datetime, UUID}:
+        return original is not rebuilt and original == rebuilt
+    if type(original) in {
+        bool,
+        float,
+        int,
+        str,
+        timedelta,
+    }:
+        return original == rebuilt
+    return False
+
+
+def _canonical_unbound_result(
+    result: EvalCaseSutResult,
+    *,
+    authenticated_identity_values: frozenset[str],
+) -> EvalCaseSutResult | None:
+    if (
+        not _canonical_singleton_state_is_closed()
+        or not _model_storage_is_closed(
+            result,
+            EvalCaseSutResult,
+        )
+    ):
+        return None
+    # The unbound Eval boundary fails closed on an exact authenticated
+    # Case/Script identity anywhere in SUT-returned structured evidence.
+    if not _payload_tree_is_closed(
+        result,
+        forbidden_identity_values=authenticated_identity_values,
+    ):
+        return None
+    try:
+        projection = result.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        )
+        if type(projection) is not str:
+            return None
+        rebuilt = EvalCaseSutResult.model_validate_json(
+            projection,
+            strict=True,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not EvalCaseSutResult
+        or not _canonical_singleton_state_is_closed()
+        or not _same_exact_value_tree(result, rebuilt)
+        or rebuilt != result
+        or not _model_storage_is_closed(
+            rebuilt,
+            EvalCaseSutResult,
+        )
+        or not _payload_tree_is_closed(
+            rebuilt,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+    ):
+        return None
+    evidence = rebuilt.evidence
+    observable = rebuilt.safe_observable
+    if not _model_storage_is_closed(evidence, UnboundEvalEvidence):
+        return None
+    if not _model_storage_is_closed(
+        observable,
+        UnboundSafeCaseObservable,
+    ):
+        return None
+    if (
+        not evidence.trace_events
+        or any(event.case_id is not None for event in evidence.trace_events)
+        or any(
+            event.event_type is TraceEventType.EVAL_CASE_GRADED
+            for event in evidence.trace_events
+        )
+    ):
+        return None
+    if evidence.observed_outcome is not observable.user_outcome:
+        return None
+    if ordinary_trace_shape(evidence.trace_events) != (
+        observable.ordinary_trace_shape
+    ):
+        return None
+    if len(evidence.context_manifests) != observable.model_calls:
+        return None
+    if (
+        evidence.agent_result is not None
+        and evidence.agent_result.outcome is not observable.user_outcome
+    ):
+        return None
+    return rebuilt
+
+
+def _unbound_result_state_is_closed(
+    raw_result: EvalCaseSutResult,
+    canonical_result: EvalCaseSutResult,
+    *,
+    authenticated_identity_values: frozenset[str],
+) -> bool:
+    return (
+        _canonical_singleton_state_is_closed()
+        and _payload_tree_is_closed(
+            raw_result,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+        and _payload_tree_is_closed(
+            canonical_result,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+        and _same_exact_value_tree(raw_result, canonical_result)
+        and raw_result == canonical_result
+    )
+
+
+def _canonical_bound_evidence(
+    evidence: EvalEvidence,
+    *,
+    case_id: str,
+    authenticated_identity_values: frozenset[str],
+) -> EvalEvidence | None:
+    allowed_identity_values = {
+        "case_id": frozenset({case_id}),
+    }
+    if (
+        not _canonical_singleton_state_is_closed()
+        or not _payload_tree_is_closed(
+            evidence,
+            forbidden_identity_values=authenticated_identity_values,
+            allowed_schema_identity_values=allowed_identity_values,
+        )
+    ):
+        return None
+    try:
+        projection = evidence.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        )
+        if type(projection) is not str:
+            return None
+        rebuilt = EvalEvidence.model_validate_json(
+            projection,
+            strict=True,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not EvalEvidence
+        or not _canonical_singleton_state_is_closed()
+        or not _same_exact_value_tree(evidence, rebuilt)
+        or rebuilt != evidence
+        or not _payload_tree_is_closed(
+            rebuilt,
+            forbidden_identity_values=authenticated_identity_values,
+            allowed_schema_identity_values=allowed_identity_values,
+        )
+    ):
+        return None
+    return rebuilt
+
+
+def _canonical_model_state_is_closed(
+    value: BaseModel,
+    expected_type: type[BaseModel],
+) -> bool:
+    return (
+        type(value) is expected_type
+        and _payload_tree_is_closed(
+            value,
+            forbidden_identity_values=frozenset(),
+            allow_any_schema_identity_value=True,
+            allow_semantic_json_keys=True,
+        )
+    )
+
+
+def _detached_canonical_model(
+    value: BaseModel,
+    expected_type: type[BaseModel],
+) -> BaseModel | None:
+    if not _canonical_model_state_is_closed(value, expected_type):
+        return None
+    try:
+        projection = value.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        )
+        if type(projection) is not str:
+            return None
+        rebuilt = expected_type.model_validate_json(
+            projection,
+            strict=True,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not expected_type
+        or not _canonical_model_state_is_closed(
+            rebuilt,
+            expected_type,
+        )
+        or not _same_exact_value_tree(value, rebuilt)
+        or rebuilt != value
+    ):
+        return None
+    return rebuilt
+
+
+def _detached_external_model_matching(
+    value: object,
+    expected: BaseModel,
+    expected_type: type[BaseModel],
+) -> BaseModel | None:
+    if (
+        type(value) is not expected_type
+        or not _canonical_model_state_is_closed(
+            value,
+            expected_type,
+        )
+        or not _canonical_model_state_is_closed(
+            expected,
+            expected_type,
+        )
+        or not _same_exact_value_tree(value, expected)
+        or value != expected
+    ):
+        return None
+    rebuilt = _detached_canonical_model(
+        value,
+        expected_type,
+    )
+    if (
+        rebuilt is None
+        or not _same_exact_value_tree(rebuilt, expected)
+        or rebuilt != expected
+    ):
+        return None
+    return rebuilt
+
+
+def _bind_authenticated_case(
+    result: EvalCaseSutResult,
+    *,
+    case_id: str,
+) -> tuple[EvalEvidence, SafeCaseObservable]:
+    unbound_observable = result.safe_observable
+    safe_observable = SafeCaseObservable(
+        case_id=case_id,
+        **{
+            field_name: getattr(unbound_observable, field_name)
+            for field_name in UnboundSafeCaseObservable.model_fields
+        },
+    )
+    unbound_evidence = result.evidence
+    evidence = EvalEvidence(
+        case_id=case_id,
+        safe_observable=safe_observable,
+        **{
+            field_name: getattr(unbound_evidence, field_name)
+            for field_name in UnboundEvalEvidence.model_fields
+        },
+    )
+    return evidence, safe_observable
 
 
 class OfflineEvalHarness:
@@ -458,17 +1635,44 @@ class OfflineEvalHarness:
         result_port: EvalResultPort,
         clock: Callable[[], datetime],
         grader_runner: GraderRunner | None = None,
+        nonce_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if type(artifacts) is not LoadedE2E01Artifacts:
             raise TypeError("artifacts must be an authenticated E2E01 bundle")
+        private_artifacts = _detached_canonical_model(
+            artifacts,
+            LoadedE2E01Artifacts,
+        )
+        if type(private_artifacts) is not LoadedE2E01Artifacts:
+            raise TypeError("artifacts must be an authenticated E2E01 bundle")
         if not callable(clock):
             raise TypeError("clock must be injected")
-        self._artifacts = artifacts
+        if not callable(nonce_factory):
+            raise TypeError("nonce_factory must be callable")
+        self._artifacts = private_artifacts
         self._sut = sut
         self._trace_callbacks = trace_callbacks
         self._result_port = result_port
         self._clock = clock
         self._grader_runner = grader_runner or grade_evidence
+        self._nonce_factory = nonce_factory
+        self._authenticated_identity_values: frozenset[str] = (
+            frozenset(
+                case.case_id
+                for case in private_artifacts.cases
+            )
+            | frozenset(
+                script.model_script_ref
+                for script in private_artifacts.scripts
+            )
+        )
+        self._issued_nonces: set[UUID] = set()
+        self._pending_case_by_execution_ref: dict[UUID, str] = {}
+        self._retired_execution_refs: set[UUID] = set()
+        self._persisted_stage_by_replay_key: dict[
+            _ReplayCacheKey,
+            _StagedCase,
+        ] = {}
 
     async def run_lane(
         self,
@@ -479,19 +1683,71 @@ class OfflineEvalHarness:
         case_ids: Sequence[str] | None = None,
         script_ref_by_case: Mapping[str, str] | None = None,
     ) -> EvalLaneRunOutcome:
+        if not _canonical_singleton_state_is_closed():
+            _restore_canonical_singleton_state()
+            raise _fresh_command_error()
+        outcome: EvalLaneRunOutcome | None = None
+        singleton_state_failed = False
+        singleton_state_restored = False
+        try:
+            outcome = await self._run_lane_impl(
+                eval_run_id=eval_run_id,
+                lane=lane,
+                attempt=attempt,
+                case_ids=case_ids,
+                script_ref_by_case=script_ref_by_case,
+            )
+            singleton_state_failed = (
+                not _canonical_singleton_state_is_closed()
+            )
+        finally:
+            singleton_state_restored = (
+                _restore_canonical_singleton_state()
+            )
+        if (
+            singleton_state_failed
+            or not singleton_state_restored
+            or outcome is None
+        ):
+            raise _fresh_command_error()
+        return outcome
+
+    async def _run_lane_impl(
+        self,
+        *,
+        eval_run_id: UUID,
+        lane: str = "offline_gate",
+        attempt: int = 1,
+        case_ids: Sequence[str] | None = None,
+        script_ref_by_case: Mapping[str, str] | None = None,
+    ) -> EvalLaneRunOutcome:
+        private_eval_run_id = _detached_closed_uuid(eval_run_id)
+        if private_eval_run_id is None:
+            raise _fresh_command_error()
+        eval_run_id = private_eval_run_id
         failures: list[EvalExecutionFailureRecord] = []
         setup_failed = False
         lane_artifact: EvalLaneArtifact | None = None
         try:
-            if lane != "offline_gate" or type(attempt) is not int or attempt < 1:
+            if (
+                type(lane) is not str
+                or lane != "offline_gate"
+                or type(attempt) is not int
+                or attempt < 1
+            ):
                 raise ArtifactContractError("offline Harness lane is invalid")
             lane_artifact = self._artifacts.lane_by_name(lane)
         except Exception:
             setup_failed = True
         if setup_failed or lane_artifact is None:
+            safe_lane = (
+                lane
+                if type(lane) is str and lane
+                else "INVALID_LANE"
+            )
             failure = await self._append_failure(
                 eval_run_id=eval_run_id,
-                lane=lane or "INVALID_LANE",
+                lane=safe_lane,
                 phase=EvalExecutionFailurePhase.HARNESS_SETUP,
                 case=None,
                 attempt=None,
@@ -499,7 +1755,7 @@ class OfflineEvalHarness:
                 lane_artifact=None,
             )
             return EvalLaneRunOutcome(
-                lane=lane or "INVALID_LANE",
+                lane=safe_lane,
                 results=(),
                 execution_failures=(failure,),
                 command_passed=False,
@@ -518,7 +1774,15 @@ class OfflineEvalHarness:
         if (
             selection_failed
             or not selected_ids
-            or not all(isinstance(case_id, str) and case_id for case_id in selected_ids)
+            or not all(
+                type(case_id) is str and case_id
+                for case_id in selected_ids
+            )
+            or any(
+                type(case_id) is not str
+                or type(script_ref) is not str
+                for case_id, script_ref in script_selection.items()
+            )
             or len(selected_ids) != len(set(selected_ids))
             or not set(selected_ids) <= set(lane_artifact.case_refs)
         ):
@@ -580,8 +1844,33 @@ class OfflineEvalHarness:
             )
 
         staged: dict[str, _StagedCase] = {}
+        replay_key_by_case: dict[str, _ReplayCacheKey] = {}
         for case_id in selected_ids:
             case = self._artifacts.case_by_id(case_id)
+            replay_key: _ReplayCacheKey | None = None
+            try:
+                normalized_script_ref = _normalized_selected_script_ref(
+                    case,
+                    script_selection.get(case_id),
+                )
+                replay_key = (
+                    eval_run_id,
+                    case_id,
+                    lane_artifact.lane,
+                    attempt,
+                    normalized_script_ref,
+                )
+                replay_key_by_case[case_id] = replay_key
+            except Exception:
+                pass
+            cached_stage = (
+                self._persisted_stage_by_replay_key.get(replay_key)
+                if replay_key is not None
+                else None
+            )
+            if cached_stage is not None:
+                staged[case_id] = cached_stage
+                continue
             stage, failure = await self._stage_case(
                 eval_run_id=eval_run_id,
                 lane_artifact=lane_artifact,
@@ -640,7 +1929,56 @@ class OfflineEvalHarness:
             if failure is not None:
                 failures.append(failure)
             elif persisted_record is not None:
-                persisted.append(persisted_record)
+                public_record = _detached_canonical_model(
+                    persisted_record,
+                    EvalResultRecord,
+                )
+                cache_record = _detached_canonical_model(
+                    persisted_record,
+                    EvalResultRecord,
+                )
+                cache_expectations = _detached_canonical_model(
+                    stage.expectations,
+                    EvalCaseExpectations,
+                )
+                cache_observable = _detached_canonical_model(
+                    stage.safe_observable,
+                    SafeCaseObservable,
+                )
+                replay_key = replay_key_by_case.get(case_id)
+                if (
+                    type(public_record) is EvalResultRecord
+                    and type(cache_record) is EvalResultRecord
+                    and type(cache_expectations)
+                    is EvalCaseExpectations
+                    and type(cache_observable)
+                    is SafeCaseObservable
+                ):
+                    persisted.append(public_record)
+                else:
+                    failures.append(
+                        await self._append_failure(
+                            eval_run_id=eval_run_id,
+                            lane=lane,
+                            phase=(
+                                EvalExecutionFailurePhase.RESULT_PERSISTENCE
+                            ),
+                            case=stage.case,
+                            attempt=attempt,
+                            trace_ref=persisted_record.trace_ref,
+                            lane_artifact=lane_artifact,
+                        )
+                    )
+                    continue
+                if replay_key is not None:
+                    self._persisted_stage_by_replay_key[replay_key] = (
+                        _StagedCase(
+                            case=stage.case,
+                            expectations=cache_expectations,
+                            result=cache_record,
+                            safe_observable=cache_observable,
+                        )
+                    )
 
         command_passed = (
             not failures
@@ -654,6 +1992,69 @@ class OfflineEvalHarness:
             command_passed=command_passed,
         )
 
+    def _issue_nonce_pair(self) -> tuple[UUID, UUID] | None:
+        try:
+            raw_values = (
+                self._nonce_factory(),
+                self._nonce_factory(),
+            )
+            if any(
+                type(value) is not UUID
+                or not _uuid_is_closed(value)
+                for value in raw_values
+            ):
+                return None
+            generated = tuple(
+                UUID(
+                    int=object.__getattribute__(value, "int"),
+                    is_safe=object.__getattribute__(
+                        value,
+                        "is_safe",
+                    ),
+                )
+                for value in raw_values
+            )
+            if (
+                any(value.version != 4 for value in generated)
+                or len(set(generated)) != 2
+                or any(
+                    value in self._issued_nonces
+                    for value in generated
+                )
+            ):
+                self._issued_nonces.update(generated)
+                return None
+            self._issued_nonces.update(generated)
+            return generated[0], generated[1]
+        except Exception:
+            return None
+
+    def _execution_input(
+        self,
+        case: EvalCaseArtifact,
+        *,
+        execution_ref: UUID,
+    ) -> EvalCaseExecutionInput:
+        fixture_ref = case.input.get("trusted_context_fixture_ref")
+        if not isinstance(fixture_ref, str) or not fixture_ref:
+            raise ArtifactContractError(
+                "Case trusted context fixture reference is invalid"
+            )
+        return EvalCaseExecutionInput(
+            execution_ref=execution_ref,
+            messages=(
+                EvalExecutionMessage(
+                    role="user",
+                    content=_trusted_message_content_for_case(case),
+                ),
+            ),
+            trusted_context_fixture_ref=fixture_ref,
+        )
+
+    def _retire_execution_ref(self, execution_ref: UUID) -> None:
+        self._pending_case_by_execution_ref.pop(execution_ref, None)
+        self._retired_execution_refs.add(execution_ref)
+
     async def _stage_case(
         self,
         *,
@@ -664,36 +2065,22 @@ class OfflineEvalHarness:
         selected_script_ref: str | None,
     ) -> tuple[_StagedCase | None, EvalExecutionFailureRecord | None]:
         case_setup_failed = False
-        provider: ScriptedModelProvider | None = None
         expectations: EvalCaseExpectations | None = None
-        runtime_fault: RuntimeFaultDirective | None = None
+        script: ModelScriptArtifact | None = None
         try:
-            script_refs = tuple(case.input.get("model_script_refs", ()))
-            if selected_script_ref is None:
-                if len(script_refs) != 1:
-                    raise ArtifactContractError(
-                        "multi-script Case requires explicit script selection"
-                    )
-                selected_script_ref = script_refs[0]
-            if (
-                not isinstance(selected_script_ref, str)
-                or selected_script_ref not in script_refs
-            ):
-                raise ArtifactContractError("selected script is not bound to Case")
+            selected_script_ref = _normalized_selected_script_ref(
+                case,
+                selected_script_ref,
+            )
             script = self._artifacts.script_by_ref(selected_script_ref)
             expectations = build_authenticated_case_expectations(
                 artifacts=self._artifacts,
                 case=case,
                 script=script,
             )
-            provider = ScriptedModelProvider(
-                self._artifacts,
-                model_script_ref=selected_script_ref,
-            )
-            runtime_fault = provider.take_runtime_fault_directive()
         except Exception:
             case_setup_failed = True
-        if case_setup_failed or provider is None or expectations is None:
+        if case_setup_failed or script is None or expectations is None:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
@@ -704,18 +2091,73 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
 
+        nonce_pair = self._issue_nonce_pair()
+        if nonce_pair is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+        execution_ref, script_execution_ref = nonce_pair
+        provider: ScriptedModelProvider | None = None
+        runtime_fault: RuntimeFaultDirective | None = None
+        execution_input: EvalCaseExecutionInput | None = None
+        try:
+            sut_execution_ref = _detached_closed_uuid(
+                execution_ref
+            )
+            provider_execution_ref = _detached_closed_uuid(
+                script_execution_ref
+            )
+            if (
+                sut_execution_ref is None
+                or provider_execution_ref is None
+            ):
+                raise ValueError("closed nonce clone failed")
+            execution_input = self._execution_input(
+                case,
+                execution_ref=sut_execution_ref,
+            )
+            provider = ScriptedModelProvider(
+                script,
+                script_execution_ref=provider_execution_ref,
+            )
+            runtime_fault = provider.take_runtime_fault_directive()
+        except Exception:
+            case_setup_failed = True
+        if case_setup_failed or provider is None or execution_input is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.CASE_SETUP,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        self._pending_case_by_execution_ref[execution_ref] = case.case_id
+        authenticated_pending_case: str | None = None
         sut_failed = False
         sut_result: EvalCaseSutResult | None = None
         try:
-            sut_result = await self._sut.execute_case(
-                case=case,
-                scripted_provider=provider,
-                runtime_fault=runtime_fault,
+            try:
+                sut_result = await self._sut.execute_case(
+                    execution_input=execution_input,
+                    scripted_provider=provider,
+                    runtime_fault=runtime_fault,
+                )
+            except Exception:
+                sut_failed = True
+            authenticated_pending_case = (
+                self._pending_case_by_execution_ref.get(execution_ref)
             )
-            if sut_result is not None:
-                provider.assert_exhausted()
-        except Exception:
-            sut_failed = True
+        finally:
+            self._retire_execution_ref(execution_ref)
         if sut_failed:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
@@ -726,7 +2168,25 @@ class OfflineEvalHarness:
                 trace_ref=None,
                 lane_artifact=lane_artifact,
             )
-        if type(sut_result) is not EvalCaseSutResult:
+
+        canonical_result: EvalCaseSutResult | None = None
+        if type(sut_result) is EvalCaseSutResult:
+            try:
+                candidate = _canonical_unbound_result(
+                    sut_result,
+                    authenticated_identity_values=(
+                        self._authenticated_identity_values
+                    ),
+                )
+                if (
+                    candidate is not None
+                    and candidate.execution_ref == execution_ref
+                    and authenticated_pending_case == case.case_id
+                ):
+                    canonical_result = candidate
+            except Exception:
+                canonical_result = None
+        if canonical_result is None:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
@@ -736,19 +2196,45 @@ class OfflineEvalHarness:
                 trace_ref=None,
                 lane_artifact=lane_artifact,
             )
-        evidence = sut_result.evidence
-        if (
-            evidence.case_id != case.case_id
-            or not evidence.trace_events
-            or any(
-                event.event_type is TraceEventType.EVAL_CASE_GRADED
-                for event in evidence.trace_events
+
+        evidence: EvalEvidence | None = None
+        safe_observable: SafeCaseObservable | None = None
+        try:
+            evidence, safe_observable = _bind_authenticated_case(
+                canonical_result,
+                case_id=case.case_id,
             )
-        ):
+            evidence = _canonical_bound_evidence(
+                evidence,
+                case_id=case.case_id,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
+            )
+            if evidence is not None:
+                safe_observable = evidence.safe_observable
+        except Exception:
+            pass
+        if evidence is None or safe_observable is None:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
                 phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+        provider_exhaustion_failed = False
+        try:
+            provider.assert_exhausted()
+        except Exception:
+            provider_exhaustion_failed = True
+        if provider_exhaustion_failed:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.SYSTEM_UNDER_TEST,
                 case=case,
                 attempt=attempt,
                 trace_ref=evidence.trace_ref,
@@ -769,6 +2255,22 @@ class OfflineEvalHarness:
         non_trace_names = tuple(
             name for name in configured_names if name != "TraceCompletenessGrader"
         )
+        if not _unbound_result_state_is_closed(
+            sut_result,
+            canonical_result,
+            authenticated_identity_values=(
+                self._authenticated_identity_values
+            ),
+        ):
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=evidence.trace_ref,
+                lane_artifact=lane_artifact,
+            )
         grading_failed = False
         initial_grading: GradingOutcome | None = None
         try:
@@ -777,6 +2279,9 @@ class OfflineEvalHarness:
                 non_trace_names,
                 evidence,
                 expectations,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
             )
         except Exception:
             grading_failed = True
@@ -806,10 +2311,19 @@ class OfflineEvalHarness:
             case_id=case.case_id,
         )
         append_failed = False
-        try:
-            await self._trace_callbacks.append_eval_case_graded(graded_event)
-        except Exception:
+        callback_graded_event = _detached_canonical_model(
+            graded_event,
+            TraceEvent,
+        )
+        if type(callback_graded_event) is not TraceEvent:
             append_failed = True
+        else:
+            try:
+                await self._trace_callbacks.append_eval_case_graded(
+                    callback_graded_event
+                )
+            except Exception:
+                append_failed = True
         if append_failed:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
@@ -822,10 +2336,67 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
 
+        expected_final_evidence: EvalEvidence | None = None
+        callback_event_is_closed = (
+            _detached_external_model_matching(
+                callback_graded_event,
+                graded_event,
+                TraceEvent,
+            )
+            is not None
+        )
+        if (
+            callback_event_is_closed
+            and _unbound_result_state_is_closed(
+                sut_result,
+                canonical_result,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
+            )
+        ):
+            try:
+                expected_final_evidence = _canonical_bound_evidence(
+                    evidence.model_copy(
+                        update={
+                            "trace_events": (
+                                *evidence.trace_events,
+                                graded_event,
+                            )
+                        }
+                    ),
+                    case_id=case.case_id,
+                    authenticated_identity_values=(
+                        self._authenticated_identity_values
+                    ),
+                )
+            except Exception:
+                expected_final_evidence = None
+        if expected_final_evidence is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=evidence.trace_ref,
+                lane_artifact=lane_artifact,
+            )
+        expected_graded_event = (
+            expected_final_evidence.trace_events[-1]
+        )
+
         reload_failed = False
         final_trace: tuple[TraceEvent, ...] | None = None
         try:
-            final_trace = await self._trace_callbacks.reload_trace(evidence.trace_ref)
+            callback_trace_ref = _detached_closed_uuid(
+                evidence.trace_ref
+            )
+            if callback_trace_ref is None:
+                raise ValueError("closed Trace ref clone failed")
+            final_trace = await self._trace_callbacks.reload_trace(
+                callback_trace_ref
+            )
         except Exception:
             reload_failed = True
         if reload_failed:
@@ -839,16 +2410,53 @@ class OfflineEvalHarness:
                 trace_ref=evidence.trace_ref,
                 lane_artifact=lane_artifact,
             )
+        final_evidence: EvalEvidence | None = None
         if (
-            not isinstance(final_trace, tuple)
-            or not all(type(event) is TraceEvent for event in final_trace)
-            or tuple(
+            type(final_trace) is tuple
+            and callback_trace_ref is not None
+            and _uuid_is_closed(callback_trace_ref)
+            and callback_trace_ref == evidence.trace_ref
+            and _unbound_result_state_is_closed(
+                sut_result,
+                canonical_result,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
+            )
+        ):
+            try:
+                final_evidence = _canonical_bound_evidence(
+                    evidence.model_copy(
+                        update={"trace_events": final_trace}
+                    ),
+                    case_id=case.case_id,
+                    authenticated_identity_values=(
+                        self._authenticated_identity_values
+                    ),
+                )
+            except Exception:
+                final_evidence = None
+        if final_evidence is not None:
+            canonical_final_trace = final_evidence.trace_events
+            graded_events = tuple(
                 event
-                for event in final_trace
+                for event in canonical_final_trace
                 if event.event_type is TraceEventType.EVAL_CASE_GRADED
             )
-            != (graded_event,)
-        ):
+            valid_identity_positions = all(
+                (
+                    event.case_id == case.case_id
+                    if event.event_type is TraceEventType.EVAL_CASE_GRADED
+                    else event.case_id is None
+                )
+                for event in canonical_final_trace
+            )
+            if (
+                graded_events != (expected_graded_event,)
+                or not valid_identity_positions
+            ):
+                final_evidence = None
+        if final_evidence is None:
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
@@ -859,7 +2467,7 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
 
-        final_evidence = _replace_trace(evidence, final_trace)
+        final_trace = final_evidence.trace_events
         final_grading_failed = False
         final_grading: GradingOutcome | None = None
         try:
@@ -868,6 +2476,9 @@ class OfflineEvalHarness:
                 ("TraceCompletenessGrader",),
                 final_evidence,
                 expectations,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
             )
         except Exception:
             final_grading_failed = True
@@ -910,20 +2521,20 @@ class OfflineEvalHarness:
             usage_summary=None,
             completed_at=max(event.occurred_at for event in final_trace),
         )
-        safe_observable = SafeCaseObservable(
-            case_id=sut_result.safe_observable.case_id,
-            http_status=sut_result.safe_observable.http_status,
-            user_outcome=sut_result.safe_observable.user_outcome,
-            response_policy=sut_result.safe_observable.response_policy,
+        final_safe_observable = SafeCaseObservable(
+            case_id=case.case_id,
+            http_status=safe_observable.http_status,
+            user_outcome=safe_observable.user_outcome,
+            response_policy=safe_observable.response_policy,
             ordinary_trace_shape=ordinary_trace_shape(final_trace),
-            model_calls=sut_result.safe_observable.model_calls,
+            model_calls=safe_observable.model_calls,
         )
         return (
             _StagedCase(
                 case=case,
                 expectations=expectations,
                 result=result,
-                safe_observable=safe_observable,
+                safe_observable=final_safe_observable,
             ),
             None,
         )
@@ -937,26 +2548,64 @@ class OfflineEvalHarness:
     ) -> tuple[EvalResultRecord | None, EvalExecutionFailureRecord | None]:
         append_failed = False
         write_result: InsertOnlyWriteResult | None = None
-        try:
-            write_result = await self._result_port.append_eval_result(record)
-        except Exception:
+        port_record = _detached_canonical_model(
+            record,
+            EvalResultRecord,
+        )
+        if type(port_record) is not EvalResultRecord:
             append_failed = True
+        else:
+            try:
+                write_result = await self._result_port.append_eval_result(
+                    port_record
+                )
+            except Exception:
+                append_failed = True
+            if (
+                not append_failed
+                and _detached_external_model_matching(
+                    port_record,
+                    record,
+                    EvalResultRecord,
+                )
+                is None
+            ):
+                append_failed = True
+            if not _canonical_singleton_state_is_closed():
+                _restore_canonical_singleton_state()
+                append_failed = True
         if not append_failed and write_result is InsertOnlyWriteResult.INSERTED:
             return record, None
         if not append_failed and write_result is InsertOnlyWriteResult.ALREADY_EXISTS:
             load_failed = False
-            existing: EvalResultRecord | None = None
+            existing: object = None
             try:
+                load_eval_run_id = _detached_closed_uuid(
+                    record.eval_run_id
+                )
+                if load_eval_run_id is None:
+                    raise ValueError("closed Eval run clone failed")
                 existing = await self._result_port.load_eval_result(
-                    eval_run_id=record.eval_run_id,
+                    eval_run_id=load_eval_run_id,
                     case_id=record.case_id,
                     lane=record.lane,
                     attempt=record.attempt,
                 )
             except Exception:
                 load_failed = True
-            if not load_failed and existing == record:
-                return existing, None
+            if not _canonical_singleton_state_is_closed():
+                _restore_canonical_singleton_state()
+                load_failed = True
+            if (
+                not load_failed
+                and _detached_external_model_matching(
+                    existing,
+                    record,
+                    EvalResultRecord,
+                )
+                is not None
+            ):
+                return record, None
         failure = await self._append_failure(
             eval_run_id=record.eval_run_id,
             lane=record.lane,
@@ -980,6 +2629,22 @@ class OfflineEvalHarness:
         lane_artifact: EvalLaneArtifact | None,
         safe_error_code: EvalExecutionSafeErrorCode | None = None,
     ) -> EvalExecutionFailureRecord:
+        if (
+            not _canonical_singleton_state_is_closed()
+            and not _restore_canonical_singleton_state()
+        ):
+            raise _fresh_command_error()
+        try:
+            occurred_at = _detached_closed_datetime(
+                self._clock()
+            )
+        except Exception:
+            occurred_at = None
+        if (
+            occurred_at is None
+            or not _canonical_singleton_state_is_closed()
+        ):
+            raise _fresh_command_error()
         code = safe_error_code or _FAILURE_CODE_BY_PHASE[phase]
         failure = EvalExecutionFailureRecord(
             schema_version="eval_execution_failure_record.p0.v1",
@@ -992,13 +2657,37 @@ class OfflineEvalHarness:
             diagnostic_ref=None,
             trace_ref=trace_ref,
             version_manifest=self._version_manifest(case, lane_artifact),
-            occurred_at=self._clock(),
+            occurred_at=occurred_at,
         )
         append_failed = False
-        try:
-            await self._result_port.append_eval_execution_failure(failure)
-        except Exception:
+        port_failure = _detached_canonical_model(
+            failure,
+            EvalExecutionFailureRecord,
+        )
+        if type(port_failure) is not EvalExecutionFailureRecord:
             append_failed = True
+        else:
+            try:
+                await self._result_port.append_eval_execution_failure(
+                    port_failure
+                )
+            except Exception:
+                append_failed = True
+            if (
+                not append_failed
+                and _detached_external_model_matching(
+                    port_failure,
+                    failure,
+                    EvalExecutionFailureRecord,
+                )
+                is None
+            ):
+                append_failed = True
+            if (
+                not _canonical_singleton_state_is_closed()
+            ):
+                _restore_canonical_singleton_state()
+                append_failed = True
         if append_failed:
             raise _fresh_command_error()
         return failure
@@ -1185,17 +2874,57 @@ def _run_verified_grading(
     configured_names: Sequence[str],
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
+    *,
+    authenticated_identity_values: frozenset[str],
 ) -> GradingOutcome:
     canonical = grade_evidence(
         configured_names,
         evidence,
         expectations,
     )
-    reported = grader_runner(
-        configured_names,
+    runner_evidence = _canonical_bound_evidence(
         evidence,
-        expectations,
+        case_id=evidence.case_id,
+        authenticated_identity_values=authenticated_identity_values,
     )
+    runner_expectations = _detached_canonical_model(
+        expectations,
+        EvalCaseExpectations,
+    )
+    if (
+        runner_evidence is None
+        or type(runner_expectations) is not EvalCaseExpectations
+    ):
+        raise GradingConfigurationError("grader input is incomplete")
+    reported_raw = grader_runner(
+        configured_names,
+        runner_evidence,
+        runner_expectations,
+    )
+    reported = (
+        _detached_canonical_model(
+            reported_raw,
+            GradingOutcome,
+        )
+        if type(reported_raw) is GradingOutcome
+        else None
+    )
+    if (
+        type(reported) is not GradingOutcome
+        or not _canonical_singleton_state_is_closed()
+        or not _payload_tree_is_closed(
+            evidence,
+            forbidden_identity_values=authenticated_identity_values,
+            allowed_schema_identity_values={
+                "case_id": frozenset({evidence.case_id}),
+            },
+        )
+        or not _canonical_model_state_is_closed(
+            expectations,
+            EvalCaseExpectations,
+        )
+    ):
+        raise GradingConfigurationError("grader output is incomplete")
     _validate_grading_output(
         reported,
         configured_names,

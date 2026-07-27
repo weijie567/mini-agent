@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import permutations
 from types import MappingProxyType
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -119,6 +120,19 @@ class SafeCaseObservable(AuditOnlyModel):
     model_calls: Annotated[int, Field(ge=0)]
 
 
+TraceVariant = Literal[
+    "SUCCESS",
+    "FOREIGN_ORDER",
+    "NONEXISTENT_ORDER",
+    "ARGUMENT_BINDING_REJECTED",
+    "PROVIDER_PROTOCOL_BEFORE_CANDIDATE",
+    "INPUT_VALIDATION_REJECTED",
+    "UNKNOWN_TOOL_GATEWAY_REJECTED",
+    "STALE_STATE_GATEWAY_REJECTED",
+    "PRESENTATION_PROTOCOL_REJECTED",
+]
+
+
 class EvalCaseExpectations(AuditOnlyModel):
     """Authenticated, artifact-derived assertions supplied by the Harness.
 
@@ -153,6 +167,7 @@ class EvalCaseExpectations(AuditOnlyModel):
     expected_message_content: str
     expected_tool_registry_version: str
     expected_model_visible_toolset_hash: ToolsetHash
+    trace_variant: TraceVariant
     required_trace_events: tuple[TraceEventType, ...]
     forbidden_trace_events: tuple[TraceEventType, ...] = ()
     expected_event_counts: tuple[TraceEventCountExpectation, ...] = ()
@@ -1489,6 +1504,271 @@ class ErrorMappingGrader:
         return _passed(self.name)
 
 
+@dataclass(frozen=True, slots=True)
+class _TraceNode:
+    event_type: TraceEventType
+    occurrence: int = 1
+    model_call_purpose: str | None = None
+
+
+def _node(
+    event_type: TraceEventType,
+    occurrence: int = 1,
+    *,
+    purpose: str | None = None,
+) -> _TraceNode:
+    return _TraceNode(
+        event_type=event_type,
+        occurrence=occurrence,
+        model_call_purpose=purpose,
+    )
+
+
+_MESSAGE = _node(TraceEventType.MESSAGE_ACCEPTED)
+_RUN_STARTED = _node(TraceEventType.RUN_STARTED)
+_RU_STARTED = _node(TraceEventType.REQUEST_UNDERSTANDING_STARTED)
+_RU_MANIFEST = _node(
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    purpose="REQUEST_UNDERSTANDING",
+)
+_NEXT_MOVE = _node(TraceEventType.NEXT_MOVE_PROPOSED)
+_DELTA_VALIDATED = _node(TraceEventType.TASK_DELTA_VALIDATED)
+_DELTA_ACCEPTED = _node(TraceEventType.TASK_DELTA_ACCEPTED)
+_BINDING = _node(TraceEventType.INPUT_BINDING_RECORDED)
+_TASK_1 = _node(TraceEventType.TASK_STATE_CHANGED, 1)
+_REVALIDATED = _node(TraceEventType.NEXT_MOVE_REVALIDATED)
+_GATE = _node(TraceEventType.GATE_DECISION_RECORDED)
+_TOOL_CREATED = _node(TraceEventType.TOOL_CALL_CREATED)
+_TOOL_STARTED = _node(TraceEventType.TOOL_CALL_STARTED)
+_TOOL_SUCCEEDED = _node(TraceEventType.TOOL_CALL_SUCCEEDED)
+_TOOL_FAILED = _node(TraceEventType.TOOL_CALL_FAILED)
+_NORMALIZED = _node(TraceEventType.TOOL_RESULT_NORMALIZED)
+_OBSERVATION = _node(TraceEventType.OBSERVATION_RECORDED)
+_PRESENTATION_MANIFEST = _node(
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    purpose="PRESENTATION",
+)
+_PRESENTATION_PLAN = _node(TraceEventType.PRESENTATION_PLAN_PROPOSED)
+_RESPONSE = _node(TraceEventType.RESPONSE_RENDERED)
+_TASK_2 = _node(TraceEventType.TASK_STATE_CHANGED, 2)
+_TASK_3 = _node(TraceEventType.TASK_STATE_CHANGED, 3)
+_RUN_STOPPED = _node(TraceEventType.RUN_STOPPED)
+_GRADED = _node(TraceEventType.EVAL_CASE_GRADED)
+
+_COMMON_TRACE_EDGES = (
+    (_MESSAGE, _RUN_STARTED),
+    (_RUN_STARTED, _RU_STARTED),
+    (_RU_STARTED, _RU_MANIFEST),
+)
+_CANDIDATE_TRACE_EDGES = (
+    (_RU_MANIFEST, _NEXT_MOVE),
+    (_NEXT_MOVE, _DELTA_VALIDATED),
+    (_DELTA_VALIDATED, _DELTA_ACCEPTED),
+    (_DELTA_ACCEPTED, _BINDING),
+    (_BINDING, _TASK_1),
+    (_TASK_1, _REVALIDATED),
+    (_REVALIDATED, _GATE),
+)
+_TASKLESS_TERMINAL_EDGES = (
+    (_RU_MANIFEST, _RESPONSE),
+    (_RESPONSE, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_GATEWAY_TERMINAL_EDGES = (
+    (_GATE, _RESPONSE),
+    (_RESPONSE, _TASK_2),
+    (_TASK_2, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_FAILED_TOOL_EDGES = (
+    (_GATE, _TOOL_CREATED),
+    (_TOOL_CREATED, _TOOL_STARTED),
+    (_TOOL_STARTED, _TOOL_FAILED),
+    (_TOOL_FAILED, _NORMALIZED),
+    (_NORMALIZED, _RESPONSE),
+    (_RESPONSE, _TASK_2),
+    (_TASK_2, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_SUCCESS_TOOL_EDGES = (
+    (_GATE, _TOOL_CREATED),
+    (_TOOL_CREATED, _TOOL_STARTED),
+    (_TOOL_STARTED, _TOOL_SUCCEEDED),
+    (_TOOL_SUCCEEDED, _NORMALIZED),
+    (_NORMALIZED, _OBSERVATION),
+    (_OBSERVATION, _PRESENTATION_MANIFEST),
+)
+_TRACE_EDGES_BY_VARIANT: Mapping[
+    TraceVariant,
+    tuple[tuple[_TraceNode, _TraceNode], ...],
+] = MappingProxyType(
+    {
+        "SUCCESS": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_SUCCESS_TOOL_EDGES,
+            (_PRESENTATION_MANIFEST, _PRESENTATION_PLAN),
+            (_PRESENTATION_PLAN, _RESPONSE),
+            (_RESPONSE, _TASK_2),
+            (_TASK_2, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+        "FOREIGN_ORDER": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_FAILED_TOOL_EDGES,
+        ),
+        "NONEXISTENT_ORDER": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_FAILED_TOOL_EDGES,
+        ),
+        "ARGUMENT_BINDING_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_GATEWAY_TERMINAL_EDGES,
+        ),
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE": (
+            *_COMMON_TRACE_EDGES,
+            *_TASKLESS_TERMINAL_EDGES,
+        ),
+        "INPUT_VALIDATION_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_TASKLESS_TERMINAL_EDGES,
+        ),
+        "UNKNOWN_TOOL_GATEWAY_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_GATEWAY_TERMINAL_EDGES,
+        ),
+        "STALE_STATE_GATEWAY_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES[:-1],
+            (_REVALIDATED, _TASK_2),
+            (_TASK_2, _GATE),
+            (_GATE, _RESPONSE),
+            (_RESPONSE, _TASK_3),
+            (_TASK_3, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+        "PRESENTATION_PROTOCOL_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_SUCCESS_TOOL_EDGES,
+            (_PRESENTATION_MANIFEST, _RESPONSE),
+            (_OBSERVATION, _RESPONSE),
+            (_RESPONSE, _TASK_2),
+            (_TASK_2, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+    }
+)
+_SAFETY_CRITICAL_TRACE_TYPES = frozenset(
+    event_type
+    for event_type in TraceEventType
+    if event_type is not TraceEventType.REQUEST_UNDERSTANDING_STARTED
+)
+
+
+def _expected_safety_event_counts(
+    variant: TraceVariant,
+) -> Counter[TraceEventType] | None:
+    edges = _TRACE_EDGES_BY_VARIANT.get(variant)
+    if edges is None:
+        return None
+    occurrence_by_type_and_purpose: dict[
+        TraceEventType,
+        dict[str | None, int],
+    ] = {}
+    for node in {
+        endpoint
+        for edge in edges
+        for endpoint in edge
+        if endpoint.event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    }:
+        by_purpose = occurrence_by_type_and_purpose.setdefault(
+            node.event_type,
+            {},
+        )
+        by_purpose[node.model_call_purpose] = max(
+            by_purpose.get(node.model_call_purpose, 0),
+            node.occurrence,
+        )
+    return Counter(
+        {
+            event_type: sum(by_purpose.values())
+            for event_type, by_purpose in (
+                occurrence_by_type_and_purpose.items()
+            )
+        }
+    )
+
+
+def _trace_safety_cardinality_reason(
+    events: tuple[TraceEvent, ...],
+    variant: TraceVariant,
+) -> EvalGraderReasonCode | None:
+    expected_counts = _expected_safety_event_counts(variant)
+    if expected_counts is None:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    actual_counts = Counter(
+        event.event_type
+        for event in events
+        if event.event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    )
+    ordered_safety_types = tuple(
+        event_type
+        for event_type in TraceEventType
+        if event_type in _SAFETY_CRITICAL_TRACE_TYPES
+    )
+    if any(
+        actual_counts[event_type] < expected_counts[event_type]
+        for event_type in ordered_safety_types
+    ):
+        return EvalGraderReasonCode.TRACE_EVENT_MISSING
+    if any(
+        actual_counts[event_type] > expected_counts[event_type]
+        for event_type in ordered_safety_types
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _trace_node_index(
+    events: tuple[TraceEvent, ...],
+    node: _TraceNode,
+) -> int | None:
+    matches = tuple(
+        index
+        for index, event in enumerate(events)
+        if event.event_type is node.event_type
+        and (
+            node.model_call_purpose is None
+            or event.model_call_purpose == node.model_call_purpose
+        )
+    )
+    if len(matches) < node.occurrence:
+        return None
+    return matches[node.occurrence - 1]
+
+
+def _trace_precedence_reason(
+    events: tuple[TraceEvent, ...],
+    variant: TraceVariant,
+) -> EvalGraderReasonCode | None:
+    edges = _TRACE_EDGES_BY_VARIANT.get(variant)
+    if edges is None:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    for before, after in edges:
+        before_index = _trace_node_index(events, before)
+        after_index = _trace_node_index(events, after)
+        if before_index is None or after_index is None:
+            return EvalGraderReasonCode.TRACE_EVENT_MISSING
+        if before_index >= after_index:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 class TraceCompletenessGrader:
     name = "TraceCompletenessGrader"
 
@@ -1533,6 +1813,18 @@ class TraceCompletenessGrader:
         event_ids = tuple(event.trace_event_id for event in events)
         if len(event_ids) != len(set(event_ids)):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        cardinality_reason = _trace_safety_cardinality_reason(
+            events,
+            expectations.trace_variant,
+        )
+        if cardinality_reason is not None:
+            return _failed(self.name, cardinality_reason)
+        precedence_reason = _trace_precedence_reason(
+            events,
+            expectations.trace_variant,
+        )
+        if precedence_reason is not None:
+            return _failed(self.name, precedence_reason)
         if any(event.run_id != evidence.run_record.run_id for event in events):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         if any(event.case_id not in {None, evidence.case_id} for event in events):
@@ -1737,6 +2029,281 @@ def _fixed_message(response_policy: str) -> str | None:
     return _FIXED_MESSAGES.get(response_policy)
 
 
+def _tool_lifecycle_references_match(
+    events: tuple[TraceEvent, ...],
+    tool_calls: tuple[ToolCallRecord, ...],
+) -> bool:
+    lifecycle_status_by_type = {
+        TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+        TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+        TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
+    }
+    lifecycle_types = frozenset(lifecycle_status_by_type)
+    lifecycle_events = tuple(
+        event for event in events if event.event_type in lifecycle_types
+    )
+    tool_call_refs = {
+        event.tool_call_id for event in lifecycle_events
+    }
+    if tool_call_refs != {item.tool_call_id for item in tool_calls}:
+        return False
+    if any(
+        event.tool_call_terminal_status
+        is not lifecycle_status_by_type[event.event_type]
+        for event in lifecycle_events
+    ):
+        return False
+    expected_lifecycle_by_status: dict[
+        ToolCallStatus,
+        tuple[TraceEventType, ...],
+    ] = {
+        ToolCallStatus.CREATED: (TraceEventType.TOOL_CALL_CREATED,),
+        ToolCallStatus.RUNNING: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+        ),
+        ToolCallStatus.SUCCEEDED: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_SUCCEEDED,
+        ),
+        ToolCallStatus.FAILED: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_FAILED,
+        ),
+        ToolCallStatus.TIMED_OUT: (
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_TIMED_OUT,
+        ),
+    }
+    for tool_call in tool_calls:
+        actual_lifecycle = tuple(
+            event.event_type
+            for event in lifecycle_events
+            if event.tool_call_id == tool_call.tool_call_id
+        )
+        expected_lifecycle = expected_lifecycle_by_status.get(
+            tool_call.status
+        )
+        if tool_call.status is ToolCallStatus.INTERRUPTED:
+            expected_lifecycle = (
+                (
+                    TraceEventType.TOOL_CALL_CREATED,
+                    TraceEventType.TOOL_CALL_INTERRUPTED,
+                )
+                if tool_call.attempt_count == 0
+                else (
+                    TraceEventType.TOOL_CALL_CREATED,
+                    TraceEventType.TOOL_CALL_STARTED,
+                    TraceEventType.TOOL_CALL_INTERRUPTED,
+                )
+            )
+        if actual_lifecycle != expected_lifecycle:
+            return False
+    return True
+
+
+def _normalized_tool_result_matches_typed_records(
+    evidence: EvalEvidence,
+) -> bool:
+    normalized_by_call: dict[UUID, tuple[int, ToolResultOutcome]] = {}
+    for index, event in enumerate(evidence.trace_events):
+        if event.event_type is not TraceEventType.TOOL_RESULT_NORMALIZED:
+            continue
+        if (
+            event.tool_call_id is None
+            or event.safe_tool_outcome is None
+            or event.tool_call_id in normalized_by_call
+        ):
+            return False
+        normalized_by_call[event.tool_call_id] = (
+            index,
+            event.safe_tool_outcome,
+        )
+
+    tool_call_by_id = {
+        tool_call.tool_call_id: tool_call
+        for tool_call in evidence.tool_calls
+    }
+    attempts_by_call: dict[UUID, list[ToolAttemptRecord]] = {
+        tool_call_id: [] for tool_call_id in tool_call_by_id
+    }
+    for attempt in evidence.tool_attempts:
+        attempts = attempts_by_call.get(attempt.tool_call_id)
+        if attempts is None:
+            return False
+        attempts.append(attempt)
+
+    terminal_outcomes: Mapping[
+        ToolCallStatus,
+        frozenset[ToolResultOutcome],
+    ] = {
+        ToolCallStatus.SUCCEEDED: frozenset(
+            {ToolResultOutcome.SUCCESS}
+        ),
+        ToolCallStatus.FAILED: frozenset(
+            {
+                ToolResultOutcome.BUSINESS_FAILURE,
+                ToolResultOutcome.SYSTEM_FAILURE,
+            }
+        ),
+        ToolCallStatus.TIMED_OUT: frozenset(
+            {ToolResultOutcome.TIMEOUT}
+        ),
+        ToolCallStatus.INTERRUPTED: frozenset(
+            {ToolResultOutcome.INTERRUPTED}
+        ),
+    }
+    expected_observations = 0
+    for tool_call_id, tool_call in tool_call_by_id.items():
+        attempts = tuple(
+            sorted(
+                attempts_by_call[tool_call_id],
+                key=lambda attempt: attempt.attempt_no,
+            )
+        )
+        if (
+            len(attempts) != tool_call.attempt_count
+            or tuple(attempt.attempt_no for attempt in attempts)
+            != tuple(range(1, tool_call.attempt_count + 1))
+        ):
+            return False
+        normalized = normalized_by_call.get(tool_call_id)
+        if tool_call.status in {
+            ToolCallStatus.CREATED,
+            ToolCallStatus.RUNNING,
+        }:
+            if normalized is not None:
+                return False
+            continue
+        if normalized is None:
+            return False
+        _, normalized_outcome = normalized
+        allowed_outcomes = terminal_outcomes.get(tool_call.status)
+        if (
+            allowed_outcomes is None
+            or normalized_outcome not in allowed_outcomes
+        ):
+            return False
+        if (
+            tool_call.status is ToolCallStatus.INTERRUPTED
+            and tool_call.attempt_count == 0
+        ):
+            if attempts:
+                return False
+        elif tool_call.status is ToolCallStatus.INTERRUPTED:
+            if (
+                not attempts
+                or attempts[-1].outcome
+                not in {None, ToolResultOutcome.INTERRUPTED}
+                or (
+                    attempts[-1].outcome is None
+                    and attempts[-1].finished_at is not None
+                )
+                or (
+                    attempts[-1].outcome
+                    is ToolResultOutcome.INTERRUPTED
+                    and attempts[-1].finished_at is None
+                )
+            ):
+                return False
+        else:
+            if (
+                not attempts
+                or attempts[-1].outcome is not normalized_outcome
+            ):
+                return False
+        if tool_call.status is ToolCallStatus.SUCCEEDED:
+            expected_observations += 1
+
+    terminal_call_ids = {
+        tool_call.tool_call_id
+        for tool_call in evidence.tool_calls
+        if tool_call.status
+        not in {ToolCallStatus.CREATED, ToolCallStatus.RUNNING}
+    }
+    if (
+        set(normalized_by_call) != terminal_call_ids
+        or len(evidence.observations) != expected_observations
+    ):
+        return False
+
+    for index, event in enumerate(evidence.trace_events):
+        if (
+            event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED
+            or event.safe_tool_outcome is None
+        ):
+            continue
+        if event.tool_call_id is None:
+            return False
+        normalized = normalized_by_call.get(event.tool_call_id)
+        if (
+            normalized is None
+            or index <= normalized[0]
+            or event.safe_tool_outcome is not normalized[1]
+        ):
+            return False
+    return True
+
+
+def _trace_projection_fields_match_typed_records(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> bool:
+    for event in evidence.trace_events:
+        if event.event_type is not TraceEventType.GATE_DECISION_RECORDED and (
+            event.gate_decision is not None
+            or event.gate_reason_code is not None
+        ):
+            return False
+        if event.event_type is not TraceEventType.RUN_STOPPED and (
+            event.user_outcome is not None
+            or event.stop_reason is not None
+        ):
+            return False
+
+    gate_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+    )
+    if Counter(
+        (event.gate_decision, event.gate_reason_code)
+        for event in gate_events
+    ) != Counter(
+        (decision.decision, decision.reason_code)
+        for decision in evidence.gate_decisions
+    ):
+        return False
+
+    stopped_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    if (
+        len(stopped_events) != 1
+        or evidence.run_record is None
+        or evidence.agent_result is None
+    ):
+        return False
+    stopped = stopped_events[0]
+    return (
+        stopped.user_outcome
+        is evidence.observed_outcome
+        is evidence.agent_result.outcome
+        is expectations.expected_outcome
+        and stopped.stop_reason
+        is evidence.run_record.stop_reason
+        is expectations.expected_stop_reason
+    )
+
+
 def _trace_references_match_typed_records(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
@@ -1909,18 +2476,14 @@ def _trace_references_match_typed_records(
     ):
         return False
 
-    lifecycle_types = {
-        TraceEventType.TOOL_CALL_CREATED,
-        TraceEventType.TOOL_CALL_STARTED,
-        TraceEventType.TOOL_CALL_SUCCEEDED,
-        TraceEventType.TOOL_CALL_FAILED,
-        TraceEventType.TOOL_CALL_TIMED_OUT,
-        TraceEventType.TOOL_CALL_INTERRUPTED,
-    }
-    tool_call_refs = {
-        event.tool_call_id for event in events if event.event_type in lifecycle_types
-    }
-    if tool_call_refs != {item.tool_call_id for item in evidence.tool_calls}:
+    if not _tool_lifecycle_references_match(events, evidence.tool_calls):
+        return False
+    if not _normalized_tool_result_matches_typed_records(evidence):
+        return False
+    if not _trace_projection_fields_match_typed_records(
+        evidence,
+        expectations,
+    ):
         return False
 
     observation_refs = {

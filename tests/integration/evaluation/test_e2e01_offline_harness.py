@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from enum import Enum, StrEnum
+from inspect import signature
 from pathlib import Path
 from typing import cast
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid5
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from mini_agent.application.persistence import (
     P0PersistenceEnvelope,
@@ -32,7 +36,13 @@ from mini_agent.application.records import (
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
+    ProviderProtocolError,
     RunTaskLinkRecord,
+)
+from mini_agent.core.common import (
+    FrozenJsonDict,
+    FrozenJsonList,
+    freeze_json_value,
 )
 from mini_agent.core.memory import (
     ContextManifest,
@@ -61,9 +71,11 @@ from mini_agent.core.task_state import (
     RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
+    TaskStatus,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
+    GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
@@ -78,11 +90,14 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
+    AgentRunStatus,
+    StopReason,
     TraceEvent,
     TraceEventType,
 )
 from mini_agent.evaluation.artifacts import (
     EvalCaseArtifact,
+    LoadedE2E01Artifacts,
     load_e2e01_artifacts,
 )
 from mini_agent.evaluation.graders import (
@@ -95,12 +110,25 @@ from mini_agent.evaluation.graders import (
     ordinary_trace_shape,
 )
 from mini_agent.evaluation.harness import (
+    EvalCaseExecutionInput,
     EvalCaseSutResult,
     EvalHarnessCommandError,
     OfflineEvalHarness,
+    UnboundEvalEvidence,
+    UnboundSafeCaseObservable,
     append_qwen_not_run_record,
     build_authenticated_case_expectations,
     build_qwen_baseline_preflight,
+    _CANONICAL_RESULT_ENUM_TYPES,
+    _DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS,
+    _MAX_PAYLOAD_DEPTH,
+    _MAX_PAYLOAD_EDGES,
+    _is_semantic_identity_field,
+    _PayloadTraversalState,
+    _payload_tree_is_closed,
+    _SAFE_IDENTITY_FIELD_TOKEN_TUPLES,
+    _same_exact_value_tree,
+    _SEMANTIC_SCHEMA_IDENTITY_FIELDS,
 )
 from mini_agent.evaluation.scripted_provider import (
     RuntimeFaultDirective,
@@ -117,19 +145,370 @@ EVAL_RUN_ID = UUID("00000000-0000-4000-8000-000000000801")
 RUN_ID = UUID("00000000-0000-4000-8000-000000000802")
 TRACE_REF = UUID("00000000-0000-4000-8000-000000000803")
 NOW = datetime(2026, 7, 27, 9, 0, tzinfo=UTC)
+EXECUTION_REF_1 = UUID("11111111-1111-4111-8111-111111111111")
+SCRIPT_EXECUTION_REF_1 = UUID("22222222-2222-4222-8222-222222222222")
+EXECUTION_REF_2 = UUID("33333333-3333-4333-8333-333333333333")
+SCRIPT_EXECUTION_REF_2 = UUID("44444444-4444-4444-8444-444444444444")
+EXECUTION_REF_3 = UUID("55555555-5555-4555-8555-555555555555")
+SCRIPT_EXECUTION_REF_3 = UUID("66666666-6666-4666-8666-666666666666")
+EXECUTION_REF_4 = UUID("77777777-7777-4777-8777-777777777777")
+SCRIPT_EXECUTION_REF_4 = UUID("88888888-8888-4888-8888-888888888888")
+UNKNOWN_EXECUTION_REF = UUID("99999999-9999-4999-8999-999999999999")
+EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF = {
+    "script:e2e01-01:success": "SUCCESS",
+    "script:e2e01-04-a:foreign-order": "FOREIGN_ORDER",
+    "script:e2e01-04-b:nonexistent-order": "NONEXISTENT_ORDER",
+    "script:sec-argument-binding:foreign-order": "ARGUMENT_BINDING_REJECTED",
+    "script:sec-argument-binding:nonexistent-order": "ARGUMENT_BINDING_REJECTED",
+    "script:fault-provider:zero-target-functions": (
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE"
+    ),
+    "script:fault-provider:multiple-target-functions": (
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE"
+    ),
+    "script:fault-provider:invalid-request-understanding-schema": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:source-authority-mismatch": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:trusted-field-override": (
+        "INPUT_VALIDATION_REJECTED"
+    ),
+    "script:fault-provider:unknown-tool-name": "UNKNOWN_TOOL_GATEWAY_REJECTED",
+    "script:fault-runtime:state-advanced-before-gate": (
+        "STALE_STATE_GATEWAY_REJECTED"
+    ),
+    "script:fault-presentation:zero-target-functions": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:multiple-target-functions": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:invalid-schema": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+    "script:fault-presentation:fact-bearing-envelope": (
+        "PRESENTATION_PROTOCOL_REJECTED"
+    ),
+}
+
+
+class SmuggledCaseIdentity(StrEnum):
+    VALUE = "E2E01-01"
+
+
+class SmuggledScriptIdentity(Enum):
+    VALUE = "script:e2e01-01:success"
+
+
+class InnerSmuggledCaseIdentity(Enum):
+    VALUE = "E2E01-01"
+
+
+class OuterSmuggledCaseIdentity(Enum):
+    VALUE = InnerSmuggledCaseIdentity.VALUE
+
+
+class IdentityString(str):
+    pass
+
+
+class SubclassSmuggledCaseIdentity(Enum):
+    VALUE = IdentityString("E2E01-01")
+
+
+class WrappedSemanticIdentity(Enum):
+    VALUE = {"case_code": "business-opaque-value"}
+
+
+class WrappedBundleIdentity(Enum):
+    VALUE = {"metadata": "E2E01-04-A"}
+
+
+class SemanticCaseCodeKey(Enum):
+    VALUE = "case_code"
+
+
+class InnerSemanticScriptUuidKey(Enum):
+    VALUE = "script_uuid"
+
+
+class OuterSemanticScriptUuidKey(Enum):
+    VALUE = InnerSemanticScriptUuidKey.VALUE
+
+
+class SemanticKeyString(str):
+    pass
+
+
+class SubclassSemanticCaseNumberKey(Enum):
+    VALUE = SemanticKeyString("case_number")
+
+
+class OrdinaryBusinessKey(Enum):
+    VALUE = "customer_case_id"
+
+
+class OrdinaryLexicalKey(Enum):
+    VALUE = "showcasecode"
+
+
+class SubclassOrdinaryLexicalKey(Enum):
+    VALUE = SemanticKeyString("scripture")
+
+
+class FlipMapping(Mapping[str, object]):
+    def __init__(self) -> None:
+        self.iterations = 0
+
+    def __getitem__(self, key: str) -> object:
+        if key != "metadata":
+            raise KeyError(key)
+        return (
+            "ordinary-value"
+            if self.iterations <= 1
+            else "E2E01-01"
+        )
+
+    def __iter__(self):
+        self.iterations += 1
+        return iter(("metadata",))
+
+    def __len__(self) -> int:
+        return 1
+
+
+class FlipList(list[object]):
+    def __init__(self) -> None:
+        super().__init__(("ordinary-value",))
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations == 1:
+            return list.__iter__(self)
+        return iter(("E2E01-01",))
+
+
+class FlipTuple(tuple[object, ...]):
+    def __new__(cls):
+        return tuple.__new__(cls, ("ordinary-value",))
+
+    def __init__(self) -> None:
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations == 1:
+            return tuple.__iter__(self)
+        return iter(("E2E01-01",))
+
+
+class FlipSet(set[object]):
+    def __init__(self) -> None:
+        super().__init__(("ordinary-value",))
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations == 1:
+            return set.__iter__(self)
+        return iter(("E2E01-01",))
+
+
+@dataclass
+class EnumValueReadCounter:
+    reads: int = 0
+
+
+FLIP_ENUM_VALUE_READ_COUNTER = EnumValueReadCounter()
+
+
+class FlipValueEnum(Enum):
+    VALUE = "ordinary-value"
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "value":
+            FLIP_ENUM_VALUE_READ_COUNTER.reads += 1
+            if FLIP_ENUM_VALUE_READ_COUNTER.reads == 1:
+                return "ordinary-value"
+            return "E2E01-01"
+        return super().__getattribute__(name)
+
+
+@dataclass
+class StringMethodReadCounter:
+    reads: int = 0
+
+
+FLIP_STRING_METHOD_READ_COUNTER = StringMethodReadCounter()
+
+
+class FlipString(str):
+    def __new__(cls, value: str):
+        return str.__new__(cls, value)
+
+    def __str__(self) -> str:
+        FLIP_STRING_METHOD_READ_COUNTER.reads += 1
+        return "E2E01-01"
+
+
+@dataclass
+class SidecarMethodReadCounter:
+    reads: int = 0
+
+
+SIDECAR_METHOD_READ_COUNTER = SidecarMethodReadCounter()
+
+
+class SneakyFieldsSet(set[str]):
+    def issubset(self, other: object) -> bool:
+        SIDECAR_METHOD_READ_COUNTER.reads += 1
+        return True
+
+    def __le__(self, other: object) -> bool:
+        SIDECAR_METHOD_READ_COUNTER.reads += 1
+        return True
+
+    def __iter__(self):
+        SIDECAR_METHOD_READ_COUNTER.reads += 1
+        return iter(("safe_observable",))
+
+
+class SneakyStorageKey(str):
+    def __hash__(self) -> int:
+        SIDECAR_METHOD_READ_COUNTER.reads += 1
+        return str.__hash__(self)
+
+    def __eq__(self, other: object) -> bool:
+        SIDECAR_METHOD_READ_COUNTER.reads += 1
+        return str.__eq__(self, other)
+
+
+@dataclass
+class TimezoneMethodReadCounter:
+    reads: int = 0
+
+
+TIMEZONE_METHOD_READ_COUNTER = TimezoneMethodReadCounter()
+
+
+class EvilTz(tzinfo):
+    secret = "E2E01-01"
+
+    def utcoffset(self, value: datetime | None) -> timedelta:
+        TIMEZONE_METHOD_READ_COUNTER.reads += 1
+        return timedelta(0)
+
+    def dst(self, value: datetime | None) -> timedelta:
+        TIMEZONE_METHOD_READ_COUNTER.reads += 1
+        return timedelta(0)
+
+    def tzname(self, value: datetime | None) -> str:
+        TIMEZONE_METHOD_READ_COUNTER.reads += 1
+        return "E2E01-01"
+
+
+@dataclass
+class BoundaryMethodReadCounter:
+    reads: int = 0
+
+
+BOUNDARY_METHOD_READ_COUNTER = BoundaryMethodReadCounter()
+
+
+class EvilEquality:
+    def __eq__(self, other: object) -> bool:
+        BOUNDARY_METHOD_READ_COUNTER.reads += 1
+        raise RuntimeError("raw-boundary-equality-secret")
+
+    def __ne__(self, other: object) -> bool:
+        BOUNDARY_METHOD_READ_COUNTER.reads += 1
+        raise RuntimeError("raw-boundary-equality-secret")
+
+
+class EvilInt(int):
+    def __and__(self, other: object) -> int:
+        BOUNDARY_METHOD_READ_COUNTER.reads += 1
+        raise RuntimeError("raw-nonce-secret")
+
+    def __rand__(self, other: object) -> int:
+        BOUNDARY_METHOD_READ_COUNTER.reads += 1
+        raise RuntimeError("raw-nonce-secret")
+
+
+class ReloadFlipTuple(tuple[object, ...]):
+    def __new__(
+        cls,
+        values: Sequence[object],
+    ) -> ReloadFlipTuple:
+        return tuple.__new__(cls, values)
+
+    def __iter__(self):
+        BOUNDARY_METHOD_READ_COUNTER.reads += 1
+        raise RuntimeError("raw-trace-store-secret")
+
+
+def _canonical_enum_storage_is_pristine(
+    member: Enum,
+    expected_items: tuple[tuple[str, object], ...],
+) -> bool:
+    storage = object.__getattribute__(member, "__dict__")
+    if type(storage) is not dict:
+        return False
+    names = tuple(dict.__iter__(storage))
+    if names != tuple(name for name, _ in expected_items):
+        return False
+    return all(
+        (
+            dict.__getitem__(storage, name) is expected
+            or (
+                type(dict.__getitem__(storage, name))
+                is type(expected)
+                and dict.__getitem__(storage, name) == expected
+            )
+        )
+        for name, expected in expected_items
+    )
+
+
+class NonceFactorySpy:
+    def __init__(self, values: Sequence[UUID]) -> None:
+        self._values = tuple(values)
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> UUID:
+        self.calls.append((args, dict(kwargs)))
+        if args or kwargs:
+            raise AssertionError("nonce factory received semantic arguments")
+        index = len(self.calls) - 1
+        if index >= len(self._values):
+            raise AssertionError("nonce factory called more often than expected")
+        return self._values[index]
 
 
 def _tool_spec() -> ToolSpec:
     return get_order_tool_spec()
 
 
-def _request(case: EvalCaseArtifact) -> RequestUnderstandingInput:
+def _request(
+    source: EvalCaseArtifact | EvalCaseExecutionInput,
+) -> RequestUnderstandingInput:
     tool = _tool_spec()
-    message = case.input["messages"][0]
+    if type(source) is EvalCaseExecutionInput:
+        run_id = _case_uuid(str(source.execution_ref), "request-run")
+        message_ref = _case_uuid(str(source.execution_ref), "message")
+        original_query = source.messages[0].content
+    else:
+        message = source.input["messages"][0]
+        run_id = RUN_ID
+        message_ref = UUID("00000000-0000-4000-8000-000000000804")
+        original_query = message["content"]
     return RequestUnderstandingInput(
-        run_id=RUN_ID,
-        message_ref=UUID("00000000-0000-4000-8000-000000000804"),
-        original_query=message["content"],
+        run_id=run_id,
+        message_ref=message_ref,
+        original_query=original_query,
         provider_visible_tool_specs=(tool,),
         model_visible_toolset_hash=compute_model_visible_toolset_hash((tool,)),
     )
@@ -319,158 +698,330 @@ def _observation_envelope(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SyntheticActualProfile:
+    customer_id: str
+    http_status: int
+    outcome: AgentOutcome
+    run_status: AgentRunStatus
+    stop_reason: StopReason
+    response_policy: str
+    binding_order_id: str
+    requested_tool_name: str
+    task_status: TaskStatus
+    task_state_version: int
+    gate_decision: GateDecisionValue
+    gate_reason: GateReasonCode | None
+    tool_call_status: ToolCallStatus | None
+    observation_count: int
+    model_calls: int
+    presentation_model_calls: int
+    trace_path: str
+
+
+_COMMON_TRACE_PREFIX = (
+    TraceEventType.MESSAGE_ACCEPTED,
+    TraceEventType.RUN_STARTED,
+    TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    TraceEventType.NEXT_MOVE_PROPOSED,
+    TraceEventType.TASK_DELTA_VALIDATED,
+    TraceEventType.TASK_DELTA_ACCEPTED,
+    TraceEventType.INPUT_BINDING_RECORDED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.NEXT_MOVE_REVALIDATED,
+)
+_TRACE_SEQUENCE_BY_PATH = {
+    "SUCCESS": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "FAILED_TOOL": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "GATEWAY_REJECTED": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "STALE_STATE": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "PRESENTATION_FAULT": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+}
+
+
+def _actual_profile(
+    request_output,
+    *,
+    runtime_fault: RuntimeFaultDirective | None,
+    presentation_failed: bool,
+) -> _SyntheticActualProfile:
+    candidate = request_output.task_delta_candidates[0]
+    message_order_id = str(candidate.input_candidates[0].candidate_value)
+    next_move_order_id = str(
+        request_output.next_move_candidate.arguments["order_id"]
+    )
+    requested_tool_name = request_output.next_move_candidate.requested_tool_name
+    common: dict[str, object] = {
+        "customer_id": "customer-A",
+        "http_status": 200,
+        "run_status": AgentRunStatus.COMPLETED,
+        "binding_order_id": message_order_id,
+        "requested_tool_name": requested_tool_name,
+        "model_calls": 1,
+        "presentation_model_calls": 0,
+    }
+    if runtime_fault is not None:
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=3,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.STATE_VERSION_MISMATCH,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="STALE_STATE",
+        )
+    if message_order_id != next_move_order_id:
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="GATEWAY_REJECTED",
+        )
+    if requested_tool_name != "get_order":
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.TOOL_NOT_REGISTERED,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="GATEWAY_REJECTED",
+        )
+    if next_move_order_id != "O-1001":
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            stop_reason=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            response_policy="FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+            task_status=TaskStatus.COMPLETED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.ACCEPT,
+            gate_reason=None,
+            tool_call_status=ToolCallStatus.FAILED,
+            observation_count=0,
+            trace_path="FAILED_TOOL",
+        )
+    if presentation_failed:
+        return _SyntheticActualProfile(
+            **{**common, "model_calls": 2, "presentation_model_calls": 1},
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.ACCEPT,
+            gate_reason=None,
+            tool_call_status=ToolCallStatus.SUCCEEDED,
+            observation_count=1,
+            trace_path="PRESENTATION_FAULT",
+        )
+    return _SyntheticActualProfile(
+        **{**common, "model_calls": 2, "presentation_model_calls": 1},
+        outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReason.GOAL_COMPLETED,
+        response_policy="DETERMINISTIC_ORDER_SUMMARY_V1",
+        task_status=TaskStatus.COMPLETED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_call_status=ToolCallStatus.SUCCEEDED,
+        observation_count=1,
+        trace_path="SUCCESS",
+    )
+
+
 def _synthetic_trace(
     *,
-    expectations: EvalCaseExpectations,
+    profile: _SyntheticActualProfile,
+    identity_seed: str,
     run_id: UUID,
     message_ref: UUID,
-    accepted_delta: AcceptedTaskDelta | None,
-    binding: InputBinding | None,
-    task: TaskRecord | None,
-    request_unit: RequestUnitRecord | None,
-    gate: GateDecision | None,
+    accepted_delta: AcceptedTaskDelta,
+    binding: InputBinding,
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+    gate: GateDecision,
     tool_call: ToolCallRecord | None,
     observation: OrderObservation | None,
     manifests: tuple[ContextManifest, ...],
 ) -> tuple[TraceEvent, ...]:
-    exact_counts = {
-        item.event_type: item.count for item in expectations.expected_event_counts
-    }
     events: list[TraceEvent] = []
     manifest_index = 0
-    sequence = 0
-    for event_type in expectations.required_trace_events:
-        if event_type is TraceEventType.EVAL_CASE_GRADED:
-            continue
-        count = exact_counts.get(event_type, 1)
-        for _ in range(count):
-            sequence += 1
-            values: dict[str, object] = {
-                "trace_event_id": _case_uuid(
-                    expectations.case_id,
-                    f"trace:{sequence}",
-                ),
-                "event_type": event_type,
-                "occurred_at": NOW + timedelta(milliseconds=sequence),
-                "run_id": run_id,
-                "case_id": expectations.case_id,
-            }
-            if event_type is TraceEventType.MESSAGE_ACCEPTED:
-                values["message_ref"] = message_ref
-            elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
-                assert (
-                    accepted_delta is not None
-                    and task is not None
-                    and request_unit is not None
-                )
-                values.update(
-                    {
-                        "message_ref": message_ref,
-                        "accepted_delta_ref": accepted_delta.accepted_delta_id,
-                        "task_id": task.task_id,
-                        "request_unit_id": request_unit.request_unit_id,
-                    }
-                )
-            elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
-                manifest = manifests[manifest_index]
-                request_understanding_calls = (
-                    expectations.expected_model_calls
-                    - expectations.expected_presentation_model_calls
-                )
-                model_call_purpose = (
-                    "REQUEST_UNDERSTANDING"
-                    if manifest_index < request_understanding_calls
-                    else "PRESENTATION"
-                )
-                manifest_index += 1
-                values.update(
-                    {
-                        "context_manifest_id": manifest.context_manifest_id,
-                        "model_call_id": manifest.model_call_id,
-                        "model_call_purpose": model_call_purpose,
-                        "tool_registry_version": (manifest.tool_registry_version),
-                        "model_visible_toolset_hash": (
-                            manifest.model_visible_toolset_hash
-                        ),
-                    }
-                )
-            elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
-                assert binding is not None
-                values["input_binding_ref"] = binding.binding_id
-            elif event_type is TraceEventType.TASK_STATE_CHANGED:
-                assert task is not None and request_unit is not None
-                values.update(
-                    {
-                        "task_id": task.task_id,
-                        "request_unit_id": request_unit.request_unit_id,
-                    }
-                )
-            elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
-                values["validated_task_state_version"] = 1
-            elif event_type is TraceEventType.GATE_DECISION_RECORDED:
-                assert gate is not None
-                values.update(
-                    {
-                        "gate_decision": gate.decision,
-                        "gate_reason_code": gate.reason_code,
-                    }
-                )
-            elif event_type in {
-                TraceEventType.TOOL_CALL_CREATED,
-                TraceEventType.TOOL_CALL_STARTED,
-                TraceEventType.TOOL_CALL_SUCCEEDED,
-                TraceEventType.TOOL_CALL_FAILED,
-                TraceEventType.TOOL_CALL_TIMED_OUT,
-                TraceEventType.TOOL_CALL_INTERRUPTED,
-            }:
-                assert tool_call is not None
-                status_by_type = {
-                    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
-                    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
-                    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
-                    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
-                    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
-                    TraceEventType.TOOL_CALL_INTERRUPTED: (ToolCallStatus.INTERRUPTED),
+    for sequence, event_type in enumerate(
+        _TRACE_SEQUENCE_BY_PATH[profile.trace_path],
+        start=1,
+    ):
+        values: dict[str, object] = {
+            "trace_event_id": _case_uuid(identity_seed, f"trace:{sequence}"),
+            "event_type": event_type,
+            "occurred_at": NOW + timedelta(milliseconds=sequence),
+            "run_id": run_id,
+            "case_id": None,
+        }
+        if event_type is TraceEventType.MESSAGE_ACCEPTED:
+            values["message_ref"] = message_ref
+        elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
+            values.update(
+                {
+                    "message_ref": message_ref,
+                    "accepted_delta_ref": accepted_delta.accepted_delta_id,
+                    "task_id": task.task_id,
+                    "request_unit_id": request_unit.request_unit_id,
                 }
-                values.update(
-                    {
-                        "tool_call_id": tool_call.tool_call_id,
-                        "tool_call_terminal_status": status_by_type[event_type],
-                    }
-                )
-            elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
-                assert tool_call is not None
-                values.update(
-                    {
-                        "tool_call_id": tool_call.tool_call_id,
-                        "safe_tool_outcome": (
-                            ToolResultOutcome.SUCCESS
-                            if tool_call.status is ToolCallStatus.SUCCEEDED
-                            else ToolResultOutcome.BUSINESS_FAILURE
-                        ),
-                    }
-                )
-            elif event_type is TraceEventType.OBSERVATION_RECORDED:
-                assert observation is not None
-                values["observation_ref"] = observation.observation_id
-            elif event_type is TraceEventType.RUN_STOPPED:
-                values.update(
-                    {
-                        "user_outcome": expectations.expected_outcome,
-                        "stop_reason": expectations.expected_stop_reason,
-                    }
-                )
-            events.append(TraceEvent(**values))
+            )
+        elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
+            manifest = manifests[manifest_index]
+            purpose = (
+                "REQUEST_UNDERSTANDING"
+                if manifest_index == 0
+                else "PRESENTATION"
+            )
+            manifest_index += 1
+            values.update(
+                {
+                    "context_manifest_id": manifest.context_manifest_id,
+                    "model_call_id": manifest.model_call_id,
+                    "model_call_purpose": purpose,
+                    "tool_registry_version": manifest.tool_registry_version,
+                    "model_visible_toolset_hash": (
+                        manifest.model_visible_toolset_hash
+                    ),
+                }
+            )
+        elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
+            values["input_binding_ref"] = binding.binding_id
+        elif event_type is TraceEventType.TASK_STATE_CHANGED:
+            values.update(
+                {
+                    "task_id": task.task_id,
+                    "request_unit_id": request_unit.request_unit_id,
+                }
+            )
+        elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
+            values["validated_task_state_version"] = 1
+        elif event_type is TraceEventType.GATE_DECISION_RECORDED:
+            values.update(
+                {
+                    "gate_decision": gate.decision,
+                    "gate_reason_code": gate.reason_code,
+                }
+            )
+        elif event_type in {
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_SUCCEEDED,
+            TraceEventType.TOOL_CALL_FAILED,
+        }:
+            assert tool_call is not None
+            status_by_type = {
+                TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+                TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+                TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+                TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+            }
+            values.update(
+                {
+                    "tool_call_id": tool_call.tool_call_id,
+                    "tool_call_terminal_status": status_by_type[event_type],
+                }
+            )
+        elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+            assert tool_call is not None
+            values.update(
+                {
+                    "tool_call_id": tool_call.tool_call_id,
+                    "safe_tool_outcome": (
+                        ToolResultOutcome.SUCCESS
+                        if tool_call.status is ToolCallStatus.SUCCEEDED
+                        else ToolResultOutcome.BUSINESS_FAILURE
+                    ),
+                }
+            )
+        elif event_type is TraceEventType.OBSERVATION_RECORDED:
+            assert observation is not None
+            values["observation_ref"] = observation.observation_id
+        elif event_type is TraceEventType.RUN_STOPPED:
+            values.update(
+                {
+                    "user_outcome": profile.outcome,
+                    "stop_reason": profile.stop_reason,
+                }
+            )
+        events.append(TraceEvent(**values))
     return tuple(events)
 
 
 def _synthetic_message(
-    expectations: EvalCaseExpectations,
+    profile: _SyntheticActualProfile,
     observation: OrderObservation | None,
 ) -> str:
-    if expectations.expected_response_policy == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE":
+    if profile.response_policy == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE":
         return "未找到可访问的订单，请核对订单号后重试。"
-    if expectations.expected_response_policy == "FIXED_SAFE_PROCESSING_ERROR":
+    if profile.response_policy == "FIXED_SAFE_PROCESSING_ERROR":
         return "当前无法安全处理该请求，请稍后重试。"
     assert observation is not None
     summary = observation.normalized_value
@@ -508,11 +1059,12 @@ class SyntheticSut:
         self.observable_overrides = dict(observable_overrides or {})
         self.calls = 0
         self.last_runtime_fault: RuntimeFaultDirective | None = None
+        self.last_trace_ref: UUID | None = None
 
     async def execute_case(
         self,
         *,
-        case: EvalCaseArtifact,
+        execution_input: EvalCaseExecutionInput,
         scripted_provider: ScriptedModelProvider,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None:
@@ -523,175 +1075,167 @@ class SyntheticSut:
         if self.fault == "missing":
             return None
         assert isinstance(scripted_provider, ModelProvider)
-        script = ARTIFACTS.script_by_ref(scripted_provider.model_script_ref)
-        expectations = build_authenticated_case_expectations(
-            artifacts=ARTIFACTS,
-            case=case,
-            script=script,
+        request = _request(execution_input)
+        request_output = await scripted_provider.propose_next_move(request)
+        proposed_delta = request_output.task_delta_candidates[0]
+        message_order_id = str(
+            proposed_delta.input_candidates[0].candidate_value
         )
-        request_output = await scripted_provider.propose_next_move(_request(case))
-        if case.case_id == "E2E01-01":
-            await scripted_provider.plan_presentation(_presentation_input())
-
-        run_id = (
-            RUN_ID if case.case_id == "E2E01-01" else _case_uuid(case.case_id, "run")
+        next_move_order_id = str(
+            request_output.next_move_candidate.arguments["order_id"]
         )
-        trace_ref = (
-            TRACE_REF
-            if case.case_id == "E2E01-01"
-            else _case_uuid(case.case_id, "trace")
+        presentation_failed = False
+        if (
+            runtime_fault is None
+            and message_order_id == next_move_order_id == "O-1001"
+            and request_output.next_move_candidate.requested_tool_name
+            == "get_order"
+        ):
+            try:
+                await scripted_provider.plan_presentation(
+                    _presentation_input()
+                )
+            except ProviderProtocolError:
+                presentation_failed = True
+        profile = _actual_profile(
+            request_output,
+            runtime_fault=runtime_fault,
+            presentation_failed=presentation_failed,
         )
+        identity_seed = str(execution_input.execution_ref)
+        run_id = request.run_id
+        trace_ref = _case_uuid(identity_seed, "trace")
+        self.last_trace_ref = trace_ref
         message_ref = request_output.message_ref
-        conversation_id = _case_uuid(case.case_id, "conversation")
-        request_understanding_record: RequestUnderstandingRecord | None = None
-        accepted_delta: AcceptedTaskDelta | None = None
-        binding: InputBinding | None = None
-        task: TaskRecord | None = None
-        request_unit: RequestUnitRecord | None = None
-        conversation_task_link: ConversationTaskLinkRecord | None = None
-        run_task_link: RunTaskLinkRecord | None = None
-        if expectations.expected_task_status is not None:
-            assert len(request_output.task_delta_candidates) == 1
-            proposed_delta = request_output.task_delta_candidates[0]
-            binding = InputBinding(
-                binding_id=_case_uuid(case.case_id, "binding"),
-                name="order_id",
-                normalized_value=expectations.expected_binding_order_id,
-                authority=InputAuthority.USER_CLAIM,
-                source_refs=(message_ref,),
-                validation_status=InputValidationStatus.ACCEPTED,
-                confirmed_by_user=True,
-                created_at=NOW,
-                updated_at=NOW,
-            )
-            task = TaskRecord(
-                task_id=_case_uuid(case.case_id, "task"),
-                owner_customer_id=expectations.trusted_customer_id,
-                status=expectations.expected_task_status,
-                state_version=expectations.expected_task_state_version,
-                created_at=NOW,
-                updated_at=NOW + timedelta(seconds=1),
-            )
-            request_unit = RequestUnitRecord(
-                request_unit_id=_case_uuid(case.case_id, "request-unit"),
-                task_id=task.task_id,
-                goal_text="查询指定订单状态",
-                goal_source_refs=(message_ref,),
-                input_binding_refs=(binding.binding_id,),
-                observation_refs=(
-                    (_case_uuid(case.case_id, "observation"),)
-                    if expectations.expected_observations == 1
-                    else ()
+        conversation_id = _case_uuid(identity_seed, "conversation")
+        binding = InputBinding(
+            binding_id=_case_uuid(identity_seed, "binding"),
+            name="order_id",
+            normalized_value=profile.binding_order_id,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(message_ref,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        task = TaskRecord(
+            task_id=_case_uuid(identity_seed, "task"),
+            owner_customer_id=profile.customer_id,
+            status=profile.task_status,
+            state_version=profile.task_state_version,
+            created_at=NOW,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        request_unit = RequestUnitRecord(
+            request_unit_id=_case_uuid(identity_seed, "request-unit"),
+            task_id=task.task_id,
+            goal_text="查询指定订单状态",
+            goal_source_refs=(message_ref,),
+            input_binding_refs=(binding.binding_id,),
+            observation_refs=(
+                (_case_uuid(identity_seed, "observation"),)
+                if profile.observation_count == 1
+                else ()
+            ),
+            status=profile.task_status,
+            state_version=profile.task_state_version,
+            created_at=NOW,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        accepted_delta = AcceptedTaskDelta(
+            accepted_delta_id=_case_uuid(identity_seed, "accepted-delta"),
+            candidate_ref=proposed_delta.candidate_id,
+            message_ref=message_ref,
+            operation=proposed_delta.operation,
+            goal_text=proposed_delta.goal_patch,
+            input_binding_refs=(binding.binding_id,),
+            accepted_at=NOW,
+        )
+        request_understanding_record = RequestUnderstandingRecord(
+            run_id=run_id,
+            message_ref=message_ref,
+            schema_version="request_understanding_record.p0.v1",
+            candidate_validation=(
+                CandidateValidationRecord(
+                    candidate_ref=proposed_delta.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
                 ),
-                status=expectations.expected_request_unit_status,
-                state_version=(expectations.expected_request_unit_state_version),
-                created_at=NOW,
-                updated_at=NOW + timedelta(seconds=1),
-            )
-            accepted_delta = AcceptedTaskDelta(
-                accepted_delta_id=_case_uuid(case.case_id, "accepted-delta"),
-                candidate_ref=proposed_delta.candidate_id,
-                message_ref=message_ref,
-                operation=proposed_delta.operation,
-                goal_text=proposed_delta.goal_patch,
-                input_binding_refs=(binding.binding_id,),
-                accepted_at=NOW,
-            )
-            request_understanding_record = RequestUnderstandingRecord(
-                run_id=run_id,
-                message_ref=message_ref,
-                schema_version="request_understanding_record.p0.v1",
-                candidate_validation=(
-                    CandidateValidationRecord(
-                        candidate_ref=proposed_delta.candidate_id,
-                        decision=CandidateValidationDecision.ACCEPT,
-                    ),
-                ),
-                accepted_delta_refs=(accepted_delta.accepted_delta_id,),
-                proposed_base_task_state_version=(
-                    request_output.next_move_candidate.base_task_state_version
-                ),
-                validated_task_state_version=(
-                    expectations.expected_validated_task_state_version
-                ),
-                next_move_candidate_ref=_case_uuid(case.case_id, "next-move"),
-            )
-            conversation_task_link = ConversationTaskLinkRecord(
-                schema_version="conversation_task_link_record.p0.v1",
-                conversation_id=conversation_id,
-                task_id=task.task_id,
-                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
-                linked_at=NOW,
-            )
-            run_task_link = RunTaskLinkRecord(
-                schema_version="run_task_link_record.p0.v1",
-                run_id=run_id,
-                task_id=task.task_id,
-                base_task_state_version=None,
-                result_task_state_version=task.state_version,
-            )
-
+            ),
+            accepted_delta_refs=(accepted_delta.accepted_delta_id,),
+            proposed_base_task_state_version=(
+                request_output.next_move_candidate.base_task_state_version
+            ),
+            validated_task_state_version=1,
+            next_move_candidate_ref=_case_uuid(identity_seed, "next-move"),
+        )
+        conversation_task_link = ConversationTaskLinkRecord(
+            schema_version="conversation_task_link_record.p0.v1",
+            conversation_id=conversation_id,
+            task_id=task.task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=NOW,
+        )
+        run_task_link = RunTaskLinkRecord(
+            schema_version="run_task_link_record.p0.v1",
+            run_id=run_id,
+            task_id=task.task_id,
+            base_task_state_version=None,
+            result_task_state_version=task.state_version,
+        )
         context_ids = tuple(
-            _case_uuid(case.case_id, f"context:{index}")
-            for index in range(expectations.expected_model_calls)
+            _case_uuid(identity_seed, f"context:{index}")
+            for index in range(profile.model_calls)
         )
         model_call_ids = tuple(
-            _case_uuid(case.case_id, f"model-call:{index}")
-            for index in range(expectations.expected_model_calls)
+            _case_uuid(identity_seed, f"model-call:{index}")
+            for index in range(profile.model_calls)
         )
-        gate: GateDecision | None = None
-        if expectations.expected_gate_decision is not None:
-            assert binding is not None
-            failed_field_by_reason = {
-                GateReasonCode.ARGUMENT_BINDING_MISMATCH: ("argument_binding_valid"),
-                GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
-                GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
-            }
-            checks = {
-                "snapshot_match": True,
-                "registration_valid": True,
-                "schema_valid": True,
-                "trusted_field_valid": True,
-                "argument_binding_valid": True,
-                "budget_valid": True,
-                "progress_valid": True,
-                "state_version_valid": True,
-                "action_boundary_valid": True,
-            }
-            if expectations.expected_gate_reason is not None:
-                checks[failed_field_by_reason[expectations.expected_gate_reason]] = (
-                    False
-                )
-            gate = GateDecision(
-                gate_decision_id=_case_uuid(case.case_id, "gate"),
-                model_call_id=model_call_ids[0],
-                context_manifest_id=context_ids[0],
-                provider_tool_call_id="synthetic-provider-call",
-                requested_provider_tool_name=(
-                    expectations.expected_requested_tool_name
-                ),
-                resolved_canonical_tool_name=(
-                    None
-                    if expectations.expected_gate_reason
-                    is GateReasonCode.TOOL_NOT_REGISTERED
-                    else "get_order"
-                ),
-                argument_binding_refs=(binding.binding_id,),
-                proposed_base_task_state_version=None,
-                validated_task_state_version=1,
-                decision=expectations.expected_gate_decision,
-                reason_code=expectations.expected_gate_reason,
-                decided_at=NOW,
-                **checks,
-            )
+        failed_field_by_reason = {
+            GateReasonCode.ARGUMENT_BINDING_MISMATCH: "argument_binding_valid",
+            GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
+            GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
+        }
+        checks = {
+            "snapshot_match": True,
+            "registration_valid": True,
+            "schema_valid": True,
+            "trusted_field_valid": True,
+            "argument_binding_valid": True,
+            "budget_valid": True,
+            "progress_valid": True,
+            "state_version_valid": True,
+            "action_boundary_valid": True,
+        }
+        if profile.gate_reason is not None:
+            checks[failed_field_by_reason[profile.gate_reason]] = False
+        gate = GateDecision(
+            gate_decision_id=_case_uuid(identity_seed, "gate"),
+            model_call_id=model_call_ids[0],
+            context_manifest_id=context_ids[0],
+            provider_tool_call_id="synthetic-provider-call",
+            requested_provider_tool_name=profile.requested_tool_name,
+            resolved_canonical_tool_name=(
+                None
+                if profile.gate_reason is GateReasonCode.TOOL_NOT_REGISTERED
+                else "get_order"
+            ),
+            argument_binding_refs=(binding.binding_id,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=1,
+            decision=profile.gate_decision,
+            reason_code=profile.gate_reason,
+            decided_at=NOW,
+            **checks,
+        )
 
         observation: OrderObservation | None = None
-        if expectations.expected_observations == 1:
+        if profile.observation_count == 1:
             projection = _presentation_input().order_summary
             observation = OrderObservation(
-                observation_id=_case_uuid(case.case_id, "observation"),
+                observation_id=_case_uuid(identity_seed, "observation"),
                 source_tool="get_order",
-                source_resource_ref=expectations.expected_binding_order_id,
+                source_resource_ref=profile.binding_order_id,
                 source_version="order-v7",
                 normalized_type="ORDER_SUMMARY",
                 normalized_value=projection,
@@ -701,16 +1245,10 @@ class SyntheticSut:
             )
         tool_call: ToolCallRecord | None = None
         tool_attempt: ToolAttemptRecord | None = None
-        if expectations.expected_tool_calls == 1:
-            assert (
-                binding is not None
-                and task is not None
-                and request_unit is not None
-                and gate is not None
-            )
-            status = expectations.expected_tool_call_status
+        if profile.tool_call_status is not None:
+            status = profile.tool_call_status
             tool_call = ToolCallRecord(
-                tool_call_id=_case_uuid(case.case_id, "tool-call"),
+                tool_call_id=_case_uuid(identity_seed, "tool-call"),
                 run_id=run_id,
                 task_id=task.task_id,
                 request_unit_id=request_unit.request_unit_id,
@@ -719,7 +1257,7 @@ class SyntheticSut:
                 gate_decision_id=gate.gate_decision_id,
                 provider_tool_call_id="synthetic-provider-call",
                 canonical_tool_name="get_order",
-                tool_registry_version=(expectations.expected_tool_registry_version),
+                tool_registry_version="e2e01-thin-tools-v1",
                 validated_task_state_version=1,
                 argument_binding_refs=(binding.binding_id,),
                 effect=ToolEffect.READ,
@@ -733,7 +1271,7 @@ class SyntheticSut:
                     else "NOT_FOUND_OR_NOT_ACCESSIBLE"
                 ),
                 result_ref=(
-                    _case_uuid(case.case_id, "tool-result")
+                    _case_uuid(identity_seed, "tool-result")
                     if observation is not None
                     else None
                 ),
@@ -753,17 +1291,16 @@ class SyntheticSut:
                 failure_code=tool_call.failure_code,
             )
         request_understanding_calls = (
-            expectations.expected_model_calls
-            - expectations.expected_presentation_model_calls
+            profile.model_calls - profile.presentation_model_calls
         )
         manifests = tuple(
             ContextManifest(
                 context_manifest_id=context_id,
                 run_id=run_id,
                 model_call_id=model_call_ids[index],
-                tool_registry_version=(expectations.expected_tool_registry_version),
-                model_visible_toolset_hash=(
-                    expectations.expected_model_visible_toolset_hash
+                tool_registry_version="e2e01-thin-tools-v1",
+                model_visible_toolset_hash=compute_model_visible_toolset_hash(
+                    (get_order_tool_spec(),)
                 ),
                 selected_message_refs=(message_ref,),
                 task_state_ref_and_version=(
@@ -791,7 +1328,8 @@ class SyntheticSut:
             for index, context_id in enumerate(context_ids)
         )
         initial_trace = _synthetic_trace(
-            expectations=expectations,
+            profile=profile,
+            identity_seed=identity_seed,
             run_id=run_id,
             message_ref=message_ref,
             accepted_delta=accepted_delta,
@@ -850,7 +1388,7 @@ class SyntheticSut:
             superseding = observation.model_copy(
                 update={
                     "supersedes": _case_uuid(
-                        case.case_id,
+                        identity_seed,
                         "previous-observation",
                     )
                 }
@@ -867,40 +1405,37 @@ class SyntheticSut:
             )
         self.traces.seed(trace_ref, initial_trace)
         observable_values: dict[str, object] = {
-            "case_id": case.case_id,
-            "http_status": expectations.expected_http_status,
-            "user_outcome": expectations.expected_outcome,
-            "response_policy": expectations.expected_response_policy,
+            "http_status": profile.http_status,
+            "user_outcome": profile.outcome,
+            "response_policy": profile.response_policy,
             "ordinary_trace_shape": ordinary_trace_shape(initial_trace),
-            "model_calls": expectations.expected_model_calls,
+            "model_calls": profile.model_calls,
         }
         observable_values.update(self.observable_overrides)
-        observable = SafeCaseObservable(**observable_values)
+        observable = UnboundSafeCaseObservable(**observable_values)
         evidence_values: dict[str, object] = {
-            "case_id": case.case_id,
-            "observed_outcome": expectations.expected_outcome,
+            "observed_outcome": profile.outcome,
             "trace_ref": trace_ref,
             "trace_events": initial_trace,
-            "safe_observable": observable,
             "run_record": AgentRunRecord(
                 run_id=run_id,
                 conversation_id=conversation_id,
-                status=expectations.expected_run_status,
+                status=profile.run_status,
                 provider_lane="offline_gate",
                 started_at=NOW,
                 completed_at=NOW + timedelta(seconds=1),
-                stop_reason=expectations.expected_stop_reason,
+                stop_reason=profile.stop_reason,
             ),
             "agent_result": AgentRunResult(
                 run_id=run_id,
-                outcome=expectations.expected_outcome,
-                message=_synthetic_message(expectations, observation),
+                outcome=profile.outcome,
+                message=_synthetic_message(profile, observation),
             ),
             "conversation_records": (
                 ConversationRecord(
                     schema_version="conversation_record.p0.v1",
                     conversation_id=conversation_id,
-                    owner_customer_id=expectations.trusted_customer_id,
+                    owner_customer_id=profile.customer_id,
                     created_at=NOW,
                 ),
             ),
@@ -910,7 +1445,7 @@ class SyntheticSut:
                     message_id=message_ref,
                     conversation_id=conversation_id,
                     direction=MessageDirection.USER,
-                    content=expectations.expected_message_content,
+                    content=execution_input.messages[0].content,
                     received_at=NOW,
                 ),
             ),
@@ -939,7 +1474,9 @@ class SyntheticSut:
             "model_visible_toolset_artifacts": (
                 ModelVisibleToolsetArtifact(
                     model_visible_toolset_hash=(
-                        expectations.expected_model_visible_toolset_hash
+                        compute_model_visible_toolset_hash(
+                            (get_order_tool_spec(),)
+                        )
                     ),
                     provider_visible_tool_specs=(get_order_tool_spec(),),
                 ),
@@ -958,22 +1495,881 @@ class SyntheticSut:
             "toolset_replay_assertions_pass": True,
         }
         evidence_values.update(self.evidence_overrides)
-        evidence = EvalEvidence(**evidence_values)
+        evidence = UnboundEvalEvidence(**evidence_values)
         return EvalCaseSutResult(
+            execution_ref=execution_input.execution_ref,
             evidence=evidence,
             safe_observable=observable,
         )
 
 
+class BoundaryProbeSut:
+    def __init__(self) -> None:
+        self.received_calls: list[dict[str, object]] = []
+
+    async def execute_case(self, **kwargs: object) -> None:
+        self.received_calls.append(dict(kwargs))
+        return None
+
+
+class ResultBoundaryMutationSut:
+    def __init__(self, delegate: SyntheticSut, *, mutation: str) -> None:
+        self._delegate = delegate
+        self._mutation = mutation
+        self.injected_container: object | None = None
+        self.injected_arguments: object | None = None
+
+    def _replace_trace_events(
+        self,
+        result: EvalCaseSutResult,
+        trace_events: tuple[TraceEvent, ...],
+    ) -> EvalCaseSutResult:
+        self._delegate.traces.seed(
+            result.evidence.trace_ref,
+            trace_events,
+        )
+        observable = result.safe_observable.model_copy(
+            update={
+                "ordinary_trace_shape": ordinary_trace_shape(
+                    trace_events
+                )
+            }
+        )
+        evidence = result.evidence.model_copy(
+            update={"trace_events": trace_events}
+        )
+        return result.model_copy(
+            update={
+                "evidence": evidence,
+                "safe_observable": observable,
+            }
+        )
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        result = await self._delegate.execute_case(**kwargs)
+        assert type(result) is EvalCaseSutResult
+        if self._mutation == "unknown_execution_ref":
+            return result.model_copy(
+                update={"execution_ref": UNKNOWN_EXECUTION_REF}
+            )
+        if self._mutation == "behaviorful_execution_ref":
+            return result.model_copy(
+                update={"execution_ref": EvilEquality()}
+            )
+        if self._mutation == "provider_execution_ref":
+            provider = kwargs["scripted_provider"]
+            return result.model_copy(
+                update={"execution_ref": provider.script_execution_ref}
+            )
+        if self._mutation in {
+            "semantic_evidence_case_id",
+            "semantic_observable_case_id",
+        }:
+            target = (
+                result.evidence
+                if self._mutation == "semantic_evidence_case_id"
+                else result.safe_observable
+            )
+            object.__setattr__(target, "case_id", "E2E01-01")
+            return result
+        if self._mutation == "trace_case_id":
+            trace_events = (
+                result.evidence.trace_events[0].model_copy(
+                    update={"case_id": "E2E01-01"}
+                ),
+                *result.evidence.trace_events[1:],
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={"trace_events": trace_events}
+                    )
+                }
+            )
+        if self._mutation == "nested_trace_semantic_case_id":
+            object.__setattr__(
+                result.evidence.trace_events[0],
+                "semantic_case_id",
+                "E2E01-01",
+            )
+            return result
+        if self._mutation == "nested_payload_cycle":
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            object.__setattr__(
+                request_output,
+                "task_delta_candidates",
+                (request_output,),
+            )
+            return result
+        if self._mutation.startswith("pydantic_sidecar:"):
+            _, sidecar_kind, location = self._mutation.split(":")
+            target: BaseModel = result
+            storage_field = "safe_observable"
+            if location == "nested":
+                request_output = (
+                    result.evidence.request_understanding_output
+                )
+                assert request_output is not None
+                target = request_output
+                storage_field = "next_move_candidate"
+            else:
+                assert location == "root"
+            if sidecar_kind == "fields-set":
+                object.__setattr__(
+                    target,
+                    "__pydantic_fields_set__",
+                    SneakyFieldsSet({"E2E01-01"}),
+                )
+            else:
+                assert sidecar_kind == "storage-key"
+                storage = target.__dict__
+                stored_value = dict.__getitem__(
+                    storage,
+                    storage_field,
+                )
+                dict.__delitem__(storage, storage_field)
+                dict.__setitem__(
+                    storage,
+                    SneakyStorageKey(storage_field),
+                    stored_value,
+                )
+            SIDECAR_METHOD_READ_COUNTER.reads = 0
+            return result
+        if self._mutation == "custom_datetime_tz":
+            conversation = result.evidence.conversation_records[0]
+            created_at = conversation.created_at.replace(
+                tzinfo=EvilTz(),
+            )
+            conversation = conversation.model_copy(
+                update={"created_at": created_at}
+            )
+            evidence = result.evidence.model_copy(
+                update={"conversation_records": (conversation,)}
+            )
+            TIMEZONE_METHOD_READ_COUNTER.reads = 0
+            return result.model_copy(update={"evidence": evidence})
+        if self._mutation.startswith("canonical_enum_storage:"):
+            drift = self._mutation.partition(":")[2]
+            member = AgentOutcome.COMPLETED
+            if drift == "hidden":
+                object.__setattr__(
+                    member,
+                    "hidden_case_id",
+                    "E2E01-01",
+                )
+            elif drift == "name":
+                object.__setattr__(member, "_name_", "E2E01-01")
+            else:
+                assert drift == "value"
+                object.__setattr__(member, "_value_", "E2E01-01")
+            return result
+        if self._mutation.startswith("uuid_internal:"):
+            slot_name = self._mutation.partition(":")[2]
+            conversation_id = (
+                result.evidence.conversation_records[0].conversation_id
+            )
+            if slot_name == "int":
+                object.__setattr__(
+                    conversation_id,
+                    "int",
+                    "E2E01-01",
+                )
+            else:
+                assert slot_name == "is-safe"
+                object.__setattr__(
+                    conversation_id,
+                    "is_safe",
+                    "E2E01-01",
+                )
+            return result
+        if self._mutation.startswith("positional_type_substitution:"):
+            substitution = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            if substitution in {
+                "arguments-tuple",
+                "arguments-model",
+            }:
+                if substitution == "arguments-tuple":
+                    replacement: object = ("ordinary-value",)
+                else:
+                    replacement = TokenCounts(
+                        input_tokens=1,
+                        output_tokens=1,
+                    )
+                next_move = request_output.next_move_candidate.model_copy(
+                    update={"arguments": replacement}
+                )
+                request_output = request_output.model_copy(
+                    update={"next_move_candidate": next_move}
+                )
+                return result.model_copy(
+                    update={
+                        "evidence": result.evidence.model_copy(
+                            update={
+                                "request_understanding_output": (
+                                    request_output
+                                ),
+                            }
+                        )
+                    }
+                )
+            if substitution in {
+                "shared-frozen-dag",
+                "deep-frozen",
+                "wide-frozen",
+            }:
+                if substitution == "shared-frozen-dag":
+                    payload: object = tuple.__new__(
+                        FrozenJsonList,
+                        ("ordinary-value",),
+                    )
+                    for _ in range(20):
+                        payload = tuple.__new__(
+                            FrozenJsonList,
+                            (payload, payload),
+                        )
+                elif substitution == "deep-frozen":
+                    payload = "ordinary-value"
+                    for _ in range(_MAX_PAYLOAD_DEPTH + 1):
+                        payload = tuple.__new__(
+                            FrozenJsonList,
+                            (payload,),
+                        )
+                else:
+                    payload = tuple.__new__(
+                        FrozenJsonList,
+                        ("ordinary-value",)
+                        * (_MAX_PAYLOAD_EDGES + 1),
+                    )
+                current_arguments = (
+                    request_output.next_move_candidate.arguments
+                )
+                assert type(current_arguments) is FrozenJsonDict
+                replacement = tuple.__new__(
+                    FrozenJsonDict,
+                    (
+                        *tuple(tuple.__iter__(current_arguments)),
+                        ("metadata", payload),
+                    ),
+                )
+                next_move = request_output.next_move_candidate.model_copy(
+                    update={"arguments": replacement}
+                )
+                request_output = request_output.model_copy(
+                    update={"next_move_candidate": next_move}
+                )
+                return result.model_copy(
+                    update={
+                        "evidence": result.evidence.model_copy(
+                            update={
+                                "request_understanding_output": (
+                                    request_output
+                                ),
+                            }
+                        )
+                    }
+                )
+            if substitution == "cross-enum":
+                assert result.evidence.task_records
+                task_records = (
+                    result.evidence.task_records[0].model_copy(
+                        update={"status": AgentOutcome.COMPLETED}
+                    ),
+                    *result.evidence.task_records[1:],
+                )
+                return result.model_copy(
+                    update={
+                        "evidence": result.evidence.model_copy(
+                            update={"task_records": task_records}
+                        )
+                    }
+                )
+            assert substitution == "typed-tuple-model"
+            assert result.evidence.task_records
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "trace_events": (
+                                result.evidence.task_records[0],
+                            )
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_business_value:"):
+            identity_key = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            arguments[identity_key] = "business-opaque-value"
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_enum_identity:"):
+            identity_kind = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            if identity_kind == "cycle":
+                cyclic_enum = Enum(
+                    "CyclicSmuggledIdentity",
+                    {"VALUE": "opaque-cycle-value"},
+                )
+                cyclic_member = cyclic_enum.VALUE
+                object.__setattr__(
+                    cyclic_member,
+                    "_value_",
+                    cyclic_member,
+                )
+                identity_field = "customer_case_id"
+                identity_value = cyclic_member
+            else:
+                identity_field, identity_value = {
+                    "case": (
+                        "customer_case_id",
+                        SmuggledCaseIdentity.VALUE,
+                    ),
+                    "script": (
+                        "script_owner_id",
+                        SmuggledScriptIdentity.VALUE,
+                    ),
+                    "nested-case": (
+                        "customer_case_id",
+                        OuterSmuggledCaseIdentity.VALUE,
+                    ),
+                    "subclass-case": (
+                        "customer_case_id",
+                        SubclassSmuggledCaseIdentity.VALUE,
+                    ),
+                    "wrapped-semantic": (
+                        "customer_case_id",
+                        WrappedSemanticIdentity.VALUE,
+                    ),
+                    "wrapped-bundle": (
+                        "customer_case_id",
+                        WrappedBundleIdentity.VALUE,
+                    ),
+                }[identity_kind]
+            arguments[identity_field] = identity_value
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith(
+            "nested_argument_authenticated_bundle_identity:"
+        ):
+            identity_kind = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            identity_field, identity_value = {
+                "other-case": (
+                    "customer_case_id",
+                    "E2E01-04-A",
+                ),
+                "other-script": (
+                    "script_owner_id",
+                    "script:e2e01-04-a:foreign-order",
+                ),
+            }[identity_kind]
+            arguments[identity_field] = identity_value
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_enum_key:"):
+            key_kind = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            if key_kind == "cycle":
+                cyclic_enum = Enum(
+                    "CyclicSmuggledKey",
+                    {"VALUE": "opaque-cycle-key"},
+                )
+                enum_key = cyclic_enum.VALUE
+                object.__setattr__(enum_key, "_value_", enum_key)
+            else:
+                enum_key = {
+                    "plain-semantic": SemanticCaseCodeKey.VALUE,
+                    "nested-semantic": OuterSemanticScriptUuidKey.VALUE,
+                    "subclass-semantic": SubclassSemanticCaseNumberKey.VALUE,
+                    "ordinary-business": OrdinaryBusinessKey.VALUE,
+                    "ordinary-lexical": OrdinaryLexicalKey.VALUE,
+                    "ordinary-subclass": (
+                        SubclassOrdinaryLexicalKey.VALUE
+                    ),
+                }[key_kind]
+            arguments[enum_key] = "business-opaque-value"
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_bytes_identity:"):
+            identity_kind = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            identity_field, identity_value = {
+                "selected-case": (
+                    "customer_case_id",
+                    b"E2E01-01",
+                ),
+                "other-script": (
+                    "script_owner_id",
+                    b"script:e2e01-04-a:foreign-order",
+                ),
+            }[identity_kind]
+            arguments[identity_field] = identity_value
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith(
+            "nested_argument_noncanonical_container:"
+        ):
+            container_kind = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            container = {
+                "dict": {"value": "ordinary-value"},
+                "list": ["ordinary-value"],
+                "tuple": ("ordinary-value",),
+                "set": {"ordinary-value"},
+                "frozenset": frozenset({"ordinary-value"}),
+                "flip-mapping": FlipMapping(),
+                "flip-list": FlipList(),
+                "flip-tuple": FlipTuple(),
+                "flip-set": FlipSet(),
+            }[container_kind]
+            self.injected_container = container
+            arguments = tuple.__new__(
+                FrozenJsonDict,
+                (
+                    ("order_id", "O-1001"),
+                    ("metadata", container),
+                ),
+            )
+            self.injected_arguments = arguments
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": arguments}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation == "nested_argument_duplicate_frozen_identity":
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = tuple.__new__(
+                FrozenJsonDict,
+                (
+                    ("order_id", "O-1001"),
+                    ("metadata", "ordinary-value"),
+                    ("metadata", "E2E01-04-A"),
+                ),
+            )
+            self.injected_arguments = arguments
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": arguments}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation == "nested_argument_canonical_frozen_json":
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = freeze_json_value(
+                {
+                    "order_id": "O-1001",
+                    "metadata": {
+                        "label": "ordinary-value",
+                        "items": [1, "two"],
+                    },
+                }
+            )
+            self.injected_arguments = arguments
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": arguments}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_flip_enum:"):
+            enum_location = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            FLIP_ENUM_VALUE_READ_COUNTER.reads = 0
+            if enum_location == "key":
+                arguments = tuple.__new__(
+                    FrozenJsonDict,
+                    (
+                        ("order_id", "O-1001"),
+                        (FlipValueEnum.VALUE, "ordinary-value"),
+                    ),
+                )
+            else:
+                arguments = tuple.__new__(
+                    FrozenJsonDict,
+                    (
+                        ("order_id", "O-1001"),
+                        ("metadata", FlipValueEnum.VALUE),
+                    ),
+                )
+            self.injected_arguments = arguments
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": arguments}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_str_subclass:"):
+            string_location = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            FLIP_STRING_METHOD_READ_COUNTER.reads = 0
+            if string_location == "key":
+                raw_pair = (
+                    FlipString("metadata"),
+                    "ordinary-value",
+                )
+            elif string_location == "ordinary-value":
+                raw_pair = (
+                    "metadata",
+                    FlipString("ordinary-value"),
+                )
+            else:
+                raw_pair = (
+                    "metadata",
+                    IdentityString("E2E01-01"),
+                )
+            arguments = tuple.__new__(
+                FrozenJsonDict,
+                (
+                    ("order_id", "O-1001"),
+                    raw_pair,
+                ),
+            )
+            self.injected_arguments = arguments
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": arguments}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("nested_argument_identity:"):
+            identity_key = self._mutation.partition(":")[2]
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            arguments[identity_key] = (
+                "script:e2e01-01:success"
+                if "script" in identity_key.casefold()
+                else "E2E01-01"
+            )
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation == "allowed_business_identity_keys":
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            arguments = dict(request_output.next_move_candidate.arguments)
+            assert arguments == {"order_id": "O-1001"}
+            next_move = request_output.next_move_candidate.model_copy(
+                update={"arguments": freeze_json_value(arguments)}
+            )
+            request_output = request_output.model_copy(
+                update={"next_move_candidate": next_move}
+            )
+            return result.model_copy(
+                update={
+                    "evidence": result.evidence.model_copy(
+                        update={
+                            "request_understanding_output": request_output,
+                        }
+                    )
+                }
+            )
+        if self._mutation.startswith("normalized_outcome:"):
+            outcome_name = self._mutation.partition(":")[2]
+            normalized_outcome = (
+                None
+                if outcome_name == "NONE"
+                else ToolResultOutcome(outcome_name)
+            )
+            trace_events = tuple(
+                (
+                    event.model_copy(
+                        update={"safe_tool_outcome": normalized_outcome}
+                    )
+                    if event.event_type
+                    is TraceEventType.TOOL_RESULT_NORMALIZED
+                    else event
+                )
+                for event in result.evidence.trace_events
+            )
+            return self._replace_trace_events(
+                result,
+                trace_events,
+            )
+        if self._mutation.startswith("gate_projection:"):
+            target_type = TraceEventType(
+                self._mutation.partition(":")[2]
+            )
+            trace_events = tuple(
+                (
+                    event.model_copy(
+                        update={
+                            "gate_decision": GateDecisionValue.REJECT,
+                            "gate_reason_code": (
+                                GateReasonCode.TOOL_NOT_REGISTERED
+                            ),
+                        }
+                    )
+                    if event.event_type is target_type
+                    else event
+                )
+                for event in result.evidence.trace_events
+            )
+            return self._replace_trace_events(result, trace_events)
+        if self._mutation.startswith("run_projection:"):
+            target_type = TraceEventType(
+                self._mutation.partition(":")[2]
+            )
+            trace_events = tuple(
+                (
+                    event.model_copy(
+                        update={
+                            "user_outcome": AgentOutcome.BLOCKED,
+                            "stop_reason": StopReason.GATE_REJECTED,
+                        }
+                    )
+                    if event.event_type is target_type
+                    else event
+                )
+                for event in result.evidence.trace_events
+            )
+            return self._replace_trace_events(result, trace_events)
+        if self._mutation.startswith("safe_outcome_projection:"):
+            _, target_value, outcome_value = self._mutation.split(":", 2)
+            target_type = TraceEventType(target_value)
+            projected_outcome = ToolResultOutcome(outcome_value)
+            tool_call = result.evidence.tool_calls[0]
+            trace_events = tuple(
+                (
+                    event.model_copy(
+                        update={
+                            "tool_call_id": tool_call.tool_call_id,
+                            "safe_tool_outcome": projected_outcome,
+                        }
+                    )
+                    if event.event_type is target_type
+                    else event
+                )
+                for event in result.evidence.trace_events
+            )
+            return self._replace_trace_events(result, trace_events)
+        if self._mutation.startswith("safe_outcome_reference:"):
+            reference_kind = self._mutation.partition(":")[2]
+            trace_events = tuple(
+                (
+                    event.model_copy(
+                        update={
+                            "tool_call_id": (
+                                None
+                                if reference_kind == "missing"
+                                else UUID(
+                                    "00000000-0000-4000-8000-000000009999"
+                                )
+                            ),
+                            "safe_tool_outcome": (
+                                ToolResultOutcome.SUCCESS
+                            ),
+                        }
+                    )
+                    if event.event_type is TraceEventType.RUN_STOPPED
+                    else event
+                )
+                for event in result.evidence.trace_events
+            )
+            return self._replace_trace_events(result, trace_events)
+        if self._mutation == "observable_disagreement":
+            mismatched_observable = result.safe_observable.model_copy(
+                update={"user_outcome": AgentOutcome.BLOCKED}
+            )
+            return type(result)(
+                execution_ref=result.execution_ref,
+                evidence=result.evidence,
+                safe_observable=mismatched_observable,
+            )
+        raise AssertionError(f"unknown result mutation {self._mutation}")
+
+
+class ReplayWithoutProviderSut:
+    def __init__(self, delegate: SyntheticSut) -> None:
+        self._delegate = delegate
+        self._first_result: EvalCaseSutResult | None = None
+        self.calls = 0
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        self.calls += 1
+        if self._first_result is None:
+            self._first_result = await self._delegate.execute_case(**kwargs)
+            return self._first_result
+        return self._first_result
+
+
+class IncompleteThenStaleRefSut:
+    def __init__(self, delegate: SyntheticSut) -> None:
+        self._delegate = delegate
+        self._incomplete_ref: UUID | None = None
+
+    async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
+        execution_input = kwargs["execution_input"]
+        if self._incomplete_ref is None:
+            self._incomplete_ref = execution_input.execution_ref
+            return None
+        result = await self._delegate.execute_case(**kwargs)
+        assert type(result) is EvalCaseSutResult
+        return result.model_copy(update={"execution_ref": self._incomplete_ref})
+
+
+class CancellingSut:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute_case(self, **kwargs: object) -> None:
+        self.calls += 1
+        raise asyncio.CancelledError
+
+
 def _harness(
     *,
-    sut: SyntheticSut | None = None,
+    artifacts: LoadedE2E01Artifacts | None = None,
+    sut: object | None = None,
     traces: InMemoryTraceCallbacks | None = None,
     port: InMemoryResultPort | None = None,
     grader_runner=None,
+    nonce_factory: Callable[..., UUID] | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[
     OfflineEvalHarness,
-    SyntheticSut,
+    object,
     InMemoryTraceCallbacks,
     InMemoryResultPort,
 ]:
@@ -983,13 +2379,18 @@ def _harness(
     traces.timeline = timeline
     port.timeline = timeline
     sut = sut or SyntheticSut(traces)
+    harness_arguments: dict[str, object] = {
+        "artifacts": artifacts or ARTIFACTS,
+        "sut": sut,
+        "trace_callbacks": traces,
+        "result_port": cast(EvalResultPort, port),
+        "clock": clock or (lambda: NOW + timedelta(seconds=2)),
+        "grader_runner": grader_runner,
+    }
+    if nonce_factory is not None:
+        harness_arguments["nonce_factory"] = nonce_factory
     harness = OfflineEvalHarness(
-        artifacts=ARTIFACTS,
-        sut=sut,
-        trace_callbacks=traces,
-        result_port=cast(EvalResultPort, port),
-        clock=lambda: NOW + timedelta(seconds=2),
-        grader_runner=grader_runner,
+        **harness_arguments,
     )
     return harness, sut, traces, port
 
@@ -1013,6 +2414,2494 @@ def _run(
     )
 
 
+def test_execution_only_sut_input_excludes_case_oracle_and_nested_setup() -> None:
+    source_case = ARTIFACTS.case_by_id("E2E01-01")
+    case_values = source_case.model_dump(mode="json")
+    source_message = dict(case_values["input"]["messages"][0])
+    source_message["setup_answer"] = {
+        "environment_fixture_ref": "order:oracle-only",
+        "expected_user_outcome": "COMPLETED",
+    }
+    case_input = dict(case_values["input"])
+    case_input["messages"] = [source_message]
+    case_input["oracle_only_top_level"] = {
+        "expected_control_result": "PASS",
+    }
+    case_values["input"] = case_input
+    case = EvalCaseArtifact.model_validate(case_values)
+    artifacts = ARTIFACTS.model_copy(
+        update={
+            "cases": tuple(
+                case if item.case_id == case.case_id else item
+                for item in ARTIFACTS.cases
+            )
+        }
+    )
+    probe = BoundaryProbeSut()
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness = OfflineEvalHarness(
+        artifacts=artifacts,
+        sut=probe,
+        trace_callbacks=traces,
+        result_port=cast(EvalResultPort, port),
+        clock=lambda: NOW + timedelta(seconds=2),
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert len(probe.received_calls) == 1
+    received = probe.received_calls[0]
+    assert set(received) == {
+        "execution_input",
+        "scripted_provider",
+        "runtime_fault",
+    }
+    execution_input = received["execution_input"]
+    assert set(type(execution_input).model_fields) == {
+        "execution_ref",
+        "messages",
+        "trusted_context_fixture_ref",
+    }
+    assert execution_input.execution_ref == EXECUTION_REF_1
+    assert execution_input.trusted_context_fixture_ref == (
+        source_case.input["trusted_context_fixture_ref"]
+    )
+    assert execution_input.messages == (
+        type(execution_input.messages[0])(
+            role="user",
+            content=source_case.input["messages"][0]["content"],
+        ),
+    )
+    assert set(type(execution_input.messages[0]).model_fields) == {
+        "role",
+        "content",
+    }
+    assert execution_input.model_dump() == {
+        "execution_ref": EXECUTION_REF_1,
+        "messages": (
+            {
+                "role": "user",
+                "content": source_case.input["messages"][0]["content"],
+            },
+        ),
+        "trusted_context_fixture_ref": (
+            source_case.input["trusted_context_fixture_ref"]
+        ),
+    }
+    assert received["scripted_provider"].script_execution_ref == (
+        SCRIPT_EXECUTION_REF_1
+    )
+    assert EXECUTION_REF_1 not in {
+        uuid5(NAMESPACE_URL, source_case.case_id),
+        uuid5(
+            NAMESPACE_URL,
+            tuple(source_case.input["model_script_refs"])[0],
+        ),
+    }
+    with pytest.raises(ValidationError):
+        type(execution_input)(
+            **execution_input.model_dump(),
+            case_id=source_case.case_id,
+        )
+    with pytest.raises(ValidationError):
+        execution_input.messages[0].content = "tampered"
+    message_type = type(execution_input.messages[0])
+    input_type = type(execution_input)
+    with pytest.raises(ValidationError):
+        message_type(role="assistant", content="not allowed")
+    with pytest.raises(ValidationError):
+        message_type(role="user", content="")
+    with pytest.raises(ValidationError):
+        input_type(
+            execution_ref=EXECUTION_REF_1,
+            messages=(),
+            trusted_context_fixture_ref=(
+                source_case.input["trusted_context_fixture_ref"]
+            ),
+        )
+    with pytest.raises(ValidationError):
+        input_type(
+            execution_ref=EXECUTION_REF_1,
+            messages=(
+                execution_input.messages[0],
+                execution_input.messages[0],
+            ),
+            trusted_context_fixture_ref=(
+                source_case.input["trusted_context_fixture_ref"]
+            ),
+        )
+
+
+def test_execution_ref_result_correlation_has_zero_argument_nonce_seam() -> None:
+    constructor_parameters = signature(OfflineEvalHarness.__init__).parameters
+
+    assert "nonce_factory" in constructor_parameters
+    assert set(EvalCaseSutResult.model_fields) == {
+        "execution_ref",
+        "evidence",
+        "safe_observable",
+    }
+    evidence_type = EvalCaseSutResult.model_fields["evidence"].annotation
+    observable_type = EvalCaseSutResult.model_fields["safe_observable"].annotation
+    assert "case_id" not in evidence_type.model_fields
+    assert "case_id" not in observable_type.model_fields
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown_execution_ref",
+        "provider_execution_ref",
+        "semantic_evidence_case_id",
+        "semantic_observable_case_id",
+        "trace_case_id",
+        "nested_trace_semantic_case_id",
+        "nested_payload_cycle",
+        "observable_disagreement",
+    ],
+)
+def test_result_correlation_rejects_unbound_spoofing_before_grading(
+    mutation: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(delegate, mutation=mutation)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_behaviorful_execution_ref_is_closed_before_equality() -> None:
+    BOUNDARY_METHOD_READ_COUNTER.reads = 0
+    traces = InMemoryTraceCallbacks()
+    sut = ResultBoundaryMutationSut(
+        SyntheticSut(traces),
+        mutation="behaviorful_execution_ref",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("behaviorful execution ref reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert BOUNDARY_METHOD_READ_COUNTER.reads == 0
+    assert grader_called is False
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    ("sidecar_kind", "location"),
+    (
+        ("fields-set", "root"),
+        ("fields-set", "nested"),
+        ("storage-key", "root"),
+        ("storage-key", "nested"),
+    ),
+)
+def test_noncanonical_pydantic_sidecar_fails_without_method_read(
+    sidecar_kind: str,
+    location: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"pydantic_sidecar:{sidecar_kind}:{location}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("noncanonical Pydantic sidecar reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert SIDECAR_METHOD_READ_COUNTER.reads == 0
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_custom_datetime_timezone_fails_without_method_read() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="custom_datetime_tz",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("custom datetime timezone reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert TIMEZONE_METHOD_READ_COUNTER.reads == 0
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize("drift", ("hidden", "name", "value"))
+def test_canonical_enum_storage_drift_fails_before_grading(
+    drift: str,
+) -> None:
+    member = AgentOutcome.COMPLETED
+    storage = object.__getattribute__(member, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(storage, key))
+        for key in dict.__iter__(storage)
+    )
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"canonical_enum_storage:{drift}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("mutated canonical Enum reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    try:
+        outcome = _run(harness)
+    finally:
+        storage = object.__getattribute__(member, "__dict__")
+        dict.clear(storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(storage, key, stored_value)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize("slot_name", ("int", "is-safe"))
+def test_mutated_uuid_internal_state_fails_before_grading(
+    slot_name: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"uuid_internal:{slot_name}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("mutated UUID reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "substitution",
+    (
+        "arguments-tuple",
+        "arguments-model",
+        "typed-tuple-model",
+        "cross-enum",
+        "shared-frozen-dag",
+        "deep-frozen",
+        "wide-frozen",
+    ),
+)
+def test_schema_position_substitution_fails_before_grading(
+    substitution: str,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"positional_type_substitution:{substitution}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("schema-position substitution reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert list(recwarn) == []
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_sut_cancellation_propagates_after_correlation_is_retired() -> None:
+    sut = CancellingSut()
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        nonce_factory=nonce_factory,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(harness)
+
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert harness._pending_case_by_execution_ref == {}
+    assert harness._retired_execution_refs == {EXECUTION_REF_1}
+    assert port.results == {}
+    assert port.failures == []
+
+
+@pytest.mark.parametrize(
+    "seam",
+    (
+        "nonce",
+        "sut",
+        "trace-append",
+        "trace-reload",
+        "grader",
+        "result-append",
+        "result-load",
+        "failure-append",
+        "clock",
+    ),
+)
+def test_command_scope_restores_singletons_on_injected_base_exception(
+    seam: str,
+) -> None:
+    class InjectedBoundaryAbort(BaseException):
+        pass
+
+    member = AgentOutcome.COMPLETED
+    member_storage = object.__getattribute__(member, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(member_storage, key))
+        for key in dict.__iter__(member_storage)
+    )
+    abort: BaseException = (
+        asyncio.CancelledError("synthetic-cancellation")
+        if seam == "sut"
+        else InjectedBoundaryAbort("synthetic-boundary-abort")
+    )
+
+    def mutate_singleton() -> None:
+        object.__setattr__(
+            member,
+            "hidden_case_id",
+            "E2E01-01",
+        )
+
+    traces: InMemoryTraceCallbacks = InMemoryTraceCallbacks()
+    port: InMemoryResultPort = InMemoryResultPort()
+    sut: object = SyntheticSut(traces)
+    nonce_factory: Callable[..., UUID] = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    grader_runner = None
+    clock: Callable[[], datetime] | None = None
+
+    if seam == "nonce":
+
+        def aborting_nonce() -> UUID:
+            mutate_singleton()
+            raise abort
+
+        nonce_factory = aborting_nonce
+    elif seam == "sut":
+
+        class MutatingCancellingSut:
+            async def execute_case(self, **kwargs: object) -> None:
+                mutate_singleton()
+                raise abort
+
+        sut = MutatingCancellingSut()
+    elif seam == "trace-append":
+
+        class AbortingAppendTraceCallbacks(InMemoryTraceCallbacks):
+            async def append_eval_case_graded(
+                self,
+                event: TraceEvent,
+            ) -> None:
+                mutate_singleton()
+                raise abort
+
+        traces = AbortingAppendTraceCallbacks()
+        sut = SyntheticSut(traces)
+    elif seam == "trace-reload":
+
+        class AbortingReloadTraceCallbacks(InMemoryTraceCallbacks):
+            async def reload_trace(
+                self,
+                trace_ref: UUID,
+            ) -> tuple[TraceEvent, ...]:
+                mutate_singleton()
+                raise abort
+
+        traces = AbortingReloadTraceCallbacks()
+        sut = SyntheticSut(traces)
+    elif seam == "grader":
+
+        def aborting_grader(*args: object) -> GradingOutcome:
+            mutate_singleton()
+            raise abort
+
+        grader_runner = aborting_grader
+    elif seam == "result-append":
+
+        class AbortingResultAppendPort(InMemoryResultPort):
+            async def append_eval_result(
+                self,
+                record: EvalResultRecord,
+            ) -> InsertOnlyWriteResult:
+                mutate_singleton()
+                raise abort
+
+        port = AbortingResultAppendPort()
+    elif seam == "result-load":
+
+        class AbortingResultLoadPort(InMemoryResultPort):
+            async def append_eval_result(
+                self,
+                record: EvalResultRecord,
+            ) -> InsertOnlyWriteResult:
+                return InsertOnlyWriteResult.ALREADY_EXISTS
+
+            async def load_eval_result(
+                self,
+                *,
+                eval_run_id: UUID,
+                case_id: str,
+                lane: str,
+                attempt: int,
+            ) -> EvalResultRecord | None:
+                mutate_singleton()
+                raise abort
+
+        port = AbortingResultLoadPort()
+    elif seam == "failure-append":
+
+        class AbortingFailureAppendPort(InMemoryResultPort):
+            async def append_eval_execution_failure(
+                self,
+                record: EvalExecutionFailureRecord,
+            ) -> None:
+                mutate_singleton()
+                raise abort
+
+        port = AbortingFailureAppendPort()
+        sut = SyntheticSut(traces, fault="sut")
+    elif seam == "clock":
+
+        def aborting_clock() -> datetime:
+            mutate_singleton()
+            raise abort
+
+        clock = aborting_clock
+        sut = SyntheticSut(traces, fault="sut")
+    else:
+        assert seam == "result-append"
+
+    harness, *_ = _harness(
+        sut=sut,
+        traces=traces,
+        port=port,
+        grader_runner=grader_runner,
+        nonce_factory=nonce_factory,
+        clock=clock,
+    )
+
+    try:
+        with pytest.raises(type(abort)) as caught:
+            _run(harness)
+        restored_by_harness = _canonical_enum_storage_is_pristine(
+            member,
+            original_items,
+        )
+    finally:
+        member_storage = object.__getattribute__(
+            member,
+            "__dict__",
+        )
+        dict.clear(member_storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(
+                member_storage,
+                key,
+                stored_value,
+            )
+
+    if seam == "sut":
+        assert caught.value.args == abort.args
+    else:
+        assert caught.value is abort
+    assert restored_by_harness is True
+    assert harness._pending_case_by_execution_ref == {}
+    assert harness._persisted_stage_by_replay_key == {}
+    assert port.results == {}
+    assert port.failures == []
+    assert port.events == []
+    if seam == "nonce":
+        assert harness._retired_execution_refs == set()
+    else:
+        assert harness._retired_execution_refs == {EXECUTION_REF_1}
+
+
+@pytest.mark.parametrize(
+    "identity_alias",
+    (
+        "case_ref",
+        "caseId",
+        "Case_ID",
+        "case_identifier",
+        "evaluation_case_id",
+        "test_case_id",
+        "case_key",
+        "model_script_ref",
+        "model_script_reference",
+        "script_identifier",
+        "case-identity",
+        "EvaluationCaseReference",
+        "semantic case key",
+        "ModelScriptReference",
+        "SCRIPT-IDENTIFIER",
+        "evaluationcaseid",
+        "TESTCASEID",
+        "modelscriptreference",
+        "semanticscriptkey",
+        "canonical_case_id",
+        "canonical-case-id",
+        "canonical case id",
+        "CanonicalCaseId",
+        "canonicalcaseid",
+        "CANONICAL_CASE_ID",
+        "golden_case_id",
+        "reference_case_id",
+        "suite_case_id",
+        "ground_truth_case_id",
+        "groundTruthCaseId",
+        "groundtruthcaseid",
+        "canonical_script_reference",
+        "CanonicalScriptReference",
+        "canonicalscriptreference",
+    ),
+)
+def test_nested_normalized_semantic_identity_alias_fails_completeness(
+    identity_alias: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_identity:{identity_alias}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("semantic identity reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "semantic_field_name",
+    (
+        "case_code",
+        "case-code",
+        "case code",
+        "caseCode",
+        "CaseCode",
+        "case_uuid",
+        "case-uuid",
+        "case uuid",
+        "caseUuid",
+        "CaseUUID",
+        "case_number",
+        "case-number",
+        "case number",
+        "caseNumber",
+        "CaseNumber",
+        "script_code",
+        "script-code",
+        "script code",
+        "scriptCode",
+        "ScriptCode",
+        "script_uuid",
+        "script-uuid",
+        "script uuid",
+        "scriptUuid",
+        "ScriptUUID",
+        "script_number",
+        "script-number",
+        "script number",
+        "scriptNumber",
+        "ScriptNumber",
+        "model_script_code",
+        "model-script-code",
+        "model script code",
+        "modelScriptCode",
+        "ModelScriptCode",
+        "model_script_uuid",
+        "model-script-uuid",
+        "model script uuid",
+        "modelScriptUuid",
+        "ModelScriptUUID",
+        "evaluation_case_code",
+        "evaluation-case-code",
+        "evaluation case code",
+        "evaluationCaseCode",
+        "EvaluationCaseCode",
+        "eval_case_uuid",
+        "test-case-code",
+        "semantic script uuid",
+        "expectedCaseCode",
+        "CanonicalScriptUUID",
+        "casecode",
+        "scriptuuid",
+        "modelscriptcode",
+        "modelscriptuuid",
+        "evaluationcasecode",
+        "evalcaseuuid",
+        "requestcasecode",
+        "runtimecaseuuid",
+        "providerscriptcode",
+        "java_script_uuid",
+        "javaScriptUuid",
+        "de_script_ion",
+        "case_fold",
+        "show_case_code",
+        "showCaseCode",
+        "tran_script_uuid",
+        "stair_case_number",
+        "lower_case_id",
+    ),
+)
+def test_semantic_entity_field_with_opaque_value_fails_completeness(
+    semantic_field_name: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"nested_argument_business_value:{semantic_field_name}"
+        ),
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("semantic entity field reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "business_identity_key",
+    (
+        "order_id",
+        "customer_id",
+        "owner_customer_id",
+        "task_id",
+        "run_id",
+        "message_ref",
+        "tool_call_id",
+        "request_unit_id",
+        "observation_ref",
+        "input_binding_ref",
+        "showcase_id",
+        "showcaseid",
+        "transcript_reference",
+        "script_version",
+        "case_status",
+        "use_case_label",
+        "use_case_id",
+        "usecaseid",
+        "customer_case_id",
+        "customerCaseId",
+        "show_case_id",
+        "showCaseId",
+        "script_owner_id",
+        "description",
+        "description_id",
+        "lowercase_id",
+        "uppercase_reference",
+        "javascript_ref",
+        "staircase_key",
+        "descriptionid",
+        "lowercaseid",
+        "uppercasereference",
+        "javascriptref",
+        "staircasekey",
+        "showcase_code",
+        "showcaseCode",
+        "transcript_uuid",
+        "transcriptUuid",
+        "description_code",
+        "javascript_uuid",
+        "staircase_number",
+        "showcasecode",
+        "transcriptuuid",
+        "javascriptuuid",
+        "casefold",
+        "scripture",
+    ),
+)
+def test_business_identity_key_is_not_a_semantic_eval_identity(
+    business_identity_key: str,
+) -> None:
+    assert _is_semantic_identity_field(business_identity_key) is False
+
+
+def test_reviewed_safe_identity_field_tokens_are_exactly_pinned() -> None:
+    assert _SAFE_IDENTITY_FIELD_TOKEN_TUPLES == frozenset(
+        {
+            ("case", "status"),
+            ("casefold",),
+            ("casestatus",),
+            ("customer", "case", "id"),
+            ("customercaseid",),
+            ("description",),
+            ("description", "code"),
+            ("description", "id"),
+            ("descriptioncode",),
+            ("descriptionid",),
+            ("javascript", "ref"),
+            ("javascript", "uuid"),
+            ("javascriptref",),
+            ("javascriptuuid",),
+            ("lowercase", "id"),
+            ("lowercaseid",),
+            ("script", "owner", "id"),
+            ("script", "version"),
+            ("scriptownerid",),
+            ("scripture",),
+            ("scriptversion",),
+            ("show", "case", "id"),
+            ("showcase", "code"),
+            ("showcase", "id"),
+            ("showcasecode",),
+            ("showcaseid",),
+            ("staircase", "key"),
+            ("staircase", "number"),
+            ("staircasekey",),
+            ("staircasenumber",),
+            ("transcript", "reference"),
+            ("transcript", "uuid"),
+            ("transcriptreference",),
+            ("transcriptuuid",),
+            ("uppercase", "reference"),
+            ("uppercasereference",),
+            ("use", "case", "id"),
+            ("use", "case", "label"),
+            ("usecaseid",),
+            ("usecaselabel",),
+        }
+    )
+
+
+def test_schema_controlled_tool_description_reaches_grading() -> None:
+    assert get_order_tool_spec().description
+    harness, _sut, _traces, _port = _harness(
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    assert outcome.results[0].status is EvalResultStatus.PASS
+
+
+def test_reachable_schema_identity_fields_match_reviewed_set() -> None:
+    assert _DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS == frozenset(
+        {"case_id"}
+    )
+    assert (
+        _DISCOVERED_SEMANTIC_SCHEMA_IDENTITY_FIELDS
+        == _SEMANTIC_SCHEMA_IDENTITY_FIELDS
+    )
+
+
+@pytest.mark.parametrize(
+    "business_identity_key",
+    (
+        "customer_case_id",
+        "use_case_id",
+        "show_case_id",
+        "script_owner_id",
+        "description",
+        "showcase_code",
+        "showcaseCode",
+        "transcript_uuid",
+        "transcriptUuid",
+        "description_code",
+        "javascript_uuid",
+        "staircase_number",
+        "showcasecode",
+        "transcriptuuid",
+        "javascriptuuid",
+        "casefold",
+        "scripture",
+    ),
+)
+def test_business_named_key_rejects_authenticated_eval_identity_value(
+    business_identity_key: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_identity:{business_identity_key}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("authenticated Eval identity reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "identity_kind",
+    ("other-case", "other-script"),
+)
+def test_other_authenticated_bundle_identity_fails_completeness(
+    identity_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            "nested_argument_authenticated_bundle_identity:"
+            f"{identity_kind}"
+        ),
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError(
+            "other authenticated bundle identity reached grading"
+        )
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "identity_kind",
+    ("case", "script", "nested-case", "subclass-case"),
+)
+def test_enum_wrapped_authenticated_identity_fails_completeness(
+    identity_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_enum_identity:{identity_kind}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("Enum-wrapped Eval identity reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_cyclic_enum_value_fails_completeness_without_error_leak() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="nested_argument_enum_identity:cycle",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("cyclic Enum value reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "identity_kind",
+    ("wrapped-semantic", "wrapped-bundle"),
+)
+def test_enum_wrapped_mapping_fails_completeness(
+    identity_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_enum_identity:{identity_kind}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("Enum-wrapped Mapping reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "key_kind",
+    ("plain-semantic", "nested-semantic", "subclass-semantic"),
+)
+def test_enum_semantic_mapping_key_fails_completeness(
+    key_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_enum_key:{key_kind}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("Enum semantic Mapping key reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "key_kind",
+    (
+        "ordinary-business",
+        "ordinary-lexical",
+        "ordinary-subclass",
+    ),
+)
+def test_ordinary_enum_mapping_key_fails_completeness(
+    key_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_enum_key:{key_kind}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("noncanonical Enum Mapping key reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_cyclic_enum_mapping_key_fails_completeness_without_error() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="nested_argument_enum_key:cycle",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("cyclic Enum Mapping key reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "identity_kind",
+    ("selected-case", "other-script"),
+)
+def test_bytes_wrapped_authenticated_identity_fails_completeness(
+    identity_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_bytes_identity:{identity_kind}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("bytes-wrapped Eval identity reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "container_kind",
+    (
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "flip-mapping",
+        "flip-list",
+        "flip-tuple",
+        "flip-set",
+    ),
+)
+def test_noncanonical_json_container_fails_without_iteration(
+    container_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            "nested_argument_noncanonical_container:"
+            f"{container_kind}"
+        ),
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("noncanonical container reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+    if container_kind.startswith("flip-"):
+        assert getattr(sut.injected_container, "iterations") == 0
+
+
+def test_duplicate_raw_frozen_json_key_fails_completeness() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="nested_argument_duplicate_frozen_identity",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("duplicate Frozen JSON key reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    arguments = sut.injected_arguments
+    assert type(arguments) is FrozenJsonDict
+    assert arguments["metadata"] == "ordinary-value"
+    assert tuple(tuple.__iter__(arguments))[-1] == (
+        "metadata",
+        "E2E01-04-A",
+    )
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_canonical_frozen_json_reaches_case_grading() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="nested_argument_canonical_frozen_json",
+    )
+    grader_calls = 0
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        nonlocal grader_calls
+        grader_calls += 1
+        return grade_evidence(configured, evidence, expectations)
+
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=recording_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    arguments = sut.injected_arguments
+    assert type(arguments) is FrozenJsonDict
+    metadata = arguments["metadata"]
+    assert type(metadata) is FrozenJsonDict
+    assert type(metadata["items"]) is FrozenJsonList
+    assert grader_calls == 2
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+@pytest.mark.parametrize("enum_location", ("key", "value"))
+def test_behaviorful_unknown_enum_is_rejected_without_value_read(
+    enum_location: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_flip_enum:{enum_location}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("behaviorful unknown Enum reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert FLIP_ENUM_VALUE_READ_COUNTER.reads == 0
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "string_location",
+    ("key", "ordinary-value", "identity-value"),
+)
+def test_direct_str_subclass_is_rejected_without_method_read(
+    string_location: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"nested_argument_str_subclass:{string_location}",
+    )
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("direct str subclass reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert FLIP_STRING_METHOD_READ_COUNTER.reads == 0
+    assert grader_called is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_repeated_nonempty_immutable_tuple_is_rejected() -> None:
+    shared: tuple[object, ...] = ("ordinary-value",)
+    root = (shared, shared)
+    traversal = _PayloadTraversalState()
+
+    assert not _payload_tree_is_closed(
+        root,
+        forbidden_identity_values=frozenset(),
+        traversal=traversal,
+    )
+    assert set(traversal.validation_counts.values()) == {1}
+    assert traversal.active_ids == set()
+
+
+def test_unique_depth_and_edge_budgets_fail_closed() -> None:
+    deep: object = "ordinary-value"
+    for _ in range(_MAX_PAYLOAD_DEPTH + 1):
+        deep = tuple.__new__(FrozenJsonList, (deep,))
+    depth_traversal = _PayloadTraversalState()
+
+    assert not _payload_tree_is_closed(
+        deep,
+        forbidden_identity_values=frozenset(),
+        traversal=depth_traversal,
+    )
+    assert depth_traversal.visited_edges == _MAX_PAYLOAD_DEPTH
+    assert depth_traversal.active_ids == set()
+
+    wide = tuple.__new__(
+        FrozenJsonList,
+        ("ordinary-value",) * (_MAX_PAYLOAD_EDGES + 1),
+    )
+    edge_traversal = _PayloadTraversalState()
+
+    assert not _payload_tree_is_closed(
+        wide,
+        forbidden_identity_values=frozenset(),
+        traversal=edge_traversal,
+    )
+    assert edge_traversal.visited_edges == _MAX_PAYLOAD_EDGES
+    assert edge_traversal.active_ids == set()
+
+
+def test_exact_tree_comparison_rejects_equal_cross_enum_values() -> None:
+    assert AgentOutcome.COMPLETED == TaskStatus.COMPLETED
+    assert not _same_exact_value_tree(
+        AgentOutcome.COMPLETED,
+        TaskStatus.COMPLETED,
+    )
+
+
+def test_canonical_result_enum_types_are_import_time_closed() -> None:
+    assert {
+        enum_type.__name__
+        for enum_type in _CANONICAL_RESULT_ENUM_TYPES
+    } == {
+        "AgentOutcome",
+        "AgentRunStatus",
+        "CandidateValidationDecision",
+        "GateDecisionValue",
+        "GateReasonCode",
+        "InputAuthority",
+        "InputSourceKind",
+        "InputValidationStatus",
+        "MessageDirection",
+        "NextMoveKind",
+        "ObservationVisibility",
+        "OrderStatus",
+        "P0LogicalChildCode",
+        "P0RecordCode",
+        "StopReason",
+        "TaskDeltaOperation",
+        "TaskStatus",
+        "ToolCallStatus",
+        "ToolEffect",
+        "ToolResultOutcome",
+        "ToolTimeoutPhase",
+        "TraceEventType",
+    }
+
+
+@pytest.mark.parametrize(
+    "business_identity_key",
+    (
+        "customer_case_id",
+        "use_case_id",
+        "show_case_id",
+        "script_owner_id",
+        "case_status",
+        "use_case_label",
+        "script_version",
+        "description",
+        "showcasecode",
+        "transcriptuuid",
+        "javascriptuuid",
+        "casefold",
+        "scripture",
+    ),
+)
+def test_business_named_key_with_ordinary_value_reaches_case_grading(
+    business_identity_key: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"nested_argument_business_value:{business_identity_key}"
+        ),
+    )
+    grader_calls = 0
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        nonlocal grader_calls
+        grader_calls += 1
+        return grade_evidence(configured, evidence, expectations)
+
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=recording_grader,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert grader_calls == 2
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+def test_nested_business_identity_key_is_allowed_by_result_boundary() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation="allowed_business_identity_keys",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "NONE",
+        ToolResultOutcome.BUSINESS_FAILURE.value,
+        ToolResultOutcome.SYSTEM_FAILURE.value,
+        ToolResultOutcome.TIMEOUT.value,
+        ToolResultOutcome.INTERRUPTED.value,
+        ToolResultOutcome.RESULT_UNKNOWN.value,
+    ),
+)
+def test_success_normalized_outcome_must_match_authoritative_attempt(
+    replacement: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"normalized_outcome:{replacement}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    trace_grader = next(
+        grader
+        for grader in outcome.results[0].grader_results
+        if grader.grader_name == "TraceCompletenessGrader"
+    )
+    assert trace_grader.status is EvalGraderStatus.FAIL
+    assert trace_grader.reason_code is (
+        EvalGraderReasonCode.ASSERTION_FAILED
+    )
+    assert CriticalFailureCode.CF_12 in (
+        outcome.results[0].critical_failures
+    )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "NONE",
+        ToolResultOutcome.SUCCESS.value,
+        ToolResultOutcome.SYSTEM_FAILURE.value,
+        ToolResultOutcome.TIMEOUT.value,
+        ToolResultOutcome.INTERRUPTED.value,
+        ToolResultOutcome.RESULT_UNKNOWN.value,
+    ),
+)
+def test_business_failure_normalized_outcome_rejects_every_substitute(
+    replacement: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"normalized_outcome:{replacement}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (
+                EXECUTION_REF_1,
+                SCRIPT_EXECUTION_REF_1,
+                EXECUTION_REF_2,
+                SCRIPT_EXECUTION_REF_2,
+            )
+        ),
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-04-A", "E2E01-04-B"),
+    )
+
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 2
+    assert {result.status for result in outcome.results} == {
+        EvalResultStatus.FAIL
+    }
+    for result in outcome.results:
+        trace_grader = next(
+            grader
+            for grader in result.grader_results
+            if grader.grader_name == "TraceCompletenessGrader"
+        )
+        assert trace_grader.status is EvalGraderStatus.FAIL
+        assert trace_grader.reason_code is (
+            EvalGraderReasonCode.ASSERTION_FAILED
+        )
+
+
+@pytest.mark.parametrize(
+    "target_type",
+    (
+        TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+        TraceEventType.RUN_STARTED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.RUN_STOPPED,
+    ),
+)
+def test_gate_projection_is_rejected_outside_gate_event(
+    target_type: TraceEventType,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"gate_projection:{target_type.value}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    trace_grader = next(
+        grader
+        for grader in outcome.results[0].grader_results
+        if grader.grader_name == "TraceCompletenessGrader"
+    )
+    assert trace_grader.status is EvalGraderStatus.FAIL
+
+
+def test_gate_projection_must_match_authoritative_gate_record() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"gate_projection:"
+            f"{TraceEventType.GATE_DECISION_RECORDED.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    "target_type",
+    (
+        TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+        TraceEventType.RUN_STARTED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+    ),
+)
+def test_run_projection_is_rejected_outside_run_stopped(
+    target_type: TraceEventType,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"run_projection:{target_type.value}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    trace_grader = next(
+        grader
+        for grader in outcome.results[0].grader_results
+        if grader.grader_name == "TraceCompletenessGrader"
+    )
+    assert trace_grader.status is EvalGraderStatus.FAIL
+
+
+def test_run_stopped_projection_must_match_authoritative_result() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"run_projection:{TraceEventType.RUN_STOPPED.value}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    "target_type",
+    (
+        TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+        TraceEventType.RUN_STARTED,
+    ),
+)
+def test_safe_tool_outcome_is_rejected_before_normalization(
+    target_type: TraceEventType,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"safe_outcome_projection:{target_type.value}:"
+            f"{ToolResultOutcome.SUCCESS.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+def test_later_matching_safe_tool_outcome_summary_is_allowed() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"safe_outcome_projection:{TraceEventType.RUN_STOPPED.value}:"
+            f"{ToolResultOutcome.SUCCESS.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.PASS
+
+
+def test_later_conflicting_safe_tool_outcome_summary_is_rejected() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"safe_outcome_projection:{TraceEventType.RUN_STOPPED.value}:"
+            f"{ToolResultOutcome.BUSINESS_FAILURE.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+def test_presentation_failure_keeps_tool_and_agent_outcomes_separate() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"safe_outcome_projection:{TraceEventType.RUN_STOPPED.value}:"
+            f"{ToolResultOutcome.SUCCESS.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-01+FAULT-PRESENTATION-PROTOCOL",),
+        script_ref_by_case={
+            "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
+                "script:fault-presentation:invalid-schema"
+            )
+        },
+    )
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.PASS
+    assert outcome.results[0].observed_outcome is AgentOutcome.BLOCKED
+    assert delegate.last_trace_ref is not None
+    final_trace = traces.events_by_ref[delegate.last_trace_ref]
+    normalized = next(
+        event
+        for event in final_trace
+        if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED
+    )
+    stopped = next(
+        event
+        for event in final_trace
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    assert normalized.safe_tool_outcome is ToolResultOutcome.SUCCESS
+    assert stopped.tool_call_id == normalized.tool_call_id
+    assert stopped.safe_tool_outcome is ToolResultOutcome.SUCCESS
+    assert stopped.user_outcome is AgentOutcome.BLOCKED
+    assert stopped.stop_reason is StopReason.PROVIDER_PROTOCOL_ERROR
+    assert sum(
+        event.event_type is TraceEventType.TOOL_CALL_SUCCEEDED
+        for event in final_trace
+    ) == 1
+    assert sum(
+        event.event_type is TraceEventType.OBSERVATION_RECORDED
+        for event in final_trace
+    ) == 1
+
+
+def test_presentation_failure_rejects_conflicting_tool_outcome_summary() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=(
+            f"safe_outcome_projection:{TraceEventType.RUN_STOPPED.value}:"
+            f"{ToolResultOutcome.BUSINESS_FAILURE.value}"
+        ),
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-01+FAULT-PRESENTATION-PROTOCOL",),
+        script_ref_by_case={
+            "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
+                "script:fault-presentation:invalid-schema"
+            )
+        },
+    )
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    trace_grader = next(
+        grader
+        for grader in outcome.results[0].grader_results
+        if grader.grader_name == "TraceCompletenessGrader"
+    )
+    assert trace_grader.status is EvalGraderStatus.FAIL
+
+
+@pytest.mark.parametrize("reference_kind", ("missing", "foreign"))
+def test_later_safe_tool_outcome_summary_requires_authoritative_tool_call(
+    reference_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ResultBoundaryMutationSut(
+        delegate,
+        mutation=f"safe_outcome_reference:{reference_kind}",
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+
+
+def test_result_correlation_replay_wins_over_unexhausted_provider() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = ReplayWithoutProviderSut(delegate)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    replayed = _run(harness, attempt=2)
+
+    assert first.execution_failures == ()
+    assert first.results[0].status is EvalResultStatus.PASS
+    assert replayed.results == ()
+    assert len(replayed.execution_failures) == 1
+    assert replayed.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_incomplete_exit_clears_correlation_before_later_stale_echo() -> None:
+    traces = InMemoryTraceCallbacks()
+    delegate = SyntheticSut(traces)
+    sut = IncompleteThenStaleRefSut(delegate)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    incomplete = _run(harness, attempt=1)
+    stale_echo = _run(harness, attempt=2)
+
+    assert incomplete.results == ()
+    assert incomplete.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert stale_echo.results == ()
+    assert stale_echo.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_nonce_factory_values_are_used_verbatim_and_unique_across_attempts() -> None:
+    probe = BoundaryProbeSut()
+    nonce_values = (
+        EXECUTION_REF_1,
+        SCRIPT_EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        SCRIPT_EXECUTION_REF_2,
+    )
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert all(
+        item.failure_phase is EvalExecutionFailurePhase.RESULT_COMPLETENESS
+        for outcome in (first, second)
+        for item in outcome.execution_failures
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(probe.received_calls) == 2
+    assert tuple(
+        call["execution_input"].execution_ref
+        for call in probe.received_calls
+    ) == (EXECUTION_REF_1, EXECUTION_REF_2)
+    assert tuple(
+        call["scripted_provider"].script_execution_ref
+        for call in probe.received_calls
+    ) == (SCRIPT_EXECUTION_REF_1, SCRIPT_EXECUTION_REF_2)
+    assert len(set(nonce_values)) == len(nonce_values)
+
+
+def test_nonce_factory_values_are_distinct_across_selected_cases() -> None:
+    probe = BoundaryProbeSut()
+    nonce_values = (
+        EXECUTION_REF_1,
+        SCRIPT_EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        SCRIPT_EXECUTION_REF_2,
+    )
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-04-A", "E2E01-04-B"),
+    )
+
+    assert outcome.results == ()
+    assert all(
+        failure.failure_phase is EvalExecutionFailurePhase.RESULT_COMPLETENESS
+        for failure in outcome.execution_failures
+    )
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(probe.received_calls) == 2
+    assert tuple(
+        call["execution_input"].execution_ref
+        for call in probe.received_calls
+    ) == (EXECUTION_REF_1, EXECUTION_REF_2)
+    assert tuple(
+        call["scripted_provider"].script_execution_ref
+        for call in probe.received_calls
+    ) == (SCRIPT_EXECUTION_REF_1, SCRIPT_EXECUTION_REF_2)
+
+
+@pytest.mark.parametrize(
+    "nonce_values",
+    [
+        (EXECUTION_REF_1, EXECUTION_REF_1),
+        (
+            uuid5(NAMESPACE_URL, "E2E01-01"),
+            SCRIPT_EXECUTION_REF_1,
+        ),
+    ],
+    ids=("execution-provider-collision", "deterministic-version-five-ref"),
+)
+def test_nonce_collision_or_non_uuid4_fails_result_completeness(
+    nonce_values: tuple[UUID, UUID],
+) -> None:
+    probe = BoundaryProbeSut()
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert probe.received_calls == []
+    assert port.results == {}
+    assert all(args == () and kwargs == {} for args, kwargs in nonce_factory.calls)
+
+
+def test_nonce_internal_state_is_closed_before_version_read() -> None:
+    bad_nonce = UUID(str(EXECUTION_REF_1))
+    object.__setattr__(
+        bad_nonce,
+        "int",
+        EvilInt(bad_nonce.int),
+    )
+    BOUNDARY_METHOD_READ_COUNTER.reads = 0
+    probe = BoundaryProbeSut()
+    harness, _sut, _traces, port = _harness(
+        sut=probe,
+        nonce_factory=NonceFactorySpy(
+            (bad_nonce, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+
+    outcome = _run(harness)
+
+    assert BOUNDARY_METHOD_READ_COUNTER.reads == 0
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert probe.received_calls == []
+    assert port.results == {}
+
+
+def test_sut_nonce_copies_cannot_corrupt_private_correlation_state() -> None:
+    class InputMutatingSut:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute_case(self, **kwargs: object) -> None:
+            self.calls += 1
+            execution_input = cast(
+                EvalCaseExecutionInput,
+                kwargs["execution_input"],
+            )
+            provider = cast(
+                ScriptedModelProvider,
+                kwargs["scripted_provider"],
+            )
+            object.__setattr__(
+                execution_input.execution_ref,
+                "int",
+                1,
+            )
+            object.__setattr__(
+                provider.script_execution_ref,
+                "int",
+                2,
+            )
+            return None
+
+    nonce_values = (
+        EXECUTION_REF_1,
+        SCRIPT_EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        SCRIPT_EXECUTION_REF_2,
+    )
+    sut = InputMutatingSut()
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        nonce_factory=NonceFactorySpy(nonce_values),
+    )
+
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert first.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert second.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert sut.calls == 2
+    assert len(harness._issued_nonces) == 4
+    assert all(value in harness._issued_nonces for value in nonce_values)
+    assert harness._pending_case_by_execution_ref == {}
+    assert harness._retired_execution_refs == {
+        EXECUTION_REF_1,
+        EXECUTION_REF_2,
+    }
+
+
+@pytest.mark.parametrize(
+    "nonce_values",
+    [
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_2,
+        ),
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_1,
+        ),
+    ],
+    ids=("execution-ref-reuse", "script-execution-ref-reuse"),
+)
+def test_nonce_reuse_across_attempts_fails_before_second_sut_call(
+    nonce_values: tuple[UUID, UUID, UUID, UUID],
+) -> None:
+    probe = BoundaryProbeSut()
+    nonce_factory = NonceFactorySpy(nonce_values)
+    harness, _sut, _traces, _port = _harness(
+        sut=probe,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, attempt=1)
+    second = _run(harness, attempt=2)
+
+    assert first.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert second.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert len(probe.received_calls) == 1
+    assert nonce_factory.calls == [((), {})] * 4
+
+
+def test_actual_mismatch_reaches_graders_and_persists_fail() -> None:
+    case = ARTIFACTS.case_by_id("E2E01-01")
+    execution_input = EvalCaseExecutionInput(
+        execution_ref=EXECUTION_REF_1,
+        messages=(
+            {
+                "role": "user",
+                "content": case.input["messages"][0]["content"],
+            },
+        ),
+        trusted_context_fixture_ref=case.input[
+            "trusted_context_fixture_ref"
+        ],
+    )
+    provider = ScriptedModelProvider(
+        ARTIFACTS.script_by_ref("script:e2e01-01:success"),
+        script_execution_ref=SCRIPT_EXECUTION_REF_1,
+    )
+    actual = asyncio.run(
+        provider.propose_next_move(_request(execution_input))
+    )
+    mismatched_move = actual.next_move_candidate.model_copy(
+        update={
+            "arguments": freeze_json_value(
+                {"order_id": "O-2001"}
+            )
+        }
+    )
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides={
+            "request_understanding_output": actual.model_copy(
+                update={"next_move_candidate": mismatched_move}
+            )
+        },
+    )
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, *_ = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+
+    outcome = _run(harness)
+
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    request_grader = next(
+        item
+        for item in outcome.results[0].grader_results
+        if item.grader_name == "RequestUnderstandingGrader"
+    )
+    assert request_grader.status is EvalGraderStatus.FAIL
+    assert request_grader.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
 def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     timeline: list[str] = []
     traces = InMemoryTraceCallbacks(timeline)
@@ -1026,7 +4915,7 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
         timeline.append(f"grade:{','.join(configured)}")
         return grade_evidence(configured, evidence, expectations)
 
-    harness, _sut, traces, port = _harness(
+    harness, sut, traces, port = _harness(
         traces=traces,
         port=port,
         grader_runner=recording_grader,
@@ -1036,10 +4925,12 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     assert outcome.command_passed is True
     assert outcome.execution_failures == ()
     assert len(outcome.results) == 1
+    assert isinstance(sut, SyntheticSut)
+    assert sut.last_trace_ref is not None
     result = outcome.results[0]
     assert result.status is EvalResultStatus.PASS
     assert result.observed_outcome is AgentOutcome.COMPLETED
-    assert result.trace_ref == TRACE_REF
+    assert result.trace_ref == sut.last_trace_ref
     assert result.grader_results
     assert result.critical_failures == ()
     assert result.usage_summary is None
@@ -1053,10 +4944,20 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
         "grade:TraceCompletenessGrader",
         "result_append",
     ]
-    final_trace = traces.events_by_ref[TRACE_REF]
+    final_trace = traces.events_by_ref[sut.last_trace_ref]
     assert [event.event_type for event in final_trace].count(
         TraceEventType.EVAL_CASE_GRADED
     ) == 1
+    assert all(
+        event.case_id is None
+        for event in final_trace
+        if event.event_type is not TraceEventType.EVAL_CASE_GRADED
+    )
+    assert tuple(
+        event.case_id
+        for event in final_trace
+        if event.event_type is TraceEventType.EVAL_CASE_GRADED
+    ) == ("E2E01-01",)
 
 
 def test_missing_observation_provenance_fails_canonical_harness_grading() -> None:
@@ -1085,28 +4986,35 @@ def test_missing_observation_provenance_fails_canonical_harness_grading() -> Non
         assert by_name[grader_name].reason_code is reason_code
 
 
-def test_raw_observation_visibility_fails_canonical_harness_grading() -> None:
+def test_raw_observation_visibility_fails_result_completeness() -> None:
     traces = InMemoryTraceCallbacks()
     sut = SyntheticSut(
         traces,
         fault="raw_observation_visibility",
     )
-    harness, *_ = _harness(sut=sut, traces=traces)
+    grader_called = False
+
+    def forbidden_grader(*args: object) -> GradingOutcome:
+        nonlocal grader_called
+        grader_called = True
+        raise AssertionError("noncanonical Observation reached grading")
+
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=forbidden_grader,
+    )
 
     outcome = _run(harness)
 
+    assert grader_called is False
     assert outcome.command_passed is False
-    assert outcome.execution_failures == ()
-    assert len(outcome.results) == 1
-    result = outcome.results[0]
-    assert result.status is EvalResultStatus.FAIL
-    configured_names = tuple(ARTIFACTS.case_by_id("E2E01-01").grading["graders"])
-    assert tuple(item.grader_name for item in result.grader_results) == configured_names
-    assert all(
-        item.status is EvalGraderStatus.FAIL
-        and item.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
-        for item in result.grader_results
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
     )
+    assert port.results == {}
 
 
 def test_supersedes_provenance_passes_canonical_harness_grading() -> None:
@@ -1144,6 +5052,23 @@ def test_authenticated_expectations_pin_message_and_toolset_projection() -> None
     assert expectations.expected_model_visible_toolset_hash == (
         compute_model_visible_toolset_hash((get_order_tool_spec(),))
     )
+
+
+def test_authenticated_case_script_selects_closed_trace_variant() -> None:
+    selected: dict[str, str] = {}
+    for case in ARTIFACTS.cases:
+        for script_ref in tuple(case.input["model_script_refs"]):
+            script = ARTIFACTS.script_by_ref(script_ref)
+            expectations = build_authenticated_case_expectations(
+                artifacts=ARTIFACTS,
+                case=case,
+                script=script,
+            )
+            selected[script_ref] = expectations.trace_variant
+
+    assert selected == EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF
+    assert len(selected) == 16
+    assert len(set(selected.values())) == 9
 
 
 def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None:
@@ -1230,6 +5155,287 @@ def test_physical_trace_reload_rejects_unresolved_authoritative_refs(
     assert outcome.execution_failures == ()
     assert outcome.results[0].status is EvalResultStatus.FAIL
     assert CriticalFailureCode.CF_12 in outcome.results[0].critical_failures
+
+
+@pytest.mark.parametrize(
+    "tamper_kind",
+    ("tuple-subclass", "behaviorful-case-id", "runtime-case-id"),
+)
+def test_reload_boundary_closes_shape_before_reads_or_final_grading(
+    tamper_kind: str,
+) -> None:
+    class BoundaryTamperingTraceCallbacks(InMemoryTraceCallbacks):
+        async def reload_trace(
+            self,
+            trace_ref: UUID,
+        ) -> tuple[TraceEvent, ...]:
+            events = await super().reload_trace(trace_ref)
+            if tamper_kind == "tuple-subclass":
+                return cast(
+                    tuple[TraceEvent, ...],
+                    ReloadFlipTuple(events),
+                )
+            replacement_case_id: object = (
+                EvilEquality()
+                if tamper_kind == "behaviorful-case-id"
+                else "E2E01-01"
+            )
+            return tuple(
+                event.model_copy(
+                    update={"case_id": replacement_case_id}
+                )
+                if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+                else event
+                for event in events
+            )
+
+    BOUNDARY_METHOD_READ_COUNTER.reads = 0
+    final_grader_calls = 0
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        nonlocal final_grader_calls
+        if "TraceCompletenessGrader" in configured:
+            final_grader_calls += 1
+        return grade_evidence(configured, evidence, expectations)
+
+    traces = BoundaryTamperingTraceCallbacks()
+    harness, _sut, _traces, port = _harness(
+        traces=traces,
+        grader_runner=recording_grader,
+    )
+
+    outcome = _run(harness)
+
+    assert BOUNDARY_METHOD_READ_COUNTER.reads == 0
+    assert final_grader_calls == 0
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize("seam", ("append-event", "reload-ref"))
+def test_trace_callback_inputs_do_not_alias_private_identity(
+    seam: str,
+) -> None:
+    class IdentityMutatingTraceCallbacks(InMemoryTraceCallbacks):
+        async def append_eval_case_graded(
+            self,
+            event: TraceEvent,
+        ) -> None:
+            await super().append_eval_case_graded(event)
+            if seam == "append-event":
+                object.__setattr__(
+                    event.trace_event_id,
+                    "int",
+                    UNKNOWN_EXECUTION_REF.int,
+                )
+
+        async def reload_trace(
+            self,
+            trace_ref: UUID,
+        ) -> tuple[TraceEvent, ...]:
+            events = await super().reload_trace(trace_ref)
+            if seam == "reload-ref":
+                object.__setattr__(
+                    trace_ref,
+                    "int",
+                    UNKNOWN_EXECUTION_REF.int,
+                )
+            return events
+
+    traces = IdentityMutatingTraceCallbacks()
+    harness, _sut, _traces, port = _harness(traces=traces)
+
+    outcome = _run(harness)
+
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+@pytest.mark.parametrize(
+    "mutation_kind",
+    ("uuid-int", "uuid-is-safe", "enum-sidecar"),
+)
+def test_post_await_raw_mutation_cannot_reach_final_grading(
+    mutation_kind: str,
+) -> None:
+    class RetainingMutationSut:
+        def __init__(self, delegate: SyntheticSut) -> None:
+            self.delegate = delegate
+            self.release: asyncio.Event | None = None
+            self.task: asyncio.Task[None] | None = None
+
+        async def execute_case(
+            self,
+            **kwargs: object,
+        ) -> EvalCaseSutResult | None:
+            result = await self.delegate.execute_case(**kwargs)
+            assert type(result) is EvalCaseSutResult
+            self.release = asyncio.Event()
+
+            async def mutate_after_release() -> None:
+                assert self.release is not None
+                await self.release.wait()
+                if mutation_kind == "enum-sidecar":
+                    object.__setattr__(
+                        AgentOutcome.COMPLETED,
+                        "hidden_case_id",
+                        "E2E01-01",
+                    )
+                    return
+                raw_trace_ref = result.evidence.trace_ref
+                if mutation_kind == "uuid-int":
+                    object.__setattr__(
+                        raw_trace_ref,
+                        "int",
+                        UNKNOWN_EXECUTION_REF.int,
+                    )
+                else:
+                    object.__setattr__(
+                        raw_trace_ref,
+                        "is_safe",
+                        "E2E01-01",
+                    )
+
+            self.task = asyncio.create_task(
+                mutate_after_release()
+            )
+            return result
+
+    class YieldingTraceCallbacks(InMemoryTraceCallbacks):
+        def __init__(self, sut: RetainingMutationSut) -> None:
+            super().__init__()
+            self.sut = sut
+
+        async def append_eval_case_graded(
+            self,
+            event: TraceEvent,
+        ) -> None:
+            await super().append_eval_case_graded(event)
+            assert self.sut.release is not None
+            assert self.sut.task is not None
+            self.sut.release.set()
+            await asyncio.sleep(0)
+            await self.sut.task
+
+    member = AgentOutcome.COMPLETED
+    member_storage = object.__getattribute__(member, "__dict__")
+    original_member_items = tuple(
+        (key, dict.__getitem__(member_storage, key))
+        for key in dict.__iter__(member_storage)
+    )
+    delegate_traces = InMemoryTraceCallbacks()
+    retaining_sut = RetainingMutationSut(
+        SyntheticSut(delegate_traces)
+    )
+    traces = YieldingTraceCallbacks(retaining_sut)
+    retaining_sut.delegate.traces = traces
+    mutated_grader_reads = 0
+    final_grader_calls = 0
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        nonlocal mutated_grader_reads, final_grader_calls
+        if "TraceCompletenessGrader" in configured:
+            final_grader_calls += 1
+        if (
+            type(evidence.trace_ref.int) is not int
+            or type(evidence.trace_ref.is_safe) is not SafeUUID
+            or not _canonical_enum_storage_is_pristine(
+                AgentOutcome.COMPLETED,
+                original_member_items,
+            )
+        ):
+            mutated_grader_reads += 1
+        return grade_evidence(configured, evidence, expectations)
+
+    harness, _sut, _traces, port = _harness(
+        sut=retaining_sut,
+        traces=traces,
+        grader_runner=recording_grader,
+    )
+
+    try:
+        outcome = _run(harness)
+    finally:
+        member_storage = object.__getattribute__(
+            member,
+            "__dict__",
+        )
+        dict.clear(member_storage)
+        for key, stored_value in original_member_items:
+            dict.__setitem__(
+                member_storage,
+                key,
+                stored_value,
+            )
+
+    assert mutated_grader_reads == 0
+    assert final_grader_calls == 0
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+    )
+    assert port.results == {}
+
+
+def test_grading_uses_detached_uuid_and_datetime_values() -> None:
+    class ScalarRetainingSut:
+        def __init__(self, delegate: SyntheticSut) -> None:
+            self.delegate = delegate
+            self.raw_trace_ref: UUID | None = None
+            self.raw_created_at: datetime | None = None
+
+        async def execute_case(
+            self,
+            **kwargs: object,
+        ) -> EvalCaseSutResult | None:
+            result = await self.delegate.execute_case(**kwargs)
+            assert type(result) is EvalCaseSutResult
+            self.raw_trace_ref = result.evidence.trace_ref
+            self.raw_created_at = (
+                result.evidence.conversation_records[0].created_at
+            )
+            return result
+
+    traces = InMemoryTraceCallbacks()
+    retaining_sut = ScalarRetainingSut(SyntheticSut(traces))
+    detached_reads: list[bool] = []
+
+    def recording_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        detached_reads.append(
+            evidence.trace_ref is not retaining_sut.raw_trace_ref
+            and evidence.conversation_records[0].created_at
+            is not retaining_sut.raw_created_at
+        )
+        return grade_evidence(configured, evidence, expectations)
+
+    harness, _sut, _traces, _port = _harness(
+        sut=retaining_sut,
+        traces=traces,
+        grader_runner=recording_grader,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is True
+    assert detached_reads == [True, True]
 
 
 @pytest.mark.parametrize(
@@ -1370,6 +5576,57 @@ def test_injected_runner_raw_string_enums_from_model_construct_fail_closed() -> 
     assert outcome.execution_failures[0].failure_phase is (
         EvalExecutionFailurePhase.GRADING
     )
+
+
+@pytest.mark.parametrize("mutation_phase", ("initial", "final"))
+def test_injected_grader_mutates_only_discarded_input_copies(
+    mutation_phase: str,
+) -> None:
+    seen_evidence: list[EvalEvidence] = []
+    seen_expectations: list[EvalCaseExpectations] = []
+
+    def mutating_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        outcome = grade_evidence(
+            configured,
+            evidence,
+            expectations,
+        )
+        is_final = configured == ("TraceCompletenessGrader",)
+        if is_final == (mutation_phase == "final"):
+            object.__setattr__(
+                evidence,
+                "observed_outcome",
+                AgentOutcome.BLOCKED,
+            )
+            object.__setattr__(
+                expectations,
+                "expected_outcome",
+                AgentOutcome.BLOCKED,
+            )
+        seen_evidence.append(evidence)
+        seen_expectations.append(expectations)
+        return outcome
+
+    harness, _sut, _traces, port = _harness(
+        grader_runner=mutating_grader,
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is True
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.PASS
+    assert outcome.results[0].observed_outcome is AgentOutcome.COMPLETED
+    assert port.results[
+        (EVAL_RUN_ID, "E2E01-01", "offline_gate", 1)
+    ].observed_outcome is AgentOutcome.COMPLETED
+    assert len(seen_evidence) == 2
+    assert seen_evidence[0] is not seen_evidence[1]
+    assert seen_expectations[0] is not seen_expectations[1]
 
 
 def test_physical_trace_reload_rejects_tampered_task_graph_refs() -> None:
@@ -1520,28 +5777,331 @@ def test_failure_store_unavailable_raises_bounded_command_error() -> None:
     assert caught.value.__context__ is None
 
 
+@pytest.mark.parametrize(
+    "clock_kind",
+    ("raises", "custom-tz", "naive", "non-utc"),
+)
+def test_invalid_clock_value_raises_only_bounded_command_error(
+    clock_kind: str,
+) -> None:
+    def invalid_clock() -> datetime:
+        if clock_kind == "raises":
+            raise RuntimeError("raw-clock-secret")
+        if clock_kind == "custom-tz":
+            return NOW.replace(tzinfo=EvilTz())
+        if clock_kind == "naive":
+            return NOW.replace(tzinfo=None)
+        return NOW.astimezone(
+            timezone(timedelta(hours=1))
+        )
+
+    TIMEZONE_METHOD_READ_COUNTER.reads = 0
+    traces = InMemoryTraceCallbacks()
+    harness, *_ = _harness(
+        sut=SyntheticSut(traces, fault="sut"),
+        traces=traces,
+        clock=invalid_clock,
+    )
+
+    with pytest.raises(EvalHarnessCommandError) as caught:
+        _run(harness)
+
+    assert TIMEZONE_METHOD_READ_COUNTER.reads == 0
+    assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("clock_kind", ("raises", "naive"))
+def test_invalid_clock_restores_canonical_singletons_without_persistence(
+    clock_kind: str,
+) -> None:
+    member = AgentOutcome.COMPLETED
+    member_storage = object.__getattribute__(member, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(member_storage, key))
+        for key in dict.__iter__(member_storage)
+    )
+
+    def invalid_clock() -> datetime:
+        object.__setattr__(
+            member,
+            "hidden_case_id",
+            "E2E01-01",
+        )
+        if clock_kind == "raises":
+            raise RuntimeError("raw-clock-secret")
+        return NOW.replace(tzinfo=None)
+
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    harness, *_ = _harness(
+        sut=SyntheticSut(traces, fault="sut"),
+        traces=traces,
+        port=port,
+        clock=invalid_clock,
+    )
+
+    try:
+        with pytest.raises(EvalHarnessCommandError) as caught:
+            _run(harness)
+        restored_by_harness = _canonical_enum_storage_is_pristine(
+            member,
+            original_items,
+        )
+    finally:
+        member_storage = object.__getattribute__(
+            member,
+            "__dict__",
+        )
+        dict.clear(member_storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(
+                member_storage,
+                key,
+                stored_value,
+            )
+
+    assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert restored_by_harness is True
+    assert harness._persisted_stage_by_replay_key == {}
+    assert port.results == {}
+    assert port.failures == []
+    assert port.events == []
+
+
+def test_valid_clock_drift_on_failure_phase_is_restored_before_record() -> None:
+    member = EvalExecutionFailurePhase.SYSTEM_UNDER_TEST
+    member_storage = object.__getattribute__(member, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(member_storage, key))
+        for key in dict.__iter__(member_storage)
+    )
+
+    def drifting_clock() -> datetime:
+        object.__setattr__(
+            member,
+            "hidden_case_id",
+            "E2E01-01",
+        )
+        return NOW
+
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    harness, *_ = _harness(
+        sut=SyntheticSut(traces, fault="sut"),
+        traces=traces,
+        port=port,
+        clock=drifting_clock,
+    )
+
+    try:
+        with pytest.raises(EvalHarnessCommandError) as caught:
+            _run(harness)
+        restored_by_harness = _canonical_enum_storage_is_pristine(
+            member,
+            original_items,
+        )
+    finally:
+        member_storage = object.__getattribute__(
+            member,
+            "__dict__",
+        )
+        dict.clear(member_storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(
+                member_storage,
+                key,
+                stored_value,
+            )
+
+    assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert restored_by_harness is True
+    assert harness._persisted_stage_by_replay_key == {}
+    assert port.results == {}
+    assert port.failures == []
+    assert port.events == []
+
+
+def test_valid_clock_and_failure_port_receive_independent_copies() -> None:
+    clock_value = NOW + timedelta(seconds=2)
+    traces = InMemoryTraceCallbacks()
+    harness, _sut, _traces, port = _harness(
+        sut=SyntheticSut(traces, fault="sut"),
+        traces=traces,
+        clock=lambda: clock_value,
+    )
+
+    outcome = _run(harness)
+
+    returned = outcome.execution_failures[0]
+    stored = port.failures[0]
+    assert returned.occurred_at == clock_value
+    assert returned.occurred_at is not clock_value
+    assert stored.occurred_at is not clock_value
+    assert stored is not returned
+
+
 def test_exact_same_lane_replay_returns_loaded_record_without_overwrite() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness)
-    second = _run(harness)
+    second = _run(
+        harness,
+        script_ref_by_case={
+            "E2E01-01": "script:e2e01-01:success",
+        },
+    )
 
     assert first.results == second.results
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert len(traces.events_by_ref) == 1
+    assert traces.events.count("trace_append") == 1
+    assert traces.events.count("trace_reload") == 1
     assert len(port.results) == 1
     assert port.events.count("result_append") == 2
 
 
+def test_public_result_mutation_does_not_change_private_replay_cache() -> None:
+    harness, sut, traces, port = _harness()
+
+    first = _run(harness)
+    cached_stage = next(
+        iter(harness._persisted_stage_by_replay_key.values())
+    )
+
+    assert first.results[0] is not cached_stage.result
+    assert first.results[0] is not next(iter(port.results.values()))
+    object.__setattr__(
+        first.results[0],
+        "status",
+        EvalResultStatus.FAIL,
+    )
+
+    second = _run(harness)
+
+    assert second.command_passed is True
+    assert second.results[0].status is EvalResultStatus.PASS
+    assert sut.calls == 1
+    assert traces.events.count("trace_append") == 1
+    assert port.events.count("result_append") == 2
+
+
+def test_caller_eval_run_uuid_cannot_alias_private_replay_key() -> None:
+    caller_eval_run_id = UUID(str(EVAL_RUN_ID))
+    original_integer = caller_eval_run_id.int
+    harness, sut, traces, port = _harness()
+
+    first = asyncio.run(
+        harness.run_lane(
+            eval_run_id=caller_eval_run_id,
+            case_ids=("E2E01-01",),
+        )
+    )
+    object.__setattr__(
+        caller_eval_run_id,
+        "int",
+        UNKNOWN_EXECUTION_REF.int,
+    )
+    second = asyncio.run(
+        harness.run_lane(
+            eval_run_id=UUID(int=original_integer),
+            case_ids=("E2E01-01",),
+        )
+    )
+
+    assert first.command_passed is True
+    assert second.command_passed is True
+    assert sut.calls == 1
+    assert traces.events.count("trace_append") == 1
+    assert len(port.results) == 1
+
+
+def test_authenticated_artifacts_are_snapshotted_at_construction() -> None:
+    caller_artifacts = load_e2e01_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:c35687d",
+    )
+    caller_case = caller_artifacts.case_by_id("E2E01-01")
+    expected_dataset_version = caller_case.version_manifest[
+        "dataset_version"
+    ]
+    harness, _sut, _traces, port = _harness(
+        artifacts=caller_artifacts,
+    )
+    object.__setattr__(
+        caller_case,
+        "version_manifest",
+        {
+            "dataset_version": "caller-injected-version",
+            "fixture_versions": ["caller-fixture"],
+        },
+    )
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is True
+    result = outcome.results[0]
+    assert result.version_manifest.dataset_version == (
+        expected_dataset_version
+    )
+    assert "caller-injected-version" not in result.model_dump_json()
+    assert "caller-fixture" not in next(
+        iter(port.results.values())
+    ).model_dump_json()
+
+
 def test_incremented_attempt_is_appended_under_a_distinct_identity() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness, attempt=1)
     second = _run(harness, attempt=2)
 
     assert first.results[0].attempt == 1
     assert second.results[0].attempt == 2
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(traces.events_by_ref) == 2
     assert len(port.results) == 2
 
 
 def test_conflicting_duplicate_attempt_routes_result_persistence_failure() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness)
     original = first.results[0]
     key = (EVAL_RUN_ID, "E2E01-01", "offline_gate", 1)
@@ -1570,7 +6130,202 @@ def test_conflicting_duplicate_attempt_routes_result_persistence_failure() -> No
     assert second.execution_failures[0].safe_error_code is (
         EvalExecutionSafeErrorCode.RESULT_PERSISTENCE_FAILED
     )
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
     assert port.results[key].status is EvalResultStatus.FAIL
+
+
+def test_result_port_mutates_only_a_detached_append_copy() -> None:
+    class MutatingResultPort(InMemoryResultPort):
+        async def append_eval_result(
+            self,
+            record: EvalResultRecord,
+        ) -> InsertOnlyWriteResult:
+            write_result = await super().append_eval_result(record)
+            object.__setattr__(
+                record,
+                "observed_outcome",
+                AgentOutcome.BLOCKED,
+            )
+            return write_result
+
+    port = MutatingResultPort()
+    harness, _sut, _traces, _port = _harness(port=port)
+
+    outcome = _run(harness)
+
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_PERSISTENCE
+    )
+
+
+@pytest.mark.parametrize(
+    "write_result",
+    (
+        InsertOnlyWriteResult.INSERTED,
+        InsertOnlyWriteResult.ALREADY_EXISTS,
+    ),
+)
+def test_result_port_return_singleton_storage_is_pinned(
+    write_result: InsertOnlyWriteResult,
+) -> None:
+    class SingletonMutatingPort(InMemoryResultPort):
+        async def append_eval_result(
+            self,
+            record: EvalResultRecord,
+        ) -> InsertOnlyWriteResult:
+            if write_result is InsertOnlyWriteResult.INSERTED:
+                await super().append_eval_result(record)
+            object.__setattr__(
+                write_result,
+                "hidden_case_id",
+                "E2E01-01",
+            )
+            return write_result
+
+    member_storage = object.__getattribute__(
+        write_result,
+        "__dict__",
+    )
+    original_items = tuple(
+        (key, dict.__getitem__(member_storage, key))
+        for key in dict.__iter__(member_storage)
+    )
+    port = SingletonMutatingPort()
+    harness, _sut, _traces, _port = _harness(port=port)
+
+    try:
+        outcome = _run(harness)
+        restored_by_harness = (
+            _canonical_enum_storage_is_pristine(
+                write_result,
+                original_items,
+            )
+        )
+    finally:
+        member_storage = object.__getattribute__(
+            write_result,
+            "__dict__",
+        )
+        dict.clear(member_storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(
+                member_storage,
+                key,
+                stored_value,
+            )
+
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_PERSISTENCE
+    )
+    assert harness._persisted_stage_by_replay_key == {}
+    assert restored_by_harness is True
+
+
+def test_failure_port_mutation_cannot_alias_returned_failure() -> None:
+    class MutatingFailurePort(InMemoryResultPort):
+        async def append_eval_execution_failure(
+            self,
+            record: EvalExecutionFailureRecord,
+        ) -> None:
+            await super().append_eval_execution_failure(record)
+            object.__setattr__(
+                record,
+                "diagnostic_ref",
+                UNKNOWN_EXECUTION_REF,
+            )
+
+    traces = InMemoryTraceCallbacks()
+    port = MutatingFailurePort()
+    harness, *_ = _harness(
+        sut=SyntheticSut(traces, fault="sut"),
+        traces=traces,
+        port=port,
+    )
+
+    with pytest.raises(EvalHarnessCommandError) as caught:
+        _run(harness)
+
+    assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_behaviorful_loaded_result_is_closed_before_equality() -> None:
+    class BehaviorfulLoadPort(InMemoryResultPort):
+        async def append_eval_result(
+            self,
+            record: EvalResultRecord,
+        ) -> InsertOnlyWriteResult:
+            self.events.append("result_append")
+            return InsertOnlyWriteResult.ALREADY_EXISTS
+
+        async def load_eval_result(
+            self,
+            *,
+            eval_run_id: UUID,
+            case_id: str,
+            lane: str,
+            attempt: int,
+        ) -> EvalResultRecord | None:
+            return cast(EvalResultRecord, EvilEquality())
+
+    BOUNDARY_METHOD_READ_COUNTER.reads = 0
+    port = BehaviorfulLoadPort()
+    harness, _sut, _traces, _port = _harness(port=port)
+
+    outcome = _run(harness)
+
+    assert BOUNDARY_METHOD_READ_COUNTER.reads == 0
+    assert outcome.results == ()
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_PERSISTENCE
+    )
+
+
+def test_different_script_selection_misses_exact_replay_cache() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+    case_id = "E2E01-01+SEC-ARGUMENT-BINDING"
+
+    first = _run(
+        harness,
+        case_ids=(case_id,),
+        script_ref_by_case={
+            case_id: "script:sec-argument-binding:foreign-order",
+        },
+    )
+    second = _run(
+        harness,
+        case_ids=(case_id,),
+        script_ref_by_case={
+            case_id: "script:sec-argument-binding:nonexistent-order",
+        },
+    )
+
+    assert first.execution_failures == ()
+    assert len(first.results) == 1
+    assert second.results == ()
+    assert second.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_PERSISTENCE
+    )
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
 
 
 def test_same_run_case_attempt_in_two_lanes_are_distinct_records() -> None:
@@ -1634,9 +6389,13 @@ def test_complete_equal_e2e01_04_pair_persists_both_passes() -> None:
 def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
     class PairSut(SyntheticSut):
         async def execute_case(self, **kwargs):
-            case = kwargs["case"]
+            execution_input = kwargs["execution_input"]
             self.observable_overrides = {
-                "model_calls": 2 if case.case_id == "E2E01-04-B" else 1
+                "http_status": (
+                    201
+                    if execution_input.messages[0].content.endswith("O-9999")
+                    else 200
+                )
             }
             return await super().execute_case(**kwargs)
 
