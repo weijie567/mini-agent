@@ -1,8 +1,8 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-04H-01-07C-planned-with-01-05R-01-06R
-status: execution_evidence_complete_through_01_07B_and_01_07C_planned
+scope: 01-04H-01-07G-planned-with-01-05R-01-06R
+status: execution_evidence_complete_through_01_07B_and_01_07C_01_07G_planned
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-07-27"
@@ -11,7 +11,7 @@ created: "2026-07-27"
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A、historical 01-05/06、current 01-07B execution feedback sampling，以及已签发但未执行的01-07C owner-document机械验证。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
+> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A、historical 01-05/06、current 01-07B execution feedback sampling，以及已签发但未执行的01-07C/01-07G owner-document机械验证。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -61,6 +61,8 @@ created: "2026-07-27"
 | 01-07B-02 | 01-07B | 14 | E2E01-01/04 | EVB-R01/EVB-S01 | closed execution-message/behavior-step projection与occurrence-aware variant-scoped safety-causal partial order；每个正常/故障variant的适用edge violation必须FAIL，合法额外事件继续PASS | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_graders.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py`；`uv run pytest` | ✅ extend | ✅ green |
 | 01-07C-01 | 01-07C | 15 | E2E01-01/04 | RUS-S01/RUS-T01/RUS-R01/RUS-I01/RUS-E01 | durable aggregate、独立版本轴、candidate/validation/accepted closure与可信时间的owner裁决 | Owner-document contract | `test "$(git diff --name-only 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD)" = "docs/architecture/intent-design-reference.md"`；focused `rg` field/axis scan | ✅ owner exists | ⬜ pending |
 | 01-07C-02 | 01-07C | 15 | E2E01-01/04 | RUS-D01/RUS-I01 | exact-version、compatibility、migration与rollback fail-closed裁决；跨文件只读影响扫描 | Owner-document contract | `git diff --check 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD`；focused `rg` compatibility scan；`uv run pytest` | ✅ owner exists | ⬜ pending |
+| 01-07G-01 | 01-07G | 15 | E2E01-01/04 | OSV-S01/OSV-T01/OSV-R01/OSV-I01/OSV-E01 | trusted owner-scoped authority、strict safe projection、canonical content hash、fixed vector及runtime-private exposure裁决 | Owner-document contract | `test "$(git diff --name-only 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD)" = "docs/implementation/e2e01-thin-slice-implementation-spec.md"`；focused algorithm/vector `rg` scan | ✅ owner exists | ⬜ pending |
+| 01-07G-02 | 01-07G | 15 | E2E01-01/04 | OSV-D01/OSV-I01 | FOUND/non-found/system-failure closed matrix、Result→Observation→Manifest exact-copy、compatibility/ABA及rollback fail-closed裁决 | Owner-document contract | `git diff --check 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD`；focused outcome/propagation `rg` scan；`uv run pytest` | ✅ owner exists | ⬜ pending |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
@@ -75,6 +77,7 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 - 01-07A：只扩展既有AgentRun Component test取得一个真实RED，再修改对应Runtime source；已完成reviewed merge。
 - 01-07B：扩展既有Grader、ScriptedProvider与Harness三份tests，以两条独立命令取得Case/Script oracle和Trace precedence RED，再修改对应三份Eval source；不创建real SUT或PG reader。
 - 01-07C：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task分别使用exact one-file containment + focused owner scan，以及`git diff --check` + compatibility scan + full suite作为可执行Nyquist验证，状态保持pending直至feature handoff。
+- 01-07G：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task分别使用exact one-file containment + algorithm/vector scan，以及`git diff --check` + outcome/exact-copy scan + full suite作为可执行Nyquist验证，状态保持pending直至feature handoff。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
 原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环，因此当前scope的`wave_0_complete=true`。该状态只表示测试先行证据完整，不推进Case lifecycle。
@@ -281,4 +284,4 @@ git diff --check
 - [x] 01-07B exact base/new identity/six-file ownership与真实RED→GREEN已完成；planning/status PR #42–#43、feature PR #44、双review、latest-integration overlay与post-merge gate均通过。
 - [x] 01-07B完成planning、实现、review、merge与post-merge gate；Summary索引精确证据，Case lifecycle仍为0/8。
 
-**Approval:** `W2_THROUGH_01-07B_SERIAL_MERGE_COMPLETE / 01-07C_PLAN_ISSUED / PROJECT_DIRECTION_ALIGNMENT_REQUIRED / 01-07G_PLANNING_BLOCKED`。01-07B已通过planning/status、implementation exact-head/overlay review、merge与post-merge gates。01-07C现已固定execution base `3f0753f7...`与Intent owner单文件Task Packet，但feature execution尚未开始。下一步必须以独立Project Direction owner PR移除或对齐仍为16的易漂移Plan计数；该PR reviewed merge前，01-07G planning与C/G feature dispatch均blocked。owner状态对齐后，01-07G才通过独立single-target planning PR签发同一execution base；C/G两者均reviewed merge后形成共同barrier，再按既定顺序推进mapping、codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID` mapping、Infra reader及Eval mapper/Scripted-Qwen consumers。全部前置reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论。
+**Approval:** `W2_THROUGH_01-07B_SERIAL_MERGE_COMPLETE / 01-07C_01-07G_PLANS_ISSUED / FEATURE_DISPATCH_NEXT`。01-07B已通过planning/status、implementation exact-head/overlay review、merge与post-merge gates。01-07C与01-07G现在都固定execution base `3f0753f7...`和互不重叠的单owner文件Task Packet，但两个feature execution均尚未开始；Project Direction owner alignment PR #47已reviewed merge并移除active owner对易漂移GSD计数的重复维护。本01-07G planning PR reviewed merge后，Integrator才从共同exact base建立C/G两个独立feature Worktree并行写入，分别完成exact-head双review，再串行合并形成共同barrier。之后按既定顺序推进mapping、codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID` mapping、Infra reader及Eval mapper/Scripted-Qwen consumers。全部前置reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论；当前Task Packet完成仍为14/28，canonical lifecycle仍为0/8。
