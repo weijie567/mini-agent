@@ -19,6 +19,7 @@ from mini_agent.application.records import (
     AgentRunCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    FinalizeRunCommand,
     InsertOnlyWriteResult,
     MessageDirection,
     ObservationWriteResult,
@@ -150,12 +151,20 @@ class RuntimeSpy:
         finalize_run_result: ConditionalWriteResult = (
             ConditionalWriteResult.APPLIED
         ),
+        finalize_run_effects: list[
+            ConditionalWriteResult | BaseException
+        ]
+        | None = None,
+        block_completed_finalize: bool = False,
         trace_error_event_type: TraceEventType | None = None,
     ) -> None:
         self.events = events
         self.graph_result = graph_result
         self.graph_error = graph_error
         self.finalize_run_result = finalize_run_result
+        self.finalize_run_effects = list(finalize_run_effects or ())
+        self.block_completed_finalize = block_completed_finalize
+        self.completed_finalize_started = asyncio.Event()
         self.trace_error_event_type = trace_error_event_type
         self.run_record: object | None = None
         self.task: TaskRecord | None = None
@@ -171,7 +180,9 @@ class RuntimeSpy:
         self.finalize_tool_commands: list[object] = []
         self.observation_commands: list[object] = []
         self.trace_events: list[TraceEvent] = []
-        self.finalize_run_commands: list[object] = []
+        self.finalize_run_commands: list[FinalizeRunCommand] = []
+        self.aggregate_messages: list[object] = []
+        self.aggregate_trace_events: list[TraceEvent] = []
 
     async def insert_run(self, command: object) -> InsertOnlyWriteResult:
         self.events.append("run_inserted")
@@ -188,25 +199,60 @@ class RuntimeSpy:
 
     async def finalize_run_if_active(
         self,
-        command: object,
+        command: FinalizeRunCommand,
     ) -> ConditionalWriteResult:
         self.events.append("run_finalized")
         self.finalize_run_commands.append(command)
-        if self.finalize_run_result is not ConditionalWriteResult.APPLIED:
-            return self.finalize_run_result
+        if (
+            self.block_completed_finalize
+            and command.terminal_record.status is AgentRunStatus.COMPLETED
+        ):
+            self.completed_finalize_started.set()
+            await asyncio.Event().wait()
+        effect: ConditionalWriteResult | BaseException
+        if self.finalize_run_effects:
+            effect = self.finalize_run_effects.pop(0)
+        else:
+            effect = self.finalize_run_result
+        if isinstance(effect, BaseException):
+            raise effect
+        if effect is not ConditionalWriteResult.APPLIED:
+            return effect
         expected_links = (
             (self.run_task_link,) if self.run_task_link is not None else ()
         )
-        expected_tasks = (self.task,) if self.task is not None else ()
         if (
             self.run_record != command.expected_active_record
             or expected_links != command.expected_active_links
-            or expected_tasks != command.result_task_records
         ):
             return ConditionalWriteResult.PROJECTION_CONFLICT
+        transition = command.task_transition
+        if transition is not None:
+            if (
+                self.task != transition.expected_task_record
+                or self.request_unit
+                != transition.expected_request_unit_record
+                or command.result_task_records
+                != (transition.next_task_record,)
+            ):
+                return ConditionalWriteResult.PROJECTION_CONFLICT
+        else:
+            expected_tasks = (self.task,) if self.task is not None else ()
+            if expected_tasks != command.result_task_records:
+                return ConditionalWriteResult.PROJECTION_CONFLICT
+        if transition is not None:
+            self.task = transition.next_task_record
+            self.request_unit = transition.next_request_unit_record
+            self.task_history.append(self.task)
+            self.request_unit_history.append(self.request_unit)
         self.run_record = command.terminal_record
         if command.terminal_links:
             self.run_task_link = command.terminal_links[0]
+        if command.assistant_message is not None:
+            self.aggregate_messages.append(command.assistant_message)
+        self.aggregate_trace_events.extend(command.terminal_trace_events)
+        self.trace_events.extend(command.terminal_trace_events)
+        self.events.append("terminal_aggregate_applied")
         return ConditionalWriteResult.APPLIED
 
     async def create_initial_task_graph_if_current(
@@ -584,6 +630,70 @@ def _index(events: list[str], value: str) -> int:
     return events.index(value)
 
 
+def _assert_complete_terminal_aggregate(
+    command: FinalizeRunCommand,
+    *,
+    result: object,
+    with_task: bool,
+) -> None:
+    assert command.terminal_record.status is AgentRunStatus.COMPLETED
+    assert command.terminal_result == result
+    assert command.assistant_message is not None
+    assert command.assistant_message.direction is MessageDirection.ASSISTANT
+    assert (
+        command.assistant_message.conversation_id
+        == command.terminal_record.conversation_id
+    )
+    assert command.assistant_message.content == command.terminal_result.message
+    assert (
+        command.assistant_message.received_at
+        == command.terminal_record.completed_at
+    )
+    if with_task:
+        assert command.task_transition is not None
+        assert command.result_task_records == (
+            command.task_transition.next_task_record,
+        )
+        assert tuple(
+            event.event_type for event in command.terminal_trace_events
+        ) == (
+            TraceEventType.TASK_STATE_CHANGED,
+            TraceEventType.RUN_STOPPED,
+        )
+        assert (
+            command.terminal_trace_events[0].occurred_at
+            == command.task_transition.task_state_transition.changed_at
+        )
+    else:
+        assert command.task_transition is None
+        assert command.expected_active_links == ()
+        assert command.terminal_links == ()
+        assert command.result_task_records == ()
+        assert tuple(
+            event.event_type for event in command.terminal_trace_events
+        ) == (TraceEventType.RUN_STOPPED,)
+    run_stopped = command.terminal_trace_events[-1]
+    assert run_stopped.run_id == command.terminal_record.run_id
+    assert run_stopped.stop_reason is command.terminal_record.stop_reason
+    assert run_stopped.user_outcome is command.terminal_result.outcome
+    assert run_stopped.occurred_at == command.terminal_record.completed_at
+
+
+def _assert_failed_terminal_projection_is_empty(
+    command: FinalizeRunCommand,
+) -> None:
+    assert command.terminal_record.status is AgentRunStatus.FAILED
+    assert command.task_transition is None
+    assert command.terminal_result is None
+    assert command.assistant_message is None
+    assert command.terminal_trace_events == ()
+
+
+def _assert_no_standalone_terminal_writes(events: list[str]) -> None:
+    assert "message:ASSISTANT" not in events
+    assert f"trace:{TraceEventType.RUN_STOPPED.value}" not in events
+
+
 async def _advance_to_waiting_user(
     *,
     runtime: RuntimeSpy,
@@ -663,8 +773,20 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
     assert runtime.task_history[0].state_version == 1
     assert runtime.task_history[-1].status is TaskStatus.COMPLETED
     assert runtime.task_history[-1].state_version == 2
-    assert conversation.messages[0].direction is MessageDirection.USER
-    assert conversation.messages[-1].direction is MessageDirection.ASSISTANT
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+    assert len(runtime.finalize_run_commands) == 1
+    terminal_command = runtime.finalize_run_commands[0]
+    _assert_complete_terminal_aggregate(
+        terminal_command,
+        result=result,
+        with_task=True,
+    )
+    assert runtime.aggregate_messages == [terminal_command.assistant_message]
+    assert runtime.aggregate_trace_events == list(
+        terminal_command.terminal_trace_events
+    )
 
     assert _index(events, "artifact_get") < _index(events, "manifest:1")
     assert _index(events, "message:USER") < _index(
@@ -677,12 +799,17 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
     assert _index(events, "manifest:2") < _index(
         events, "provider:presentation"
     )
-    assert _index(events, "task_transition:COMPLETED:v2") < _index(
+    assert not any(
+        event.startswith("task_transition:") for event in events
+    )
+    _assert_no_standalone_terminal_writes(events)
+    assert _index(events, "trace:RESPONSE_RENDERED") < _index(
         events, "run_finalized"
     )
-    assert _index(events, "run_finalized") < events.index(
-        "message:ASSISTANT"
+    assert _index(events, "run_finalized") < _index(
+        events, "terminal_aggregate_applied"
     )
+    assert events[-1] == "terminal_aggregate_applied"
 
     trace_dump = " ".join(
         str(event.model_dump(mode="json")) for event in runtime.trace_events
@@ -821,6 +948,19 @@ def test_stale_hook_advances_v2_then_gateway_blocks_v3_without_tool() -> None:
         (TaskStatus.WAITING_USER, 2),
         (TaskStatus.BLOCKED, 3),
     ]
+    terminal_command = runtime.finalize_run_commands[-1]
+    assert terminal_command.task_transition is not None
+    assert (
+        terminal_command.task_transition.expected_task_record.status
+        is TaskStatus.WAITING_USER
+    )
+    assert terminal_command.task_transition.expected_task_record.state_version == 2
+    assert terminal_command.task_transition.next_task_record.status is (
+        TaskStatus.BLOCKED
+    )
+    assert terminal_command.task_transition.next_task_record.state_version == 3
+    assert "task_transition:WAITING_USER:v2" in events
+    assert "task_transition:BLOCKED:v3" not in events
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert sum(
@@ -859,6 +999,36 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
     assert runtime.create_tool_commands == []
     assert order.queries == []
     assert runtime.run_record.stop_reason is expected_stop
+
+
+def test_no_task_completion_commits_result_message_and_run_stopped_once() -> None:
+    events: list[str] = []
+    model = ModelSpy(events, ru_protocol_error=True)
+    service, _events, _model, runtime, conversation, _order, _artifact = _build(
+        model=model
+    )
+
+    result = _run(service)
+
+    assert len(runtime.finalize_run_commands) == 1
+    terminal_command = runtime.finalize_run_commands[0]
+    _assert_complete_terminal_aggregate(
+        terminal_command,
+        result=result,
+        with_task=False,
+    )
+    assert runtime.aggregate_messages == [terminal_command.assistant_message]
+    assert runtime.aggregate_trace_events == list(
+        terminal_command.terminal_trace_events
+    )
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+    assert not any(
+        event.startswith("task_transition:") for event in events
+    )
+    _assert_no_standalone_terminal_writes(events)
+    assert events[-1] == "terminal_aggregate_applied"
 
 
 def test_order_system_failure_has_one_read_no_observation_or_presentation() -> None:
@@ -958,6 +1128,10 @@ def test_cancelled_order_read_closes_tool_and_run_before_reraising() -> None:
     assert finalization.finalized_attempt.outcome is ToolResultOutcome.INTERRUPTED
     assert runtime.run_record.status is AgentRunStatus.FAILED
     assert runtime.observation_commands == []
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
     assert [message.direction for message in conversation.messages] == [
         MessageDirection.USER
     ]
@@ -1053,7 +1227,9 @@ def test_conditional_graph_conflict_finalizes_failed_then_reraises() -> None:
     assert runtime.run_record.status is AgentRunStatus.FAILED
     assert runtime.run_record.stop_reason is None
     assert len(runtime.finalize_run_commands) == 1
-    assert runtime.finalize_run_commands[0].expected_active_links == ()
+    finalization = runtime.finalize_run_commands[0]
+    _assert_failed_terminal_projection_is_empty(finalization)
+    assert finalization.expected_active_links == ()
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
     assert order.queries == []
@@ -1078,6 +1254,9 @@ def test_internal_graph_exception_finalizes_failed_then_reraises() -> None:
     assert runtime.run_record.status is AgentRunStatus.FAILED
     assert runtime.run_record.stop_reason is None
     assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
     assert order.queries == []
@@ -1118,6 +1297,7 @@ def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> N
     assert runtime.run_record.status is AgentRunStatus.FAILED
     assert len(runtime.finalize_run_commands) == 1
     finalization = runtime.finalize_run_commands[0]
+    _assert_failed_terminal_projection_is_empty(finalization)
     assert finalization.result_task_records == (runtime.task,)
     assert finalization.terminal_links[0].result_task_state_version == 2
     assert runtime.gates == []
@@ -1127,10 +1307,12 @@ def test_state_advanced_hook_error_reloads_current_task_before_failed_cas() -> N
     ]
 
 
-def test_assistant_persistence_error_after_commit_returns_committed_result(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_with_task_applied_aggregate_never_awaits_standalone_terminal_writes() -> None:
     events: list[str] = []
+    runtime = RuntimeSpy(
+        events,
+        trace_error_event_type=TraceEventType.RUN_STOPPED,
+    )
     conversation = ConversationSpy(
         events,
         assistant_error=RuntimeError("private assistant persistence failure"),
@@ -1138,6 +1320,7 @@ def test_assistant_persistence_error_after_commit_returns_committed_result(
     model = ModelSpy(events)
     service, _events, _model, runtime, conversation, _order, _artifact = _build(
         model=model,
+        runtime=runtime,
         conversation=conversation,
     )
 
@@ -1147,26 +1330,38 @@ def test_assistant_persistence_error_after_commit_returns_committed_result(
     assert runtime.run_record.status is AgentRunStatus.COMPLETED
     assert runtime.run_record.stop_reason is StopReason.GOAL_COMPLETED
     assert len(runtime.finalize_run_commands) == 1
+    terminal_command = runtime.finalize_run_commands[0]
+    _assert_complete_terminal_aggregate(
+        terminal_command,
+        result=result,
+        with_task=True,
+    )
     assert [message.direction for message in conversation.messages] == [
         MessageDirection.USER
     ]
-    assert runtime.trace_events[-1].event_type is TraceEventType.RUN_STOPPED
-    assert "ASSISTANT_MESSAGE_PERSISTENCE_FAILED" in caplog.text
-    assert "private assistant persistence failure" not in caplog.text
+    _assert_no_standalone_terminal_writes(events)
+    assert runtime.aggregate_messages == [terminal_command.assistant_message]
+    assert runtime.aggregate_trace_events == list(
+        terminal_command.terminal_trace_events
+    )
+    assert events[-1] == "terminal_aggregate_applied"
 
 
-def test_run_stopped_persistence_error_after_commit_returns_committed_result(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_no_task_applied_aggregate_never_awaits_standalone_terminal_writes() -> None:
     events: list[str] = []
     runtime = RuntimeSpy(
         events,
         trace_error_event_type=TraceEventType.RUN_STOPPED,
     )
+    conversation = ConversationSpy(
+        events,
+        assistant_error=RuntimeError("private assistant persistence failure"),
+    )
     model = ModelSpy(events, ru_protocol_error=True)
     service, _events, _model, runtime, conversation, _order, _artifact = _build(
         model=model,
         runtime=runtime,
+        conversation=conversation,
     )
 
     result = _run(service)
@@ -1175,16 +1370,140 @@ def test_run_stopped_persistence_error_after_commit_returns_committed_result(
     assert runtime.run_record.status is AgentRunStatus.COMPLETED
     assert runtime.run_record.stop_reason is StopReason.PROVIDER_PROTOCOL_ERROR
     assert len(runtime.finalize_run_commands) == 1
+    terminal_command = runtime.finalize_run_commands[0]
+    _assert_complete_terminal_aggregate(
+        terminal_command,
+        result=result,
+        with_task=False,
+    )
     assert [message.direction for message in conversation.messages] == [
-        MessageDirection.USER,
-        MessageDirection.ASSISTANT,
+        MessageDirection.USER
+    ]
+    _assert_no_standalone_terminal_writes(events)
+    assert runtime.aggregate_messages == [terminal_command.assistant_message]
+    assert runtime.aggregate_trace_events == list(
+        terminal_command.terminal_trace_events
+    )
+    assert events[-1] == "terminal_aggregate_applied"
+
+
+@pytest.mark.parametrize(
+    ("first_effect", "expected_error"),
+    (
+        (
+            ConditionalWriteResult.PROJECTION_CONFLICT,
+            AgentRunExecutionError,
+        ),
+        (
+            RuntimeError("private terminal aggregate failure"),
+            RuntimeError,
+        ),
+    ),
+    ids=("conflict", "exception"),
+)
+def test_terminal_aggregate_failure_has_zero_success_and_zero_partial_projection(
+    first_effect: ConditionalWriteResult | BaseException,
+    expected_error: type[BaseException],
+) -> None:
+    events: list[str] = []
+    runtime = RuntimeSpy(
+        events,
+        finalize_run_effects=[
+            first_effect,
+            ConditionalWriteResult.APPLIED,
+        ],
+    )
+    model = ModelSpy(events)
+    service, _events, _model, runtime, conversation, _order, _artifact = _build(
+        model=model,
+        runtime=runtime,
+    )
+
+    with pytest.raises(expected_error):
+        _run(service)
+
+    assert len(runtime.finalize_run_commands) == 2
+    attempted_terminal, failed_cleanup = runtime.finalize_run_commands
+    _assert_complete_terminal_aggregate(
+        attempted_terminal,
+        result=attempted_terminal.terminal_result,
+        with_task=True,
+    )
+    _assert_failed_terminal_projection_is_empty(failed_cleanup)
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert runtime.task is not None
+    assert runtime.task.status is TaskStatus.ACTIVE
+    assert runtime.task.state_version == 1
+    assert failed_cleanup.result_task_records == (runtime.task,)
+    assert (
+        failed_cleanup.terminal_links[0].result_task_state_version == 1
+    )
+    assert [(task.status, task.state_version) for task in runtime.task_history] == [
+        (TaskStatus.ACTIVE, 1)
+    ]
+    assert runtime.aggregate_messages == []
+    assert runtime.aggregate_trace_events == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
     ]
     assert not any(
-        event.event_type is TraceEventType.RUN_STOPPED
-        for event in runtime.trace_events
+        event.startswith("task_transition:") for event in events
     )
-    assert "RUN_STOPPED_TRACE_PERSISTENCE_FAILED" in caplog.text
-    assert "private trace persistence failure" not in caplog.text
+    _assert_no_standalone_terminal_writes(events)
+
+
+def test_terminal_aggregate_cancellation_has_zero_success_and_zero_partial_projection() -> None:
+    async def scenario():
+        events: list[str] = []
+        runtime = RuntimeSpy(events, block_completed_finalize=True)
+        model = ModelSpy(events)
+        service, _events, _model, runtime, conversation, _order, _artifact = (
+            _build(
+                model=model,
+                runtime=runtime,
+            )
+        )
+        run_task = asyncio.create_task(
+            service.handle(
+                AgentRunCommand(
+                    customer_context=_context(),
+                    message="请查询订单 O-1001",
+                )
+            )
+        )
+        await asyncio.wait_for(
+            runtime.completed_finalize_started.wait(),
+            timeout=0.5,
+        )
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        return events, runtime, conversation
+
+    events, runtime, conversation = asyncio.run(scenario())
+
+    assert len(runtime.finalize_run_commands) == 2
+    attempted_terminal, failed_cleanup = runtime.finalize_run_commands
+    _assert_complete_terminal_aggregate(
+        attempted_terminal,
+        result=attempted_terminal.terminal_result,
+        with_task=True,
+    )
+    _assert_failed_terminal_projection_is_empty(failed_cleanup)
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert runtime.task is not None
+    assert runtime.task.status is TaskStatus.ACTIVE
+    assert runtime.task.state_version == 1
+    assert failed_cleanup.result_task_records == (runtime.task,)
+    assert runtime.aggregate_messages == []
+    assert runtime.aggregate_trace_events == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+    assert not any(
+        event.startswith("task_transition:") for event in events
+    )
+    _assert_no_standalone_terminal_writes(events)
 
 
 def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -> None:
