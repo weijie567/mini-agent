@@ -100,6 +100,20 @@ class P0PersistenceSystemError(Exception):
         super().__init__("PERSISTENCE_SYSTEM_FAILURE")
 
 
+class _FinalizeRunNotApplicable(Exception):
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class _FinalizeRunProjectionConflict(Exception):
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 def _bounded_database_failures(
     operation: Callable[_Params, Awaitable[_ResultT]],
 ) -> Callable[_Params, Awaitable[_ResultT]]:
@@ -904,94 +918,251 @@ class PostgresRecordAdapter:
                 return ConditionalWriteResult.PROJECTION_CONFLICT
             return ConditionalWriteResult.APPLIED
 
+    def _finalize_run_in_transaction(
+        self,
+        session: Session,
+        command: FinalizeRunCommand,
+    ) -> None:
+        run_row = self._row_for_identity(
+            session,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(
+                ("run_id", command.expected_active_record.run_id),
+            ),
+        )
+        if run_row is None:
+            raise _FinalizeRunNotApplicable() from None
+
+        link_rows = tuple(
+            session.scalars(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.RUN_TASK_LINK_RECORD.value,
+                    P0RecordModel.run_id
+                    == command.expected_active_record.run_id,
+                )
+                .limit(2)
+            )
+        )
+        if len(link_rows) != len(command.expected_active_links):
+            raise _FinalizeRunProjectionConflict() from None
+
+        expected_task: TaskRecord | None = None
+        task_row: P0RecordModel | None = None
+        expected_unit: RequestUnitRecord | None = None
+        unit_row: P0RecordModel | None = None
+        if command.result_task_records:
+            expected_task = (
+                command.task_transition.expected_task_record
+                if command.task_transition is not None
+                else command.result_task_records[0]
+            )
+            task_row = self._row_for_identity(
+                session,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", expected_task.task_id),),
+            )
+            if task_row is None:
+                raise _FinalizeRunProjectionConflict() from None
+        if command.task_transition is not None:
+            expected_unit = (
+                command.task_transition.expected_request_unit_record
+            )
+            unit_row = self._row_for_identity(
+                session,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=(
+                    ("request_unit_id", expected_unit.request_unit_id),
+                ),
+            )
+            if unit_row is None:
+                raise _FinalizeRunProjectionConflict() from None
+
+        rows_to_lock = [
+            run_row,
+            *link_rows,
+            *((task_row,) if task_row is not None else ()),
+            *((unit_row,) if unit_row is not None else ()),
+        ]
+        locked_by_id = {
+            row.record_id: row
+            for row in self._lock_rows_stably(session, rows_to_lock)
+        }
+        run_row = locked_by_id[run_row.record_id]
+        link_rows = tuple(
+            locked_by_id[row.record_id]
+            for row in link_rows
+        )
+        if task_row is not None:
+            task_row = locked_by_id[task_row.record_id]
+        if unit_row is not None:
+            unit_row = locked_by_id[unit_row.record_id]
+
+        run_decoded = self._validate_physical_projection(session, run_row)
+        if run_decoded.source_record != command.expected_active_record:
+            raise _FinalizeRunProjectionConflict() from None
+
+        link_by_task: dict[UUID, P0RecordModel] = {}
+        for row in link_rows:
+            decoded_link = self._validate_physical_projection(
+                session,
+                row,
+            ).source_record
+            if type(decoded_link) is not RunTaskLinkRecord:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            link_by_task[decoded_link.task_id] = row
+        expected_link_by_task = {
+            link.task_id: link
+            for link in command.expected_active_links
+        }
+        if set(link_by_task) != set(expected_link_by_task):
+            raise _FinalizeRunProjectionConflict() from None
+        for task_id, row in link_by_task.items():
+            if (
+                self._validate_physical_projection(
+                    session,
+                    row,
+                ).source_record
+                != expected_link_by_task[task_id]
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+
+        task_children: tuple[BaseModel, ...] = ()
+        if expected_task is not None:
+            assert task_row is not None
+            task_decoded = self._validate_physical_projection(
+                session,
+                task_row,
+            )
+            if task_decoded.source_record != expected_task:
+                raise _FinalizeRunProjectionConflict() from None
+            task_children = cast(
+                tuple[BaseModel, ...],
+                task_decoded.logical_children,
+            )
+        if expected_unit is not None:
+            assert unit_row is not None
+            unit_decoded = self._validate_physical_projection(
+                session,
+                unit_row,
+            )
+            if (
+                unit_decoded.source_record != expected_unit
+                or unit_decoded.logical_children
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+
+        output_envelopes: list[P0PersistenceEnvelope] = []
+        if command.assistant_message is not None:
+            output_envelopes.append(
+                encode_persistence_record(
+                    P0RecordCode.MESSAGE_RECORD,
+                    command.assistant_message,
+                )
+            )
+        output_envelopes.extend(
+            encode_persistence_record(
+                P0RecordCode.TRACE_EVENT_RECORD,
+                event,
+            )
+            for event in command.terminal_trace_events
+        )
+        for envelope in output_envelopes:
+            if (
+                self._row_for_identity(
+                    session,
+                    record_code=envelope.record_code,
+                    logical_identity=envelope.logical_identity,
+                )
+                is not None
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+
+        if command.task_transition is not None:
+            assert task_row is not None
+            assert unit_row is not None
+            next_task = encode_persistence_record(
+                P0RecordCode.TASK_RECORD,
+                command.task_transition.next_task_record,
+                logical_children=(
+                    *task_children,
+                    command.task_transition.task_state_transition,
+                ),
+            )
+            if not self._replace_row_envelope(
+                session,
+                task_row,
+                expected_record=(
+                    command.task_transition.expected_task_record
+                ),
+                expected_children=task_children,
+                next_envelope=next_task,
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+            if not self._replace_row_envelope(
+                session,
+                unit_row,
+                expected_record=(
+                    command.task_transition.expected_request_unit_record
+                ),
+                expected_children=(),
+                next_envelope=encode_persistence_record(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    command.task_transition.next_request_unit_record,
+                ),
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+
+        if not self._replace_row_envelope(
+            session,
+            run_row,
+            expected_record=command.expected_active_record,
+            expected_children=(),
+            next_envelope=encode_persistence_record(
+                P0RecordCode.AGENT_RUN_RECORD,
+                command.terminal_record,
+            ),
+        ):
+            raise _FinalizeRunProjectionConflict() from None
+
+        terminal_link_by_task = {
+            link.task_id: link
+            for link in command.terminal_links
+        }
+        for task_id in sorted(link_by_task, key=str):
+            if not self._replace_row_envelope(
+                session,
+                link_by_task[task_id],
+                expected_record=expected_link_by_task[task_id],
+                expected_children=(),
+                next_envelope=encode_persistence_record(
+                    P0RecordCode.RUN_TASK_LINK_RECORD,
+                    terminal_link_by_task[task_id],
+                ),
+            ):
+                raise _FinalizeRunProjectionConflict() from None
+
+        if output_envelopes and not all(
+            self._persist_envelopes(session, output_envelopes)
+        ):
+            raise _FinalizeRunProjectionConflict() from None
+
+    @_bounded_database_failures
     async def finalize_run_if_active(
         self,
         command: FinalizeRunCommand,
     ) -> ConditionalWriteResult:
-        with self.session_factory.begin() as session:
-            run_row = self._row_for_identity(
-                session,
-                record_code=P0RecordCode.AGENT_RUN_RECORD,
-                logical_identity=(
-                    ("run_id", command.expected_active_record.run_id),
-                ),
-                for_update=True,
-            )
-            if run_row is None:
-                return ConditionalWriteResult.NOT_APPLICABLE
-            run_decoded = self._validate_physical_projection(session, run_row)
-            if run_decoded.source_record != command.expected_active_record:
-                return ConditionalWriteResult.PROJECTION_CONFLICT
-
-            link_rows: list[P0RecordModel] = []
-            for expected_link in sorted(
-                command.expected_active_links,
-                key=lambda item: str(item.task_id),
-            ):
-                link_row = self._row_for_identity(
-                    session,
-                    record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
-                    logical_identity=(
-                        ("run_id", expected_link.run_id),
-                        ("task_id", expected_link.task_id),
-                    ),
-                    for_update=True,
-                )
-                if link_row is None:
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-                decoded = self._validate_physical_projection(session, link_row)
-                if decoded.source_record != expected_link:
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-                link_rows.append(link_row)
-            for task in command.result_task_records:
-                task_row = self._row_for_identity(
-                    session,
-                    record_code=P0RecordCode.TASK_RECORD,
-                    logical_identity=(("task_id", task.task_id),),
-                    for_update=True,
-                )
-                if task_row is None:
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-                if (
-                    self._validate_physical_projection(
-                        session,
-                        task_row,
-                    ).source_record
-                    != task
-                ):
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-
-            if not self._replace_row_envelope(
-                session,
-                run_row,
-                expected_record=command.expected_active_record,
-                expected_children=(),
-                next_envelope=encode_persistence_record(
-                    P0RecordCode.AGENT_RUN_RECORD,
-                    command.terminal_record,
-                ),
-            ):
-                return ConditionalWriteResult.PROJECTION_CONFLICT
-            for row, expected_link, terminal_link in zip(
-                link_rows,
-                command.expected_active_links,
-                command.terminal_links,
-                strict=True,
-            ):
-                if not self._replace_row_envelope(
-                    session,
-                    row,
-                    expected_record=expected_link,
-                    expected_children=(),
-                    next_envelope=encode_persistence_record(
-                        P0RecordCode.RUN_TASK_LINK_RECORD,
-                        terminal_link,
-                    ),
-                ):
-                    raise _integrity(
-                        P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
-                    )
-            return ConditionalWriteResult.APPLIED
+        try:
+            with self.session_factory.begin() as session:
+                self._finalize_run_in_transaction(session, command)
+        except _FinalizeRunNotApplicable:
+            return ConditionalWriteResult.NOT_APPLICABLE
+        except _FinalizeRunProjectionConflict:
+            return ConditionalWriteResult.PROJECTION_CONFLICT
+        return ConditionalWriteResult.APPLIED
 
     async def create_initial_task_graph_if_current(
         self,
