@@ -32,7 +32,7 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / 01-07B_COMPLETE / 01-07C_01-07G_NEXT`
+**Status**: `ACTIVE / 01-07C_ISSUED / 01-07G_NEXT`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
@@ -47,7 +47,7 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 当前磁盘正式签发16个Plan（7个numbered + 7个inserted dependency Packets D–H/07A/07B + 2个replacement 05R/06R），`01-07C`至`01-07L`、`01-08/01-08A`尚无Plan文件。01-05R、01-06R、01-07、01-07A与01-07B已reviewed merge；historical 01-05/01-06 Packet不改写。`01-07B`已在exact six-file Eval ownership内关闭Case/Script/output oracle、canonical boundary与variant-scoped安全因果Trace gap；invalid-RU failure taxonomy缺口仍由未签发的01-07I Application signal/Port、01-07J Runtime mapping与01-07L Eval-owned Scripted/Qwen consumers串行关闭。下一步按`{01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling} → {01-07D RU exact mapping, 01-07H Core/Order DTO} → {01-07E persistence codec, 01-07F RU Core} → 01-07I Application Evidence Port / Provider failure contract → 01-07J Runtime / INPUT_INVALID mapping → {01-07K Infra reader, 01-07L Eval mapper / Scripted-Qwen consumers} → 01-08 → 01-08A`从每一阶段reviewed merge后的exact SHA签发，同组ownership不重叠者可并行写入，Integrator仍串行合并。每个Plan由GSD planner / checker角色提供只读建议，再由Integrator在dedicated planning-status Worktree中单写并通过PR创建；不运行stock import / plan-phase。若owner ruling要求额外migration、全局Memory version升级或新的外部契约，必须插入新Packet并更新分母，不得扩大既有allowlist。
+**Plans**: 当前磁盘正式签发17个Plan（7个numbered + 8个inserted dependency Packets D–H/07A/07B/07C + 2个replacement 05R/06R）。[01-07C Plan](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)固定execution base `3f0753f7...`与Intent owner单文件ownership，状态为`ISSUED / EXECUTION_NOT_STARTED`；`01-07G`仍待独立planning PR，`01-07D–01-07F`、`01-07H–01-07L`与`01-08/01-08A`尚无Plan文件。01-05R、01-06R、01-07、01-07A与01-07B已reviewed merge；historical 01-05/01-06 Packet不改写。`01-07B`已在exact six-file Eval ownership内关闭Case/Script/output oracle、canonical boundary与variant-scoped安全因果Trace gap；invalid-RU failure taxonomy缺口仍由未签发的01-07I Application signal/Port、01-07J Runtime mapping与01-07L Eval-owned Scripted/Qwen consumers串行关闭。后续按`{01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling} → {01-07D RU exact mapping, 01-07H Core/Order DTO} → {01-07E persistence codec, 01-07F RU Core} → 01-07I Application Evidence Port / Provider failure contract → 01-07J Runtime / INPUT_INVALID mapping → {01-07K Infra reader, 01-07L Eval mapper / Scripted-Qwen consumers} → 01-08 → 01-08A`从每一阶段reviewed merge后的exact SHA签发，同组ownership不重叠者可并行写入，Integrator仍串行合并。每个Plan由GSD planner / checker角色提供只读建议，再由Integrator在dedicated planning-status Worktree中单写并通过PR创建；不运行stock import / plan-phase。若owner ruling要求额外migration、全局Memory version升级或新的外部契约，必须插入新Packet并更新分母，不得扩大既有allowlist。
 
 Plans:
 
@@ -67,11 +67,11 @@ Plans:
 - [ ] 01-07: W2 Eval（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；[PR #29](https://github.com/weijie567/mini-agent/pull/29) head `b8ecbb0...`经latest overlay `ee46f38...`复验并merge `eee1c0e...`；191 focused / 40 migration / 936 full、1 deselected，双preflight、双review与Graphify gate；[Summary](phases/01-cycle-1-e2e-01/01-07-SUMMARY.md)）
 - [ ] 01-07A: Runtime Trace alignment（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；planning [PR #37](https://github.com/weijie567/mini-agent/pull/37)、Runtime [PR #38](https://github.com/weijie567/mini-agent/pull/38) merge `4cfac0a...`；100 focused / 40 migration / 936 full（1 deselected）、feature/overlay双路`PASS / NOT_FOUND`与Graphify gate；[Summary](phases/01-cycle-1-e2e-01/01-07A-SUMMARY.md)）
 - [ ] 01-07B: Eval oracle isolation / Trace precedence（插入式 `TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；[Plan](phases/01-cycle-1-e2e-01/01-07B-PLAN.md)固定base `8544137...`与six-file ownership；[PR #44](https://github.com/weijie567/mini-agent/pull/44) merge `ccdafe87...`；[Summary](phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)；checkbox因lifecycle仍为0/8而保持未勾选）
-- [ ] 01-07C: RU semantic ruling（`READY_AFTER_STATUS_ALIGNMENT`；Intent owner裁决contextualization/candidates/created_at/base-result versions的exact durable shape、logical version evolution、compatibility与rollback）
+- [ ] 01-07C: RU semantic ruling（`ISSUED / EXECUTION_NOT_STARTED`；[Plan](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)固定base `3f0753f7...`与Intent owner单文件ownership；裁决contextualization/candidates/created_at/base-result versions的exact durable shape、logical/model独立version evolution、compatibility与rollback）
 - [ ] 01-07D: Thin Slice RU exact mapping（`BLOCKED_BY_01-07C/G`；与01-07G共享Thin Slice owner文件，必须等C/G串行合并后从同一exact SHA签发；只写active mapping）
 - [ ] 01-07E: Application persistence codec（`BLOCKED_BY_01-07D/H`；只从D/H共同merge barrier签发；codec sole writer落实per-record version registry/encode/decode及tests；不修改active docs/RU DTO）
 - [ ] 01-07F: RU Core implementation（`BLOCKED_BY_01-07D/H`；只从D/H共同merge barrier签发；RU owner落实actual output/candidates与logical/model双version区分；不修改codec）
-- [ ] 01-07G: Thin Slice `get_order` source-version ruling（`READY_AFTER_STATUS_ALIGNMENT`；scoped owner定义唯一来源/算法、FOUND必填、Observation/Manifest exact copy与禁止schema fallback；不实现Core DTO）
+- [ ] 01-07G: Thin Slice `get_order` source-version ruling（`READY / PLAN_NOT_YET_ISSUED`；scoped owner定义唯一来源/算法、FOUND必填、Observation/Manifest exact copy与禁止schema fallback；不实现Core DTO）
 - [ ] 01-07H: Core/Order DTO consumer（`BLOCKED_BY_01-07C/G`；与01-07D一起只从C/G merge barrier后的同一exact SHA签发；独立Python source owner实现`GetOrderResult`合同与tests）
 - [ ] 01-07I: Application exact-Run Evidence Port / Provider failure contract（`BLOCKED_BY_01-07E/F/H`；定义expectation-free、owner-scoped、transactionally-consistent closure DTO/Port及partial/torn fail-closed；Port owner另冻结fresh parameterless、raw-free RU candidate-invalid signal与`ModelProvider`异常分类）
 - [ ] 01-07J: Runtime consumer / INPUT_INVALID mapping（`BLOCKED_BY_01-07E/F/H/I`；写canonical RU record，传播P0 source version且Manifest不fallback；只把01-07I signal映射为`COMPLETED / INPUT_INVALID`，不catch raw Pydantic/ValueError/Exception）
@@ -99,7 +99,7 @@ Plans:
 | 01-07 | Eval | `COMPLETE / EVIDENCE_INDEXED`：PR #29 merge `eee1c0e...`；191 focused / 40 migration / 936 full（1 deselected）、preflight/review与Graphify gate |
 | 01-07A | Runtime Trace alignment | `COMPLETE / EVIDENCE_INDEXED`：PR #37/#38 merge `4cfac0a...`；100 focused / 40 migration / 936 full（1 deselected）、review与Graphify gate |
 | 01-07B | Eval evidence boundary | `COMPLETE / EVIDENCE_INDEXED`：PR #42–#44，merge `ccdafe87...`；367 Harness / 725 owned / 762 Plan focused / 40 migration / 1493 full（1 deselected）、双review与Graphify gate |
-| 01-07C / 01-07G | RU semantic / source-version rulings | `READY_AFTER_STATUS_ALIGNMENT`：从当前status PR reviewed merge后的同一exact SHA分别签发；两个active owner不共享writer，Integrator串行合并 |
+| 01-07C / 01-07G | RU semantic / source-version rulings | 01-07C Plan已固定execution base `3f0753f7...`并签发，feature未开始；01-07G等待独立planning PR且必须写入同一execution base。两个active owner不共享writer，可并行执行，Integrator串行合并 |
 | 01-07D / 01-07H | RU exact mapping / Core-Order DTO | 01-07C与01-07G均reviewed merge形成同一新exact SHA后才签发；D/H ownership不重叠可并行写入，Integrator串行合并 |
 | 01-07E / 01-07F | persistence codec / RU Core | 01-07D与01-07H均reviewed merge形成共同exact barrier后签发，ownership与文件不重叠；Integrator串行合并 |
 | 01-07I | Application Evidence Port / Provider failure contract | 01-07E/01-07F/01-07H reviewed merge后从新的exact SHA签发；records/ports contract tests必须证明fresh parameterless/raw-free signal与RU-vs-protocol/Presentation分类 |
@@ -214,7 +214,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 7/8；新增依赖后目标Packet完成14/28、当前正式签发16个Plan；01-07B complete，01-07C/01-07G next，01-07D–01-07L/01-08/01-08A等待各自前置exact base` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 7/8；新增依赖后目标Packet完成14/28、当前正式签发17个Plan；01-07C issued / execution not started，01-07G next，01-07D–01-07L/01-08/01-08A等待各自前置exact base` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |

@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "07B"
+current_plan: "07C"
 status: "in_progress"
-last_updated: "2026-07-27T23:33:50+08:00"
-last_activity: "2026-07-27 — 01-07B planning/status PRs #42–#43 and feature PR #44 merged to ccdafe87; post-merge full and Graphify gates passed"
+last_updated: "2026-07-28T00:11:16+08:00"
+last_activity: "2026-07-28 — 01-07C single-owner Plan signed from exact execution base 3f0753f7; feature execution not started"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -33,31 +33,31 @@ See: [PROJECT.md](PROJECT.md)（2026-07-26）
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 07B
+Current Plan: 07C
 Total Phases: 6
 Total Plans in Phase: 8
-Status: 01-07C / 01-07G owner-ruling planning
-Last Activity: 2026-07-27
-Last Activity Description: 01-07B planning/status PR #42–#43与feature PR #44均已reviewed merge；integration为`ccdafe87...`且762 Plan focused、40 migration、1493 full（1 deselected）与Graphify通过
+Status: 01-07C issued / 01-07G planning pending
+Last Activity: 2026-07-28
+Last Activity Description: 01-07C Plan固定execution base `3f0753f7...`与Intent owner单文件ownership；feature execution尚未开始，01-07G仍待独立planning PR
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07、01-07A与01-07B均已evidence-indexed；01-07C–01-07L/01-08/01-08A等待各自前置exact integration SHA）
-Status: `ACTIVE / 01-07C_01-07G_PLANNING`
-Last activity: 2026-07-27 — integration `ccdafe87...`；新增依赖后目标Packet完成口径14/28、正式签发16个Plan；canonical lifecycle仍为0/8
+Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07、01-07A与01-07B均已evidence-indexed；01-07C已签发但未执行，01-07G及01-07D–01-07L/01-08/01-08A等待各自前置exact integration SHA）
+Status: `ACTIVE / 01-07C_ISSUED / 01-07G_PLANNING_PENDING`
+Last activity: 2026-07-28 — 01-07C Plan已签发、implementation未开始；新增依赖后目标Packet完成口径14/28、正式签发17个Plan；canonical lifecycle仍为0/8
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 通过当前 Integrator single-writer status PR，为01-07B建立Summary并把active/derived状态对齐到reviewed merge `ccdafe87...`；不推进Case lifecycle。
-2. 从该status PR reviewed merge后的同一exact integration SHA分别签发01-07C RU semantic ruling与01-07G Thin Slice `get_order` source-version ruling；两个active owner可并行写独立Worktree，Integrator仍串行合并。
-3. Integrator串行合并01-07C与01-07G形成共同barrier，再从该SHA签发01-07D RU exact mapping与01-07H Core/Order DTO；D/H全部串行合并后，才签发ownership不重叠的01-07E persistence codec与01-07F RU Core。
-4. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
-5. 从01-07J的新exact SHA并行签发01-07K Infra reader与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
-6. 01-07K/L reviewed merge后签发01-08 Composition Root与真实纵向证据；01-08 reviewed merge后签发01-08A Eval-owner credentialed Qwen runner，缺凭据只能形成`NOT_RUN / SKIPPED`。
-7. 01-08A后依次执行受控GSD code review/fix/validation/Eval/security/UAT与integration→main release PR。
+1. 通过当前01-07C dedicated planning-status PR；只签发Intent owner单文件Packet，不写canonical owner或推进Case lifecycle。
+2. 从01-07C planning PR reviewed merge后的新planning head建立独立01-07G planning-status Worktree；01-07G Plan仍把execution base固定为`3f0753f7...`，不得把planning merge误作execution dependency。
+3. 01-07G Plan reviewed merge后，从同一个`3f0753f7...`为01-07C与01-07G分别建立独立feature Worktree并行写入；Integrator串行合并两个owner PR形成共同barrier。
+4. 从C/G共同barrier签发01-07D RU exact mapping与01-07H Core/Order DTO；D/H全部串行合并后，才签发ownership不重叠的01-07E persistence codec与01-07F RU Core。
+5. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
+6. 从01-07J的新exact SHA并行签发01-07K Infra reader与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
+7. 01-07K/L reviewed merge后签发01-08 Composition Root与真实纵向证据；01-08 reviewed merge后签发01-08A Eval-owner credentialed Qwen runner，缺凭据只能形成`NOT_RUN / SKIPPED`；随后执行受控quality gate与release PR。
 
 ## Decisions
 
@@ -108,8 +108,9 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / EVAL_FEATURE_AND_OVERLAY_PASS`: PR #29 head `b8ecbb0...`与latest overlay `ee46f38...`均获独立`PASS / NOT_FOUND`；merge与post-merge gate完成。
 - `CONFIRMED / REAL_EVAL_RUNTIME_TRACE_ALIGNMENT_CLOSED`: 01-07A已关闭ContextManifest purpose、fixed-result ResponseRendered与explicit active-run hook identity；Eval reader仍禁止合成。
 - `CONFIRMED / PROJECT_DIRECTION_STATUS_ALIGNMENT`: `PROJECT_DIRECTION.md`实现状态段已对齐01-07B reviewed merge、14/28与0/8边界；状态修订不表示纵向Case或产品完成。
-- `READY / 01-07C_01-07G_ISSUANCE`: 当前status PR reviewed merge后，从同一exact SHA签发C/G owner rulings；C/G必须由Integrator串行合并形成共同barrier，D/H只能从该SHA签发；D/H也必须全部串行合并形成下一共同barrier，E/F只能从该barrier签发；I冻结Evidence Port与Provider failure signal，J映射Runtime，K只实现reader而L实现mapper与Eval-owned Scripted-Qwen consumers。
-- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。新增依赖后当前目标Packet完成14/28、正式签发16个Plan。
+- `CONFIRMED / 01-07C_ISSUED`: [01-07C Plan](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)固定execution base `3f0753f7...`、Intent owner单文件allowlist、完整version/closure/threat/rollback gate；feature execution尚未开始。
+- `READY / 01-07G_ISSUANCE`: 01-07G必须通过新的single-target planning PR签发并固定同一execution base；C/G均reviewed merge后形成共同barrier，D/H才可从该SHA签发。
+- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。新增依赖后当前目标Packet完成14/28、正式签发17个Plan。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -118,6 +119,6 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 
 ## Session
 
-Last Date: 2026-07-27
-Stopped At: 01-07B reviewed merge与post-merge full/Graphify完成；当前status alignment PR待review/merge
-Resume File: [phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md](phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)
+Last Date: 2026-07-28
+Stopped At: 01-07C Plan已在dedicated planning-status branch签发，feature execution尚未开始；01-07G planning待后续独立PR
+Resume File: [phases/01-cycle-1-e2e-01/01-07C-PLAN.md](phases/01-cycle-1-e2e-01/01-07C-PLAN.md)
