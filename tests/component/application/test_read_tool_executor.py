@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -168,12 +169,13 @@ async def _execute(
     return execution, actual_runtime, order
 
 
-@pytest.mark.asyncio
-async def test_found_read_is_durably_fenced_once_then_observed() -> None:
-    execution, runtime, order = await _execute(
-        result=GetOrderResult(
-            outcome=GetOrderOutcome.FOUND,
-            order_summary=_summary(),
+def test_found_read_is_durably_fenced_once_then_observed() -> None:
+    execution, runtime, order = asyncio.run(
+        _execute(
+            result=GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=_summary(),
+            )
         )
     )
 
@@ -199,7 +201,6 @@ async def test_found_read_is_durably_fenced_once_then_observed() -> None:
     assert execution.observation.normalized_value == _summary()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fence_result",
     [
@@ -208,16 +209,18 @@ async def test_found_read_is_durably_fenced_once_then_observed() -> None:
         ToolDispatchFenceWriteResult.ACTION_LEDGER_REQUIRED,
     ],
 )
-async def test_every_non_applied_dispatch_fence_performs_zero_read(
+def test_every_non_applied_dispatch_fence_performs_zero_read(
     fence_result: ToolDispatchFenceWriteResult,
 ) -> None:
     runtime = RuntimeSpy(fence_result=fence_result)
-    execution, runtime, order = await _execute(
-        result=GetOrderResult(
-            outcome=GetOrderOutcome.FOUND,
-            order_summary=_summary(),
-        ),
-        runtime=runtime,
+    execution, runtime, order = asyncio.run(
+        _execute(
+            result=GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=_summary(),
+            ),
+            runtime=runtime,
+        )
     )
 
     assert execution.dispatch_fence_result is fence_result
@@ -227,8 +230,7 @@ async def test_every_non_applied_dispatch_fence_performs_zero_read(
     assert runtime.events == ["tool_call_created", "dispatch_fence"]
 
 
-@pytest.mark.asyncio
-async def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
+def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
     runtime = RuntimeSpy(insert_result=InsertOnlyWriteResult.ALREADY_EXISTS)
     order = OrderSpy(
         GetOrderResult(
@@ -245,23 +247,24 @@ async def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
     )
 
     with pytest.raises(ReadToolExecutionError, match="insert"):
-        await executor.execute_get_order(
-            owner_scope=_owner_scope(),
-            authorized_command=_authorized(),
-            run_id=uuid4(),
-            task_id=uuid4(),
-            request_unit_id=uuid4(),
-            model_call_id=uuid4(),
-            context_manifest_id=uuid4(),
-            provider_tool_call_id=None,
-            tool_registry_version="runtime-tools-v1",
+        asyncio.run(
+            executor.execute_get_order(
+                owner_scope=_owner_scope(),
+                authorized_command=_authorized(),
+                run_id=uuid4(),
+                task_id=uuid4(),
+                request_unit_id=uuid4(),
+                model_call_id=uuid4(),
+                context_manifest_id=uuid4(),
+                provider_tool_call_id=None,
+                tool_registry_version="runtime-tools-v1",
+            )
         )
 
     assert runtime.events == ["tool_call_created"]
     assert order.queries == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("result", "expected_outcome", "expected_failure_code"),
     [
@@ -282,12 +285,12 @@ async def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
         ),
     ],
 )
-async def test_non_found_and_system_failures_finalize_without_observation(
+def test_non_found_and_system_failures_finalize_without_observation(
     result: GetOrderResult,
     expected_outcome: ToolResultOutcome,
     expected_failure_code: str,
 ) -> None:
-    execution, runtime, order = await _execute(result=result)
+    execution, runtime, order = asyncio.run(_execute(result=result))
 
     assert len(order.queries) == 1
     assert len(runtime.finalize_commands) == 1
@@ -299,19 +302,20 @@ async def test_non_found_and_system_failures_finalize_without_observation(
     assert "raw-upstream-detail" not in str(execution)
 
 
-@pytest.mark.asyncio
-async def test_finalize_conflict_never_writes_an_observation() -> None:
+def test_finalize_conflict_never_writes_an_observation() -> None:
     runtime = RuntimeSpy(
         finalize_result=ConditionalWriteResult.PROJECTION_CONFLICT
     )
 
     with pytest.raises(ReadToolExecutionError, match="finalization"):
-        await _execute(
-            result=GetOrderResult(
-                outcome=GetOrderOutcome.FOUND,
-                order_summary=_summary(),
+        asyncio.run(
+            _execute(
+                result=GetOrderResult(
+                    outcome=GetOrderOutcome.FOUND,
+                    order_summary=_summary(),
+                ),
+                runtime=runtime,
             ),
-            runtime=runtime,
         )
 
     assert runtime.events[-1] == "tool_call_finalized"
@@ -331,4 +335,3 @@ def test_read_executor_has_no_retry_parallel_or_action_execution_surface() -> No
         forbidden not in public_methods
         for forbidden in ("retry", "execute_action", "parallel")
     )
-
