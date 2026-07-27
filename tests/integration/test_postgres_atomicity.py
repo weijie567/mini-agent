@@ -38,7 +38,12 @@ from mini_agent.core.tool_system import (
     ToolCallStatus,
     ToolEffect,
 )
-from mini_agent.core.trace import AgentOutcome, AgentRunStatus, StopReason
+from mini_agent.core.trace import (
+    AgentOutcome,
+    AgentRunStatus,
+    StopReason,
+    TraceEventType,
+)
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
@@ -62,6 +67,7 @@ from test_record_contracts import (  # noqa: E402
     _initial_graph,
     _input_binding,
     _message,
+    _owner_scope,
     _recovery_trace_events,
 )
 
@@ -483,6 +489,85 @@ async def _seed_initial_graph_prerequisites(
         is ConditionalWriteResult.APPLIED
     )
     return graph
+
+
+def _no_task_finalization_for_graph(graph) -> FinalizeRunCommand:
+    template = _physical_finalization_command(with_task=False)
+    assert template.terminal_record.completed_at is not None
+    assert template.terminal_result is not None
+    assert template.assistant_message is not None
+    active_run = graph.expected_active_run_record
+    completed_at = template.terminal_record.completed_at
+    terminal_result = template.terminal_result.model_copy(
+        update={"run_id": active_run.run_id}
+    )
+    return FinalizeRunCommand(
+        expected_active_record=active_run,
+        terminal_record=active_run.model_copy(
+            update={
+                "status": AgentRunStatus.COMPLETED,
+                "completed_at": completed_at,
+                "stop_reason": StopReason.PROVIDER_PROTOCOL_ERROR,
+            }
+        ),
+        expected_active_links=(),
+        terminal_links=(),
+        result_task_records=(),
+        task_transition=None,
+        terminal_result=terminal_result,
+        assistant_message=template.assistant_message.model_copy(
+            update={
+                "conversation_id": active_run.conversation_id,
+                "content": terminal_result.message,
+                "received_at": completed_at,
+            }
+        ),
+        terminal_trace_events=tuple(
+            event.model_copy(
+                update={
+                    "run_id": active_run.run_id,
+                    "occurred_at": completed_at,
+                }
+            )
+            for event in template.terminal_trace_events
+        ),
+    )
+
+
+def _same_timestamp_terminal_trace_command() -> FinalizeRunCommand:
+    command = _physical_finalization_command(with_task=True)
+    transition = command.task_transition
+    assert transition is not None
+    assert command.terminal_record.completed_at is not None
+    occurred_at = command.terminal_record.completed_at
+    next_task = transition.next_task_record.model_copy(
+        update={"updated_at": occurred_at}
+    )
+    next_unit = transition.next_request_unit_record.model_copy(
+        update={"updated_at": occurred_at}
+    )
+    next_transition = ApplyTaskTransitionCommand(
+        expected_task_record=transition.expected_task_record,
+        next_task_record=next_task,
+        expected_request_unit_record=(
+            transition.expected_request_unit_record
+        ),
+        next_request_unit_record=next_unit,
+        task_state_transition=transition.task_state_transition.model_copy(
+            update={"changed_at": occurred_at}
+        ),
+    )
+    task_changed, run_stopped = command.terminal_trace_events
+    return command.model_copy(
+        update={
+            "result_task_records": (next_task,),
+            "task_transition": next_transition,
+            "terminal_trace_events": (
+                task_changed.model_copy(update={"occurred_at": occurred_at}),
+                run_stopped,
+            ),
+        }
+    )
 
 
 def _empty_graph_recovery_command(closure) -> ApplyRestartRecoveryCommand:
@@ -1142,6 +1227,79 @@ async def test_finalize_run_persists_exact_complete_terminal_projection(
         engine.dispose()
 
 
+async def test_finalize_run_lists_same_timestamp_terminal_traces_semantically(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _same_timestamp_terminal_trace_command()
+        await _seed_finalization_prerequisites(adapter, command)
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is ConditionalWriteResult.APPLIED
+        )
+
+        low_record_id = UUID(int=1)
+        high_record_id = UUID(int=2)
+        with adapter.session_factory.begin() as session:
+            trace_rows = tuple(
+                session.scalars(
+                    select(P0RecordModel).where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value,
+                        P0RecordModel.run_id
+                        == command.terminal_record.run_id,
+                    )
+                )
+            )
+            trace_row_by_type = {
+                adapter._decode_row(session, row).source_record.event_type: row
+                for row in trace_rows
+            }
+            task_changed_row = trace_row_by_type[
+                TraceEventType.TASK_STATE_CHANGED
+            ]
+            run_stopped_row = trace_row_by_type[TraceEventType.RUN_STOPPED]
+            task_changed_row.stored_at = (
+                command.terminal_record.completed_at
+            )
+            run_stopped_row.stored_at = command.terminal_record.completed_at
+            task_changed_row.record_id = high_record_id
+            run_stopped_row.record_id = low_record_id
+
+        with adapter.session_factory() as session:
+            physical_order = tuple(
+                adapter._decode_row(session, row).source_record.event_type
+                for row in session.scalars(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value,
+                        P0RecordModel.run_id
+                        == command.terminal_record.run_id,
+                    )
+                    .order_by(
+                        P0RecordModel.stored_at,
+                        P0RecordModel.record_id,
+                    )
+                )
+            )
+        assert physical_order == (
+            TraceEventType.RUN_STOPPED,
+            TraceEventType.TASK_STATE_CHANGED,
+        )
+        assert (
+            await adapter.list_trace_events_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=command.terminal_record.run_id,
+            )
+            == command.terminal_trace_events
+        )
+    finally:
+        engine.dispose()
+
+
 _TERMINAL_RECORD_FAULTS = (
     ("task", None),
     ("request_unit", None),
@@ -1437,6 +1595,105 @@ async def test_finalize_run_non_applied_paths_write_nothing(
         if stale_kind.endswith("_exists"):
             assert not replacement_attempted
     finally:
+        engine.dispose()
+
+
+async def test_finalize_run_rechecks_link_closure_after_acquiring_run_lock(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    finalizer = PostgresRecordAdapter(session_factory)
+    initial_graph_writer = PostgresRecordAdapter(session_factory)
+    old_closure_materialized = threading.Event()
+    initial_graph_committed = threading.Event()
+    pause_guard = threading.Lock()
+    paused = False
+    try:
+        graph = await _seed_initial_graph_prerequisites(
+            initial_graph_writer
+        )
+        command = _no_task_finalization_for_graph(graph)
+        original_lock_rows_stably = finalizer._lock_rows_stably
+
+        def pause_before_first_lock(session, rows):
+            nonlocal paused
+            materialized = tuple(rows)
+            with pause_guard:
+                should_pause = not paused
+                paused = True
+            if should_pause:
+                assert tuple(
+                    row.record_code for row in materialized
+                ) == (P0RecordCode.AGENT_RUN_RECORD.value,)
+                old_closure_materialized.set()
+                assert initial_graph_committed.wait(timeout=5)
+            return original_lock_rows_stably(session, materialized)
+
+        monkeypatch.setattr(
+            finalizer,
+            "_lock_rows_stably",
+            pause_before_first_lock,
+        )
+
+        def finalize_in_thread():
+            return asyncio.run(finalizer.finalize_run_if_active(command))
+
+        finalize_task = asyncio.create_task(
+            asyncio.to_thread(finalize_in_thread)
+        )
+        assert await asyncio.to_thread(
+            old_closure_materialized.wait,
+            5,
+        )
+        try:
+            initial_graph_result = (
+                await initial_graph_writer.create_initial_task_graph_if_current(
+                    graph
+                )
+            )
+        finally:
+            initial_graph_committed.set()
+        finalize_result = await asyncio.wait_for(finalize_task, timeout=15)
+
+        assert initial_graph_result is ConditionalWriteResult.APPLIED
+        assert finalize_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        assert (
+            await finalizer.load_run_for_owner(
+                owner_scope=graph.owner_scope,
+                run_id=graph.expected_active_run_record.run_id,
+            )
+            == graph.expected_active_run_record
+        )
+        assert (
+            await finalizer.list_run_task_links_for_owner(
+                owner_scope=graph.owner_scope,
+                run_id=graph.expected_active_run_record.run_id,
+            )
+            == (graph.run_task_link.active_record,)
+        )
+        assert (
+            await finalizer.list_trace_events_for_owner(
+                owner_scope=graph.owner_scope,
+                run_id=graph.expected_active_run_record.run_id,
+            )
+            == ()
+        )
+        assert command.assistant_message is not None
+        with session_factory() as session:
+            assert (
+                _row_for_envelope(
+                    session,
+                    encode_persistence_record(
+                        P0RecordCode.MESSAGE_RECORD,
+                        command.assistant_message,
+                    ),
+                )
+                is None
+            )
+    finally:
+        initial_graph_committed.set()
         engine.dispose()
 
 
