@@ -1,6 +1,6 @@
 # 消费者订单与配送售后 Agent｜P0 项目方向与架构决策
 
-更新日期：2026-07-27
+更新日期：2026-07-28
 状态：P0 当前方向与架构基线
 
 > 本文是当前可执行方向的基线，不是不可变的永久结论。发现新的失败证据或更优候选方案时，按问题说明、影响分析、Eval 对照、owner 裁决和 cross-file alignment 演进；具体证据链见 [`Agent Evaluation Strategy`](docs/evaluation/agent-evaluation-strategy.md#10-eval-作为架构决策证据)。
