@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from mini_agent.application.persistence import (
     P0RecordCode,
+    P0RecordReference,
     decode_persistence_record,
     encode_persistence_record,
 )
@@ -23,6 +25,7 @@ from mini_agent.application.records import (
     CreateRunCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
+    FinalizeRunCommand,
     InsertOnlyWriteResult,
     MarkRunIncompleteForRecoveryCommand,
     RecoveryWriteResult,
@@ -35,7 +38,7 @@ from mini_agent.core.tool_system import (
     ToolCallStatus,
     ToolEffect,
 )
-from mini_agent.core.trace import AgentRunStatus, StopReason
+from mini_agent.core.trace import AgentOutcome, AgentRunStatus, StopReason
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
@@ -53,7 +56,12 @@ _COMPONENT_APPLICATION_TESTS = (
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_persistence_contract import _record_cases  # noqa: E402
 from test_record_contracts import (  # noqa: E402
+    _completed_finalization,
+    _conversation,
+    _failed_finalization,
     _initial_graph,
+    _input_binding,
+    _message,
     _recovery_trace_events,
 )
 
@@ -132,6 +140,324 @@ def _encoded_graph_and_new_tool_call():
         )
     assert new_tool_call is not None
     return tuple(envelopes), CreateToolCallCommand(created_record=new_tool_call)
+
+
+def _physical_finalization_command(
+    *,
+    with_task: bool,
+    failed: bool = False,
+) -> FinalizeRunCommand:
+    if failed:
+        command = _failed_finalization(with_task=with_task)
+    else:
+        command = _completed_finalization(
+            stop_reason=(
+                StopReason.GOAL_COMPLETED
+                if with_task
+                else StopReason.PROVIDER_PROTOCOL_ERROR
+            ),
+            outcome=(
+                AgentOutcome.COMPLETED
+                if with_task
+                else AgentOutcome.BLOCKED
+            ),
+            with_task=with_task,
+            task_status=TaskStatus.COMPLETED if with_task else None,
+        )
+    active_links = tuple(
+        link.model_copy(
+            update={"schema_version": "run_task_link_record.p0.v1"}
+        )
+        for link in command.expected_active_links
+    )
+    terminal_links = tuple(
+        link.model_copy(
+            update={"schema_version": "run_task_link_record.p0.v1"}
+        )
+        for link in command.terminal_links
+    )
+    return command.model_copy(
+        update={
+            "expected_active_links": active_links,
+            "terminal_links": terminal_links,
+        }
+    )
+
+
+def _finalization_prerequisite_envelopes(
+    command: FinalizeRunCommand,
+):
+    conversation = _conversation(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=command.expected_active_record.conversation_id,
+        owner_customer_id="customer-A",
+        created_at=command.expected_active_record.started_at,
+    )
+    envelopes = [
+        encode_persistence_record(
+            P0RecordCode.CONVERSATION_RECORD,
+            conversation,
+        ),
+        encode_persistence_record(
+            P0RecordCode.AGENT_RUN_RECORD,
+            command.expected_active_record,
+        ),
+    ]
+    if command.expected_active_links:
+        expected_task = (
+            command.task_transition.expected_task_record
+            if command.task_transition is not None
+            else command.result_task_records[0]
+        )
+        envelopes.append(
+            encode_persistence_record(
+                P0RecordCode.TASK_RECORD,
+                expected_task,
+            )
+        )
+        envelopes.append(
+            encode_persistence_record(
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                command.expected_active_links[0],
+            )
+        )
+        if command.task_transition is not None:
+            expected_unit = (
+                command.task_transition.expected_request_unit_record
+            )
+            source_message = _message(
+                schema_version="message_record.p0.v1",
+                message_id=expected_unit.goal_source_refs[0],
+                conversation_id=conversation.conversation_id,
+                received_at=conversation.created_at,
+            )
+            input_binding = _input_binding(
+                binding_id=expected_unit.input_binding_refs[0],
+                source_refs=(source_message.message_id,),
+                created_at=conversation.created_at,
+                updated_at=conversation.created_at,
+            )
+            envelopes.extend(
+                (
+                    encode_persistence_record(
+                        P0RecordCode.MESSAGE_RECORD,
+                        source_message,
+                    ),
+                    encode_persistence_record(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        expected_unit,
+                    ),
+                    encode_persistence_record(
+                        P0RecordCode.INPUT_BINDING_RECORD,
+                        input_binding,
+                        external_references=(
+                            P0RecordReference(
+                                relation="request_unit_id",
+                                target_record_code=(
+                                    P0RecordCode.REQUEST_UNIT_RECORD
+                                ),
+                                target_logical_identity=(
+                                    (
+                                        "request_unit_id",
+                                        str(
+                                            expected_unit.request_unit_id
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            )
+    return tuple(envelopes)
+
+
+async def _seed_finalization_prerequisites(
+    adapter: PostgresRecordAdapter,
+    command: FinalizeRunCommand,
+) -> None:
+    with adapter.session_factory.begin() as session:
+        inserted = adapter._persist_envelopes(
+            session,
+            _finalization_prerequisite_envelopes(command),
+        )
+        assert all(inserted)
+
+
+def _physical_snapshot(session_factory):
+    with session_factory() as session:
+        record_columns = tuple(P0RecordModel.__table__.columns)
+        reference_columns = tuple(P0RecordReferenceModel.__table__.columns)
+        records = tuple(
+            tuple(
+                deepcopy(getattr(row, column.name))
+                for column in record_columns
+            )
+            for row in session.scalars(
+                select(P0RecordModel).order_by(P0RecordModel.record_id)
+            )
+        )
+        references = tuple(
+            tuple(
+                deepcopy(getattr(row, column.name))
+                for column in reference_columns
+            )
+            for row in session.scalars(
+                select(P0RecordReferenceModel).order_by(
+                    P0RecordReferenceModel.reference_id
+                )
+            )
+        )
+    return records, references
+
+
+def _row_for_envelope(session, envelope):
+    return session.scalar(
+        select(P0RecordModel).where(
+            P0RecordModel.record_code == envelope.record_code.value,
+            P0RecordModel.logical_identity
+            == [
+                [
+                    field_name,
+                    str(value) if isinstance(value, UUID) else value,
+                ]
+                for field_name, value in envelope.logical_identity
+            ],
+        )
+    )
+
+
+def _terminal_envelopes(
+    command: FinalizeRunCommand,
+):
+    assert command.task_transition is not None
+    return {
+        "task": encode_persistence_record(
+            P0RecordCode.TASK_RECORD,
+            command.task_transition.next_task_record,
+            logical_children=(command.task_transition.task_state_transition,),
+        ),
+        "request_unit": encode_persistence_record(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            command.task_transition.next_request_unit_record,
+        ),
+        "run": encode_persistence_record(
+            P0RecordCode.AGENT_RUN_RECORD,
+            command.terminal_record,
+        ),
+        "link": encode_persistence_record(
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            command.terminal_links[0],
+        ),
+        "message": encode_persistence_record(
+            P0RecordCode.MESSAGE_RECORD,
+            command.assistant_message,
+        ),
+        "task_trace": encode_persistence_record(
+            P0RecordCode.TRACE_EVENT_RECORD,
+            command.terminal_trace_events[0],
+        ),
+        "run_trace": encode_persistence_record(
+            P0RecordCode.TRACE_EVENT_RECORD,
+            command.terminal_trace_events[1],
+        ),
+    }
+
+
+def _assert_persisted_finalization(
+    adapter: PostgresRecordAdapter,
+    command: FinalizeRunCommand,
+) -> None:
+    with adapter.session_factory() as session:
+        terminal_run_envelope = encode_persistence_record(
+            P0RecordCode.AGENT_RUN_RECORD,
+            command.terminal_record,
+        )
+        run_row = _row_for_envelope(session, terminal_run_envelope)
+        assert run_row is not None
+        assert (
+            adapter._decode_row(session, run_row).source_record
+            == command.terminal_record
+        )
+
+        for expected_link in command.terminal_links:
+            envelope = encode_persistence_record(
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                expected_link,
+            )
+            row = _row_for_envelope(session, envelope)
+            assert row is not None
+            assert (
+                adapter._decode_row(session, row).source_record
+                == expected_link
+            )
+
+        if command.task_transition is not None:
+            task_envelope = encode_persistence_record(
+                P0RecordCode.TASK_RECORD,
+                command.task_transition.next_task_record,
+                logical_children=(
+                    command.task_transition.task_state_transition,
+                ),
+            )
+            task_row = _row_for_envelope(session, task_envelope)
+            assert task_row is not None
+            decoded_task = adapter._decode_row(session, task_row)
+            assert (
+                decoded_task.source_record
+                == command.task_transition.next_task_record
+            )
+            assert decoded_task.logical_children == (
+                command.task_transition.task_state_transition,
+            )
+            unit_envelope = encode_persistence_record(
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                command.task_transition.next_request_unit_record,
+            )
+            unit_row = _row_for_envelope(session, unit_envelope)
+            assert unit_row is not None
+            assert (
+                adapter._decode_row(session, unit_row).source_record
+                == command.task_transition.next_request_unit_record
+            )
+        elif command.result_task_records:
+            task_envelope = encode_persistence_record(
+                P0RecordCode.TASK_RECORD,
+                command.result_task_records[0],
+            )
+            task_row = _row_for_envelope(session, task_envelope)
+            assert task_row is not None
+            decoded_task = adapter._decode_row(session, task_row)
+            assert decoded_task.source_record == command.result_task_records[0]
+            assert decoded_task.logical_children == ()
+
+        if command.assistant_message is not None:
+            message_envelope = encode_persistence_record(
+                P0RecordCode.MESSAGE_RECORD,
+                command.assistant_message,
+            )
+            message_row = _row_for_envelope(session, message_envelope)
+            assert message_row is not None
+            assert (
+                adapter._decode_row(session, message_row).source_record
+                == command.assistant_message
+            )
+
+        expected_trace_by_id = {
+            event.trace_event_id: event
+            for event in command.terminal_trace_events
+        }
+        actual_trace_by_id = {}
+        for row in session.scalars(
+            select(P0RecordModel).where(
+                P0RecordModel.record_code
+                == P0RecordCode.TRACE_EVENT_RECORD.value,
+                P0RecordModel.run_id == command.terminal_record.run_id,
+            )
+        ):
+            event = adapter._decode_row(session, row).source_record
+            actual_trace_by_id[event.trace_event_id] = event
+        assert actual_trace_by_id == expected_trace_by_id
 
 
 async def _seed_initial_graph_prerequisites(
@@ -780,5 +1106,380 @@ async def test_action_dispatch_requires_ledger_and_writes_nothing(
             assert row is not None
             assert row.lifecycle_status == ToolCallStatus.CREATED.value
             assert row.attempt_count == 0
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("with_task", "failed"),
+    (
+        (True, False),
+        (False, False),
+        (True, True),
+        (False, True),
+    ),
+)
+async def test_finalize_run_persists_exact_complete_terminal_projection(
+    eval_postgres_namespace,
+    with_task: bool,
+    failed: bool,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _physical_finalization_command(
+            with_task=with_task,
+            failed=failed,
+        )
+        await _seed_finalization_prerequisites(adapter, command)
+
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is ConditionalWriteResult.APPLIED
+        )
+        _assert_persisted_finalization(adapter, command)
+    finally:
+        engine.dispose()
+
+
+_TERMINAL_RECORD_FAULTS = (
+    ("task", None),
+    ("request_unit", None),
+    ("run", None),
+    ("link", None),
+    ("message", None),
+    ("task_trace", None),
+    ("run_trace", None),
+)
+_TERMINAL_REFERENCE_FAULTS = (
+    ("task", 0),
+    ("request_unit", 0),
+    ("request_unit", 1),
+    ("request_unit", 2),
+    ("run", 0),
+    ("link", 0),
+    ("link", 1),
+    ("message", 0),
+    ("task_trace", 0),
+    ("task_trace", 1),
+    ("task_trace", 2),
+    ("run_trace", 0),
+)
+
+
+@pytest.mark.parametrize(
+    ("target_label", "reference_ordinal"),
+    (*_TERMINAL_RECORD_FAULTS, *_TERMINAL_REFERENCE_FAULTS),
+)
+async def test_finalize_run_rolls_back_every_terminal_child_and_reference_fault(
+    eval_postgres_namespace,
+    monkeypatch,
+    target_label: str,
+    reference_ordinal: int | None,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    triggered = False
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        before = _physical_snapshot(adapter.session_factory)
+        target = _terminal_envelopes(command)[target_label]
+        target_key = (
+            target.record_code,
+            target.logical_identity,
+        )
+
+        if reference_ordinal is not None:
+            original_reference_model = adapter._reference_model
+
+            def fail_selected_reference(
+                envelope,
+                *,
+                ordinal,
+                reference,
+            ):
+                nonlocal triggered
+                model = original_reference_model(
+                    envelope,
+                    ordinal=ordinal,
+                    reference=reference,
+                )
+                if (
+                    (envelope.record_code, envelope.logical_identity)
+                    == target_key
+                    and ordinal == reference_ordinal
+                ):
+                    triggered = True
+                    raise RuntimeError(
+                        f"injected {target_label} reference fault"
+                    )
+                return model
+
+            monkeypatch.setattr(
+                adapter,
+                "_reference_model",
+                fail_selected_reference,
+            )
+            with pytest.raises(
+                RuntimeError,
+                match=f"injected {target_label} reference fault",
+            ):
+                await adapter.finalize_run_if_active(command)
+        elif target_label in {"task", "request_unit", "run", "link"}:
+            original_replace = adapter._replace_row_envelope
+
+            def fail_after_selected_replacement(
+                session,
+                row,
+                *,
+                expected_record,
+                expected_children,
+                next_envelope,
+            ):
+                nonlocal triggered
+                result = original_replace(
+                    session,
+                    row,
+                    expected_record=expected_record,
+                    expected_children=expected_children,
+                    next_envelope=next_envelope,
+                )
+                if (
+                    (
+                        next_envelope.record_code,
+                        next_envelope.logical_identity,
+                    )
+                    == target_key
+                ):
+                    triggered = True
+                    assert result
+                    return False
+                return result
+
+            monkeypatch.setattr(
+                adapter,
+                "_replace_row_envelope",
+                fail_after_selected_replacement,
+            )
+            assert (
+                await adapter.finalize_run_if_active(command)
+                is ConditionalWriteResult.PROJECTION_CONFLICT
+            )
+        else:
+            original_persist = adapter._persist_envelopes
+
+            def fail_after_selected_insert(session, envelopes):
+                nonlocal triggered
+                materialized = tuple(envelopes)
+                results = list(original_persist(session, materialized))
+                for index, envelope in enumerate(materialized):
+                    if (
+                        envelope.record_code,
+                        envelope.logical_identity,
+                    ) == target_key:
+                        triggered = True
+                        assert results[index]
+                        results[index] = False
+                return tuple(results)
+
+            monkeypatch.setattr(
+                adapter,
+                "_persist_envelopes",
+                fail_after_selected_insert,
+            )
+            assert (
+                await adapter.finalize_run_if_active(command)
+                is ConditionalWriteResult.PROJECTION_CONFLICT
+            )
+
+        assert triggered
+        assert _physical_snapshot(adapter.session_factory) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("stale_kind", "expected_result"),
+    (
+        ("missing_run", ConditionalWriteResult.NOT_APPLICABLE),
+        ("run", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("link", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("task", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("request_unit", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("message_exists", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("task_trace_exists", ConditionalWriteResult.PROJECTION_CONFLICT),
+        ("run_trace_exists", ConditionalWriteResult.PROJECTION_CONFLICT),
+    ),
+)
+async def test_finalize_run_non_applied_paths_write_nothing(
+    eval_postgres_namespace,
+    monkeypatch,
+    stale_kind: str,
+    expected_result: ConditionalWriteResult,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    replacement_attempted = False
+    try:
+        command = _physical_finalization_command(
+            with_task=stale_kind != "missing_run"
+        )
+        if stale_kind == "missing_run":
+            prerequisites = _finalization_prerequisite_envelopes(command)
+            with adapter.session_factory.begin() as session:
+                assert adapter._persist_envelopes(
+                    session,
+                    prerequisites[:1],
+                ) == (True,)
+        else:
+            await _seed_finalization_prerequisites(adapter, command)
+
+        if stale_kind in {"run", "link", "task", "request_unit"}:
+            if stale_kind == "run":
+                current_record = command.expected_active_record
+                next_record = current_record.model_copy(
+                    update={"provider_lane": "stale-provider-lane"}
+                )
+                code = P0RecordCode.AGENT_RUN_RECORD
+                current_children = ()
+                next_children = ()
+            elif stale_kind == "link":
+                current_record = command.expected_active_links[0]
+                next_record = current_record.model_copy(
+                    update={"base_task_state_version": None}
+                )
+                code = P0RecordCode.RUN_TASK_LINK_RECORD
+                current_children = ()
+                next_children = ()
+            elif stale_kind == "task":
+                assert command.task_transition is not None
+                current_record = command.task_transition.expected_task_record
+                next_record = current_record.model_copy(
+                    update={
+                        "status": TaskStatus.WAITING_USER,
+                        "state_version": 2,
+                        "updated_at": (
+                            current_record.updated_at
+                            + timedelta(milliseconds=1)
+                        ),
+                    }
+                )
+                code = P0RecordCode.TASK_RECORD
+                current_children = ()
+                next_children = ()
+            else:
+                assert command.task_transition is not None
+                current_record = (
+                    command.task_transition.expected_request_unit_record
+                )
+                next_record = current_record.model_copy(
+                    update={
+                        "status": TaskStatus.WAITING_USER,
+                        "state_version": 2,
+                        "updated_at": (
+                            current_record.updated_at
+                            + timedelta(milliseconds=1)
+                        ),
+                    }
+                )
+                code = P0RecordCode.REQUEST_UNIT_RECORD
+                current_children = ()
+                next_children = ()
+            current_envelope = encode_persistence_record(
+                code,
+                current_record,
+                logical_children=current_children,
+            )
+            next_envelope = encode_persistence_record(
+                code,
+                next_record,
+                logical_children=next_children,
+            )
+            with adapter.session_factory.begin() as session:
+                row = _row_for_envelope(session, current_envelope)
+                assert row is not None
+                assert adapter._replace_row_envelope(
+                    session,
+                    row,
+                    expected_record=current_record,
+                    expected_children=current_children,
+                    next_envelope=next_envelope,
+                )
+        elif stale_kind.endswith("_exists"):
+            terminal = _terminal_envelopes(command)
+            key = stale_kind.removesuffix("_exists")
+            with adapter.session_factory.begin() as session:
+                assert adapter._persist_envelopes(
+                    session,
+                    (terminal[key],),
+                ) == (True,)
+
+            original_replace = adapter._replace_row_envelope
+
+            def track_replacement(*args, **kwargs):
+                nonlocal replacement_attempted
+                replacement_attempted = True
+                return original_replace(*args, **kwargs)
+
+            monkeypatch.setattr(
+                adapter,
+                "_replace_row_envelope",
+                track_replacement,
+            )
+
+        before = _physical_snapshot(adapter.session_factory)
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is expected_result
+        )
+        assert _physical_snapshot(adapter.session_factory) == before
+        if stale_kind.endswith("_exists"):
+            assert not replacement_attempted
+    finally:
+        engine.dispose()
+
+
+async def test_finalize_run_concurrent_winner_and_loser_commit_one_aggregate(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    start_barrier = threading.Barrier(2)
+    local_state = threading.local()
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        original_row_for_identity = adapter._row_for_identity
+
+        def synchronize_first_lookup(*args, **kwargs):
+            if not getattr(local_state, "first_lookup_seen", False):
+                local_state.first_lookup_seen = True
+                start_barrier.wait(timeout=5)
+            return original_row_for_identity(*args, **kwargs)
+
+        monkeypatch.setattr(
+            adapter,
+            "_row_for_identity",
+            synchronize_first_lookup,
+        )
+
+        def finalize_in_thread():
+            return asyncio.run(adapter.finalize_run_if_active(command))
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(finalize_in_thread),
+                asyncio.to_thread(finalize_in_thread),
+            ),
+            timeout=15,
+        )
+
+        assert results.count(ConditionalWriteResult.APPLIED) == 1
+        assert (
+            results.count(ConditionalWriteResult.PROJECTION_CONFLICT) == 1
+        )
+        _assert_persisted_finalization(adapter, command)
     finally:
         engine.dispose()
