@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 
@@ -16,6 +17,13 @@ from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
 from mini_agent.infrastructure.persistence.database import build_session_factory
 
 UTC_NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 def _summary(order_id: str, product_name: str) -> OrderSummaryProjection:
