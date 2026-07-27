@@ -37,12 +37,12 @@
 
 ## 当前执行边界
 
-- 当前 integration branch：`integration/e2e01-thin`；01-04H owner PR #32 reviewed merge后的 exact head 为 `64992cf3bdc6205e00d0c36433309b1657a57531`。原W2 Runtime / Infra feature仍以`c35687d...`为历史execution base并被冻结；新01-05R Runtime Packet以`64992cf...`为独立exact base。
+- 当前 integration branch：`integration/e2e01-thin`；01-05R Runtime PR #34 reviewed merge后的 exact head 为 `fb607019130843c94825a47d7822518cbdb2143c`。原W2 Runtime / Infra feature仍以`c35687d...`为历史execution base并被冻结；新01-06R Infra Packet以`fb607019...`为独立exact base。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
-- 01-04E/F/G owner Packet已依序通过PR #23/#24/#25合并；01-04H planning PR #31与owner PR #32随后完成，四文件Application terminal-turn contract在`64992cf...`取得560-test与Graphify gate。历史Runtime / Infra PR #28/#30保持Draft evidence；Eval PR #29已修复至`b8ecbb0...`并取得独立`PASS / NOT_FOUND`，仍等待latest-integration replay。
-- 当前 immediate gate：通过本planning-status PR签发01-05R exact-base Runtime replacement，完成实现/review/merge后再签发01-06R Infra replacement。随后把Eval `b8ecbb0...`移植到post-Runtime/Infra latest integration复验并串行合并。当前Component证据不证明Composition Root、完整HTTP/PostgreSQL Trajectory/E2E、credentialed Qwen baseline或产品完成；01-08仍由Integrator串行规划与集成。
+- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R又通过planning PR #33与Runtime PR #34完成，reviewed merge `fb607019...`取得100 focused / 660 full、38 migration、independent feature/overlay `PASS / NOT_FOUND`与Graphify gate。历史Runtime / Infra PR #28/#30保持Draft evidence；Eval PR #29已修复至`b8ecbb0...`并取得独立`PASS / NOT_FOUND`，仍等待latest-integration replay。
+- 当前 immediate gate：通过本planning-status PR签发01-06R exact-base Infra replacement，受控 replay historical `054dcaf...`并关闭两项review HIGH与01-04H physical transaction rollback。随后把Eval `b8ecbb0...`移植到post-Infra latest integration复验并串行合并。当前Component/Infra integration证据不证明Composition Root、完整HTTP Trajectory/E2E、credentialed Qwen baseline或产品完成；01-08仍由Integrator串行规划与集成。
 - 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
 
 ## 不属于 GSD 派生层的事项
@@ -74,8 +74,8 @@
 | 01-04F Thin Slice / Eval fault alignment | stale-state变体以canonical Port执行`ACTIVE/v1 → WAITING_USER/v2` race，再由Gateway拒绝并推进`BLOCKED/v3`；fact-bearing raw presentation映射为 Provider protocol failure | `COMPLETE / EVIDENCE_INDEXED / PR #24` |
 | 01-04G recovery Trace atomicity | Application command携带Core-produced exact recovery Trace；Port contract要求compliant Adapter将APPLIED state/link/Trace同事务并拒绝跨类型payload污染 | `COMPLETE / EVIDENCE_INDEXED / PR #25` |
 | 01-04H terminal-turn contract | planning PR #31 + owner PR #32；reviewed head `c0306ef...`、merge `64992cf...`、269 focused / 560 full与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
-| 01-05R Runtime replacement | exact base `64992cf...`、new branch/worktree与原14-file ownership已由新Plan固定；历史`a27141b...`只作受控donor，consumer pair必须消费01-04H | `PLANNED / PLANNING_PR_PENDING` |
-| 01-06R Infra replacement | 只有01-05R reviewed merge形成新exact integration SHA后才签发；负责两项Infra review finding与physical terminal transaction rollback | `NOT_ISSUED / EXACT_BASE_GATE` |
+| 01-05R Runtime replacement | planning PR #33 + Runtime PR #34；reviewed head `05f0182...`、merge `fb607019...`、100 focused / 660 full、38 migration与post-merge Graphify gate | `COMPLETE / EVIDENCE_INDEXED` |
+| 01-06R Infra replacement | exact base `fb607019...`、new branch/worktree与原13-file ownership由新Plan固定；四个allowed delta关闭两项review HIGH与physical terminal transaction rollback | `PLANNED / PLANNING_PR_PENDING` |
 | 01-07 Eval | PR #29 head `b8ecbb0...`已取得独立`PASS / NOT_FOUND`，150 grader+harness / 657 full、1 deselected；仍须post-Runtime/Infra latest-integration replay/review | `FEATURE_REVIEW_PASS / LATEST_REPLAY_PENDING` |
 
 ## 完成证据规则
