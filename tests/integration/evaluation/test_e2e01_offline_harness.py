@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import signature
 from pathlib import Path
@@ -34,6 +35,7 @@ from mini_agent.application.records import (
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
+    ProviderProtocolError,
     RunTaskLinkRecord,
 )
 from mini_agent.core.memory import (
@@ -63,9 +65,11 @@ from mini_agent.core.task_state import (
     RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
+    TaskStatus,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
+    GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
@@ -80,6 +84,8 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
+    AgentRunStatus,
+    StopReason,
     TraceEvent,
     TraceEventType,
 )
@@ -97,9 +103,12 @@ from mini_agent.evaluation.graders import (
     ordinary_trace_shape,
 )
 from mini_agent.evaluation.harness import (
+    EvalCaseExecutionInput,
     EvalCaseSutResult,
     EvalHarnessCommandError,
     OfflineEvalHarness,
+    UnboundEvalEvidence,
+    UnboundSafeCaseObservable,
     append_qwen_not_run_record,
     build_authenticated_case_expectations,
     build_qwen_baseline_preflight,
@@ -187,13 +196,23 @@ def _tool_spec() -> ToolSpec:
     return get_order_tool_spec()
 
 
-def _request(case: EvalCaseArtifact) -> RequestUnderstandingInput:
+def _request(
+    source: EvalCaseArtifact | EvalCaseExecutionInput,
+) -> RequestUnderstandingInput:
     tool = _tool_spec()
-    message = case.input["messages"][0]
+    if type(source) is EvalCaseExecutionInput:
+        run_id = _case_uuid(str(source.execution_ref), "request-run")
+        message_ref = _case_uuid(str(source.execution_ref), "message")
+        original_query = source.messages[0].content
+    else:
+        message = source.input["messages"][0]
+        run_id = RUN_ID
+        message_ref = UUID("00000000-0000-4000-8000-000000000804")
+        original_query = message["content"]
     return RequestUnderstandingInput(
-        run_id=RUN_ID,
-        message_ref=UUID("00000000-0000-4000-8000-000000000804"),
-        original_query=message["content"],
+        run_id=run_id,
+        message_ref=message_ref,
+        original_query=original_query,
         provider_visible_tool_specs=(tool,),
         model_visible_toolset_hash=compute_model_visible_toolset_hash((tool,)),
     )
@@ -383,158 +402,330 @@ def _observation_envelope(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SyntheticActualProfile:
+    customer_id: str
+    http_status: int
+    outcome: AgentOutcome
+    run_status: AgentRunStatus
+    stop_reason: StopReason
+    response_policy: str
+    binding_order_id: str
+    requested_tool_name: str
+    task_status: TaskStatus
+    task_state_version: int
+    gate_decision: GateDecisionValue
+    gate_reason: GateReasonCode | None
+    tool_call_status: ToolCallStatus | None
+    observation_count: int
+    model_calls: int
+    presentation_model_calls: int
+    trace_path: str
+
+
+_COMMON_TRACE_PREFIX = (
+    TraceEventType.MESSAGE_ACCEPTED,
+    TraceEventType.RUN_STARTED,
+    TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    TraceEventType.NEXT_MOVE_PROPOSED,
+    TraceEventType.TASK_DELTA_VALIDATED,
+    TraceEventType.TASK_DELTA_ACCEPTED,
+    TraceEventType.INPUT_BINDING_RECORDED,
+    TraceEventType.TASK_STATE_CHANGED,
+    TraceEventType.NEXT_MOVE_REVALIDATED,
+)
+_TRACE_SEQUENCE_BY_PATH = {
+    "SUCCESS": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+        TraceEventType.PRESENTATION_PLAN_PROPOSED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "FAILED_TOOL": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "GATEWAY_REJECTED": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "STALE_STATE": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+    "PRESENTATION_FAULT": (
+        *_COMMON_TRACE_PREFIX,
+        TraceEventType.GATE_DECISION_RECORDED,
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_RESULT_NORMALIZED,
+        TraceEventType.OBSERVATION_RECORDED,
+        TraceEventType.CONTEXT_MANIFEST_RECORDED,
+        TraceEventType.RESPONSE_RENDERED,
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    ),
+}
+
+
+def _actual_profile(
+    request_output,
+    *,
+    runtime_fault: RuntimeFaultDirective | None,
+    presentation_failed: bool,
+) -> _SyntheticActualProfile:
+    candidate = request_output.task_delta_candidates[0]
+    message_order_id = str(candidate.input_candidates[0].candidate_value)
+    next_move_order_id = str(
+        request_output.next_move_candidate.arguments["order_id"]
+    )
+    requested_tool_name = request_output.next_move_candidate.requested_tool_name
+    common: dict[str, object] = {
+        "customer_id": "customer-A",
+        "http_status": 200,
+        "run_status": AgentRunStatus.COMPLETED,
+        "binding_order_id": message_order_id,
+        "requested_tool_name": requested_tool_name,
+        "model_calls": 1,
+        "presentation_model_calls": 0,
+    }
+    if runtime_fault is not None:
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=3,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.STATE_VERSION_MISMATCH,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="STALE_STATE",
+        )
+    if message_order_id != next_move_order_id:
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="GATEWAY_REJECTED",
+        )
+    if requested_tool_name != "get_order":
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.GATE_REJECTED,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.REJECT,
+            gate_reason=GateReasonCode.TOOL_NOT_REGISTERED,
+            tool_call_status=None,
+            observation_count=0,
+            trace_path="GATEWAY_REJECTED",
+        )
+    if next_move_order_id != "O-1001":
+        return _SyntheticActualProfile(
+            **common,
+            outcome=AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            stop_reason=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            response_policy="FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+            task_status=TaskStatus.COMPLETED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.ACCEPT,
+            gate_reason=None,
+            tool_call_status=ToolCallStatus.FAILED,
+            observation_count=0,
+            trace_path="FAILED_TOOL",
+        )
+    if presentation_failed:
+        return _SyntheticActualProfile(
+            **{**common, "model_calls": 2, "presentation_model_calls": 1},
+            outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+            response_policy="FIXED_SAFE_PROCESSING_ERROR",
+            task_status=TaskStatus.BLOCKED,
+            task_state_version=2,
+            gate_decision=GateDecisionValue.ACCEPT,
+            gate_reason=None,
+            tool_call_status=ToolCallStatus.SUCCEEDED,
+            observation_count=1,
+            trace_path="PRESENTATION_FAULT",
+        )
+    return _SyntheticActualProfile(
+        **{**common, "model_calls": 2, "presentation_model_calls": 1},
+        outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReason.GOAL_COMPLETED,
+        response_policy="DETERMINISTIC_ORDER_SUMMARY_V1",
+        task_status=TaskStatus.COMPLETED,
+        task_state_version=2,
+        gate_decision=GateDecisionValue.ACCEPT,
+        gate_reason=None,
+        tool_call_status=ToolCallStatus.SUCCEEDED,
+        observation_count=1,
+        trace_path="SUCCESS",
+    )
+
+
 def _synthetic_trace(
     *,
-    expectations: EvalCaseExpectations,
+    profile: _SyntheticActualProfile,
+    identity_seed: str,
     run_id: UUID,
     message_ref: UUID,
-    accepted_delta: AcceptedTaskDelta | None,
-    binding: InputBinding | None,
-    task: TaskRecord | None,
-    request_unit: RequestUnitRecord | None,
-    gate: GateDecision | None,
+    accepted_delta: AcceptedTaskDelta,
+    binding: InputBinding,
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+    gate: GateDecision,
     tool_call: ToolCallRecord | None,
     observation: OrderObservation | None,
     manifests: tuple[ContextManifest, ...],
 ) -> tuple[TraceEvent, ...]:
-    exact_counts = {
-        item.event_type: item.count for item in expectations.expected_event_counts
-    }
     events: list[TraceEvent] = []
     manifest_index = 0
-    sequence = 0
-    for event_type in expectations.required_trace_events:
-        if event_type is TraceEventType.EVAL_CASE_GRADED:
-            continue
-        count = exact_counts.get(event_type, 1)
-        for _ in range(count):
-            sequence += 1
-            values: dict[str, object] = {
-                "trace_event_id": _case_uuid(
-                    expectations.case_id,
-                    f"trace:{sequence}",
-                ),
-                "event_type": event_type,
-                "occurred_at": NOW + timedelta(milliseconds=sequence),
-                "run_id": run_id,
-                "case_id": expectations.case_id,
-            }
-            if event_type is TraceEventType.MESSAGE_ACCEPTED:
-                values["message_ref"] = message_ref
-            elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
-                assert (
-                    accepted_delta is not None
-                    and task is not None
-                    and request_unit is not None
-                )
-                values.update(
-                    {
-                        "message_ref": message_ref,
-                        "accepted_delta_ref": accepted_delta.accepted_delta_id,
-                        "task_id": task.task_id,
-                        "request_unit_id": request_unit.request_unit_id,
-                    }
-                )
-            elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
-                manifest = manifests[manifest_index]
-                request_understanding_calls = (
-                    expectations.expected_model_calls
-                    - expectations.expected_presentation_model_calls
-                )
-                model_call_purpose = (
-                    "REQUEST_UNDERSTANDING"
-                    if manifest_index < request_understanding_calls
-                    else "PRESENTATION"
-                )
-                manifest_index += 1
-                values.update(
-                    {
-                        "context_manifest_id": manifest.context_manifest_id,
-                        "model_call_id": manifest.model_call_id,
-                        "model_call_purpose": model_call_purpose,
-                        "tool_registry_version": (manifest.tool_registry_version),
-                        "model_visible_toolset_hash": (
-                            manifest.model_visible_toolset_hash
-                        ),
-                    }
-                )
-            elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
-                assert binding is not None
-                values["input_binding_ref"] = binding.binding_id
-            elif event_type is TraceEventType.TASK_STATE_CHANGED:
-                assert task is not None and request_unit is not None
-                values.update(
-                    {
-                        "task_id": task.task_id,
-                        "request_unit_id": request_unit.request_unit_id,
-                    }
-                )
-            elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
-                values["validated_task_state_version"] = 1
-            elif event_type is TraceEventType.GATE_DECISION_RECORDED:
-                assert gate is not None
-                values.update(
-                    {
-                        "gate_decision": gate.decision,
-                        "gate_reason_code": gate.reason_code,
-                    }
-                )
-            elif event_type in {
-                TraceEventType.TOOL_CALL_CREATED,
-                TraceEventType.TOOL_CALL_STARTED,
-                TraceEventType.TOOL_CALL_SUCCEEDED,
-                TraceEventType.TOOL_CALL_FAILED,
-                TraceEventType.TOOL_CALL_TIMED_OUT,
-                TraceEventType.TOOL_CALL_INTERRUPTED,
-            }:
-                assert tool_call is not None
-                status_by_type = {
-                    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
-                    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
-                    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
-                    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
-                    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
-                    TraceEventType.TOOL_CALL_INTERRUPTED: (ToolCallStatus.INTERRUPTED),
+    for sequence, event_type in enumerate(
+        _TRACE_SEQUENCE_BY_PATH[profile.trace_path],
+        start=1,
+    ):
+        values: dict[str, object] = {
+            "trace_event_id": _case_uuid(identity_seed, f"trace:{sequence}"),
+            "event_type": event_type,
+            "occurred_at": NOW + timedelta(milliseconds=sequence),
+            "run_id": run_id,
+            "case_id": None,
+        }
+        if event_type is TraceEventType.MESSAGE_ACCEPTED:
+            values["message_ref"] = message_ref
+        elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
+            values.update(
+                {
+                    "message_ref": message_ref,
+                    "accepted_delta_ref": accepted_delta.accepted_delta_id,
+                    "task_id": task.task_id,
+                    "request_unit_id": request_unit.request_unit_id,
                 }
-                values.update(
-                    {
-                        "tool_call_id": tool_call.tool_call_id,
-                        "tool_call_terminal_status": status_by_type[event_type],
-                    }
-                )
-            elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
-                assert tool_call is not None
-                values.update(
-                    {
-                        "tool_call_id": tool_call.tool_call_id,
-                        "safe_tool_outcome": (
-                            ToolResultOutcome.SUCCESS
-                            if tool_call.status is ToolCallStatus.SUCCEEDED
-                            else ToolResultOutcome.BUSINESS_FAILURE
-                        ),
-                    }
-                )
-            elif event_type is TraceEventType.OBSERVATION_RECORDED:
-                assert observation is not None
-                values["observation_ref"] = observation.observation_id
-            elif event_type is TraceEventType.RUN_STOPPED:
-                values.update(
-                    {
-                        "user_outcome": expectations.expected_outcome,
-                        "stop_reason": expectations.expected_stop_reason,
-                    }
-                )
-            events.append(TraceEvent(**values))
+            )
+        elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
+            manifest = manifests[manifest_index]
+            purpose = (
+                "REQUEST_UNDERSTANDING"
+                if manifest_index == 0
+                else "PRESENTATION"
+            )
+            manifest_index += 1
+            values.update(
+                {
+                    "context_manifest_id": manifest.context_manifest_id,
+                    "model_call_id": manifest.model_call_id,
+                    "model_call_purpose": purpose,
+                    "tool_registry_version": manifest.tool_registry_version,
+                    "model_visible_toolset_hash": (
+                        manifest.model_visible_toolset_hash
+                    ),
+                }
+            )
+        elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
+            values["input_binding_ref"] = binding.binding_id
+        elif event_type is TraceEventType.TASK_STATE_CHANGED:
+            values.update(
+                {
+                    "task_id": task.task_id,
+                    "request_unit_id": request_unit.request_unit_id,
+                }
+            )
+        elif event_type is TraceEventType.NEXT_MOVE_REVALIDATED:
+            values["validated_task_state_version"] = 1
+        elif event_type is TraceEventType.GATE_DECISION_RECORDED:
+            values.update(
+                {
+                    "gate_decision": gate.decision,
+                    "gate_reason_code": gate.reason_code,
+                }
+            )
+        elif event_type in {
+            TraceEventType.TOOL_CALL_CREATED,
+            TraceEventType.TOOL_CALL_STARTED,
+            TraceEventType.TOOL_CALL_SUCCEEDED,
+            TraceEventType.TOOL_CALL_FAILED,
+        }:
+            assert tool_call is not None
+            status_by_type = {
+                TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+                TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+                TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+                TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+            }
+            values.update(
+                {
+                    "tool_call_id": tool_call.tool_call_id,
+                    "tool_call_terminal_status": status_by_type[event_type],
+                }
+            )
+        elif event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+            assert tool_call is not None
+            values.update(
+                {
+                    "tool_call_id": tool_call.tool_call_id,
+                    "safe_tool_outcome": (
+                        ToolResultOutcome.SUCCESS
+                        if tool_call.status is ToolCallStatus.SUCCEEDED
+                        else ToolResultOutcome.BUSINESS_FAILURE
+                    ),
+                }
+            )
+        elif event_type is TraceEventType.OBSERVATION_RECORDED:
+            assert observation is not None
+            values["observation_ref"] = observation.observation_id
+        elif event_type is TraceEventType.RUN_STOPPED:
+            values.update(
+                {
+                    "user_outcome": profile.outcome,
+                    "stop_reason": profile.stop_reason,
+                }
+            )
+        events.append(TraceEvent(**values))
     return tuple(events)
 
 
 def _synthetic_message(
-    expectations: EvalCaseExpectations,
+    profile: _SyntheticActualProfile,
     observation: OrderObservation | None,
 ) -> str:
-    if expectations.expected_response_policy == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE":
+    if profile.response_policy == "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE":
         return "未找到可访问的订单，请核对订单号后重试。"
-    if expectations.expected_response_policy == "FIXED_SAFE_PROCESSING_ERROR":
+    if profile.response_policy == "FIXED_SAFE_PROCESSING_ERROR":
         return "当前无法安全处理该请求，请稍后重试。"
     assert observation is not None
     summary = observation.normalized_value
@@ -572,11 +763,12 @@ class SyntheticSut:
         self.observable_overrides = dict(observable_overrides or {})
         self.calls = 0
         self.last_runtime_fault: RuntimeFaultDirective | None = None
+        self.last_trace_ref: UUID | None = None
 
     async def execute_case(
         self,
         *,
-        case: EvalCaseArtifact,
+        execution_input: EvalCaseExecutionInput,
         scripted_provider: ScriptedModelProvider,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None:
@@ -587,175 +779,167 @@ class SyntheticSut:
         if self.fault == "missing":
             return None
         assert isinstance(scripted_provider, ModelProvider)
-        script = ARTIFACTS.script_by_ref(scripted_provider.model_script_ref)
-        expectations = build_authenticated_case_expectations(
-            artifacts=ARTIFACTS,
-            case=case,
-            script=script,
+        request = _request(execution_input)
+        request_output = await scripted_provider.propose_next_move(request)
+        proposed_delta = request_output.task_delta_candidates[0]
+        message_order_id = str(
+            proposed_delta.input_candidates[0].candidate_value
         )
-        request_output = await scripted_provider.propose_next_move(_request(case))
-        if case.case_id == "E2E01-01":
-            await scripted_provider.plan_presentation(_presentation_input())
-
-        run_id = (
-            RUN_ID if case.case_id == "E2E01-01" else _case_uuid(case.case_id, "run")
+        next_move_order_id = str(
+            request_output.next_move_candidate.arguments["order_id"]
         )
-        trace_ref = (
-            TRACE_REF
-            if case.case_id == "E2E01-01"
-            else _case_uuid(case.case_id, "trace")
+        presentation_failed = False
+        if (
+            runtime_fault is None
+            and message_order_id == next_move_order_id == "O-1001"
+            and request_output.next_move_candidate.requested_tool_name
+            == "get_order"
+        ):
+            try:
+                await scripted_provider.plan_presentation(
+                    _presentation_input()
+                )
+            except ProviderProtocolError:
+                presentation_failed = True
+        profile = _actual_profile(
+            request_output,
+            runtime_fault=runtime_fault,
+            presentation_failed=presentation_failed,
         )
+        identity_seed = str(execution_input.execution_ref)
+        run_id = request.run_id
+        trace_ref = _case_uuid(identity_seed, "trace")
+        self.last_trace_ref = trace_ref
         message_ref = request_output.message_ref
-        conversation_id = _case_uuid(case.case_id, "conversation")
-        request_understanding_record: RequestUnderstandingRecord | None = None
-        accepted_delta: AcceptedTaskDelta | None = None
-        binding: InputBinding | None = None
-        task: TaskRecord | None = None
-        request_unit: RequestUnitRecord | None = None
-        conversation_task_link: ConversationTaskLinkRecord | None = None
-        run_task_link: RunTaskLinkRecord | None = None
-        if expectations.expected_task_status is not None:
-            assert len(request_output.task_delta_candidates) == 1
-            proposed_delta = request_output.task_delta_candidates[0]
-            binding = InputBinding(
-                binding_id=_case_uuid(case.case_id, "binding"),
-                name="order_id",
-                normalized_value=expectations.expected_binding_order_id,
-                authority=InputAuthority.USER_CLAIM,
-                source_refs=(message_ref,),
-                validation_status=InputValidationStatus.ACCEPTED,
-                confirmed_by_user=True,
-                created_at=NOW,
-                updated_at=NOW,
-            )
-            task = TaskRecord(
-                task_id=_case_uuid(case.case_id, "task"),
-                owner_customer_id=expectations.trusted_customer_id,
-                status=expectations.expected_task_status,
-                state_version=expectations.expected_task_state_version,
-                created_at=NOW,
-                updated_at=NOW + timedelta(seconds=1),
-            )
-            request_unit = RequestUnitRecord(
-                request_unit_id=_case_uuid(case.case_id, "request-unit"),
-                task_id=task.task_id,
-                goal_text="查询指定订单状态",
-                goal_source_refs=(message_ref,),
-                input_binding_refs=(binding.binding_id,),
-                observation_refs=(
-                    (_case_uuid(case.case_id, "observation"),)
-                    if expectations.expected_observations == 1
-                    else ()
+        conversation_id = _case_uuid(identity_seed, "conversation")
+        binding = InputBinding(
+            binding_id=_case_uuid(identity_seed, "binding"),
+            name="order_id",
+            normalized_value=profile.binding_order_id,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(message_ref,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        task = TaskRecord(
+            task_id=_case_uuid(identity_seed, "task"),
+            owner_customer_id=profile.customer_id,
+            status=profile.task_status,
+            state_version=profile.task_state_version,
+            created_at=NOW,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        request_unit = RequestUnitRecord(
+            request_unit_id=_case_uuid(identity_seed, "request-unit"),
+            task_id=task.task_id,
+            goal_text="查询指定订单状态",
+            goal_source_refs=(message_ref,),
+            input_binding_refs=(binding.binding_id,),
+            observation_refs=(
+                (_case_uuid(identity_seed, "observation"),)
+                if profile.observation_count == 1
+                else ()
+            ),
+            status=profile.task_status,
+            state_version=profile.task_state_version,
+            created_at=NOW,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        accepted_delta = AcceptedTaskDelta(
+            accepted_delta_id=_case_uuid(identity_seed, "accepted-delta"),
+            candidate_ref=proposed_delta.candidate_id,
+            message_ref=message_ref,
+            operation=proposed_delta.operation,
+            goal_text=proposed_delta.goal_patch,
+            input_binding_refs=(binding.binding_id,),
+            accepted_at=NOW,
+        )
+        request_understanding_record = RequestUnderstandingRecord(
+            run_id=run_id,
+            message_ref=message_ref,
+            schema_version="request_understanding_record.p0.v1",
+            candidate_validation=(
+                CandidateValidationRecord(
+                    candidate_ref=proposed_delta.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
                 ),
-                status=expectations.expected_request_unit_status,
-                state_version=(expectations.expected_request_unit_state_version),
-                created_at=NOW,
-                updated_at=NOW + timedelta(seconds=1),
-            )
-            accepted_delta = AcceptedTaskDelta(
-                accepted_delta_id=_case_uuid(case.case_id, "accepted-delta"),
-                candidate_ref=proposed_delta.candidate_id,
-                message_ref=message_ref,
-                operation=proposed_delta.operation,
-                goal_text=proposed_delta.goal_patch,
-                input_binding_refs=(binding.binding_id,),
-                accepted_at=NOW,
-            )
-            request_understanding_record = RequestUnderstandingRecord(
-                run_id=run_id,
-                message_ref=message_ref,
-                schema_version="request_understanding_record.p0.v1",
-                candidate_validation=(
-                    CandidateValidationRecord(
-                        candidate_ref=proposed_delta.candidate_id,
-                        decision=CandidateValidationDecision.ACCEPT,
-                    ),
-                ),
-                accepted_delta_refs=(accepted_delta.accepted_delta_id,),
-                proposed_base_task_state_version=(
-                    request_output.next_move_candidate.base_task_state_version
-                ),
-                validated_task_state_version=(
-                    expectations.expected_validated_task_state_version
-                ),
-                next_move_candidate_ref=_case_uuid(case.case_id, "next-move"),
-            )
-            conversation_task_link = ConversationTaskLinkRecord(
-                schema_version="conversation_task_link_record.p0.v1",
-                conversation_id=conversation_id,
-                task_id=task.task_id,
-                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
-                linked_at=NOW,
-            )
-            run_task_link = RunTaskLinkRecord(
-                schema_version="run_task_link_record.p0.v1",
-                run_id=run_id,
-                task_id=task.task_id,
-                base_task_state_version=None,
-                result_task_state_version=task.state_version,
-            )
-
+            ),
+            accepted_delta_refs=(accepted_delta.accepted_delta_id,),
+            proposed_base_task_state_version=(
+                request_output.next_move_candidate.base_task_state_version
+            ),
+            validated_task_state_version=1,
+            next_move_candidate_ref=_case_uuid(identity_seed, "next-move"),
+        )
+        conversation_task_link = ConversationTaskLinkRecord(
+            schema_version="conversation_task_link_record.p0.v1",
+            conversation_id=conversation_id,
+            task_id=task.task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=NOW,
+        )
+        run_task_link = RunTaskLinkRecord(
+            schema_version="run_task_link_record.p0.v1",
+            run_id=run_id,
+            task_id=task.task_id,
+            base_task_state_version=None,
+            result_task_state_version=task.state_version,
+        )
         context_ids = tuple(
-            _case_uuid(case.case_id, f"context:{index}")
-            for index in range(expectations.expected_model_calls)
+            _case_uuid(identity_seed, f"context:{index}")
+            for index in range(profile.model_calls)
         )
         model_call_ids = tuple(
-            _case_uuid(case.case_id, f"model-call:{index}")
-            for index in range(expectations.expected_model_calls)
+            _case_uuid(identity_seed, f"model-call:{index}")
+            for index in range(profile.model_calls)
         )
-        gate: GateDecision | None = None
-        if expectations.expected_gate_decision is not None:
-            assert binding is not None
-            failed_field_by_reason = {
-                GateReasonCode.ARGUMENT_BINDING_MISMATCH: ("argument_binding_valid"),
-                GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
-                GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
-            }
-            checks = {
-                "snapshot_match": True,
-                "registration_valid": True,
-                "schema_valid": True,
-                "trusted_field_valid": True,
-                "argument_binding_valid": True,
-                "budget_valid": True,
-                "progress_valid": True,
-                "state_version_valid": True,
-                "action_boundary_valid": True,
-            }
-            if expectations.expected_gate_reason is not None:
-                checks[failed_field_by_reason[expectations.expected_gate_reason]] = (
-                    False
-                )
-            gate = GateDecision(
-                gate_decision_id=_case_uuid(case.case_id, "gate"),
-                model_call_id=model_call_ids[0],
-                context_manifest_id=context_ids[0],
-                provider_tool_call_id="synthetic-provider-call",
-                requested_provider_tool_name=(
-                    expectations.expected_requested_tool_name
-                ),
-                resolved_canonical_tool_name=(
-                    None
-                    if expectations.expected_gate_reason
-                    is GateReasonCode.TOOL_NOT_REGISTERED
-                    else "get_order"
-                ),
-                argument_binding_refs=(binding.binding_id,),
-                proposed_base_task_state_version=None,
-                validated_task_state_version=1,
-                decision=expectations.expected_gate_decision,
-                reason_code=expectations.expected_gate_reason,
-                decided_at=NOW,
-                **checks,
-            )
+        failed_field_by_reason = {
+            GateReasonCode.ARGUMENT_BINDING_MISMATCH: "argument_binding_valid",
+            GateReasonCode.STATE_VERSION_MISMATCH: "state_version_valid",
+            GateReasonCode.TOOL_NOT_REGISTERED: "registration_valid",
+        }
+        checks = {
+            "snapshot_match": True,
+            "registration_valid": True,
+            "schema_valid": True,
+            "trusted_field_valid": True,
+            "argument_binding_valid": True,
+            "budget_valid": True,
+            "progress_valid": True,
+            "state_version_valid": True,
+            "action_boundary_valid": True,
+        }
+        if profile.gate_reason is not None:
+            checks[failed_field_by_reason[profile.gate_reason]] = False
+        gate = GateDecision(
+            gate_decision_id=_case_uuid(identity_seed, "gate"),
+            model_call_id=model_call_ids[0],
+            context_manifest_id=context_ids[0],
+            provider_tool_call_id="synthetic-provider-call",
+            requested_provider_tool_name=profile.requested_tool_name,
+            resolved_canonical_tool_name=(
+                None
+                if profile.gate_reason is GateReasonCode.TOOL_NOT_REGISTERED
+                else "get_order"
+            ),
+            argument_binding_refs=(binding.binding_id,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=1,
+            decision=profile.gate_decision,
+            reason_code=profile.gate_reason,
+            decided_at=NOW,
+            **checks,
+        )
 
         observation: OrderObservation | None = None
-        if expectations.expected_observations == 1:
+        if profile.observation_count == 1:
             projection = _presentation_input().order_summary
             observation = OrderObservation(
-                observation_id=_case_uuid(case.case_id, "observation"),
+                observation_id=_case_uuid(identity_seed, "observation"),
                 source_tool="get_order",
-                source_resource_ref=expectations.expected_binding_order_id,
+                source_resource_ref=profile.binding_order_id,
                 source_version="order-v7",
                 normalized_type="ORDER_SUMMARY",
                 normalized_value=projection,
@@ -765,16 +949,10 @@ class SyntheticSut:
             )
         tool_call: ToolCallRecord | None = None
         tool_attempt: ToolAttemptRecord | None = None
-        if expectations.expected_tool_calls == 1:
-            assert (
-                binding is not None
-                and task is not None
-                and request_unit is not None
-                and gate is not None
-            )
-            status = expectations.expected_tool_call_status
+        if profile.tool_call_status is not None:
+            status = profile.tool_call_status
             tool_call = ToolCallRecord(
-                tool_call_id=_case_uuid(case.case_id, "tool-call"),
+                tool_call_id=_case_uuid(identity_seed, "tool-call"),
                 run_id=run_id,
                 task_id=task.task_id,
                 request_unit_id=request_unit.request_unit_id,
@@ -783,7 +961,7 @@ class SyntheticSut:
                 gate_decision_id=gate.gate_decision_id,
                 provider_tool_call_id="synthetic-provider-call",
                 canonical_tool_name="get_order",
-                tool_registry_version=(expectations.expected_tool_registry_version),
+                tool_registry_version="e2e01-thin-tools-v1",
                 validated_task_state_version=1,
                 argument_binding_refs=(binding.binding_id,),
                 effect=ToolEffect.READ,
@@ -797,7 +975,7 @@ class SyntheticSut:
                     else "NOT_FOUND_OR_NOT_ACCESSIBLE"
                 ),
                 result_ref=(
-                    _case_uuid(case.case_id, "tool-result")
+                    _case_uuid(identity_seed, "tool-result")
                     if observation is not None
                     else None
                 ),
@@ -817,17 +995,16 @@ class SyntheticSut:
                 failure_code=tool_call.failure_code,
             )
         request_understanding_calls = (
-            expectations.expected_model_calls
-            - expectations.expected_presentation_model_calls
+            profile.model_calls - profile.presentation_model_calls
         )
         manifests = tuple(
             ContextManifest(
                 context_manifest_id=context_id,
                 run_id=run_id,
                 model_call_id=model_call_ids[index],
-                tool_registry_version=(expectations.expected_tool_registry_version),
-                model_visible_toolset_hash=(
-                    expectations.expected_model_visible_toolset_hash
+                tool_registry_version="e2e01-thin-tools-v1",
+                model_visible_toolset_hash=compute_model_visible_toolset_hash(
+                    (get_order_tool_spec(),)
                 ),
                 selected_message_refs=(message_ref,),
                 task_state_ref_and_version=(
@@ -855,7 +1032,8 @@ class SyntheticSut:
             for index, context_id in enumerate(context_ids)
         )
         initial_trace = _synthetic_trace(
-            expectations=expectations,
+            profile=profile,
+            identity_seed=identity_seed,
             run_id=run_id,
             message_ref=message_ref,
             accepted_delta=accepted_delta,
@@ -914,7 +1092,7 @@ class SyntheticSut:
             superseding = observation.model_copy(
                 update={
                     "supersedes": _case_uuid(
-                        case.case_id,
+                        identity_seed,
                         "previous-observation",
                     )
                 }
@@ -931,40 +1109,37 @@ class SyntheticSut:
             )
         self.traces.seed(trace_ref, initial_trace)
         observable_values: dict[str, object] = {
-            "case_id": case.case_id,
-            "http_status": expectations.expected_http_status,
-            "user_outcome": expectations.expected_outcome,
-            "response_policy": expectations.expected_response_policy,
+            "http_status": profile.http_status,
+            "user_outcome": profile.outcome,
+            "response_policy": profile.response_policy,
             "ordinary_trace_shape": ordinary_trace_shape(initial_trace),
-            "model_calls": expectations.expected_model_calls,
+            "model_calls": profile.model_calls,
         }
         observable_values.update(self.observable_overrides)
-        observable = SafeCaseObservable(**observable_values)
+        observable = UnboundSafeCaseObservable(**observable_values)
         evidence_values: dict[str, object] = {
-            "case_id": case.case_id,
-            "observed_outcome": expectations.expected_outcome,
+            "observed_outcome": profile.outcome,
             "trace_ref": trace_ref,
             "trace_events": initial_trace,
-            "safe_observable": observable,
             "run_record": AgentRunRecord(
                 run_id=run_id,
                 conversation_id=conversation_id,
-                status=expectations.expected_run_status,
+                status=profile.run_status,
                 provider_lane="offline_gate",
                 started_at=NOW,
                 completed_at=NOW + timedelta(seconds=1),
-                stop_reason=expectations.expected_stop_reason,
+                stop_reason=profile.stop_reason,
             ),
             "agent_result": AgentRunResult(
                 run_id=run_id,
-                outcome=expectations.expected_outcome,
-                message=_synthetic_message(expectations, observation),
+                outcome=profile.outcome,
+                message=_synthetic_message(profile, observation),
             ),
             "conversation_records": (
                 ConversationRecord(
                     schema_version="conversation_record.p0.v1",
                     conversation_id=conversation_id,
-                    owner_customer_id=expectations.trusted_customer_id,
+                    owner_customer_id=profile.customer_id,
                     created_at=NOW,
                 ),
             ),
@@ -974,7 +1149,7 @@ class SyntheticSut:
                     message_id=message_ref,
                     conversation_id=conversation_id,
                     direction=MessageDirection.USER,
-                    content=expectations.expected_message_content,
+                    content=execution_input.messages[0].content,
                     received_at=NOW,
                 ),
             ),
@@ -1003,7 +1178,9 @@ class SyntheticSut:
             "model_visible_toolset_artifacts": (
                 ModelVisibleToolsetArtifact(
                     model_visible_toolset_hash=(
-                        expectations.expected_model_visible_toolset_hash
+                        compute_model_visible_toolset_hash(
+                            (get_order_tool_spec(),)
+                        )
                     ),
                     provider_visible_tool_specs=(get_order_tool_spec(),),
                 ),
@@ -1022,8 +1199,9 @@ class SyntheticSut:
             "toolset_replay_assertions_pass": True,
         }
         evidence_values.update(self.evidence_overrides)
-        evidence = EvalEvidence(**evidence_values)
+        evidence = UnboundEvalEvidence(**evidence_values)
         return EvalCaseSutResult(
+            execution_ref=execution_input.execution_ref,
             evidence=evidence,
             safe_observable=observable,
         )
@@ -1080,6 +1258,24 @@ class ResultBoundaryMutationSut:
                     )
                 }
             )
+        if self._mutation == "nested_trace_semantic_case_id":
+            object.__setattr__(
+                result.evidence.trace_events[0],
+                "semantic_case_id",
+                "E2E01-01",
+            )
+            return result
+        if self._mutation == "nested_payload_cycle":
+            cycle: list[object] = []
+            cycle.append(cycle)
+            request_output = result.evidence.request_understanding_output
+            assert request_output is not None
+            object.__setattr__(
+                request_output,
+                "task_delta_candidates",
+                cycle,
+            )
+            return result
         if self._mutation == "observable_disagreement":
             mismatched_observable = result.safe_observable.model_copy(
                 update={"user_outcome": AgentOutcome.BLOCKED}
@@ -1119,6 +1315,15 @@ class IncompleteThenStaleRefSut:
         result = await self._delegate.execute_case(**kwargs)
         assert type(result) is EvalCaseSutResult
         return result.model_copy(update={"execution_ref": self._incomplete_ref})
+
+
+class CancellingSut:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute_case(self, **kwargs: object) -> None:
+        self.calls += 1
+        raise asyncio.CancelledError
 
 
 def _harness(
@@ -1325,6 +1530,8 @@ def test_execution_ref_result_correlation_has_zero_argument_nonce_seam() -> None
         "semantic_evidence_case_id",
         "semantic_observable_case_id",
         "trace_case_id",
+        "nested_trace_semantic_case_id",
+        "nested_payload_cycle",
         "observable_disagreement",
     ],
 )
@@ -1352,6 +1559,27 @@ def test_result_correlation_rejects_unbound_spoofing_before_grading(
         EvalExecutionFailurePhase.RESULT_COMPLETENESS
     )
     assert port.results == {}
+
+
+def test_sut_cancellation_propagates_after_correlation_is_retired() -> None:
+    sut = CancellingSut()
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        nonce_factory=nonce_factory,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(harness)
+
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert harness._pending_case_by_execution_ref == {}
+    assert harness._retired_execution_refs == {EXECUTION_REF_1}
+    assert port.results == {}
+    assert port.failures == []
 
 
 def test_result_correlation_replay_wins_over_unexhausted_provider() -> None:
@@ -1565,11 +1793,25 @@ def test_nonce_reuse_across_attempts_fails_before_second_sut_call(
 
 def test_actual_mismatch_reaches_graders_and_persists_fail() -> None:
     case = ARTIFACTS.case_by_id("E2E01-01")
-    provider = ScriptedModelProvider(
-        ARTIFACTS,
-        model_script_ref="script:e2e01-01:success",
+    execution_input = EvalCaseExecutionInput(
+        execution_ref=EXECUTION_REF_1,
+        messages=(
+            {
+                "role": "user",
+                "content": case.input["messages"][0]["content"],
+            },
+        ),
+        trusted_context_fixture_ref=case.input[
+            "trusted_context_fixture_ref"
+        ],
     )
-    actual = asyncio.run(provider.propose_next_move(_request(case)))
+    provider = ScriptedModelProvider(
+        ARTIFACTS.script_by_ref("script:e2e01-01:success"),
+        script_execution_ref=SCRIPT_EXECUTION_REF_1,
+    )
+    actual = asyncio.run(
+        provider.propose_next_move(_request(execution_input))
+    )
     mismatched_move = actual.next_move_candidate.model_copy(
         update={"arguments": {"order_id": "O-2001"}}
     )
@@ -1582,10 +1824,18 @@ def test_actual_mismatch_reaches_graders_and_persists_fail() -> None:
             )
         },
     )
-    harness, *_ = _harness(sut=sut, traces=traces)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, *_ = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
 
     outcome = _run(harness)
 
+    assert nonce_factory.calls == [((), {}), ((), {})]
     assert outcome.execution_failures == ()
     assert outcome.results[0].status is EvalResultStatus.FAIL
     request_grader = next(
@@ -1610,7 +1860,7 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
         timeline.append(f"grade:{','.join(configured)}")
         return grade_evidence(configured, evidence, expectations)
 
-    harness, _sut, traces, port = _harness(
+    harness, sut, traces, port = _harness(
         traces=traces,
         port=port,
         grader_runner=recording_grader,
@@ -1620,10 +1870,12 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     assert outcome.command_passed is True
     assert outcome.execution_failures == ()
     assert len(outcome.results) == 1
+    assert isinstance(sut, SyntheticSut)
+    assert sut.last_trace_ref is not None
     result = outcome.results[0]
     assert result.status is EvalResultStatus.PASS
     assert result.observed_outcome is AgentOutcome.COMPLETED
-    assert result.trace_ref == TRACE_REF
+    assert result.trace_ref == sut.last_trace_ref
     assert result.grader_results
     assert result.critical_failures == ()
     assert result.usage_summary is None
@@ -1637,7 +1889,7 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
         "grade:TraceCompletenessGrader",
         "result_append",
     ]
-    final_trace = traces.events_by_ref[TRACE_REF]
+    final_trace = traces.events_by_ref[sut.last_trace_ref]
     assert [event.event_type for event in final_trace].count(
         TraceEventType.EVAL_CASE_GRADED
     ) == 1
@@ -2132,27 +2384,72 @@ def test_failure_store_unavailable_raises_bounded_command_error() -> None:
 
 
 def test_exact_same_lane_replay_returns_loaded_record_without_overwrite() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness)
-    second = _run(harness)
+    second = _run(
+        harness,
+        script_ref_by_case={
+            "E2E01-01": "script:e2e01-01:success",
+        },
+    )
 
     assert first.results == second.results
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert len(traces.events_by_ref) == 1
+    assert traces.events.count("trace_append") == 1
+    assert traces.events.count("trace_reload") == 1
     assert len(port.results) == 1
     assert port.events.count("result_append") == 2
 
 
 def test_incremented_attempt_is_appended_under_a_distinct_identity() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness, attempt=1)
     second = _run(harness, attempt=2)
 
     assert first.results[0].attempt == 1
     assert second.results[0].attempt == 2
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
+    assert len(traces.events_by_ref) == 2
     assert len(port.results) == 2
 
 
 def test_conflicting_duplicate_attempt_routes_result_persistence_failure() -> None:
-    harness, _sut, _traces, port = _harness()
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, _sut, _traces, port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
     first = _run(harness)
     original = first.results[0]
     key = (EVAL_RUN_ID, "E2E01-01", "offline_gate", 1)
@@ -2181,7 +2478,52 @@ def test_conflicting_duplicate_attempt_routes_result_persistence_failure() -> No
     assert second.execution_failures[0].safe_error_code is (
         EvalExecutionSafeErrorCode.RESULT_PERSISTENCE_FAILED
     )
+    assert sut.calls == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
     assert port.results[key].status is EvalResultStatus.FAIL
+
+
+def test_different_script_selection_misses_exact_replay_cache() -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(traces)
+    nonce_factory = NonceFactorySpy(
+        (
+            EXECUTION_REF_1,
+            SCRIPT_EXECUTION_REF_1,
+            EXECUTION_REF_2,
+            SCRIPT_EXECUTION_REF_2,
+        )
+    )
+    harness, _sut, _traces, _port = _harness(
+        sut=sut,
+        traces=traces,
+        nonce_factory=nonce_factory,
+    )
+    case_id = "E2E01-01+SEC-ARGUMENT-BINDING"
+
+    first = _run(
+        harness,
+        case_ids=(case_id,),
+        script_ref_by_case={
+            case_id: "script:sec-argument-binding:foreign-order",
+        },
+    )
+    second = _run(
+        harness,
+        case_ids=(case_id,),
+        script_ref_by_case={
+            case_id: "script:sec-argument-binding:nonexistent-order",
+        },
+    )
+
+    assert first.execution_failures == ()
+    assert len(first.results) == 1
+    assert second.results == ()
+    assert second.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.RESULT_PERSISTENCE
+    )
+    assert sut.calls == 2
+    assert nonce_factory.calls == [((), {})] * 4
 
 
 def test_same_run_case_attempt_in_two_lanes_are_distinct_records() -> None:
@@ -2245,9 +2587,13 @@ def test_complete_equal_e2e01_04_pair_persists_both_passes() -> None:
 def test_e2e01_04_safe_difference_forces_both_case_results_fail() -> None:
     class PairSut(SyntheticSut):
         async def execute_case(self, **kwargs):
-            case = kwargs["case"]
+            execution_input = kwargs["execution_input"]
             self.observable_overrides = {
-                "model_calls": 2 if case.case_id == "E2E01-04-B" else 1
+                "http_status": (
+                    201
+                    if execution_input.messages[0].content.endswith("O-9999")
+                    else 200
+                )
             }
             return await super().execute_case(**kwargs)
 

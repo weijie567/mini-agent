@@ -86,7 +86,10 @@ def _presentation_input() -> PresentationInput:
 
 def _provider(script_ref: str) -> ScriptedModelProvider:
     artifacts = load_e2e01_artifacts(REPO_ROOT, candidate_version="candidate")
-    provider = ScriptedModelProvider(artifacts, model_script_ref=script_ref)
+    provider = ScriptedModelProvider(
+        artifacts.script_by_ref(script_ref),
+        script_execution_ref=SCRIPT_EXECUTION_REF,
+    )
     assert isinstance(provider, ModelProvider)
     return provider
 
@@ -207,20 +210,9 @@ def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> 
         expected_control_result=source.expected_control_result,
         runtime_fault=source.runtime_fault,
     )
-    projected_artifacts = artifacts.model_copy(
-        update={
-            "scripts": tuple(
-                script
-                if item.model_script_ref == script.model_script_ref
-                else item
-                for item in artifacts.scripts
-            )
-        }
-    )
-
     provider = ScriptedModelProvider(
-        projected_artifacts,
-        model_script_ref=script.model_script_ref,
+        script,
+        script_execution_ref=SCRIPT_EXECUTION_REF,
     )
     reachable = _reachable_state(provider)
 
@@ -249,6 +241,7 @@ def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> 
         dict,
         list,
     }.isdisjoint(reachable.value_types)
+    assert provider.script_execution_ref == SCRIPT_EXECUTION_REF
     step_types = {
         value_type
         for value_type in reachable.value_types
@@ -264,6 +257,10 @@ def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> 
     )
 
     output = asyncio.run(provider.propose_next_move(_request()))
+    assert output.task_delta_candidates[0].candidate_id == uuid5(
+        NAMESPACE_URL,
+        f"script-execution:{SCRIPT_EXECUTION_REF}:{MESSAGE_REF}",
+    )
     assert output.task_delta_candidates[0].candidate_id != uuid5(
         NAMESPACE_URL,
         f"{script.model_script_ref}:{MESSAGE_REF}",
@@ -276,8 +273,8 @@ def test_execution_only_provider_drops_fact_bearing_raw_payload() -> None:
         "script:fault-presentation:fact-bearing-envelope"
     )
     provider = ScriptedModelProvider(
-        artifacts,
-        model_script_ref=script.model_script_ref,
+        script,
+        script_execution_ref=SCRIPT_EXECUTION_REF,
     )
 
     reachable = _reachable_state(provider)

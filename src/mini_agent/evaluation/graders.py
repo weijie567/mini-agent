@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import permutations
 from types import MappingProxyType
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -119,6 +120,19 @@ class SafeCaseObservable(AuditOnlyModel):
     model_calls: Annotated[int, Field(ge=0)]
 
 
+TraceVariant = Literal[
+    "SUCCESS",
+    "FOREIGN_ORDER",
+    "NONEXISTENT_ORDER",
+    "ARGUMENT_BINDING_REJECTED",
+    "PROVIDER_PROTOCOL_BEFORE_CANDIDATE",
+    "INPUT_VALIDATION_REJECTED",
+    "UNKNOWN_TOOL_GATEWAY_REJECTED",
+    "STALE_STATE_GATEWAY_REJECTED",
+    "PRESENTATION_PROTOCOL_REJECTED",
+]
+
+
 class EvalCaseExpectations(AuditOnlyModel):
     """Authenticated, artifact-derived assertions supplied by the Harness.
 
@@ -153,6 +167,7 @@ class EvalCaseExpectations(AuditOnlyModel):
     expected_message_content: str
     expected_tool_registry_version: str
     expected_model_visible_toolset_hash: ToolsetHash
+    trace_variant: TraceVariant
     required_trace_events: tuple[TraceEventType, ...]
     forbidden_trace_events: tuple[TraceEventType, ...] = ()
     expected_event_counts: tuple[TraceEventCountExpectation, ...] = ()
@@ -1489,6 +1504,202 @@ class ErrorMappingGrader:
         return _passed(self.name)
 
 
+@dataclass(frozen=True, slots=True)
+class _TraceNode:
+    event_type: TraceEventType
+    occurrence: int = 1
+    model_call_purpose: str | None = None
+
+
+def _node(
+    event_type: TraceEventType,
+    occurrence: int = 1,
+    *,
+    purpose: str | None = None,
+) -> _TraceNode:
+    return _TraceNode(
+        event_type=event_type,
+        occurrence=occurrence,
+        model_call_purpose=purpose,
+    )
+
+
+_MESSAGE = _node(TraceEventType.MESSAGE_ACCEPTED)
+_RUN_STARTED = _node(TraceEventType.RUN_STARTED)
+_RU_STARTED = _node(TraceEventType.REQUEST_UNDERSTANDING_STARTED)
+_RU_MANIFEST = _node(
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    purpose="REQUEST_UNDERSTANDING",
+)
+_NEXT_MOVE = _node(TraceEventType.NEXT_MOVE_PROPOSED)
+_DELTA_VALIDATED = _node(TraceEventType.TASK_DELTA_VALIDATED)
+_DELTA_ACCEPTED = _node(TraceEventType.TASK_DELTA_ACCEPTED)
+_BINDING = _node(TraceEventType.INPUT_BINDING_RECORDED)
+_TASK_1 = _node(TraceEventType.TASK_STATE_CHANGED, 1)
+_REVALIDATED = _node(TraceEventType.NEXT_MOVE_REVALIDATED)
+_GATE = _node(TraceEventType.GATE_DECISION_RECORDED)
+_TOOL_CREATED = _node(TraceEventType.TOOL_CALL_CREATED)
+_TOOL_STARTED = _node(TraceEventType.TOOL_CALL_STARTED)
+_TOOL_SUCCEEDED = _node(TraceEventType.TOOL_CALL_SUCCEEDED)
+_TOOL_FAILED = _node(TraceEventType.TOOL_CALL_FAILED)
+_NORMALIZED = _node(TraceEventType.TOOL_RESULT_NORMALIZED)
+_OBSERVATION = _node(TraceEventType.OBSERVATION_RECORDED)
+_PRESENTATION_MANIFEST = _node(
+    TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    purpose="PRESENTATION",
+)
+_PRESENTATION_PLAN = _node(TraceEventType.PRESENTATION_PLAN_PROPOSED)
+_RESPONSE = _node(TraceEventType.RESPONSE_RENDERED)
+_TASK_2 = _node(TraceEventType.TASK_STATE_CHANGED, 2)
+_TASK_3 = _node(TraceEventType.TASK_STATE_CHANGED, 3)
+_RUN_STOPPED = _node(TraceEventType.RUN_STOPPED)
+_GRADED = _node(TraceEventType.EVAL_CASE_GRADED)
+
+_COMMON_TRACE_EDGES = (
+    (_MESSAGE, _RUN_STARTED),
+    (_RUN_STARTED, _RU_STARTED),
+    (_RU_STARTED, _RU_MANIFEST),
+)
+_CANDIDATE_TRACE_EDGES = (
+    (_RU_MANIFEST, _NEXT_MOVE),
+    (_NEXT_MOVE, _DELTA_VALIDATED),
+    (_DELTA_VALIDATED, _DELTA_ACCEPTED),
+    (_DELTA_ACCEPTED, _BINDING),
+    (_BINDING, _TASK_1),
+    (_TASK_1, _REVALIDATED),
+    (_REVALIDATED, _GATE),
+)
+_TASKLESS_TERMINAL_EDGES = (
+    (_RU_MANIFEST, _RESPONSE),
+    (_RESPONSE, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_GATEWAY_TERMINAL_EDGES = (
+    (_GATE, _RESPONSE),
+    (_RESPONSE, _TASK_2),
+    (_TASK_2, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_FAILED_TOOL_EDGES = (
+    (_GATE, _TOOL_CREATED),
+    (_TOOL_CREATED, _TOOL_STARTED),
+    (_TOOL_STARTED, _TOOL_FAILED),
+    (_TOOL_FAILED, _NORMALIZED),
+    (_NORMALIZED, _RESPONSE),
+    (_RESPONSE, _TASK_2),
+    (_TASK_2, _RUN_STOPPED),
+    (_RUN_STOPPED, _GRADED),
+)
+_SUCCESS_TOOL_EDGES = (
+    (_GATE, _TOOL_CREATED),
+    (_TOOL_CREATED, _TOOL_STARTED),
+    (_TOOL_STARTED, _TOOL_SUCCEEDED),
+    (_TOOL_SUCCEEDED, _NORMALIZED),
+    (_NORMALIZED, _OBSERVATION),
+    (_OBSERVATION, _PRESENTATION_MANIFEST),
+)
+_TRACE_EDGES_BY_VARIANT: Mapping[
+    TraceVariant,
+    tuple[tuple[_TraceNode, _TraceNode], ...],
+] = MappingProxyType(
+    {
+        "SUCCESS": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_SUCCESS_TOOL_EDGES,
+            (_PRESENTATION_MANIFEST, _PRESENTATION_PLAN),
+            (_PRESENTATION_PLAN, _RESPONSE),
+            (_RESPONSE, _TASK_2),
+            (_TASK_2, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+        "FOREIGN_ORDER": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_FAILED_TOOL_EDGES,
+        ),
+        "NONEXISTENT_ORDER": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_FAILED_TOOL_EDGES,
+        ),
+        "ARGUMENT_BINDING_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_GATEWAY_TERMINAL_EDGES,
+        ),
+        "PROVIDER_PROTOCOL_BEFORE_CANDIDATE": (
+            *_COMMON_TRACE_EDGES,
+            *_TASKLESS_TERMINAL_EDGES,
+        ),
+        "INPUT_VALIDATION_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_TASKLESS_TERMINAL_EDGES,
+        ),
+        "UNKNOWN_TOOL_GATEWAY_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_GATEWAY_TERMINAL_EDGES,
+        ),
+        "STALE_STATE_GATEWAY_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES[:-1],
+            (_REVALIDATED, _TASK_2),
+            (_TASK_2, _GATE),
+            (_GATE, _RESPONSE),
+            (_RESPONSE, _TASK_3),
+            (_TASK_3, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+        "PRESENTATION_PROTOCOL_REJECTED": (
+            *_COMMON_TRACE_EDGES,
+            *_CANDIDATE_TRACE_EDGES,
+            *_SUCCESS_TOOL_EDGES,
+            (_PRESENTATION_MANIFEST, _RESPONSE),
+            (_OBSERVATION, _RESPONSE),
+            (_RESPONSE, _TASK_2),
+            (_TASK_2, _RUN_STOPPED),
+            (_RUN_STOPPED, _GRADED),
+        ),
+    }
+)
+
+
+def _trace_node_index(
+    events: tuple[TraceEvent, ...],
+    node: _TraceNode,
+) -> int | None:
+    matches = tuple(
+        index
+        for index, event in enumerate(events)
+        if event.event_type is node.event_type
+        and (
+            node.model_call_purpose is None
+            or event.model_call_purpose == node.model_call_purpose
+        )
+    )
+    if len(matches) < node.occurrence:
+        return None
+    return matches[node.occurrence - 1]
+
+
+def _trace_precedence_reason(
+    events: tuple[TraceEvent, ...],
+    variant: TraceVariant,
+) -> EvalGraderReasonCode | None:
+    edges = _TRACE_EDGES_BY_VARIANT.get(variant)
+    if edges is None:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    for before, after in edges:
+        before_index = _trace_node_index(events, before)
+        after_index = _trace_node_index(events, after)
+        if before_index is None or after_index is None:
+            return EvalGraderReasonCode.TRACE_EVENT_MISSING
+        if before_index >= after_index:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 class TraceCompletenessGrader:
     name = "TraceCompletenessGrader"
 
@@ -1533,6 +1744,12 @@ class TraceCompletenessGrader:
         event_ids = tuple(event.trace_event_id for event in events)
         if len(event_ids) != len(set(event_ids)):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        precedence_reason = _trace_precedence_reason(
+            events,
+            expectations.trace_variant,
+        )
+        if precedence_reason is not None:
+            return _failed(self.name, precedence_reason)
         if any(event.run_id != evidence.run_record.run_id for event in events):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         if any(event.case_id not in {None, evidence.case_id} for event in events):

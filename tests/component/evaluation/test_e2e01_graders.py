@@ -200,6 +200,7 @@ def _expectations(**overrides: object) -> EvalCaseExpectations:
         "expected_message_content": "订单 O-1001 状态怎么样？",
         "expected_tool_registry_version": "e2e01-thin-tools-v1",
         "expected_model_visible_toolset_hash": TOOLSET_HASH,
+        "trace_variant": "SUCCESS",
         "required_trace_events": REQUIRED_EVENTS,
         "forbidden_trace_events": (TraceEventType.TOOL_CALL_FAILED,),
         "expected_event_counts": (
