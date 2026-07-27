@@ -2,9 +2,9 @@
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
 scope: 01-04H-01-07B-with-01-05R-01-06R
-status: execution_evidence_in_progress
+status: execution_evidence_complete_through_01_07B
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: "2026-07-27"
 ---
 
@@ -22,7 +22,7 @@ created: "2026-07-27"
 | Quick command | 每个 Task Packet 的 exact focused pytest command |
 | Full suite | `uv run pytest` |
 | Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
-| Current exact-base evidence | `100 Runtime focused` + `40 migration` + `936 full, 1 deselected` after 01-07A merge; status-aligned 01-07B base `8544137cfbcaebda603cd3000312fb5d2406327c` |
+| Current reviewed evidence | 01-07B merge `ccdafe87...`; `367 Harness` + `725 owned` + `762 Plan focused` + `40 migration` + `1493 full, 1 deselected, 12 warnings`; feature / overlay双review与post-merge Graphify通过 |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
 
 仓库当前没有 canonical lint、type-check、build 或 app-start命令，也没有 pinned Ruff dependency；不得编造。允许的附加机械检查为 `compileall`、`git diff --check`、artifact SHA 与 changed-file containment。
@@ -57,8 +57,8 @@ created: "2026-07-27"
 | 01-07-06 | 01-07 | 12 | E2E01-01/04 | EV-I04 | marker与missing-input / real-SUT-not-wired preflight；canonical SKIPPED/NOT_RUN且零network | Baseline preflight | `env -u DASHSCOPE_API_KEY -u DASHSCOPE_BASE_URL uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；`DASHSCOPE_API_KEY=not-a-real-key DASHSCOPE_BASE_URL=https://example.invalid uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x` | ✅ created | ✅ green |
 | 01-07A-01 | 01-07A | 13 | E2E01-01/04 | RTA-T01/RTA-T02/RTA-R01 | test-only RED复现purpose、fixed-result ResponseRendered与hook active-run identity缺口 | Component alignment | `uv run pytest tests/component/application/test_agent_run_service.py -x` | ✅ extend | ✅ green |
 | 01-07A-02 | 01-07A | 13 | E2E01-01/04 | RTA-I01/RTA-D01/RTA-E01 | real Runtime Trace关闭缺口，保持terminal aggregate与FAILED fail-closed | Component alignment | `uv run pytest tests/component/application/test_agent_run_service.py -x`；`uv run pytest` | ✅ extend | ✅ green |
-| 01-07B-01 | 01-07B | 14 | E2E01-01/04 | EVB-E01/EVB-T01/EVB-I01/EVB-S01 | 两条独立test-only RED证明SUT Case/嵌套message、Provider nested step与output-side `case_id`可见semantic identity/answers，zero-argument non-semantic nonce correlation缺失，以及actual mismatch被oracle覆盖的风险 | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py -k 'execution_only or execution_ref or result_correlation or nonce or oracle or actual_mismatch'`；`uv run pytest tests/component/evaluation/test_e2e01_graders.py -k 'precedence or reordered'` | ✅ extend | ⬜ pending |
-| 01-07B-02 | 01-07B | 14 | E2E01-01/04 | EVB-R01/EVB-S01 | closed execution-message/behavior-step projection与occurrence-aware variant-scoped safety-causal partial order；每个正常/故障variant的适用edge violation必须FAIL，合法额外事件继续PASS | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_graders.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py`；`uv run pytest` | ✅ extend | ⬜ pending |
+| 01-07B-01 | 01-07B | 14 | E2E01-01/04 | EVB-E01/EVB-T01/EVB-I01/EVB-S01 | 两条独立test-only RED证明SUT Case/嵌套message、Provider nested step与output-side `case_id`可见semantic identity/answers，zero-argument non-semantic nonce correlation缺失，以及actual mismatch被oracle覆盖的风险 | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py -k 'execution_only or execution_ref or result_correlation or nonce or oracle or actual_mismatch'`；`uv run pytest tests/component/evaluation/test_e2e01_graders.py -k 'precedence or reordered'` | ✅ extend | ✅ green |
+| 01-07B-02 | 01-07B | 14 | E2E01-01/04 | EVB-R01/EVB-S01 | closed execution-message/behavior-step projection与occurrence-aware variant-scoped safety-causal partial order；每个正常/故障variant的适用edge violation必须FAIL，合法额外事件继续PASS | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_graders.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py`；`uv run pytest` | ✅ extend | ✅ green |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
@@ -74,7 +74,7 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 - 01-07B：扩展既有Grader、ScriptedProvider与Harness三份tests，以两条独立命令取得Case/Script oracle和Trace precedence RED，再修改对应三份Eval source；不创建real SUT或PG reader。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
-原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；但当前scope已扩到01-07B，而它自己的test-only RED尚未形成，因此frontmatter保持`wave_0_complete=false`。01-07B不能复用历史Wave 0声明，只有其RED commit形成后才可更新为true。
+原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环，因此当前scope的`wave_0_complete=true`。该状态只表示测试先行证据完整，不推进Case lifecycle。
 
 ## Packet Full Gates
 
@@ -269,13 +269,13 @@ git diff --check
 - [x] planning PR #26 final published head `2922308b...` 已取得canonical与security/process两个Codex只读Reviewer的`PASS`，所有planning findings已关闭，并merge为`968b4a9...`；持久化记录见PR #26 [canonical evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174316)与[security/process evidence](https://github.com/weijie567/mini-agent/pull/26#issuecomment-5086174609)，不是GitHub Reviews API formal approvals。
 - [x] **HISTORICAL PR #26 SIGN-OFF / SUPERSEDED FOR CURRENT INTEGRATION:** 原01-05/06/07 Wave 0 RED已进入published feature history；首轮focused/full为Runtime 83/549、Infra 68/496、Eval 111/577（1 deselected）。它们只证明当时feature形成，不批准当前合并。
 - [x] Historical Runtime/Infra heads后续测试增长至95/561与23/506并被exact-head review判定BLOCK；它们保持历史evidence。
-- [x] 01-04H planning/owner/review/merge/full/Graphify Gate通过；01-04H当时的Wave 0已完成，但当前聚合frontmatter因01-07B RED尚未形成而保持`wave_0_complete=false`。
+- [x] 01-04H planning/owner/review/merge/full/Graphify Gate通过；01-04H当时的Wave 0已完成。
 - [x] Eval `b8ecbb0...`及latest overlay `ee46f38...`已通过191 focused / 936 full（1 deselected）、two zero-network preflights、independent `PASS / NOT_FOUND`并merge为`eee1c0e...`。
 - [x] 01-05R已在exact predecessor merge后完成planning、实现、review与merge。
 - [x] 01-06R在exact predecessor merge后完成planning、实现、review与merge。
 - [x] Runtime → Infra → Eval latest-integration compatibility、serial merge与post-merge gates全部PASS。
 - [x] 01-07A exact base/new identity/two-file ownership、真实RED→GREEN、review、merge与post-merge gate已完成。
-- [x] 01-07B exact base/new identity/six-file ownership与真实RED→GREEN已规划；planning merge前不启动写入。
-- [ ] 01-07B完成planning、实现、review、merge与post-merge gate。
+- [x] 01-07B exact base/new identity/six-file ownership与真实RED→GREEN已完成；planning/status PR #42–#43、feature PR #44、双review、latest-integration overlay与post-merge gate均通过。
+- [x] 01-07B完成planning、实现、review、merge与post-merge gate；Summary索引精确证据，Case lifecycle仍为0/8。
 
-**Approval:** `W2_AND_01-07A_SERIAL_MERGE_COMPLETE / 01-07B_PLANNING_REVIEW_PENDING`。PR #26只批准historical 01-05/06/07 Packet从`c35687d...`创建，PR #37只批准01-07A；二者不能批准新Eval boundary。当前01-07B必须先通过本planning PR、implementation exact-head/overlay review与merge；随后才按新的exact base逐个签发Request Understanding persistence、Observation source-version、Eval evidence closure/Application Port/Provider failure signal、Runtime `INPUT_INVALID` mapping、Infra reader及Eval mapper/Scripted-Qwen consumers等owner-ruling与implementation Packet。全部前置reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论。
+**Approval:** `W2_THROUGH_01-07B_SERIAL_MERGE_COMPLETE / 01-07C_01-07G_PLANNING_READY`。01-07B已通过planning/status、implementation exact-head/overlay review、merge与post-merge gates。下一步从当前status alignment PR reviewed merge后的同一exact SHA分别签发Request Understanding semantic ruling与Observation source-version ruling，再按既定barrier推进mapping、codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID` mapping、Infra reader及Eval mapper/Scripted-Qwen consumers。全部前置reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论。
