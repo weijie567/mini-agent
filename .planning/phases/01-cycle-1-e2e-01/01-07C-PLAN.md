@@ -70,9 +70,10 @@ base_branch: `integration/e2e01-thin`
 base_sha: `3f0753f7bef87fc02f314e28fe8b07860a819701`
 base_tree: `b5214d3b7140ca305566a9cb802a21388a92464c`
 worktree_id: `e2e01-01-ru-semantic-ruling`
-worktree_path: `/Users/ming/projects/mini-agent-worktrees/e2e01-01-ru-semantic-ruling`
 writer: `Intent canonical-owner sole writer, supervised by /root Integrator`
 agent_role: `gsd-doc-writer`
+
+物理 Worktree path 只由 Integrator 在 private dispatch handoff 中传递，不持久化到公开 Plan 或 PR；公开身份只使用 `worktree_id`。
 
 owned_files:
 
