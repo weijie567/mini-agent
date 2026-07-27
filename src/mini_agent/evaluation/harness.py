@@ -772,14 +772,10 @@ class OfflineEvalHarness:
         grading_failed = False
         initial_grading: GradingOutcome | None = None
         try:
-            initial_grading = self._grader_runner(
+            initial_grading = _run_verified_grading(
+                self._grader_runner,
                 non_trace_names,
                 evidence,
-                expectations,
-            )
-            _validate_grading_output(
-                initial_grading,
-                non_trace_names,
                 expectations,
             )
         except Exception:
@@ -867,14 +863,10 @@ class OfflineEvalHarness:
         final_grading_failed = False
         final_grading: GradingOutcome | None = None
         try:
-            final_grading = self._grader_runner(
+            final_grading = _run_verified_grading(
+                self._grader_runner,
                 ("TraceCompletenessGrader",),
                 final_evidence,
-                expectations,
-            )
-            _validate_grading_output(
-                final_grading,
-                ("TraceCompletenessGrader",),
                 expectations,
             )
         except Exception:
@@ -1161,6 +1153,34 @@ def _validate_grading_output(
         raise GradingConfigurationError(
             "grader output does not match authenticated derivation"
         )
+
+
+def _run_verified_grading(
+    grader_runner: GraderRunner,
+    configured_names: Sequence[str],
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> GradingOutcome:
+    canonical = grade_evidence(
+        configured_names,
+        evidence,
+        expectations,
+    )
+    reported = grader_runner(
+        configured_names,
+        evidence,
+        expectations,
+    )
+    _validate_grading_output(
+        reported,
+        configured_names,
+        expectations,
+    )
+    if reported != canonical:
+        raise GradingConfigurationError(
+            "grader runner output does not match canonical grading"
+        )
+    return canonical
 
 
 def _replace_trace(

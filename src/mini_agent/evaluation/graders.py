@@ -14,6 +14,7 @@ from pydantic import Field, model_validator
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
+    ConversationTaskLinkRecord,
     CriticalFailureCode,
     EvalGraderReasonCode,
     EvalGraderResult,
@@ -21,6 +22,7 @@ from mini_agent.application.records import (
     EvalResultStatus,
     MessageDirection,
     MessageRecord,
+    RunTaskLinkRecord,
 )
 from mini_agent.core.common import AuditOnlyModel
 from mini_agent.core.memory import (
@@ -35,7 +37,10 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingOutput,
 )
 from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
+    CandidateValidationDecision,
     InputBinding,
+    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
     TaskStatus,
@@ -45,9 +50,11 @@ from mini_agent.core.tool_system import (
     GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
+    ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
+    ToolResultOutcome,
     ToolsetHash,
     compute_model_visible_toolset_hash,
 )
@@ -234,11 +241,16 @@ class EvalEvidence(AuditOnlyModel):
     conversation_records: tuple[ConversationRecord, ...] = ()
     message_records: tuple[MessageRecord, ...] = ()
     request_understanding_output: RequestUnderstandingOutput | None = None
+    request_understanding_records: tuple[RequestUnderstandingRecord, ...] = ()
+    accepted_task_deltas: tuple[AcceptedTaskDelta, ...] = ()
     input_bindings: tuple[InputBinding, ...] = ()
     task_records: tuple[TaskRecord, ...] = ()
     request_units: tuple[RequestUnitRecord, ...] = ()
+    conversation_task_links: tuple[ConversationTaskLinkRecord, ...] = ()
+    run_task_links: tuple[RunTaskLinkRecord, ...] = ()
     gate_decisions: tuple[GateDecision, ...] = ()
     tool_calls: tuple[ToolCallRecord, ...] = ()
+    tool_attempts: tuple[ToolAttemptRecord, ...] = ()
     observations: tuple[OrderObservation, ...] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
@@ -248,11 +260,19 @@ class EvalEvidence(AuditOnlyModel):
         identity_sets: tuple[tuple[object, ...], ...] = (
             tuple(item.conversation_id for item in self.conversation_records),
             tuple(item.message_id for item in self.message_records),
+            tuple(item.run_id for item in self.request_understanding_records),
+            tuple(item.accepted_delta_id for item in self.accepted_task_deltas),
             tuple(item.binding_id for item in self.input_bindings),
             tuple(item.task_id for item in self.task_records),
             tuple(item.request_unit_id for item in self.request_units),
+            tuple(
+                (item.conversation_id, item.task_id, item.linked_at)
+                for item in self.conversation_task_links
+            ),
+            tuple((item.run_id, item.task_id) for item in self.run_task_links),
             tuple(item.gate_decision_id for item in self.gate_decisions),
             tuple(item.tool_call_id for item in self.tool_calls),
+            tuple((item.tool_call_id, item.attempt_no) for item in self.tool_attempts),
             tuple(item.observation_id for item in self.observations),
             tuple(item.context_manifest_id for item in self.context_manifests),
             tuple(
@@ -393,6 +413,9 @@ class RequestUnderstandingGrader:
             or next_move.base_task_state_version is not None
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        graph_reason = _request_understanding_graph_reason(evidence, expectations)
+        if graph_reason is not None:
+            return _failed(self.name, graph_reason)
         return _passed(self.name)
 
 
@@ -513,12 +536,232 @@ def _conversation_graph_reason(
     output = evidence.request_understanding_output
     if output is not None and output.message_ref != message_ref:
         return EvalGraderReasonCode.ASSERTION_FAILED
+    if output is not None and any(
+        input_candidate.source_ref != message_ref
+        or input_candidate.source_quote not in message.content
+        or input_candidate.candidate_value not in input_candidate.source_quote
+        for delta in output.task_delta_candidates
+        for input_candidate in delta.input_candidates
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
     if any(
         binding.source_refs != (message_ref,) for binding in evidence.input_bindings
     ):
         return EvalGraderReasonCode.ASSERTION_FAILED
     if any(unit.goal_source_refs != (message_ref,) for unit in evidence.request_units):
         return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _request_understanding_graph_reason(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> EvalGraderReasonCode | None:
+    expected_count = 1 if expectations.expected_task_status is not None else 0
+    for records in (
+        evidence.request_understanding_records,
+        evidence.accepted_task_deltas,
+        evidence.conversation_task_links,
+        evidence.run_task_links,
+    ):
+        count_reason = _closed_record_count_reason(len(records), expected_count)
+        if count_reason is not None:
+            return count_reason
+    if expected_count == 0:
+        return None
+
+    if (
+        evidence.run_record is None
+        or evidence.request_understanding_output is None
+        or len(evidence.conversation_records) != 1
+        or len(evidence.message_records) != 1
+        or len(evidence.input_bindings) != 1
+        or len(evidence.task_records) != 1
+        or len(evidence.request_units) != 1
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    output = evidence.request_understanding_output
+    if (
+        len(output.task_delta_candidates) != 1
+        or len(output.task_delta_candidates[0].input_candidates) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    conversation = evidence.conversation_records[0]
+    message = evidence.message_records[0]
+    understanding = evidence.request_understanding_records[0]
+    accepted_delta = evidence.accepted_task_deltas[0]
+    binding = evidence.input_bindings[0]
+    task = evidence.task_records[0]
+    request_unit = evidence.request_units[0]
+    conversation_link = evidence.conversation_task_links[0]
+    run_link = evidence.run_task_links[0]
+    proposed_delta = output.task_delta_candidates[0]
+    input_candidate = proposed_delta.input_candidates[0]
+
+    accepted_candidates = tuple(
+        validation
+        for validation in understanding.candidate_validation
+        if validation.decision is CandidateValidationDecision.ACCEPT
+    )
+    if (
+        understanding.schema_version != "request_understanding_record.p0.v1"
+        or understanding.run_id != evidence.run_record.run_id
+        or understanding.message_ref != message.message_id
+        or understanding.message_ref != output.message_ref
+        or understanding.proposed_base_task_state_version
+        != output.next_move_candidate.base_task_state_version
+        or understanding.validated_task_state_version
+        != expectations.expected_validated_task_state_version
+        or len(understanding.candidate_validation) != 1
+        or len(accepted_candidates) != 1
+        or accepted_candidates[0].candidate_ref != proposed_delta.candidate_id
+        or understanding.accepted_delta_refs != (accepted_delta.accepted_delta_id,)
+        or accepted_delta.candidate_ref != proposed_delta.candidate_id
+        or accepted_delta.message_ref != understanding.message_ref
+        or accepted_delta.operation is not proposed_delta.operation
+        or accepted_delta.goal_text != proposed_delta.goal_patch
+        or accepted_delta.input_binding_refs != (binding.binding_id,)
+        or input_candidate.source_ref != message.message_id
+        or input_candidate.source_quote not in message.content
+        or input_candidate.candidate_value not in input_candidate.source_quote
+        or binding.source_refs != (message.message_id,)
+        or request_unit.task_id != task.task_id
+        or request_unit.goal_text != accepted_delta.goal_text
+        or request_unit.goal_source_refs != (message.message_id,)
+        or request_unit.input_binding_refs != accepted_delta.input_binding_refs
+        or conversation_link.schema_version != "conversation_task_link_record.p0.v1"
+        or conversation_link.conversation_id != conversation.conversation_id
+        or conversation_link.task_id != task.task_id
+        or conversation_link.link_reason != "CURRENT_MESSAGE_ACCEPTED_DELTA"
+        or conversation_link.ended_at is not None
+        or run_link.schema_version != "run_task_link_record.p0.v1"
+        or run_link.run_id != evidence.run_record.run_id
+        or run_link.task_id != task.task_id
+        or run_link.base_task_state_version is not None
+        or run_link.result_task_state_version != task.state_version
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    selected_observation_ids = set(request_unit.observation_refs)
+    selected_observations = tuple(
+        observation
+        for observation in evidence.observations
+        if observation.observation_id in selected_observation_ids
+    )
+    if selected_observations and any(
+        observation.source_resource_ref != input_candidate.candidate_value
+        for observation in selected_observations
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _request_unit_observation_graph_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    if not evidence.request_units:
+        return None
+    if len(evidence.request_units) != 1:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    refs = evidence.request_units[0].observation_refs
+    authoritative_ids = tuple(
+        observation.observation_id for observation in evidence.observations
+    )
+    if len(refs) < len(authoritative_ids) and set(refs) <= set(authoritative_ids):
+        return EvalGraderReasonCode.MISSING_RECORD
+    if len(refs) != len(set(refs)) or set(refs) != set(authoritative_ids):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _tool_attempt_graph_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    expected_count = sum(call.attempt_count for call in evidence.tool_calls)
+    count_reason = _closed_record_count_reason(
+        len(evidence.tool_attempts),
+        expected_count,
+    )
+    if count_reason is not None:
+        return count_reason
+
+    attempts_by_call: dict[UUID, list[ToolAttemptRecord]] = {
+        call.tool_call_id: [] for call in evidence.tool_calls
+    }
+    for attempt in evidence.tool_attempts:
+        attempts = attempts_by_call.get(attempt.tool_call_id)
+        if attempts is None:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        attempts.append(attempt)
+
+    final_outcomes: Mapping[ToolCallStatus, frozenset[ToolResultOutcome]] = {
+        ToolCallStatus.SUCCEEDED: frozenset({ToolResultOutcome.SUCCESS}),
+        ToolCallStatus.FAILED: frozenset(
+            {
+                ToolResultOutcome.BUSINESS_FAILURE,
+                ToolResultOutcome.SYSTEM_FAILURE,
+            }
+        ),
+        ToolCallStatus.TIMED_OUT: frozenset({ToolResultOutcome.TIMEOUT}),
+    }
+    for call in evidence.tool_calls:
+        attempts = tuple(
+            sorted(
+                attempts_by_call[call.tool_call_id],
+                key=lambda item: item.attempt_no,
+            )
+        )
+        if tuple(item.attempt_no for item in attempts) != tuple(
+            range(1, call.attempt_count + 1)
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if any(item.started_at < call.started_at for item in attempts) or any(
+            current.started_at > following.started_at
+            for current, following in zip(attempts, attempts[1:])
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if call.status is ToolCallStatus.CREATED:
+            continue
+        if call.status is ToolCallStatus.RUNNING:
+            if (
+                not attempts
+                or attempts[-1].finished_at is not None
+                or attempts[-1].outcome is not None
+                or any(
+                    item.finished_at is None or item.outcome is None
+                    for item in attempts[:-1]
+                )
+            ):
+                return EvalGraderReasonCode.ASSERTION_FAILED
+            continue
+        if call.status is ToolCallStatus.INTERRUPTED:
+            if any(
+                item.finished_at is None or item.outcome is None
+                for item in attempts[:-1]
+            ):
+                return EvalGraderReasonCode.ASSERTION_FAILED
+            if (
+                attempts
+                and attempts[-1].finished_at is not None
+                and (
+                    attempts[-1].outcome is not ToolResultOutcome.INTERRUPTED
+                    or call.finished_at != attempts[-1].finished_at
+                )
+            ):
+                return EvalGraderReasonCode.ASSERTION_FAILED
+            continue
+        if (
+            not attempts
+            or any(
+                item.finished_at is None or item.outcome is None for item in attempts
+            )
+            or attempts[-1].outcome not in final_outcomes.get(call.status, frozenset())
+            or call.finished_at != attempts[-1].finished_at
+            or call.failure_code != attempts[-1].failure_code
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
     return None
 
 
@@ -767,6 +1010,9 @@ class ToolCallGrader:
                 else EvalGraderReasonCode.ASSERTION_FAILED
             )
             return _failed(self.name, reason)
+        attempt_reason = _tool_attempt_graph_reason(evidence)
+        if attempt_reason is not None:
+            return _failed(self.name, attempt_reason)
         if expectations.expected_gate_decision is None:
             return _passed(self.name)
         if (
@@ -1041,6 +1287,12 @@ class PersistenceGrader:
         conversation_reason = _conversation_graph_reason(evidence, expectations)
         if conversation_reason is not None:
             return _failed(self.name, conversation_reason)
+        understanding_reason = _request_understanding_graph_reason(
+            evidence,
+            expectations,
+        )
+        if understanding_reason is not None:
+            return _failed(self.name, understanding_reason)
         if expectations.expected_task_status is not None and (
             not evidence.task_records
             or not evidence.request_units
@@ -1059,6 +1311,11 @@ class PersistenceGrader:
         )
         if observation_reason is not None:
             return _failed(self.name, observation_reason)
+        request_unit_observation_reason = _request_unit_observation_graph_reason(
+            evidence
+        )
+        if request_unit_observation_reason is not None:
+            return _failed(self.name, request_unit_observation_reason)
         manifest_reason = _context_manifest_graph_reason(
             evidence,
             expectations,
@@ -1080,6 +1337,9 @@ class PersistenceGrader:
                 )
         elif evidence.gate_decisions or evidence.tool_calls:
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        attempt_reason = _tool_attempt_graph_reason(evidence)
+        if attempt_reason is not None:
+            return _failed(self.name, attempt_reason)
         run_id = evidence.run_record.run_id
         if any(
             record.run_id != run_id
@@ -1201,8 +1461,17 @@ def _trace_references_match_typed_records(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
 ) -> bool:
+    if (
+        _request_understanding_graph_reason(evidence, expectations) is not None
+        or _request_unit_observation_graph_reason(evidence) is not None
+        or _tool_attempt_graph_reason(evidence) is not None
+    ):
+        return False
     events = evidence.trace_events
     message_refs = {item.message_id for item in evidence.message_records}
+    accepted_delta_by_id = {
+        item.accepted_delta_id: item for item in evidence.accepted_task_deltas
+    }
     task_ids = {item.task_id for item in evidence.task_records}
     request_unit_ids = {item.request_unit_id for item in evidence.request_units}
     binding_ids = {item.binding_id for item in evidence.input_bindings}
@@ -1217,6 +1486,11 @@ def _trace_references_match_typed_records(
     expected_version = expectations.expected_validated_task_state_version
     for event in events:
         if event.message_ref is not None and event.message_ref not in message_refs:
+            return False
+        if (
+            event.accepted_delta_ref is not None
+            and event.accepted_delta_ref not in accepted_delta_by_id
+        ):
             return False
         if event.task_id is not None and event.task_id not in task_ids:
             return False
@@ -1281,6 +1555,31 @@ def _trace_references_match_typed_records(
     )
     if Counter(message_event_refs) != Counter(message_refs):
         return False
+
+    accepted_delta_events = tuple(
+        event
+        for event in events
+        if event.event_type is TraceEventType.TASK_DELTA_ACCEPTED
+    )
+    if Counter(event.accepted_delta_ref for event in accepted_delta_events) != Counter(
+        accepted_delta_by_id.keys()
+    ):
+        return False
+    task_by_id = {item.task_id: item for item in evidence.task_records}
+    request_unit_by_id = {item.request_unit_id: item for item in evidence.request_units}
+    for event in accepted_delta_events:
+        accepted_delta = accepted_delta_by_id.get(event.accepted_delta_ref)
+        request_unit = request_unit_by_id.get(event.request_unit_id)
+        if (
+            accepted_delta is None
+            or request_unit is None
+            or event.message_ref != accepted_delta.message_ref
+            or event.task_id not in task_by_id
+            or request_unit.task_id != event.task_id
+            or request_unit.goal_text != accepted_delta.goal_text
+            or request_unit.input_binding_refs != accepted_delta.input_binding_refs
+        ):
+            return False
 
     context_projection = {
         (

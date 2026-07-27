@@ -13,6 +13,7 @@ from mini_agent.application.ports import EvalResultPort, ModelProvider
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
+    ConversationTaskLinkRecord,
     CriticalFailureCode,
     EvalExecutionFailurePhase,
     EvalExecutionFailureRecord,
@@ -25,6 +26,7 @@ from mini_agent.application.records import (
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
+    RunTaskLinkRecord,
 )
 from mini_agent.core.memory import (
     ContextManifest,
@@ -45,8 +47,12 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
 )
 from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
+    CandidateValidationDecision,
+    CandidateValidationRecord,
     InputBinding,
     InputValidationStatus,
+    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
 )
@@ -54,6 +60,7 @@ from mini_agent.core.tool_system import (
     GateDecision,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
+    ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
@@ -77,6 +84,7 @@ from mini_agent.evaluation.graders import (
     EvalEvidence,
     GradingOutcome,
     SafeCaseObservable,
+    derive_grading_outcome,
     grade_evidence,
     ordinary_trace_shape,
 )
@@ -257,6 +265,7 @@ def _synthetic_trace(
     expectations: EvalCaseExpectations,
     run_id: UUID,
     message_ref: UUID,
+    accepted_delta: AcceptedTaskDelta | None,
     binding: InputBinding | None,
     task: TaskRecord | None,
     request_unit: RequestUnitRecord | None,
@@ -289,6 +298,20 @@ def _synthetic_trace(
             }
             if event_type is TraceEventType.MESSAGE_ACCEPTED:
                 values["message_ref"] = message_ref
+            elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
+                assert (
+                    accepted_delta is not None
+                    and task is not None
+                    and request_unit is not None
+                )
+                values.update(
+                    {
+                        "message_ref": message_ref,
+                        "accepted_delta_ref": accepted_delta.accepted_delta_id,
+                        "task_id": task.task_id,
+                        "request_unit_id": request_unit.request_unit_id,
+                    }
+                )
             elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
                 manifest = manifests[manifest_index]
                 request_understanding_calls = (
@@ -461,10 +484,16 @@ class SyntheticSut:
         )
         message_ref = request_output.message_ref
         conversation_id = _case_uuid(case.case_id, "conversation")
+        request_understanding_record: RequestUnderstandingRecord | None = None
+        accepted_delta: AcceptedTaskDelta | None = None
         binding: InputBinding | None = None
         task: TaskRecord | None = None
         request_unit: RequestUnitRecord | None = None
+        conversation_task_link: ConversationTaskLinkRecord | None = None
+        run_task_link: RunTaskLinkRecord | None = None
         if expectations.expected_task_status is not None:
+            assert len(request_output.task_delta_candidates) == 1
+            proposed_delta = request_output.task_delta_candidates[0]
             binding = InputBinding(
                 binding_id=_case_uuid(case.case_id, "binding"),
                 name="order_id",
@@ -490,10 +519,57 @@ class SyntheticSut:
                 goal_text="查询指定订单状态",
                 goal_source_refs=(message_ref,),
                 input_binding_refs=(binding.binding_id,),
+                observation_refs=(
+                    (_case_uuid(case.case_id, "observation"),)
+                    if expectations.expected_observations == 1
+                    else ()
+                ),
                 status=expectations.expected_request_unit_status,
                 state_version=(expectations.expected_request_unit_state_version),
                 created_at=NOW,
                 updated_at=NOW + timedelta(seconds=1),
+            )
+            accepted_delta = AcceptedTaskDelta(
+                accepted_delta_id=_case_uuid(case.case_id, "accepted-delta"),
+                candidate_ref=proposed_delta.candidate_id,
+                message_ref=message_ref,
+                operation=proposed_delta.operation,
+                goal_text=proposed_delta.goal_patch,
+                input_binding_refs=(binding.binding_id,),
+                accepted_at=NOW,
+            )
+            request_understanding_record = RequestUnderstandingRecord(
+                run_id=run_id,
+                message_ref=message_ref,
+                schema_version="request_understanding_record.p0.v1",
+                candidate_validation=(
+                    CandidateValidationRecord(
+                        candidate_ref=proposed_delta.candidate_id,
+                        decision=CandidateValidationDecision.ACCEPT,
+                    ),
+                ),
+                accepted_delta_refs=(accepted_delta.accepted_delta_id,),
+                proposed_base_task_state_version=(
+                    request_output.next_move_candidate.base_task_state_version
+                ),
+                validated_task_state_version=(
+                    expectations.expected_validated_task_state_version
+                ),
+                next_move_candidate_ref=_case_uuid(case.case_id, "next-move"),
+            )
+            conversation_task_link = ConversationTaskLinkRecord(
+                schema_version="conversation_task_link_record.p0.v1",
+                conversation_id=conversation_id,
+                task_id=task.task_id,
+                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+                linked_at=NOW,
+            )
+            run_task_link = RunTaskLinkRecord(
+                schema_version="run_task_link_record.p0.v1",
+                run_id=run_id,
+                task_id=task.task_id,
+                base_task_state_version=None,
+                result_task_state_version=task.state_version,
             )
 
         context_ids = tuple(
@@ -565,6 +641,7 @@ class SyntheticSut:
                 visibility=ObservationVisibility.MODEL_VISIBLE,
             )
         tool_call: ToolCallRecord | None = None
+        tool_attempt: ToolAttemptRecord | None = None
         if expectations.expected_tool_calls == 1:
             assert (
                 binding is not None
@@ -599,6 +676,20 @@ class SyntheticSut:
                 result_ref=(
                     observation.observation_id if observation is not None else None
                 ),
+            )
+            attempt_outcome = {
+                ToolCallStatus.SUCCEEDED: ToolResultOutcome.SUCCESS,
+                ToolCallStatus.FAILED: ToolResultOutcome.BUSINESS_FAILURE,
+                ToolCallStatus.TIMED_OUT: ToolResultOutcome.TIMEOUT,
+                ToolCallStatus.INTERRUPTED: ToolResultOutcome.INTERRUPTED,
+            }.get(status)
+            tool_attempt = ToolAttemptRecord(
+                tool_call_id=tool_call.tool_call_id,
+                attempt_no=1,
+                started_at=tool_call.started_at,
+                finished_at=tool_call.finished_at,
+                outcome=attempt_outcome,
+                failure_code=tool_call.failure_code,
             )
         request_understanding_calls = (
             expectations.expected_model_calls
@@ -642,6 +733,7 @@ class SyntheticSut:
             expectations=expectations,
             run_id=run_id,
             message_ref=message_ref,
+            accepted_delta=accepted_delta,
             binding=binding,
             task=task,
             request_unit=request_unit,
@@ -700,11 +792,24 @@ class SyntheticSut:
                 ),
             ),
             "request_understanding_output": request_output,
+            "request_understanding_records": (
+                (request_understanding_record,)
+                if request_understanding_record is not None
+                else ()
+            ),
+            "accepted_task_deltas": (
+                (accepted_delta,) if accepted_delta is not None else ()
+            ),
             "input_bindings": (binding,) if binding is not None else (),
             "task_records": (task,) if task is not None else (),
             "request_units": ((request_unit,) if request_unit is not None else ()),
+            "conversation_task_links": (
+                (conversation_task_link,) if conversation_task_link is not None else ()
+            ),
+            "run_task_links": ((run_task_link,) if run_task_link is not None else ()),
             "gate_decisions": (gate,) if gate is not None else (),
             "tool_calls": (tool_call,) if tool_call is not None else (),
+            "tool_attempts": ((tool_attempt,) if tool_attempt is not None else ()),
             "observations": ((observation,) if observation is not None else ()),
             "context_manifests": manifests,
             "model_visible_toolset_artifacts": (
@@ -865,6 +970,33 @@ def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None
 
 
 @pytest.mark.parametrize(
+    "field_name",
+    (
+        "request_understanding_records",
+        "accepted_task_deltas",
+        "conversation_task_links",
+        "run_task_links",
+        "tool_attempts",
+    ),
+)
+def test_missing_authoritative_graph_record_forces_case_fail(
+    field_name: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides={field_name: ()},
+    )
+    harness, _sut, _traces, _port = _harness(sut=sut, traces=traces)
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    assert CriticalFailureCode.CF_12 in outcome.results[0].critical_failures
+
+
+@pytest.mark.parametrize(
     ("event_type", "update"),
     [
         (
@@ -874,6 +1006,10 @@ def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None
         (
             TraceEventType.CONTEXT_MANIFEST_RECORDED,
             {"model_visible_toolset_hash": f"sha256:{'b' * 64}"},
+        ),
+        (
+            TraceEventType.TASK_DELTA_ACCEPTED,
+            {"accepted_delta_ref": UUID(int=994)},
         ),
     ],
 )
@@ -935,6 +1071,78 @@ def test_injected_grader_outcome_must_match_authenticated_derivation(
     harness, *_ = _harness(grader_runner=inconsistent_grader)
     outcome = _run(harness)
 
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.GRADING
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("forged_all_pass", "missing_result", "duplicate_result", "altered_result"),
+)
+def test_injected_grader_runner_cannot_replace_canonical_grading(
+    mode: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    sut = SyntheticSut(
+        traces,
+        evidence_overrides=(
+            {"input_bindings": ()} if mode == "forged_all_pass" else None
+        ),
+    )
+
+    def untrusted_grader(
+        configured: Sequence[str],
+        evidence: EvalEvidence,
+        expectations: EvalCaseExpectations,
+    ) -> GradingOutcome:
+        passing = tuple(
+            EvalGraderResult(
+                grader_name=name,
+                status=EvalGraderStatus.PASS,
+            )
+            for name in configured
+        )
+        if mode == "forged_all_pass":
+            return GradingOutcome(
+                status=EvalResultStatus.PASS,
+                grader_results=passing,
+                critical_failures=(),
+            )
+        if mode == "missing_result":
+            return GradingOutcome(
+                status=EvalResultStatus.PASS,
+                grader_results=passing[:-1],
+                critical_failures=(),
+            )
+        if mode == "duplicate_result":
+            return GradingOutcome(
+                status=EvalResultStatus.PASS,
+                grader_results=(*passing, passing[-1]),
+                critical_failures=(),
+            )
+        canonical = grade_evidence(configured, evidence, expectations)
+        altered = canonical.grader_results[0].model_copy(
+            update={
+                "status": EvalGraderStatus.FAIL,
+                "reason_code": EvalGraderReasonCode.ASSERTION_FAILED,
+            }
+        )
+        return derive_grading_outcome(
+            (altered, *canonical.grader_results[1:]),
+            expectations,
+        )
+
+    harness, *_ = _harness(
+        sut=sut,
+        traces=traces,
+        grader_runner=untrusted_grader,
+    )
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
     assert outcome.results == ()
     assert len(outcome.execution_failures) == 1
     assert outcome.execution_failures[0].failure_phase is (

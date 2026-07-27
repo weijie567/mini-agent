@@ -9,6 +9,7 @@ import pytest
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
+    ConversationTaskLinkRecord,
     CriticalFailureCode,
     EvalGraderReasonCode,
     EvalGraderResult,
@@ -16,6 +17,7 @@ from mini_agent.application.records import (
     EvalResultStatus,
     MessageDirection,
     MessageRecord,
+    RunTaskLinkRecord,
 )
 from mini_agent.core.memory import (
     ContextManifest,
@@ -41,8 +43,12 @@ from mini_agent.core.request_understanding import (
     TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
+    AcceptedTaskDelta,
+    CandidateValidationDecision,
+    CandidateValidationRecord,
     InputBinding,
     InputValidationStatus,
+    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
     TaskStatus,
@@ -51,9 +57,11 @@ from mini_agent.core.tool_system import (
     GateDecision,
     GateDecisionValue,
     ModelVisibleToolsetArtifact,
+    ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
+    ToolResultOutcome,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -86,6 +94,8 @@ CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000500")
 TRACE_REF = UUID("00000000-0000-4000-8000-000000000502")
 MESSAGE_REF = UUID("00000000-0000-4000-8000-000000000503")
 CANDIDATE_ID = UUID("00000000-0000-4000-8000-000000000504")
+ACCEPTED_DELTA_ID = UUID("00000000-0000-4000-8000-000000000515")
+NEXT_MOVE_REF = UUID("00000000-0000-4000-8000-000000000516")
 BINDING_ID = UUID("00000000-0000-4000-8000-000000000505")
 TASK_ID = UUID("00000000-0000-4000-8000-000000000506")
 REQUEST_UNIT_ID = UUID("00000000-0000-4000-8000-000000000507")
@@ -103,6 +113,7 @@ REQUIRED_EVENTS = (
     TraceEventType.MESSAGE_ACCEPTED,
     TraceEventType.RUN_STARTED,
     TraceEventType.CONTEXT_MANIFEST_RECORDED,
+    TraceEventType.TASK_DELTA_ACCEPTED,
     TraceEventType.INPUT_BINDING_RECORDED,
     TraceEventType.GATE_DECISION_RECORDED,
     TraceEventType.TOOL_CALL_CREATED,
@@ -187,6 +198,7 @@ def _request_understanding(
     *,
     binding_value: str = "O-1001",
     next_move_value: str = "O-1001",
+    source_quote: str | None = None,
 ) -> RequestUnderstandingOutput:
     return RequestUnderstandingOutput(
         message_ref=MESSAGE_REF,
@@ -203,7 +215,7 @@ def _request_understanding(
                         authority=InputAuthority.USER_CLAIM,
                         source_kind=InputSourceKind.CURRENT_MESSAGE,
                         source_ref=MESSAGE_REF,
-                        source_quote=binding_value,
+                        source_quote=source_quote or binding_value,
                         confidence=1.0,
                     ),
                 ),
@@ -306,6 +318,15 @@ def _trace(
         )
     elif event_type is TraceEventType.MESSAGE_ACCEPTED:
         values["message_ref"] = MESSAGE_REF
+    elif event_type is TraceEventType.TASK_DELTA_ACCEPTED:
+        values.update(
+            {
+                "message_ref": MESSAGE_REF,
+                "accepted_delta_ref": ACCEPTED_DELTA_ID,
+                "task_id": TASK_ID,
+                "request_unit_id": REQUEST_UNIT_ID,
+            }
+        )
     elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
         values["input_binding_ref"] = BINDING_ID
     elif event_type is TraceEventType.GATE_DECISION_RECORDED:
@@ -347,19 +368,20 @@ def _trace_events() -> tuple[TraceEvent, ...]:
             offset=2,
             context_index=1,
         ),
-        _trace(TraceEventType.INPUT_BINDING_RECORDED, offset=3),
-        _trace(TraceEventType.GATE_DECISION_RECORDED, offset=4),
-        _trace(TraceEventType.TOOL_CALL_CREATED, offset=5),
-        _trace(TraceEventType.TOOL_CALL_STARTED, offset=6),
-        _trace(TraceEventType.TOOL_CALL_SUCCEEDED, offset=7),
-        _trace(TraceEventType.OBSERVATION_RECORDED, offset=8),
+        _trace(TraceEventType.TASK_DELTA_ACCEPTED, offset=3),
+        _trace(TraceEventType.INPUT_BINDING_RECORDED, offset=4),
+        _trace(TraceEventType.GATE_DECISION_RECORDED, offset=5),
+        _trace(TraceEventType.TOOL_CALL_CREATED, offset=6),
+        _trace(TraceEventType.TOOL_CALL_STARTED, offset=7),
+        _trace(TraceEventType.TOOL_CALL_SUCCEEDED, offset=8),
+        _trace(TraceEventType.OBSERVATION_RECORDED, offset=9),
         _trace(
             TraceEventType.CONTEXT_MANIFEST_RECORDED,
-            offset=9,
+            offset=10,
             context_index=2,
         ),
-        _trace(TraceEventType.RUN_STOPPED, offset=10),
-        _trace(TraceEventType.EVAL_CASE_GRADED, offset=11),
+        _trace(TraceEventType.RUN_STOPPED, offset=11),
+        _trace(TraceEventType.EVAL_CASE_GRADED, offset=12),
     )
 
 
@@ -433,6 +455,34 @@ def _evidence(**overrides: object) -> EvalEvidence:
             ),
         ),
         "request_understanding_output": _request_understanding(),
+        "request_understanding_records": (
+            RequestUnderstandingRecord(
+                run_id=RUN_ID,
+                message_ref=MESSAGE_REF,
+                schema_version="request_understanding_record.p0.v1",
+                candidate_validation=(
+                    CandidateValidationRecord(
+                        candidate_ref=CANDIDATE_ID,
+                        decision=CandidateValidationDecision.ACCEPT,
+                    ),
+                ),
+                accepted_delta_refs=(ACCEPTED_DELTA_ID,),
+                proposed_base_task_state_version=None,
+                validated_task_state_version=1,
+                next_move_candidate_ref=NEXT_MOVE_REF,
+            ),
+        ),
+        "accepted_task_deltas": (
+            AcceptedTaskDelta(
+                accepted_delta_id=ACCEPTED_DELTA_ID,
+                candidate_ref=CANDIDATE_ID,
+                message_ref=MESSAGE_REF,
+                operation=TaskDeltaOperation.ADD_GOAL,
+                goal_text="查询指定订单状态",
+                input_binding_refs=(BINDING_ID,),
+                accepted_at=NOW,
+            ),
+        ),
         "input_bindings": (
             InputBinding(
                 binding_id=BINDING_ID,
@@ -468,6 +518,24 @@ def _evidence(**overrides: object) -> EvalEvidence:
                 state_version=2,
                 created_at=NOW,
                 updated_at=NOW + timedelta(seconds=1),
+            ),
+        ),
+        "conversation_task_links": (
+            ConversationTaskLinkRecord(
+                schema_version="conversation_task_link_record.p0.v1",
+                conversation_id=CONVERSATION_ID,
+                task_id=TASK_ID,
+                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+                linked_at=NOW,
+            ),
+        ),
+        "run_task_links": (
+            RunTaskLinkRecord(
+                schema_version="run_task_link_record.p0.v1",
+                run_id=RUN_ID,
+                task_id=TASK_ID,
+                base_task_state_version=None,
+                result_task_state_version=2,
             ),
         ),
         "gate_decisions": (
@@ -514,6 +582,15 @@ def _evidence(**overrides: object) -> EvalEvidence:
                 started_at=NOW,
                 finished_at=NOW + timedelta(milliseconds=500),
                 result_ref=OBSERVATION_ID,
+            ),
+        ),
+        "tool_attempts": (
+            ToolAttemptRecord(
+                tool_call_id=TOOL_CALL_ID,
+                attempt_no=1,
+                started_at=NOW,
+                finished_at=NOW + timedelta(milliseconds=500),
+                outcome=ToolResultOutcome.SUCCESS,
             ),
         ),
         "observations": (observation,),
@@ -711,6 +788,106 @@ def test_each_grader_rejects_directed_typed_evidence_tamper(
         EvalGraderReasonCode.ASSERTION_FAILED,
         EvalGraderReasonCode.TRACE_EVENT_MISSING,
     }
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "request_understanding_records",
+        "accepted_task_deltas",
+        "conversation_task_links",
+        "run_task_links",
+        "tool_attempts",
+    ),
+)
+def test_persistence_grader_requires_complete_authoritative_record_graph(
+    field_name: str,
+) -> None:
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(**{field_name: ()}),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+def test_persistence_and_trace_resolve_accepted_delta_refs_authoritatively() -> None:
+    evidence = _evidence()
+    foreign_ref = UUID(int=930)
+    understanding = evidence.request_understanding_records[0].model_copy(
+        update={"accepted_delta_refs": (foreign_ref,)}
+    )
+    events = tuple(
+        event.model_copy(update={"accepted_delta_ref": foreign_ref})
+        if event.event_type is TraceEventType.TASK_DELTA_ACCEPTED
+        else event
+        for event in evidence.trace_events
+    )
+    tampered = _evidence(
+        request_understanding_records=(understanding,),
+        trace_events=events,
+    )
+
+    for grader_name in ("PersistenceGrader", "TraceCompletenessGrader"):
+        result = grader_registry()[grader_name].grade(
+            tampered,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_persistence_rejects_foreign_request_unit_observation_ref() -> None:
+    evidence = _evidence()
+    request_unit = evidence.request_units[0].model_copy(
+        update={"observation_refs": (UUID(int=931),)}
+    )
+
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(request_units=(request_unit,)),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    "grader_name",
+    ("ToolCallGrader", "PersistenceGrader"),
+)
+def test_tool_attempt_graph_must_match_authoritative_attempt_count(
+    grader_name: str,
+) -> None:
+    evidence = _evidence()
+    tool_call = evidence.tool_calls[0].model_copy(update={"attempt_count": 2})
+
+    result = grader_registry()[grader_name].grade(
+        _evidence(tool_calls=(tool_call,)),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+@pytest.mark.parametrize(
+    "grader_name",
+    ("RequestUnderstandingGrader", "PersistenceGrader"),
+)
+def test_source_quote_must_resolve_against_authoritative_message_and_observation(
+    grader_name: str,
+) -> None:
+    result = grader_registry()[grader_name].grade(
+        _evidence(
+            request_understanding_output=_request_understanding(source_quote="O-2001")
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
 @pytest.mark.parametrize(
