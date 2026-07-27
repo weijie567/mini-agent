@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Any, Annotated, Self, TypeVar
 from uuid import UUID
 
 from pydantic import (
+    BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -46,6 +48,7 @@ from mini_agent.core.trace import (
     AgentRunRecord,
     AgentRunStatus,
     StopReason,
+    TimingAndUsageSummary,
     TraceEvent,
     TraceEventType,
 )
@@ -326,8 +329,312 @@ class TransitionRunCommand(_StrictRuntimePrivateRecord):
         return self
 
 
-class FinalizeRunCommand(_StrictRuntimePrivateRecord):
-    """Atomically finalize one RUNNING Run and every active RunTaskLink."""
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def _canonical_model_field_projection(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise ValueError(error_message)
+    field_names = frozenset(expected_type.model_fields)
+    if (
+        frozenset(vars(value)) != field_names
+        or not value.model_fields_set.issubset(field_names)
+        or value.__pydantic_extra__ is not None
+        or value.__pydantic_private__ is not None
+    ):
+        raise ValueError(error_message)
+    return {
+        field_name: getattr(value, field_name)
+        for field_name in expected_type.model_fields
+    }
+
+
+def _strict_validate_canonical_projection(
+    expected_type: type[_ModelT],
+    projection: Mapping[str, object],
+    *,
+    error_message: str,
+) -> _ModelT:
+    try:
+        return expected_type.model_validate(projection, strict=True)
+    except ValidationError:
+        raise ValueError(error_message) from None
+
+
+def _strict_rebuild_exact_model(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> _ModelT:
+    projection = _canonical_model_field_projection(
+        value,
+        expected_type,
+        error_message=error_message,
+    )
+    return _strict_validate_canonical_projection(
+        expected_type,
+        projection,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_terminal_trace_event(value: object) -> TraceEvent:
+    error_message = "terminal TraceEvent must be canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        TraceEvent,
+        error_message=error_message,
+    )
+    timing_summary = projection["timing_and_usage_summary"]
+    if timing_summary is not None:
+        projection["timing_and_usage_summary"] = _strict_rebuild_exact_model(
+            timing_summary,
+            TimingAndUsageSummary,
+            error_message=error_message,
+        )
+    return _strict_validate_canonical_projection(
+        TraceEvent,
+        projection,
+        error_message=error_message,
+    )
+
+
+_COMPLETED_FINALIZATION_ROWS = frozenset(
+    {
+        (
+            StopReason.GOAL_COMPLETED,
+            True,
+            AgentOutcome.COMPLETED,
+            TaskStatus.COMPLETED,
+        ),
+        (
+            StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            True,
+            AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+            TaskStatus.COMPLETED,
+        ),
+        (
+            StopReason.PROVIDER_PROTOCOL_ERROR,
+            False,
+            AgentOutcome.BLOCKED,
+            None,
+        ),
+        (
+            StopReason.PROVIDER_PROTOCOL_ERROR,
+            True,
+            AgentOutcome.BLOCKED,
+            TaskStatus.BLOCKED,
+        ),
+        (
+            StopReason.INPUT_INVALID,
+            False,
+            AgentOutcome.BLOCKED,
+            None,
+        ),
+        (
+            StopReason.GATE_REJECTED,
+            True,
+            AgentOutcome.BLOCKED,
+            TaskStatus.BLOCKED,
+        ),
+        (
+            StopReason.ORDER_SERVICE_UNAVAILABLE,
+            True,
+            AgentOutcome.BLOCKED,
+            TaskStatus.BLOCKED,
+        ),
+        (
+            StopReason.PRESENTATION_PLAN_REJECTED,
+            True,
+            AgentOutcome.BLOCKED,
+            TaskStatus.BLOCKED,
+        ),
+        (
+            StopReason.RENDERER_INVARIANT_FAILED,
+            True,
+            AgentOutcome.BLOCKED,
+            TaskStatus.BLOCKED,
+        ),
+    }
+)
+_TRACE_EVENT_FIELD_NAMES = frozenset(TraceEvent.model_fields)
+_TERMINAL_TRACE_COMMON_FIELDS = frozenset(
+    {
+        "trace_event_id",
+        "event_type",
+        "occurred_at",
+        "run_id",
+    }
+)
+_TERMINAL_TRACE_ALLOWED_FIELDS = {
+    TraceEventType.TASK_STATE_CHANGED: _TERMINAL_TRACE_COMMON_FIELDS
+    | {"task_id", "request_unit_id"},
+    TraceEventType.RUN_STOPPED: _TERMINAL_TRACE_COMMON_FIELDS
+    | {"user_outcome", "stop_reason"},
+}
+_FINALIZE_VALIDATION_FALLBACK = "FinalizeRunCommand validation failed"
+_FINALIZE_SAFE_ERROR_TYPE_MESSAGES = {
+    "frozen_instance": "Instance is frozen",
+}
+_FINALIZE_SAFE_VALIDATION_MESSAGES = frozenset(
+    {
+        "terminal result must be canonical",
+        "ASSISTANT Message must be canonical",
+        "Task transition must be recursively canonical",
+        "terminal TraceEvent must be canonical",
+        "FinalizeRunCommand must be canonical",
+        "Run finalization expects RUNNING status",
+        "Run finalization rejects a dirty expected active Run",
+        "Run finalization requires a terminal Run",
+        "normal Run finalization cannot use recovery-only stop reason",
+        "normal terminal Run cannot carry incomplete_reason",
+        "COMPLETED Run requires conversation_id",
+        "FAILED Run cannot carry stop_reason",
+        "Run finalization cannot change stable fields",
+        "active RunTaskLink must belong to the Run",
+        "active RunTaskLink must have no result Task version",
+        "RunTaskLink identities must be unique",
+        "terminal RunTaskLink must belong to the Run",
+        "terminal RunTaskLink requires a result Task version",
+        "Run finalization requires the exact RunTaskLink set",
+        "terminal RunTaskLink must preserve its active projection",
+        "result Task identities must be unique",
+        "Run finalization requires one exact result Task per link Task identity",
+        "RunTaskLink result Task version must match result Task",
+        (
+            "FAILED Run requires empty Task transition, terminal result, "
+            "ASSISTANT Message and terminal Trace projections"
+        ),
+        "COMPLETED Run with a link requires its Task transition",
+        "COMPLETED Run without a link cannot carry a Task transition",
+        "COMPLETED Run requires a terminal result",
+        "terminal result requires an exact AgentRunResult",
+        "COMPLETED Run requires an ASSISTANT Message",
+        "ASSISTANT Message requires an exact MessageRecord",
+        "Run without a Task cannot carry result Tasks",
+        "Run without a Task terminal Trace may contain only RunStopped",
+        "Task transition expected and next Task must equal the link Task",
+        "Task transition cannot precede active link base Task version",
+        "terminal Task and RequestUnit require the same status/version",
+        "result Task projection must equal the exact next Task",
+        "Task transition cannot follow Run completion",
+        (
+            "Task terminal Trace must be ordered exactly as "
+            "TaskStateChanged, RunStopped"
+        ),
+        "COMPLETED Run projection is outside the closed terminal matrix",
+        "terminal result must bind the terminal Run",
+        "ASSISTANT Message requires schema_version message_record.p0.v1",
+        "ASSISTANT Message requires ASSISTANT direction",
+        "ASSISTANT Message must bind the terminal Conversation",
+        "ASSISTANT Message content must equal terminal result",
+        "ASSISTANT Message timestamp must equal Run completion",
+        "terminal Trace event identities must be unique",
+        "every terminal Trace event must bind the terminal Run",
+        (
+            "TaskStateChanged terminal Trace only allows its exact per-kind "
+            "projection"
+        ),
+        (
+            "RunStopped terminal Trace only allows its exact per-kind projection"
+        ),
+        "TaskStateChanged must bind the terminal Task/RequestUnit",
+        "TaskStateChanged timestamp must equal Task transition",
+        "RunStopped stop reason must equal terminal Run",
+        "RunStopped outcome must equal terminal result",
+        "RunStopped timestamp must equal Run completion",
+    }
+)
+
+
+def _bounded_finalize_validation_message(
+    line_error: Mapping[str, object],
+) -> str:
+    error_type = line_error.get("type")
+    if type(error_type) is str:
+        safe_error_type_message = _FINALIZE_SAFE_ERROR_TYPE_MESSAGES.get(
+            error_type
+        )
+        if safe_error_type_message is not None:
+            return safe_error_type_message
+    context = line_error.get("ctx")
+    if not isinstance(context, Mapping):
+        return _FINALIZE_VALIDATION_FALLBACK
+    source_error = context.get("error")
+    if type(source_error) is not ValueError or len(source_error.args) != 1:
+        return _FINALIZE_VALIDATION_FALLBACK
+    candidate = source_error.args[0]
+    if (
+        type(candidate) is str
+        and candidate in _FINALIZE_SAFE_VALIDATION_MESSAGES
+    ):
+        return candidate
+    return _FINALIZE_VALIDATION_FALLBACK
+
+
+def _new_finalize_validation_error(safe_message: str) -> ValidationError:
+    if (
+        safe_message != _FINALIZE_VALIDATION_FALLBACK
+        and safe_message not in _FINALIZE_SAFE_ERROR_TYPE_MESSAGES.values()
+        and safe_message not in _FINALIZE_SAFE_VALIDATION_MESSAGES
+    ):
+        safe_message = _FINALIZE_VALIDATION_FALLBACK
+    return ValidationError.from_exception_data(
+        "FinalizeRunCommand",
+        [
+            {
+                "type": "value_error",
+                "loc": ("finalize_run_command",),
+                "input": None,
+                "ctx": {"error": ValueError(safe_message)},
+            }
+        ],
+        input_type="python",
+        hide_input=True,
+    )
+
+
+def _sanitize_finalize_validation_error(
+    error: ValidationError,
+) -> ValidationError:
+    source_line_errors = error.errors(
+        include_url=False,
+        include_context=True,
+        include_input=False,
+    )
+    safe_message = (
+        _bounded_finalize_validation_message(source_line_errors[0])
+        if source_line_errors
+        else _FINALIZE_VALIDATION_FALLBACK
+    )
+    return _new_finalize_validation_error(safe_message)
+
+
+class _FinalizeRunCommandMeta(type(_StrictRuntimePrivateRecord)):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().__call__(*args, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+
+class FinalizeRunCommand(
+    _StrictRuntimePrivateRecord,
+    metaclass=_FinalizeRunCommandMeta,
+):
+    """One validated aggregate for a normal terminal turn."""
+
+    model_config = ConfigDict(
+        hide_input_in_errors=True,
+        revalidate_instances="always",
+    )
 
     expected_active_record: AgentRunRecord
     terminal_record: AgentRunRecord
@@ -343,6 +650,171 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
         tuple[TaskRecord, ...],
         Field(max_length=1),
     ]
+    task_transition: ApplyTaskTransitionCommand | None = None
+    terminal_result: AgentRunResult | None = None
+    assistant_message: MessageRecord | None = None
+    terminal_trace_events: Annotated[
+        tuple[TraceEvent, ...],
+        Field(max_length=2),
+    ] = ()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        try:
+            super().__setattr__(name, value)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        else:
+            return
+        raise sanitized_error from None
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            super().__delattr__(name)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        else:
+            return
+        raise sanitized_error from None
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        copied_source = self.__deepcopy__() if deep else self.__copy__()
+        try:
+            complete_projection = _canonical_model_field_projection(
+                copied_source,
+                type(self),
+                error_message="FinalizeRunCommand must be canonical",
+            )
+        except ValueError:
+            sanitized_error = _new_finalize_validation_error(
+                "FinalizeRunCommand must be canonical"
+            )
+        else:
+            restored_fields_set = set(copied_source.model_fields_set)
+            updated_field_names: set[str] = set()
+            if update:
+                updated_field_names.update(update)
+                if not updated_field_names.issubset(complete_projection):
+                    raise _new_finalize_validation_error(
+                        "FinalizeRunCommand must be canonical"
+                    ) from None
+                complete_projection.update(update)
+                restored_fields_set.update(updated_field_names)
+            rebuilt = type(self).model_validate(complete_projection)
+            for field_name in updated_field_names:
+                object.__setattr__(
+                    copied_source,
+                    field_name,
+                    getattr(rebuilt, field_name),
+                )
+            object.__setattr__(
+                copied_source,
+                "__pydantic_fields_set__",
+                restored_fields_set,
+            )
+            return copied_source
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        **kwargs: Any,
+    ) -> Self:
+        if isinstance(obj, cls):
+            try:
+                obj = _canonical_model_field_projection(
+                    obj,
+                    cls,
+                    error_message="FinalizeRunCommand must be canonical",
+                )
+            except ValueError:
+                sanitized_error = _new_finalize_validation_error(
+                    "FinalizeRunCommand must be canonical"
+                )
+            else:
+                sanitized_error = None
+            if sanitized_error is not None:
+                raise sanitized_error from None
+        try:
+            return super().model_validate(obj, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        **kwargs: Any,
+    ) -> Self:
+        try:
+            return super().model_validate_json(json_data, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate_strings(
+        cls,
+        obj: Any,
+        **kwargs: Any,
+    ) -> Self:
+        try:
+            return super().model_validate_strings(obj, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+    @field_validator("task_transition")
+    @classmethod
+    def task_transition_is_recursively_canonical(
+        cls,
+        value: ApplyTaskTransitionCommand | None,
+    ) -> ApplyTaskTransitionCommand | None:
+        if value is None:
+            return None
+        return _strict_rebuild_task_transition(value)
+
+    @field_validator("terminal_result")
+    @classmethod
+    def terminal_result_is_canonical(
+        cls,
+        value: AgentRunResult | None,
+    ) -> AgentRunResult | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_model(
+            value,
+            AgentRunResult,
+            error_message="terminal result must be canonical",
+        )
+
+    @field_validator("assistant_message")
+    @classmethod
+    def assistant_message_is_canonical(
+        cls,
+        value: MessageRecord | None,
+    ) -> MessageRecord | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_model(
+            value,
+            MessageRecord,
+            error_message="ASSISTANT Message must be canonical",
+        )
+
+    @field_validator("terminal_trace_events")
+    @classmethod
+    def terminal_trace_events_are_canonical(
+        cls,
+        events: tuple[TraceEvent, ...],
+    ) -> tuple[TraceEvent, ...]:
+        return tuple(_strict_rebuild_terminal_trace_event(event) for event in events)
 
     @model_validator(mode="after")
     def terminal_projection_is_exact_and_graph_closed(self) -> Self:
@@ -363,6 +835,16 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
             )
         if terminal.incomplete_reason is not None:
             raise ValueError("normal terminal Run cannot carry incomplete_reason")
+        if (
+            terminal.status is AgentRunStatus.COMPLETED
+            and terminal.conversation_id is None
+        ):
+            raise ValueError("COMPLETED Run requires conversation_id")
+        if (
+            terminal.status is AgentRunStatus.FAILED
+            and terminal.stop_reason is not None
+        ):
+            raise ValueError("FAILED Run cannot carry stop_reason")
         if any(
             getattr(expected, field_name) != getattr(terminal, field_name)
             for field_name in _RUN_STABLE_FIELDS
@@ -407,7 +889,10 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
                 raise ValueError("result Task identities must be unique")
             task_by_id[task_record.task_id] = task_record
         if set(task_by_id) != set(terminal_by_task):
-            raise ValueError("Run finalization requires one exact result Task per link")
+            raise ValueError(
+                "Run finalization requires one exact result Task per link Task "
+                "identity"
+            )
         for task_id, terminal_link in terminal_by_task.items():
             if (
                 terminal_link.result_task_state_version
@@ -416,6 +901,166 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
                 raise ValueError(
                     "RunTaskLink result Task version must match result Task"
                 )
+
+        if terminal.status is AgentRunStatus.FAILED:
+            if (
+                self.task_transition is not None
+                or self.terminal_result is not None
+                or self.assistant_message is not None
+                or self.terminal_trace_events
+            ):
+                raise ValueError(
+                    "FAILED Run requires empty Task transition, terminal result, "
+                    "ASSISTANT Message and terminal Trace projections"
+                )
+            return self
+
+        has_task = bool(expected_by_task)
+        transition = self.task_transition
+        if has_task and transition is None:
+            raise ValueError("COMPLETED Run with a link requires its Task transition")
+        if not has_task and transition is not None:
+            raise ValueError(
+                "COMPLETED Run without a link cannot carry a Task transition"
+            )
+
+        result = self.terminal_result
+        if result is None:
+            raise ValueError("COMPLETED Run requires a terminal result")
+        if type(result) is not AgentRunResult:
+            raise ValueError("terminal result requires an exact AgentRunResult")
+        message = self.assistant_message
+        if message is None:
+            raise ValueError("COMPLETED Run requires an ASSISTANT Message")
+        if type(message) is not MessageRecord:
+            raise ValueError("ASSISTANT Message requires an exact MessageRecord")
+
+        task_status: TaskStatus | None = None
+        event_types = tuple(event.event_type for event in self.terminal_trace_events)
+        if transition is None:
+            if self.result_task_records:
+                raise ValueError("Run without a Task cannot carry result Tasks")
+            if event_types != (TraceEventType.RUN_STOPPED,):
+                raise ValueError(
+                    "Run without a Task terminal Trace may contain only RunStopped"
+                )
+        else:
+            link_task_id = next(iter(expected_by_task))
+            if (
+                transition.expected_task_record.task_id != link_task_id
+                or transition.next_task_record.task_id != link_task_id
+            ):
+                raise ValueError(
+                    "Task transition expected and next Task must equal the link Task"
+                )
+            active_link_base_version = expected_by_task[
+                link_task_id
+            ].base_task_state_version
+            if (
+                active_link_base_version is not None
+                and transition.expected_task_record.state_version
+                < active_link_base_version
+            ):
+                raise ValueError(
+                    "Task transition cannot precede active link base Task version"
+                )
+            next_task = transition.next_task_record
+            next_unit = transition.next_request_unit_record
+            if (
+                next_task.status is not next_unit.status
+                or next_task.state_version != next_unit.state_version
+            ):
+                raise ValueError(
+                    "terminal Task and RequestUnit require the same status/version"
+                )
+            if self.result_task_records != (next_task,):
+                raise ValueError(
+                    "result Task projection must equal the exact next Task"
+                )
+            if transition.task_state_transition.changed_at > terminal.completed_at:
+                raise ValueError("Task transition cannot follow Run completion")
+            task_status = next_task.status
+            if event_types != (
+                TraceEventType.TASK_STATE_CHANGED,
+                TraceEventType.RUN_STOPPED,
+            ):
+                raise ValueError(
+                    "Task terminal Trace must be ordered exactly as "
+                    "TaskStateChanged, RunStopped"
+                )
+
+        matrix_row = (
+            terminal.stop_reason,
+            has_task,
+            result.outcome,
+            task_status,
+        )
+        if matrix_row not in _COMPLETED_FINALIZATION_ROWS:
+            raise ValueError(
+                "COMPLETED Run projection is outside the closed terminal matrix"
+            )
+        if result.run_id != terminal.run_id:
+            raise ValueError("terminal result must bind the terminal Run")
+        if message.schema_version != "message_record.p0.v1":
+            raise ValueError(
+                "ASSISTANT Message requires schema_version message_record.p0.v1"
+            )
+        if message.direction is not MessageDirection.ASSISTANT:
+            raise ValueError("ASSISTANT Message requires ASSISTANT direction")
+        if message.conversation_id != terminal.conversation_id:
+            raise ValueError("ASSISTANT Message must bind the terminal Conversation")
+        if message.content != result.message:
+            raise ValueError("ASSISTANT Message content must equal terminal result")
+        if message.received_at != terminal.completed_at:
+            raise ValueError(
+                "ASSISTANT Message timestamp must equal Run completion"
+            )
+
+        event_ids = tuple(
+            event.trace_event_id for event in self.terminal_trace_events
+        )
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("terminal Trace event identities must be unique")
+        for event in self.terminal_trace_events:
+            if event.run_id != terminal.run_id:
+                raise ValueError(
+                    "every terminal Trace event must bind the terminal Run"
+                )
+            allowed_fields = _TERMINAL_TRACE_ALLOWED_FIELDS[event.event_type]
+            for field_name, field_info in TraceEvent.model_fields.items():
+                if field_name in allowed_fields:
+                    continue
+                if getattr(event, field_name) != field_info.default:
+                    raise ValueError(
+                        f"{event.event_type.value} terminal Trace only allows "
+                        "its exact per-kind projection"
+                    )
+
+        if transition is not None:
+            task_changed = self.terminal_trace_events[0]
+            if (
+                task_changed.task_id != transition.next_task_record.task_id
+                or task_changed.request_unit_id
+                != transition.next_request_unit_record.request_unit_id
+            ):
+                raise ValueError(
+                    "TaskStateChanged must bind the terminal Task/RequestUnit"
+                )
+            if (
+                task_changed.occurred_at
+                != transition.task_state_transition.changed_at
+            ):
+                raise ValueError(
+                    "TaskStateChanged timestamp must equal Task transition"
+                )
+
+        run_stopped = self.terminal_trace_events[-1]
+        if run_stopped.stop_reason is not terminal.stop_reason:
+            raise ValueError("RunStopped stop reason must equal terminal Run")
+        if run_stopped.user_outcome is not result.outcome:
+            raise ValueError("RunStopped outcome must equal terminal result")
+        if run_stopped.occurred_at != terminal.completed_at:
+            raise ValueError("RunStopped timestamp must equal Run completion")
         return self
 
 
@@ -700,6 +1345,38 @@ class ApplyTaskTransitionCommand(_StrictRuntimePrivateRecord):
                 "next projections must use the transition change timestamp"
             )
         return self
+
+
+def _strict_rebuild_task_transition(
+    value: object,
+) -> ApplyTaskTransitionCommand:
+    error_message = "Task transition must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        ApplyTaskTransitionCommand,
+        error_message=error_message,
+    )
+    nested_types: dict[str, type[BaseModel]] = {
+        "expected_task_record": TaskRecord,
+        "next_task_record": TaskRecord,
+        "expected_request_unit_record": RequestUnitRecord,
+        "next_request_unit_record": RequestUnitRecord,
+        "task_state_transition": TaskStateTransition,
+    }
+    for field_name, expected_type in nested_types.items():
+        projection[field_name] = _strict_rebuild_exact_model(
+            projection[field_name],
+            expected_type,
+            error_message=error_message,
+        )
+    return _strict_validate_canonical_projection(
+        ApplyTaskTransitionCommand,
+        projection,
+        error_message=error_message,
+    )
+
+
+FinalizeRunCommand.model_rebuild()
 
 
 class CreateToolCallCommand(_StrictRuntimePrivateRecord):
@@ -1120,7 +1797,6 @@ _RECOVERY_TRACE_COMMON_FIELDS = frozenset(
         "run_id",
     }
 )
-_TRACE_EVENT_FIELD_NAMES = frozenset(TraceEvent.model_fields)
 _RECOVERY_TRACE_ALLOWED_FIELDS = {
     TraceEventType.RUN_STOPPED: _RECOVERY_TRACE_COMMON_FIELDS
     | {"user_outcome", "stop_reason"},
