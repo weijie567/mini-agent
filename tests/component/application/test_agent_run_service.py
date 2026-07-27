@@ -81,6 +81,7 @@ from mini_agent.core.trace import (
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 class UuidSequence:
@@ -511,6 +512,13 @@ def _snapshot(*, timeout_ms: int = 500) -> RegistrySnapshot:
     )
 
 
+def test_get_order_agent_visible_schema_does_not_expose_source_version() -> None:
+    assert (
+        "source_version"
+        not in get_order_tool_spec().output_schema["properties"]
+    )
+
+
 def _snapshot_with_provider_schema_drift() -> RegistrySnapshot:
     snapshot = _snapshot()
     canonical_spec = get_order_tool_spec()
@@ -563,6 +571,7 @@ def _found_result() -> GetOrderResult:
             ordered_at=NOW,
             status_updated_at=NOW,
         ),
+        source_version=SYNTHETIC_SOURCE_VERSION,
     )
 
 
