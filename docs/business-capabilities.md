@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜P0 业务能力说明
 
-更新日期：2026-07-26  
+更新日期：2026-07-27<br>
 文档状态：P0 目标业务范围  
 适用读者：业务、产品、研发、测试及项目评审人员
 
-> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。仓库当前已有 W1 工具链、Core / Application contract、基础 PostgreSQL migration 和 versioned Eval artifacts，但尚无可运行的 HTTP 纵向切片、Harness 或 Eval Result。因此本文描述的仍是 **P0 目标能力与验收边界**，不代表功能已经开发完成或接入生产系统；实时实现证据见[多 Agent 实施计划](implementation/e2e01-thin-slice-multi-agent-plan.md)。
+> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。仓库当前已有 W1 基础骨架，以及 W2 Runtime、Session / HTTP、PostgreSQL `get_order` 等组件和 Eval Provider Adapter、Harness、Graders 与结构化结果 / 故障记录机制，相关边界已有 Component / Integration 级测试证据。但 Composition Root、真实 `EvalCaseSut` 与 PostgreSQL evidence reader、HTTP → Runtime → PostgreSQL → Eval 的真实纵向装配及 Trajectory / E2E Result、credentialed Qwen runner 与完整 P0 纵向切片仍未实现；`E2E01-01/04` 生命周期继续保持 `CONTRACT_DEFINED`（`0/8`）。因此本文描述的仍是 **P0 目标能力与验收边界**，不代表完整功能已经开发完成或接入生产系统；详细实现状态与证据见[多 Agent 实施计划](implementation/e2e01-thin-slice-multi-agent-plan.md)。
 
 ## 1. P0 目标与定位
 
