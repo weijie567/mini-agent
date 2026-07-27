@@ -172,7 +172,20 @@ class RuntimeRecordPort(Protocol):
         self,
         command: FinalizeRunCommand,
     ) -> ConditionalWriteResult:
-        """Finalize RUNNING Run and every RunTaskLink atomically against Tasks."""
+        """Conditionally commit one complete terminal-turn aggregate.
+
+        For a compliant Adapter, APPLIED means the exact active Run,
+        RunTaskLink, Task and RequestUnit preconditions matched and the
+        Task/RequestUnit transition, terminal Run/RunTaskLink, ASSISTANT Message
+        and exact terminal Trace committed in one transaction. The validated
+        terminal result is the return/message/Trace binding, not another
+        persistence item.
+
+        PROJECTION_CONFLICT and NOT_APPLICABLE mean zero writes across every
+        Task/RequestUnit/transition, terminal Run/RunTaskLink, Message and Trace
+        projection. Post-commit Message or terminal Trace writes cannot satisfy
+        this contract.
+        """
         ...
 
     async def create_initial_task_graph_if_current(

@@ -2822,12 +2822,7 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         _rebuild(graph, input_bindings=(binding, binding))
 
     finalization = _completed_finalization()
-    empty_finalization = _completed_finalization(
-        stop_reason=StopReason.INPUT_INVALID,
-        outcome=AgentOutcome.BLOCKED,
-        with_task=False,
-        task_status=None,
-    )
+    empty_finalization = _failed_finalization(with_task=False)
 
     running_closure = _restart_recovery_closure()
     running_recovery = _restart_recovery_command()
