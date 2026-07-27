@@ -61,13 +61,18 @@ from mini_agent.core.tool_system import (
     ExecutionPolicy,
     GateReasonCode,
     RegistrySnapshot,
+    ToolSpec,
     ToolCallStatus,
     ToolEffect,
     ToolRegistration,
+    ToolResultOutcome,
+    ToolTimeoutPhase,
+    compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
+    AgentRunStatus,
     StopReason,
     TraceEvent,
     TraceEventType,
@@ -129,12 +134,14 @@ class RuntimeSpy:
         events: list[str],
         *,
         graph_result: ConditionalWriteResult = ConditionalWriteResult.APPLIED,
+        graph_error: Exception | None = None,
         finalize_run_result: ConditionalWriteResult = (
             ConditionalWriteResult.APPLIED
         ),
     ) -> None:
         self.events = events
         self.graph_result = graph_result
+        self.graph_error = graph_error
         self.finalize_run_result = finalize_run_result
         self.run_record: object | None = None
         self.task: TaskRecord | None = None
@@ -182,6 +189,8 @@ class RuntimeSpy:
         command: object,
     ) -> ConditionalWriteResult:
         self.events.append("initial_graph_saved")
+        if self.graph_error is not None:
+            raise self.graph_error
         if self.graph_result is ConditionalWriteResult.APPLIED:
             self.task = command.initial_task.initial_record
             self.request_unit = command.initial_request_unit.initial_record
@@ -293,6 +302,20 @@ class OrderSpy:
         return self.result
 
 
+class HangingOrderSpy:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.queries: list[GetOrderQuery] = []
+        self.started = asyncio.Event()
+
+    async def get_order(self, query: GetOrderQuery) -> GetOrderResult:
+        self.events.append("order_read")
+        self.queries.append(query)
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class ModelSpy:
     def __init__(
         self,
@@ -314,10 +337,12 @@ class ModelSpy:
         self.presentation_protocol_error = presentation_protocol_error
         self.next_move_calls = 0
         self.presentation_calls = 0
+        self.next_move_requests: list[object] = []
 
     async def propose_next_move(self, request: object):
         self.events.append("provider:request_understanding")
         self.next_move_calls += 1
+        self.next_move_requests.append(request)
         if self.ru_protocol_error:
             raise ProviderProtocolError()
         message_ref = request.message_ref
@@ -392,7 +417,7 @@ class FailingRenderer:
         return self.delegate.map_result(**kwargs)
 
 
-def _snapshot() -> RegistrySnapshot:
+def _snapshot(*, timeout_ms: int = 500) -> RegistrySnapshot:
     return RegistrySnapshot.build(
         tool_registry_version="runtime-tools-v1",
         registrations=(
@@ -404,11 +429,43 @@ def _snapshot() -> RegistrySnapshot:
                 idempotency="READ_ONLY",
                 handler_ref="orders.get_order",
                 execution_policy=ExecutionPolicy(
-                    timeout_ms=500,
+                    timeout_ms=timeout_ms,
                     max_attempts=1,
                     interrupt_behavior="MARK_INTERRUPTED",
                 ),
             ),
+        ),
+    )
+
+
+def _snapshot_with_provider_schema_drift() -> RegistrySnapshot:
+    snapshot = _snapshot()
+    canonical_spec = get_order_tool_spec()
+    drifted_visible_spec = ToolSpec(
+        name="get_order",
+        description=canonical_spec.description,
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "order_ref": {
+                    "type": "string",
+                    "pattern": r"^O-[0-9]{4,20}$",
+                }
+            },
+            "required": ["order_ref"],
+        },
+        output_schema=canonical_spec.output_schema,
+    )
+    return RegistrySnapshot(
+        tool_registry_version=snapshot.tool_registry_version,
+        canonical_registrations=snapshot.canonical_registrations,
+        provider_visible_toolset=(drifted_visible_spec,),
+        provider_name_to_canonical_name=(
+            snapshot.provider_name_to_canonical_name
+        ),
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (drifted_visible_spec,)
         ),
     )
 
@@ -443,13 +500,15 @@ def _build(
     runtime: RuntimeSpy | None = None,
     renderer: object | None = None,
     after_revalidation_hook: object | None = None,
+    registry_snapshot: RegistrySnapshot | None = None,
+    order_port: object | None = None,
 ):
     events: list[str] = model.events if model is not None else []
     actual_model = model or ModelSpy(events)
     actual_runtime = runtime or RuntimeSpy(events)
     artifact = ArtifactSpy(events)
     conversation = ConversationSpy(events)
-    order = OrderSpy(events, order_result or _found_result())
+    order = order_port or OrderSpy(events, order_result or _found_result())
     ids = UuidSequence()
     read_executor = ReadToolExecutor(
         runtime_record_port=actual_runtime,
@@ -459,7 +518,7 @@ def _build(
     )
     service = AgentRunService(
         model_provider=actual_model,
-        registry_snapshot=_snapshot(),
+        registry_snapshot=registry_snapshot or _snapshot(),
         toolset_artifact_port=artifact,
         conversation_record_port=conversation,
         runtime_record_port=actual_runtime,
@@ -553,6 +612,27 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
     )
     assert runtime.trace_events[-1].event_type is TraceEventType.RUN_STOPPED
     assert runtime.trace_events[-1].stop_reason is StopReason.GOAL_COMPLETED
+
+
+def test_model_visible_schema_drift_is_rejected_before_tool_execution() -> None:
+    events: list[str] = []
+    model = ModelSpy(events)
+    snapshot = _snapshot_with_provider_schema_drift()
+    service, _events, model, runtime, _conversation, order, _artifact = _build(
+        model=model,
+        registry_snapshot=snapshot,
+    )
+
+    result = _run(service)
+
+    visible_spec = model.next_move_requests[0].provider_visible_tool_specs[0]
+    assert visible_spec == snapshot.provider_visible_toolset[0]
+    assert visible_spec.input_schema["required"] == ("order_ref",)
+    assert result.outcome is AgentOutcome.BLOCKED
+    assert runtime.gates[-1].reason_code is GateReasonCode.SCHEMA_INVALID
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.observation_commands == []
 
 
 @pytest.mark.parametrize("order_id", ["O-2001", "O-9999"])
@@ -763,6 +843,92 @@ def test_order_system_failure_has_one_read_no_observation_or_presentation() -> N
     assert "private-upstream-detail" not in result.message
 
 
+def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
+    async def scenario():
+        events: list[str] = []
+        model = ModelSpy(events)
+        order = HangingOrderSpy(events)
+        service, _events, _model, runtime, _conversation, _order, _artifact = (
+            _build(
+                model=model,
+                registry_snapshot=_snapshot(timeout_ms=5),
+                order_port=order,
+            )
+        )
+        result = await asyncio.wait_for(
+            service.handle(
+                AgentRunCommand(
+                    customer_context=_context(),
+                    message="请查询订单 O-1001",
+                )
+            ),
+            timeout=0.5,
+        )
+        return result, runtime, order
+
+    result, runtime, order = asyncio.run(scenario())
+
+    assert result.outcome is AgentOutcome.BLOCKED
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_tool_commands) == 1
+    finalization = runtime.finalize_tool_commands[0]
+    assert finalization.terminal_record.status is ToolCallStatus.TIMED_OUT
+    assert finalization.terminal_record.timeout_phase is (
+        ToolTimeoutPhase.AFTER_DISPATCH
+    )
+    assert finalization.finalized_attempt.outcome is ToolResultOutcome.TIMEOUT
+    assert runtime.observation_commands == []
+    assert sum(
+        event.event_type is TraceEventType.TOOL_CALL_TIMED_OUT
+        for event in runtime.trace_events
+    ) == 1
+    assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
+
+
+def test_cancelled_order_read_closes_tool_and_run_before_reraising() -> None:
+    async def scenario():
+        events: list[str] = []
+        model = ModelSpy(events)
+        order = HangingOrderSpy(events)
+        service, _events, _model, runtime, conversation, _order, _artifact = (
+            _build(
+                model=model,
+                registry_snapshot=_snapshot(timeout_ms=5_000),
+                order_port=order,
+            )
+        )
+        run_task = asyncio.create_task(
+            service.handle(
+                AgentRunCommand(
+                    customer_context=_context(),
+                    message="请查询订单 O-1001",
+                )
+            )
+        )
+        await asyncio.wait_for(order.started.wait(), timeout=0.5)
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        return runtime, conversation, order
+
+    runtime, conversation, order = asyncio.run(scenario())
+
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_tool_commands) == 1
+    finalization = runtime.finalize_tool_commands[0]
+    assert finalization.terminal_record.status is ToolCallStatus.INTERRUPTED
+    assert finalization.finalized_attempt.outcome is ToolResultOutcome.INTERRUPTED
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert runtime.observation_commands == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
+    assert sum(
+        event.event_type is TraceEventType.TOOL_CALL_INTERRUPTED
+        for event in runtime.trace_events
+    ) == 1
+
+
 def test_presentation_protocol_failure_retains_observation_without_plan_trace() -> None:
     events: list[str] = []
     model = ModelSpy(events, presentation_protocol_error=True)
@@ -831,7 +997,7 @@ def test_renderer_invariant_failure_returns_no_partial_fact_message() -> None:
     assert runtime.run_record.stop_reason is StopReason.RENDERER_INVARIANT_FAILED
 
 
-def test_conditional_graph_conflict_propagates_as_execution_failure() -> None:
+def test_conditional_graph_conflict_finalizes_failed_then_reraises() -> None:
     events: list[str] = []
     runtime = RuntimeSpy(
         events,
@@ -846,9 +1012,41 @@ def test_conditional_graph_conflict_propagates_as_execution_failure() -> None:
     with pytest.raises(AgentRunExecutionError, match="initial Task graph"):
         _run(service)
 
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert runtime.run_record.stop_reason is None
+    assert len(runtime.finalize_run_commands) == 1
+    assert runtime.finalize_run_commands[0].expected_active_links == ()
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
     assert order.queries == []
+    assert runtime.observation_commands == []
+
+
+def test_internal_graph_exception_finalizes_failed_then_reraises() -> None:
+    events: list[str] = []
+    runtime = RuntimeSpy(
+        events,
+        graph_error=RuntimeError("private graph failure"),
+    )
+    model = ModelSpy(events)
+    service, _events, _model, runtime, conversation, order, _artifact = _build(
+        model=model,
+        runtime=runtime,
+    )
+
+    with pytest.raises(RuntimeError, match="private graph failure"):
+        _run(service)
+
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert runtime.run_record.stop_reason is None
+    assert len(runtime.finalize_run_commands) == 1
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.observation_commands == []
+    assert [message.direction for message in conversation.messages] == [
+        MessageDirection.USER
+    ]
 
 
 def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -> None:

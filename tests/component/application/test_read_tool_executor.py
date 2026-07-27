@@ -26,9 +26,12 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
+    ExecutionPolicy,
     ToolCallStatus,
     ToolResultOutcome,
+    ToolTimeoutPhase,
 )
+from mini_agent.core.trace import TraceEvent, TraceEventType
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -55,6 +58,7 @@ class RuntimeSpy:
         self.dispatch_commands: list[object] = []
         self.finalize_commands: list[object] = []
         self.observation_commands: list[object] = []
+        self.trace_events: list[TraceEvent] = []
 
     async def insert_tool_call(self, command: object) -> InsertOnlyWriteResult:
         self.events.append("tool_call_created")
@@ -85,6 +89,10 @@ class RuntimeSpy:
         self.observation_commands.append(command)
         return self.observation_result
 
+    async def append_trace_event(self, record: TraceEvent) -> None:
+        self.events.append(f"trace:{record.event_type.value}")
+        self.trace_events.append(record)
+
 
 class OrderSpy:
     def __init__(self, result: GetOrderResult, events: list[str]) -> None:
@@ -96,6 +104,20 @@ class OrderSpy:
         self.events.append("order_read")
         self.queries.append(query)
         return self.result
+
+
+class HangingOrderSpy:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.queries: list[GetOrderQuery] = []
+        self.started = asyncio.Event()
+
+    async def get_order(self, query: GetOrderQuery) -> GetOrderResult:
+        self.events.append("order_read")
+        self.queries.append(query)
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 class UuidSequence:
@@ -142,6 +164,14 @@ def _summary() -> OrderSummaryProjection:
     )
 
 
+def _execution_policy(timeout_ms: int = 500) -> ExecutionPolicy:
+    return ExecutionPolicy(
+        timeout_ms=timeout_ms,
+        max_attempts=1,
+        interrupt_behavior="MARK_INTERRUPTED",
+    )
+
+
 async def _execute(
     *,
     result: GetOrderResult,
@@ -165,6 +195,8 @@ async def _execute(
         context_manifest_id=uuid4(),
         provider_tool_call_id="provider-call-1",
         tool_registry_version="runtime-tools-v1",
+        execution_policy=_execution_policy(),
+        remaining_run_time_budget_ms=500,
     )
     return execution, actual_runtime, order
 
@@ -258,6 +290,8 @@ def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
                 context_manifest_id=uuid4(),
                 provider_tool_call_id=None,
                 tool_registry_version="runtime-tools-v1",
+                execution_policy=_execution_policy(),
+                remaining_run_time_budget_ms=500,
             )
         )
 
@@ -320,6 +354,97 @@ def test_finalize_conflict_never_writes_an_observation() -> None:
 
     assert runtime.events[-1] == "tool_call_finalized"
     assert runtime.observation_commands == []
+
+
+def test_applied_hanging_read_uses_effective_budget_and_times_out() -> None:
+    async def scenario():
+        runtime = RuntimeSpy()
+        order = HangingOrderSpy(runtime.events)
+        executor = ReadToolExecutor(
+            runtime_record_port=runtime,
+            get_order_port=order,
+            clock=lambda: NOW,
+            uuid_factory=UuidSequence(),
+        )
+        execution = await executor.execute_get_order(
+            owner_scope=_owner_scope(),
+            authorized_command=_authorized(),
+            run_id=uuid4(),
+            task_id=uuid4(),
+            request_unit_id=uuid4(),
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            provider_tool_call_id=None,
+            tool_registry_version="runtime-tools-v1",
+            execution_policy=_execution_policy(timeout_ms=100),
+            remaining_run_time_budget_ms=5,
+        )
+        return execution, runtime, order
+
+    execution, runtime, order = asyncio.run(scenario())
+
+    assert execution.effective_timeout_ms == 5
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_commands) == 1
+    assert runtime.observation_commands == []
+    assert execution.terminal_tool_call.status is ToolCallStatus.TIMED_OUT
+    assert execution.terminal_tool_call.timeout_phase is (
+        ToolTimeoutPhase.AFTER_DISPATCH
+    )
+    assert execution.finalized_attempt.outcome is ToolResultOutcome.TIMEOUT
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+
+
+def test_cancelled_applied_read_finalizes_interrupted_then_reraises() -> None:
+    async def scenario():
+        runtime = RuntimeSpy()
+        order = HangingOrderSpy(runtime.events)
+        executor = ReadToolExecutor(
+            runtime_record_port=runtime,
+            get_order_port=order,
+            clock=lambda: NOW,
+            uuid_factory=UuidSequence(),
+        )
+        execution_task = asyncio.create_task(
+            executor.execute_get_order(
+                owner_scope=_owner_scope(),
+                authorized_command=_authorized(),
+                run_id=uuid4(),
+                task_id=uuid4(),
+                request_unit_id=uuid4(),
+                model_call_id=uuid4(),
+                context_manifest_id=uuid4(),
+                provider_tool_call_id=None,
+                tool_registry_version="runtime-tools-v1",
+                execution_policy=_execution_policy(timeout_ms=5_000),
+                remaining_run_time_budget_ms=5_000,
+            )
+        )
+        order_started = asyncio.create_task(order.started.wait())
+        done, _pending = await asyncio.wait(
+            {execution_task, order_started},
+            timeout=0.5,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if execution_task in done:
+            await execution_task
+        assert order_started in done
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution_task
+        return runtime, order
+
+    runtime, order = asyncio.run(scenario())
+
+    assert len(order.queries) == 1
+    assert len(runtime.finalize_commands) == 1
+    finalize = runtime.finalize_commands[0]
+    assert finalize.terminal_record.status is ToolCallStatus.INTERRUPTED
+    assert finalize.finalized_attempt.outcome is ToolResultOutcome.INTERRUPTED
+    assert runtime.observation_commands == []
+    assert [event.event_type for event in runtime.trace_events] == [
+        TraceEventType.TOOL_CALL_INTERRUPTED
+    ]
 
 
 def test_read_executor_has_no_retry_parallel_or_action_execution_surface() -> None:

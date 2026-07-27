@@ -27,8 +27,10 @@ from mini_agent.core.tool_system import (
     GateDecisionValue,
     GateReasonCode,
     RegistrySnapshot,
+    ToolSpec,
     ToolEffect,
     ToolRegistration,
+    compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
 
@@ -70,6 +72,38 @@ def _snapshot(
                     interrupt_behavior="MARK_INTERRUPTED",
                 ),
             ),
+        ),
+    )
+
+
+def _snapshot_with_provider_schema_drift() -> RegistrySnapshot:
+    snapshot = _snapshot()
+    canonical_spec = get_order_tool_spec()
+    drifted_visible_spec = ToolSpec(
+        name="get_order",
+        description=canonical_spec.description,
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "order_ref": {
+                    "type": "string",
+                    "pattern": r"^O-[0-9]{4,20}$",
+                }
+            },
+            "required": ["order_ref"],
+        },
+        output_schema=canonical_spec.output_schema,
+    )
+    return RegistrySnapshot(
+        tool_registry_version=snapshot.tool_registry_version,
+        canonical_registrations=snapshot.canonical_registrations,
+        provider_visible_toolset=(drifted_visible_spec,),
+        provider_name_to_canonical_name=(
+            snapshot.provider_name_to_canonical_name
+        ),
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (drifted_visible_spec,)
         ),
     )
 
@@ -201,6 +235,22 @@ def test_exact_bound_get_order_candidate_is_approved() -> None:
     assert gate.validated_task_state_version == 1
     assert "tool_call_id" not in type(gate).model_fields
     assert "order_number" not in type(gate).model_fields
+
+
+def test_provider_visible_schema_must_match_registration_projection() -> None:
+    decision = _decision()
+    snapshot = _snapshot_with_provider_schema_drift()
+
+    gate = _evaluate(decision, snapshot=snapshot)
+
+    assert (
+        snapshot.provider_visible_toolset[0].input_schema["required"]
+        == ("order_ref",)
+    )
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is GateReasonCode.SCHEMA_INVALID
+    assert gate.schema_valid is False
+    assert "tool_call_id" not in type(gate).model_fields
 
 
 @pytest.mark.parametrize("replacement", ["O-2001", "O-9999"])
