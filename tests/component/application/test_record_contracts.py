@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 import mini_agent.application.records as application_records_module
 from mini_agent.application.records import (
@@ -2777,6 +2777,32 @@ def test_terminal_turn_valid_copy_revalidation_and_pickle_remain_compatible() ->
     assert shallow is not command
     assert shallow.expected_active_record is command.expected_active_record
     assert deep.expected_active_record is not command.expected_active_record
+
+
+def test_terminal_turn_subclass_copy_preserves_unset_default_factory_value() -> None:
+    class FinalizeRunCommandWithNonce(FinalizeRunCommand):
+        nonce: UUID = Field(default_factory=uuid4)
+
+    command = _completed_finalization()
+    base_values = {
+        field_name: getattr(command, field_name)
+        for field_name in FinalizeRunCommand.model_fields
+    }
+    extended = FinalizeRunCommandWithNonce(**base_values)
+    original_fields_set = extended.model_fields_set
+    replacement_nonce = uuid4()
+
+    shallow = extended.model_copy()
+    deep = extended.model_copy(deep=True)
+    updated = extended.model_copy(update={"nonce": replacement_nonce})
+
+    assert "nonce" not in original_fields_set
+    assert shallow.nonce == extended.nonce
+    assert deep.nonce == extended.nonce
+    assert shallow.model_fields_set == original_fields_set
+    assert deep.model_fields_set == original_fields_set
+    assert updated.nonce == replacement_nonce
+    assert updated.model_fields_set == original_fields_set | {"nonce"}
 
 
 def test_terminal_turn_frozen_assignment_sanitizes_raw_input() -> None:

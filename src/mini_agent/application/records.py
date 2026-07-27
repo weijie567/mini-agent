@@ -694,14 +694,17 @@ class FinalizeRunCommand(
                 "FinalizeRunCommand must be canonical"
             )
         else:
-            selected_projection = {
-                field_name: value
-                for field_name, value in complete_projection.items()
-                if field_name in copied_source.model_fields_set
-            }
+            restored_fields_set = set(copied_source.model_fields_set)
             if update:
-                selected_projection.update(update)
-            return type(self).model_validate(selected_projection)
+                complete_projection.update(update)
+                restored_fields_set.update(update)
+            rebuilt = type(self).model_validate(complete_projection)
+            object.__setattr__(
+                rebuilt,
+                "__pydantic_fields_set__",
+                restored_fields_set,
+            )
+            return rebuilt
         raise sanitized_error from None
 
     @classmethod
