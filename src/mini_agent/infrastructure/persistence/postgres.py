@@ -61,7 +61,12 @@ from mini_agent.core.tool_system import (
     ToolCallRecord,
     ToolEffect,
 )
-from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, TraceEvent
+from mini_agent.core.trace import (
+    AgentRunRecord,
+    AgentRunStatus,
+    TraceEvent,
+    TraceEventType,
+)
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
@@ -89,6 +94,10 @@ _PRIVATE_RECORD_CODES = frozenset(
     }
 )
 _RECORD_CODE_BY_VALUE = {code.value: code for code in P0RecordCode}
+_TRACE_EVENT_TYPE_ORDER = {
+    event_type: ordinal
+    for ordinal, event_type in enumerate(TraceEventType)
+}
 
 
 class P0PersistenceSystemError(Exception):
@@ -933,18 +942,28 @@ class PostgresRecordAdapter:
         if run_row is None:
             raise _FinalizeRunNotApplicable() from None
 
-        link_rows = tuple(
-            session.scalars(
-                select(P0RecordModel)
-                .where(
-                    P0RecordModel.record_code
-                    == P0RecordCode.RUN_TASK_LINK_RECORD.value,
-                    P0RecordModel.run_id
-                    == command.expected_active_record.run_id,
-                )
-                .limit(2)
+        link_closure_statement = (
+            select(P0RecordModel)
+            .where(
+                P0RecordModel.record_code
+                == P0RecordCode.RUN_TASK_LINK_RECORD.value,
+                P0RecordModel.run_id
+                == command.expected_active_record.run_id,
             )
+            .limit(2)
         )
+        prelock_link_rows = tuple(
+            session.scalars(link_closure_statement)
+        )
+        if len(prelock_link_rows) != len(command.expected_active_links):
+            raise _FinalizeRunProjectionConflict() from None
+
+        run_row = self._lock_rows_stably(session, (run_row,))[0]
+        run_decoded = self._validate_physical_projection(session, run_row)
+        if run_decoded.source_record != command.expected_active_record:
+            raise _FinalizeRunProjectionConflict() from None
+
+        link_rows = tuple(session.scalars(link_closure_statement))
         if len(link_rows) != len(command.expected_active_links):
             raise _FinalizeRunProjectionConflict() from None
 
@@ -979,17 +998,18 @@ class PostgresRecordAdapter:
             if unit_row is None:
                 raise _FinalizeRunProjectionConflict() from None
 
-        rows_to_lock = [
-            run_row,
+        closure_rows_to_lock = [
             *link_rows,
             *((task_row,) if task_row is not None else ()),
             *((unit_row,) if unit_row is not None else ()),
         ]
         locked_by_id = {
             row.record_id: row
-            for row in self._lock_rows_stably(session, rows_to_lock)
+            for row in self._lock_rows_stably(
+                session,
+                closure_rows_to_lock,
+            )
         }
-        run_row = locked_by_id[run_row.record_id]
         link_rows = tuple(
             locked_by_id[row.record_id]
             for row in link_rows
@@ -998,10 +1018,6 @@ class PostgresRecordAdapter:
             task_row = locked_by_id[task_row.record_id]
         if unit_row is not None:
             unit_row = locked_by_id[unit_row.record_id]
-
-        run_decoded = self._validate_physical_projection(session, run_row)
-        if run_decoded.source_record != command.expected_active_record:
-            raise _FinalizeRunProjectionConflict() from None
 
         link_by_task: dict[UUID, P0RecordModel] = {}
         for row in link_rows:
@@ -1773,11 +1789,21 @@ class PostgresRecordAdapter:
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
     ) -> tuple[TraceEvent, ...]:
-        return await self._list_for_owner(
+        events = await self._list_for_owner(
             owner_scope=owner_scope,
             record_code=P0RecordCode.TRACE_EVENT_RECORD,
             filters=(P0RecordModel.run_id == run_id,),
             expected_type=TraceEvent,
+        )
+        return tuple(
+            sorted(
+                events,
+                key=lambda event: (
+                    event.occurred_at,
+                    _TRACE_EVENT_TYPE_ORDER[event.event_type],
+                    str(event.trace_event_id),
+                ),
+            )
         )
 
     async def append_eval_result(
