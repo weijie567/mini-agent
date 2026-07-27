@@ -30,6 +30,8 @@ from mini_agent.core.tool_system import (
     GateDecisionValue,
     GateReasonCode,
     ToolCallStatus,
+    compute_model_visible_toolset_hash,
+    get_order_tool_spec,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -193,6 +195,9 @@ _NO_CANONICAL_REQUEST_OUTPUT = frozenset(
         "INJECT_TRUSTED_FIELD_OVERRIDE",
     }
 )
+_EXPECTED_MODEL_VISIBLE_TOOLSET_HASH = compute_model_visible_toolset_hash(
+    (get_order_tool_spec(),)
+)
 
 
 def _case_trace_expectations(
@@ -277,6 +282,21 @@ def _trusted_customer_for_case(
     if not isinstance(customer_id, str) or not customer_id:
         raise ArtifactContractError("trusted customer fixture is invalid")
     return customer_id
+
+
+def _trusted_message_content_for_case(case: EvalCaseArtifact) -> str:
+    messages = case.input.get("messages")
+    if (
+        not isinstance(messages, tuple)
+        or len(messages) != 1
+        or not isinstance(messages[0], Mapping)
+        or messages[0].get("role") != "user"
+    ):
+        raise ArtifactContractError("Case user message is not unique")
+    content = messages[0].get("content")
+    if not isinstance(content, str) or not content:
+        raise ArtifactContractError("Case user message content is invalid")
+    return content
 
 
 def build_authenticated_case_expectations(
@@ -418,7 +438,9 @@ def build_authenticated_case_expectations(
         expected_observations=observations,
         expected_model_calls=model_calls,
         expected_presentation_model_calls=presentation_calls,
+        expected_message_content=_trusted_message_content_for_case(case),
         expected_tool_registry_version=version,
+        expected_model_visible_toolset_hash=(_EXPECTED_MODEL_VISIBLE_TOOLSET_HASH),
         required_trace_events=required,
         forbidden_trace_events=forbidden,
         expected_event_counts=counts,

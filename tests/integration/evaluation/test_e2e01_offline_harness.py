@@ -12,6 +12,7 @@ import pytest
 from mini_agent.application.ports import EvalResultPort, ModelProvider
 from mini_agent.application.records import (
     AgentRunResult,
+    ConversationRecord,
     CriticalFailureCode,
     EvalExecutionFailurePhase,
     EvalExecutionFailureRecord,
@@ -22,6 +23,8 @@ from mini_agent.application.records import (
     EvalResultRecord,
     EvalResultStatus,
     InsertOnlyWriteResult,
+    MessageDirection,
+    MessageRecord,
 )
 from mini_agent.core.memory import (
     ContextManifest,
@@ -50,12 +53,14 @@ from mini_agent.core.task_state import (
 from mini_agent.core.tool_system import (
     GateDecision,
     GateReasonCode,
+    ModelVisibleToolsetArtifact,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
     ToolSpec,
     compute_model_visible_toolset_hash,
+    get_order_tool_spec,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -101,22 +106,7 @@ NOW = datetime(2026, 7, 27, 9, 0, tzinfo=UTC)
 
 
 def _tool_spec() -> ToolSpec:
-    return ToolSpec(
-        name="get_order",
-        description="查询当前用户订单。",
-        input_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {"order_id": {"type": "string"}},
-            "required": ["order_id"],
-        },
-        output_schema={
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {"outcome": {"type": "string"}},
-            "required": ["outcome"],
-        },
-    )
+    return get_order_tool_spec()
 
 
 def _request(case: EvalCaseArtifact) -> RequestUnderstandingInput:
@@ -301,11 +291,21 @@ def _synthetic_trace(
                 values["message_ref"] = message_ref
             elif event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED:
                 manifest = manifests[manifest_index]
+                request_understanding_calls = (
+                    expectations.expected_model_calls
+                    - expectations.expected_presentation_model_calls
+                )
+                model_call_purpose = (
+                    "REQUEST_UNDERSTANDING"
+                    if manifest_index < request_understanding_calls
+                    else "PRESENTATION"
+                )
                 manifest_index += 1
                 values.update(
                     {
                         "context_manifest_id": manifest.context_manifest_id,
                         "model_call_id": manifest.model_call_id,
+                        "model_call_purpose": model_call_purpose,
                         "tool_registry_version": (manifest.tool_registry_version),
                         "model_visible_toolset_hash": (
                             manifest.model_visible_toolset_hash
@@ -460,6 +460,7 @@ class SyntheticSut:
             else _case_uuid(case.case_id, "trace")
         )
         message_ref = request_output.message_ref
+        conversation_id = _case_uuid(case.case_id, "conversation")
         binding: InputBinding | None = None
         task: TaskRecord | None = None
         request_unit: RequestUnitRecord | None = None
@@ -599,14 +600,18 @@ class SyntheticSut:
                     observation.observation_id if observation is not None else None
                 ),
             )
+        request_understanding_calls = (
+            expectations.expected_model_calls
+            - expectations.expected_presentation_model_calls
+        )
         manifests = tuple(
             ContextManifest(
                 context_manifest_id=context_id,
                 run_id=run_id,
                 model_call_id=model_call_ids[index],
                 tool_registry_version=(expectations.expected_tool_registry_version),
-                model_visible_toolset_hash=compute_model_visible_toolset_hash(
-                    (_tool_spec(),)
+                model_visible_toolset_hash=(
+                    expectations.expected_model_visible_toolset_hash
                 ),
                 selected_message_refs=(message_ref,),
                 task_state_ref_and_version=(
@@ -614,7 +619,7 @@ class SyntheticSut:
                         task_id=task.task_id,
                         state_version=1,
                     )
-                    if task is not None
+                    if task is not None and index >= request_understanding_calls
                     else None
                 ),
                 observation_refs_and_versions=(
@@ -624,7 +629,7 @@ class SyntheticSut:
                             version="order-v7",
                         ),
                     )
-                    if observation is not None and index == len(context_ids) - 1
+                    if observation is not None and index >= request_understanding_calls
                     else ()
                 ),
                 redaction_policy_version="p0-redaction-v1",
@@ -664,6 +669,7 @@ class SyntheticSut:
             "safe_observable": observable,
             "run_record": AgentRunRecord(
                 run_id=run_id,
+                conversation_id=conversation_id,
                 status=expectations.expected_run_status,
                 provider_lane="offline_gate",
                 started_at=NOW,
@@ -675,6 +681,24 @@ class SyntheticSut:
                 outcome=expectations.expected_outcome,
                 message=_synthetic_message(expectations, observation),
             ),
+            "conversation_records": (
+                ConversationRecord(
+                    schema_version="conversation_record.p0.v1",
+                    conversation_id=conversation_id,
+                    owner_customer_id=expectations.trusted_customer_id,
+                    created_at=NOW,
+                ),
+            ),
+            "message_records": (
+                MessageRecord(
+                    schema_version="message_record.p0.v1",
+                    message_id=message_ref,
+                    conversation_id=conversation_id,
+                    direction=MessageDirection.USER,
+                    content=expectations.expected_message_content,
+                    received_at=NOW,
+                ),
+            ),
             "request_understanding_output": request_output,
             "input_bindings": (binding,) if binding is not None else (),
             "task_records": (task,) if task is not None else (),
@@ -683,6 +707,14 @@ class SyntheticSut:
             "tool_calls": (tool_call,) if tool_call is not None else (),
             "observations": ((observation,) if observation is not None else ()),
             "context_manifests": manifests,
+            "model_visible_toolset_artifacts": (
+                ModelVisibleToolsetArtifact(
+                    model_visible_toolset_hash=(
+                        expectations.expected_model_visible_toolset_hash
+                    ),
+                    provider_visible_tool_specs=(get_order_tool_spec(),),
+                ),
+            ),
             "schema_assertions_pass": True,
             "identity_boundary_assertions_pass": True,
             "request_understanding_assertions_pass": True,
@@ -798,6 +830,25 @@ def test_complete_case_appends_graded_reloads_then_persists_pass() -> None:
     ) == 1
 
 
+def test_authenticated_expectations_pin_message_and_toolset_projection() -> None:
+    case = ARTIFACTS.case_by_id("E2E01-01")
+    script_ref = tuple(case.input["model_script_refs"])[0]
+    script = ARTIFACTS.script_by_ref(script_ref)
+
+    expectations = build_authenticated_case_expectations(
+        artifacts=ARTIFACTS,
+        case=case,
+        script=script,
+    )
+
+    assert (
+        expectations.expected_message_content == (case.input["messages"][0]["content"])
+    )
+    assert expectations.expected_model_visible_toolset_hash == (
+        compute_model_visible_toolset_hash((get_order_tool_spec(),))
+    )
+
+
 def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None:
     traces = InMemoryTraceCallbacks()
     sut = SyntheticSut(
@@ -811,6 +862,46 @@ def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None
     assert outcome.execution_failures == ()
     assert outcome.results[0].status is EvalResultStatus.FAIL
     assert CriticalFailureCode.CF_14 in outcome.results[0].critical_failures
+
+
+@pytest.mark.parametrize(
+    ("event_type", "update"),
+    [
+        (
+            TraceEventType.MESSAGE_ACCEPTED,
+            {"message_ref": UUID(int=993)},
+        ),
+        (
+            TraceEventType.CONTEXT_MANIFEST_RECORDED,
+            {"model_visible_toolset_hash": f"sha256:{'b' * 64}"},
+        ),
+    ],
+)
+def test_physical_trace_reload_rejects_unresolved_authoritative_refs(
+    event_type: TraceEventType,
+    update: dict[str, object],
+) -> None:
+    class TamperingTraceCallbacks(InMemoryTraceCallbacks):
+        async def reload_trace(
+            self,
+            trace_ref: UUID,
+        ) -> tuple[TraceEvent, ...]:
+            events = await super().reload_trace(trace_ref)
+            return tuple(
+                event.model_copy(update=update)
+                if event.event_type is event_type
+                else event
+                for event in events
+            )
+
+    traces = TamperingTraceCallbacks()
+    harness, *_ = _harness(traces=traces)
+    outcome = _run(harness)
+
+    assert outcome.command_passed is False
+    assert outcome.execution_failures == ()
+    assert outcome.results[0].status is EvalResultStatus.FAIL
+    assert CriticalFailureCode.CF_12 in outcome.results[0].critical_failures
 
 
 @pytest.mark.parametrize(

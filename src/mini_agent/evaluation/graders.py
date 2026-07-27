@@ -13,11 +13,14 @@ from pydantic import Field, model_validator
 
 from mini_agent.application.records import (
     AgentRunResult,
+    ConversationRecord,
     CriticalFailureCode,
     EvalGraderReasonCode,
     EvalGraderResult,
     EvalGraderStatus,
     EvalResultStatus,
+    MessageDirection,
+    MessageRecord,
 )
 from mini_agent.core.common import AuditOnlyModel
 from mini_agent.core.memory import (
@@ -41,9 +44,12 @@ from mini_agent.core.tool_system import (
     GateDecision,
     GateDecisionValue,
     GateReasonCode,
+    ModelVisibleToolsetArtifact,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
+    ToolsetHash,
+    compute_model_visible_toolset_hash,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -128,7 +134,9 @@ class EvalCaseExpectations(AuditOnlyModel):
     expected_observations: Annotated[int, Field(ge=0)]
     expected_model_calls: Annotated[int, Field(ge=0)]
     expected_presentation_model_calls: Annotated[int, Field(ge=0)]
+    expected_message_content: str
     expected_tool_registry_version: str
+    expected_model_visible_toolset_hash: ToolsetHash
     required_trace_events: tuple[TraceEventType, ...]
     forbidden_trace_events: tuple[TraceEventType, ...] = ()
     expected_event_counts: tuple[TraceEventCountExpectation, ...] = ()
@@ -183,6 +191,15 @@ class EvalCaseExpectations(AuditOnlyModel):
             raise ValueError(
                 "Gate expectation requires an exact validated Task version"
             )
+        if self.expected_presentation_model_calls > self.expected_model_calls:
+            raise ValueError("presentation calls cannot exceed total model calls")
+        if self.expected_presentation_model_calls > 1:
+            raise ValueError("thin-slice presentation call count must be zero or one")
+        if self.expected_presentation_model_calls and (
+            self.expected_task_status is None
+            or self.expected_validated_task_state_version is None
+        ):
+            raise ValueError("presentation expectation requires an exact Task snapshot")
         return self
 
 
@@ -214,6 +231,8 @@ class EvalEvidence(AuditOnlyModel):
     toolset_replay_assertions_pass: bool | None = None
     run_record: AgentRunRecord | None = None
     agent_result: AgentRunResult | None = None
+    conversation_records: tuple[ConversationRecord, ...] = ()
+    message_records: tuple[MessageRecord, ...] = ()
     request_understanding_output: RequestUnderstandingOutput | None = None
     input_bindings: tuple[InputBinding, ...] = ()
     task_records: tuple[TaskRecord, ...] = ()
@@ -222,10 +241,13 @@ class EvalEvidence(AuditOnlyModel):
     tool_calls: tuple[ToolCallRecord, ...] = ()
     observations: tuple[OrderObservation, ...] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
+    model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
 
     @model_validator(mode="after")
     def evidence_sets_are_unambiguous(self) -> "EvalEvidence":
         identity_sets: tuple[tuple[object, ...], ...] = (
+            tuple(item.conversation_id for item in self.conversation_records),
+            tuple(item.message_id for item in self.message_records),
             tuple(item.binding_id for item in self.input_bindings),
             tuple(item.task_id for item in self.task_records),
             tuple(item.request_unit_id for item in self.request_units),
@@ -233,6 +255,10 @@ class EvalEvidence(AuditOnlyModel):
             tuple(item.tool_call_id for item in self.tool_calls),
             tuple(item.observation_id for item in self.observations),
             tuple(item.context_manifest_id for item in self.context_manifests),
+            tuple(
+                item.model_visible_toolset_hash
+                for item in self.model_visible_toolset_artifacts
+            ),
         )
         if any(len(values) != len(set(values)) for values in identity_sets):
             raise ValueError("typed Eval evidence identities must be unique")
@@ -297,6 +323,22 @@ class IdentityBoundaryGrader:
         expectations: EvalCaseExpectations,
     ) -> EvalGraderResult:
         _validate_grader_inputs(evidence, expectations)
+        if not evidence.conversation_records or not evidence.message_records:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if (
+            len(evidence.conversation_records) != 1
+            or len(evidence.message_records) != 1
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        conversation = evidence.conversation_records[0]
+        message = evidence.message_records[0]
+        if (
+            conversation.owner_customer_id != expectations.trusted_customer_id
+            or message.conversation_id != conversation.conversation_id
+            or message.direction is not MessageDirection.USER
+            or message.content != expectations.expected_message_content
+        ):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         if expectations.expected_task_status is None:
             if evidence.task_records:
                 return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
@@ -425,6 +467,206 @@ class TaskStateGrader:
         return _passed(self.name)
 
 
+_REQUEST_UNDERSTANDING_PURPOSE = "REQUEST_UNDERSTANDING"
+_PRESENTATION_PURPOSE = "PRESENTATION"
+
+
+def _closed_record_count_reason(
+    actual: int,
+    expected: int,
+) -> EvalGraderReasonCode | None:
+    if actual < expected:
+        return EvalGraderReasonCode.MISSING_RECORD
+    if actual > expected:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _conversation_graph_reason(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> EvalGraderReasonCode | None:
+    for records in (
+        evidence.conversation_records,
+        evidence.message_records,
+    ):
+        count_reason = _closed_record_count_reason(len(records), 1)
+        if count_reason is not None:
+            return count_reason
+    if evidence.run_record is None:
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    conversation = evidence.conversation_records[0]
+    message = evidence.message_records[0]
+    if (
+        conversation.schema_version != "conversation_record.p0.v1"
+        or conversation.owner_customer_id != expectations.trusted_customer_id
+        or message.schema_version != "message_record.p0.v1"
+        or message.conversation_id != conversation.conversation_id
+        or message.direction is not MessageDirection.USER
+        or message.content != expectations.expected_message_content
+        or evidence.run_record.conversation_id != conversation.conversation_id
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    message_ref = message.message_id
+    output = evidence.request_understanding_output
+    if output is not None and output.message_ref != message_ref:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if any(
+        binding.source_refs != (message_ref,) for binding in evidence.input_bindings
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if any(unit.goal_source_refs != (message_ref,) for unit in evidence.request_units):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _context_manifest_graph_reason(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> EvalGraderReasonCode | None:
+    count_reason = _closed_record_count_reason(
+        len(evidence.context_manifests),
+        expectations.expected_model_calls,
+    )
+    if count_reason is not None:
+        return count_reason
+    context_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    )
+    count_reason = _closed_record_count_reason(
+        len(context_events),
+        expectations.expected_model_calls,
+    )
+    if count_reason is not None:
+        return count_reason
+    if not evidence.context_manifests:
+        return None
+    if evidence.run_record is None or len(evidence.message_records) != 1:
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    required_event_fields = tuple(
+        (
+            event.context_manifest_id,
+            event.model_call_id,
+            event.model_call_purpose,
+            event.tool_registry_version,
+            event.model_visible_toolset_hash,
+        )
+        for event in context_events
+    )
+    if any(any(value is None for value in values) for values in required_event_fields):
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    event_manifest_ids = tuple(event.context_manifest_id for event in context_events)
+    event_model_call_ids = tuple(event.model_call_id for event in context_events)
+    if len(event_manifest_ids) != len(set(event_manifest_ids)) or len(
+        event_model_call_ids
+    ) != len(set(event_model_call_ids)):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    expected_purpose_counts = Counter(
+        {
+            _REQUEST_UNDERSTANDING_PURPOSE: (
+                expectations.expected_model_calls
+                - expectations.expected_presentation_model_calls
+            ),
+            _PRESENTATION_PURPOSE: expectations.expected_presentation_model_calls,
+        }
+    )
+    actual_purpose_counts = Counter(
+        event.model_call_purpose for event in context_events
+    )
+    if actual_purpose_counts != +expected_purpose_counts:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    manifests_by_id = {
+        manifest.context_manifest_id: manifest
+        for manifest in evidence.context_manifests
+    }
+    if set(event_manifest_ids) != set(manifests_by_id):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    task_ids = {task.task_id for task in evidence.task_records}
+    observation_by_id = {
+        observation.observation_id: observation for observation in evidence.observations
+    }
+    expected_observation_refs = tuple(
+        (
+            observation.observation_id,
+            observation.source_version,
+        )
+        for observation in evidence.observations
+    )
+    message_ref = evidence.message_records[0].message_id
+    expected_task_version = expectations.expected_validated_task_state_version
+
+    purpose_by_manifest_id = {
+        event.context_manifest_id: event.model_call_purpose for event in context_events
+    }
+    if any(
+        purpose_by_manifest_id.get(gate.context_manifest_id)
+        != _REQUEST_UNDERSTANDING_PURPOSE
+        for gate in evidence.gate_decisions
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+
+    for event in context_events:
+        assert event.context_manifest_id is not None
+        assert event.model_call_id is not None
+        assert event.model_call_purpose is not None
+        manifest = manifests_by_id[event.context_manifest_id]
+        if (
+            manifest.run_id != evidence.run_record.run_id
+            or manifest.model_call_id != event.model_call_id
+            or manifest.selected_message_refs != (message_ref,)
+            or manifest.tool_registry_version
+            != expectations.expected_tool_registry_version
+            or manifest.model_visible_toolset_hash
+            != expectations.expected_model_visible_toolset_hash
+            or manifest.evidence_refs_and_versions
+            or manifest.action_record_refs
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+
+        if event.model_call_purpose == _REQUEST_UNDERSTANDING_PURPOSE:
+            if (
+                manifest.task_state_ref_and_version is not None
+                or manifest.observation_refs_and_versions
+            ):
+                return EvalGraderReasonCode.ASSERTION_FAILED
+            continue
+
+        task_ref = manifest.task_state_ref_and_version
+        if task_ref is None:
+            return EvalGraderReasonCode.MISSING_RECORD
+        if (
+            len(task_ids) != 1
+            or task_ref.task_id not in task_ids
+            or task_ref.state_version != expected_task_version
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        actual_observation_refs = tuple(
+            (item.record_ref, item.version)
+            for item in manifest.observation_refs_and_versions
+        )
+        if len(actual_observation_refs) < len(expected_observation_refs):
+            return EvalGraderReasonCode.MISSING_RECORD
+        if (
+            len(actual_observation_refs) > len(expected_observation_refs)
+            or actual_observation_refs != expected_observation_refs
+            or any(
+                ref not in observation_by_id
+                or observation_by_id[ref].source_version != version
+                for ref, version in actual_observation_refs
+            )
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+
+    return None
+
+
 def _tool_graph_is_closed(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
@@ -462,10 +704,10 @@ def _tool_graph_is_closed(
         or manifest.model_call_id != gate.model_call_id
         or manifest.selected_message_refs
         != (evidence.request_understanding_output.message_ref,)
-        or manifest.task_state_ref_and_version is None
-        or manifest.task_state_ref_and_version.task_id != task.task_id
-        or manifest.task_state_ref_and_version.state_version != expected_version
+        or manifest.task_state_ref_and_version is not None
         or manifest.observation_refs_and_versions
+        or manifest.model_visible_toolset_hash
+        != expectations.expected_model_visible_toolset_hash
         or manifest.tool_registry_version != expectations.expected_tool_registry_version
         or gate.decision is not expectations.expected_gate_decision
         or gate.reason_code is not expectations.expected_gate_reason
@@ -796,6 +1038,9 @@ class PersistenceGrader:
         _validate_grader_inputs(evidence, expectations)
         if evidence.run_record is None:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        conversation_reason = _conversation_graph_reason(evidence, expectations)
+        if conversation_reason is not None:
+            return _failed(self.name, conversation_reason)
         if expectations.expected_task_status is not None and (
             not evidence.task_records
             or not evidence.request_units
@@ -808,6 +1053,18 @@ class PersistenceGrader:
             or len(evidence.input_bindings) != 1
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        observation_reason = _closed_record_count_reason(
+            len(evidence.observations),
+            expectations.expected_observations,
+        )
+        if observation_reason is not None:
+            return _failed(self.name, observation_reason)
+        manifest_reason = _context_manifest_graph_reason(
+            evidence,
+            expectations,
+        )
+        if manifest_reason is not None:
+            return _failed(self.name, manifest_reason)
         if expectations.expected_gate_decision is not None:
             if not evidence.gate_decisions:
                 return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
@@ -874,11 +1131,34 @@ class ToolsetReplayGrader:
             )
             return _failed(self.name, reason)
         if not manifests:
-            return _passed(self.name)
-        hashes = {item.model_visible_toolset_hash for item in manifests}
-        if len(hashes) != 1 or any(
-            item.tool_registry_version != expectations.expected_tool_registry_version
-            for item in manifests
+            return (
+                _passed(self.name)
+                if not evidence.model_visible_toolset_artifacts
+                else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+            )
+        artifacts = evidence.model_visible_toolset_artifacts
+        if not artifacts:
+            return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+        if len(artifacts) != 1:
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        artifact = artifacts[0]
+        try:
+            recomputed_hash = compute_model_visible_toolset_hash(
+                artifact.provider_visible_tool_specs
+            )
+        except (TypeError, ValueError):
+            return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
+        if (
+            artifact.model_visible_toolset_hash != recomputed_hash
+            or recomputed_hash != expectations.expected_model_visible_toolset_hash
+            or any(
+                item.model_visible_toolset_hash != recomputed_hash for item in manifests
+            )
+            or any(
+                item.tool_registry_version
+                != expectations.expected_tool_registry_version
+                for item in manifests
+            )
         ):
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         trace_projection = {
@@ -922,20 +1202,15 @@ def _trace_references_match_typed_records(
     expectations: EvalCaseExpectations,
 ) -> bool:
     events = evidence.trace_events
-    message_refs = {
-        ref
-        for manifest in evidence.context_manifests
-        for ref in manifest.selected_message_refs
-    } | {ref for binding in evidence.input_bindings for ref in binding.source_refs}
-    if evidence.request_understanding_output is not None:
-        message_refs.add(evidence.request_understanding_output.message_ref)
+    message_refs = {item.message_id for item in evidence.message_records}
     task_ids = {item.task_id for item in evidence.task_records}
     request_unit_ids = {item.request_unit_id for item in evidence.request_units}
     binding_ids = {item.binding_id for item in evidence.input_bindings}
     manifest_ids = {item.context_manifest_id for item in evidence.context_manifests}
     model_call_ids = {item.model_call_id for item in evidence.context_manifests}
     toolset_hashes = {
-        item.model_visible_toolset_hash for item in evidence.context_manifests
+        item.model_visible_toolset_hash
+        for item in evidence.model_visible_toolset_artifacts
     }
     tool_call_ids = {item.tool_call_id for item in evidence.tool_calls}
     observation_ids = {item.observation_id for item in evidence.observations}
@@ -965,9 +1240,10 @@ def _trace_references_match_typed_records(
             and event.model_call_id not in model_call_ids
         ):
             return False
-        if (
-            event.model_visible_toolset_hash is not None
-            and event.model_visible_toolset_hash not in toolset_hashes
+        if event.model_visible_toolset_hash is not None and (
+            event.model_visible_toolset_hash not in toolset_hashes
+            or event.model_visible_toolset_hash
+            != expectations.expected_model_visible_toolset_hash
         ):
             return False
         if any(ref not in binding_ids for ref in event.argument_binding_refs):
@@ -998,6 +1274,13 @@ def _trace_references_match_typed_records(
     }
     if binding_refs != {item.binding_id for item in evidence.input_bindings}:
         return False
+    message_event_refs = tuple(
+        event.message_ref
+        for event in events
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+    )
+    if Counter(message_event_refs) != Counter(message_refs):
+        return False
 
     context_projection = {
         (
@@ -1018,6 +1301,32 @@ def _trace_references_match_typed_records(
         )
         for item in evidence.context_manifests
     }:
+        return False
+    context_events = tuple(
+        event
+        for event in events
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    )
+    if any(event.model_call_purpose is None for event in context_events) or Counter(
+        event.model_call_purpose for event in context_events
+    ) != +Counter(
+        {
+            _REQUEST_UNDERSTANDING_PURPOSE: (
+                expectations.expected_model_calls
+                - expectations.expected_presentation_model_calls
+            ),
+            _PRESENTATION_PURPOSE: (expectations.expected_presentation_model_calls),
+        }
+    ):
+        return False
+    purpose_by_manifest_id = {
+        event.context_manifest_id: event.model_call_purpose for event in context_events
+    }
+    if any(
+        purpose_by_manifest_id.get(gate.context_manifest_id)
+        != _REQUEST_UNDERSTANDING_PURPOSE
+        for gate in evidence.gate_decisions
+    ):
         return False
 
     lifecycle_types = {

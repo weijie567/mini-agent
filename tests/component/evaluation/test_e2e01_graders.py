@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -7,11 +8,14 @@ import pytest
 
 from mini_agent.application.records import (
     AgentRunResult,
+    ConversationRecord,
     CriticalFailureCode,
     EvalGraderReasonCode,
     EvalGraderResult,
     EvalGraderStatus,
     EvalResultStatus,
+    MessageDirection,
+    MessageRecord,
 )
 from mini_agent.core.memory import (
     ContextManifest,
@@ -46,9 +50,12 @@ from mini_agent.core.task_state import (
 from mini_agent.core.tool_system import (
     GateDecision,
     GateDecisionValue,
+    ModelVisibleToolsetArtifact,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
+    compute_model_visible_toolset_hash,
+    get_order_tool_spec,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -75,6 +82,7 @@ from mini_agent.evaluation.graders import (
 
 RUN_ID = UUID("00000000-0000-4000-8000-000000000501")
 OTHER_RUN_ID = UUID("00000000-0000-4000-8000-000000000599")
+CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000500")
 TRACE_REF = UUID("00000000-0000-4000-8000-000000000502")
 MESSAGE_REF = UUID("00000000-0000-4000-8000-000000000503")
 CANDIDATE_ID = UUID("00000000-0000-4000-8000-000000000504")
@@ -89,9 +97,10 @@ GATE_ID = UUID("00000000-0000-4000-8000-000000000512")
 TOOL_CALL_ID = UUID("00000000-0000-4000-8000-000000000513")
 OBSERVATION_ID = UUID("00000000-0000-4000-8000-000000000514")
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
-TOOLSET_HASH = f"sha256:{'a' * 64}"
+TOOLSET_HASH = compute_model_visible_toolset_hash((get_order_tool_spec(),))
 
 REQUIRED_EVENTS = (
+    TraceEventType.MESSAGE_ACCEPTED,
     TraceEventType.RUN_STARTED,
     TraceEventType.CONTEXT_MANIFEST_RECORDED,
     TraceEventType.INPUT_BINDING_RECORDED,
@@ -145,7 +154,9 @@ def _expectations(**overrides: object) -> EvalCaseExpectations:
         "expected_observations": 1,
         "expected_model_calls": 2,
         "expected_presentation_model_calls": 1,
+        "expected_message_content": "订单 O-1001 状态怎么样？",
         "expected_tool_registry_version": "e2e01-thin-tools-v1",
+        "expected_model_visible_toolset_hash": TOOLSET_HASH,
         "required_trace_events": REQUIRED_EVENTS,
         "forbidden_trace_events": (TraceEventType.TOOL_CALL_FAILED,),
         "expected_event_counts": (
@@ -233,6 +244,7 @@ def _manifest(
     context_id: UUID,
     model_call_id: UUID,
     toolset_hash: str = TOOLSET_HASH,
+    include_task: bool = False,
     include_observation: bool = False,
 ) -> ContextManifest:
     return ContextManifest(
@@ -242,9 +254,13 @@ def _manifest(
         tool_registry_version="e2e01-thin-tools-v1",
         model_visible_toolset_hash=toolset_hash,
         selected_message_refs=(MESSAGE_REF,),
-        task_state_ref_and_version=TaskStateRefAndVersion(
-            task_id=TASK_ID,
-            state_version=1,
+        task_state_ref_and_version=(
+            TaskStateRefAndVersion(
+                task_id=TASK_ID,
+                state_version=1,
+            )
+            if include_task
+            else None
         ),
         observation_refs_and_versions=(
             (
@@ -281,10 +297,15 @@ def _trace(
             {
                 "context_manifest_id": (CONTEXT_1 if context_index == 1 else CONTEXT_2),
                 "model_call_id": (MODEL_CALL_1 if context_index == 1 else MODEL_CALL_2),
+                "model_call_purpose": (
+                    "REQUEST_UNDERSTANDING" if context_index == 1 else "PRESENTATION"
+                ),
                 "tool_registry_version": "e2e01-thin-tools-v1",
                 "model_visible_toolset_hash": TOOLSET_HASH,
             }
         )
+    elif event_type is TraceEventType.MESSAGE_ACCEPTED:
+        values["message_ref"] = MESSAGE_REF
     elif event_type is TraceEventType.INPUT_BINDING_RECORDED:
         values["input_binding_ref"] = BINDING_ID
     elif event_type is TraceEventType.GATE_DECISION_RECORDED:
@@ -319,6 +340,7 @@ def _trace(
 
 def _trace_events() -> tuple[TraceEvent, ...]:
     return (
+        _trace(TraceEventType.MESSAGE_ACCEPTED, offset=0),
         _trace(TraceEventType.RUN_STARTED, offset=1),
         _trace(
             TraceEventType.CONTEXT_MANIFEST_RECORDED,
@@ -380,6 +402,7 @@ def _evidence(**overrides: object) -> EvalEvidence:
         ),
         "run_record": AgentRunRecord(
             run_id=RUN_ID,
+            conversation_id=CONVERSATION_ID,
             status=AgentRunStatus.COMPLETED,
             provider_lane="offline_gate",
             started_at=NOW,
@@ -390,6 +413,24 @@ def _evidence(**overrides: object) -> EvalEvidence:
             run_id=RUN_ID,
             outcome=AgentOutcome.COMPLETED,
             message=_rendered_message(observation),
+        ),
+        "conversation_records": (
+            ConversationRecord(
+                schema_version="conversation_record.p0.v1",
+                conversation_id=CONVERSATION_ID,
+                owner_customer_id="customer-A",
+                created_at=NOW,
+            ),
+        ),
+        "message_records": (
+            MessageRecord(
+                schema_version="message_record.p0.v1",
+                message_id=MESSAGE_REF,
+                conversation_id=CONVERSATION_ID,
+                direction=MessageDirection.USER,
+                content="订单 O-1001 状态怎么样？",
+                received_at=NOW,
+            ),
         ),
         "request_understanding_output": _request_understanding(),
         "input_bindings": (
@@ -484,7 +525,14 @@ def _evidence(**overrides: object) -> EvalEvidence:
             _manifest(
                 context_id=CONTEXT_2,
                 model_call_id=MODEL_CALL_2,
+                include_task=True,
                 include_observation=True,
+            ),
+        ),
+        "model_visible_toolset_artifacts": (
+            ModelVisibleToolsetArtifact(
+                model_visible_toolset_hash=TOOLSET_HASH,
+                provider_visible_tool_specs=(get_order_tool_spec(),),
             ),
         ),
     }
@@ -606,6 +654,7 @@ def _tampered(grader_name: str) -> EvalEvidence:
             context_id=CONTEXT_2,
             model_call_id=MODEL_CALL_2,
             toolset_hash=f"sha256:{'b' * 64}",
+            include_task=True,
             include_observation=True,
         )
         return _evidence(context_manifests=(evidence.context_manifests[0], manifest))
@@ -685,6 +734,307 @@ def test_tool_call_grader_closes_gate_and_tool_call_graph(
 
     assert result.status is EvalGraderStatus.FAIL
     assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    "grader_name",
+    ("ToolCallGrader", "PersistenceGrader"),
+)
+def test_first_new_goal_manifest_cannot_claim_task_state(
+    grader_name: str,
+) -> None:
+    evidence = _evidence()
+    first_manifest = evidence.context_manifests[0].model_copy(
+        update={
+            "task_state_ref_and_version": TaskStateRefAndVersion(
+                task_id=TASK_ID,
+                state_version=1,
+            )
+        }
+    )
+
+    result = grader_registry()[grader_name].grade(
+        _evidence(
+            context_manifests=(
+                first_manifest,
+                evidence.context_manifests[1],
+            )
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    "manifest_update",
+    [
+        {
+            "task_state_ref_and_version": TaskStateRefAndVersion(
+                task_id=UUID(int=920),
+                state_version=1,
+            )
+        },
+        {
+            "task_state_ref_and_version": TaskStateRefAndVersion(
+                task_id=TASK_ID,
+                state_version=999,
+            )
+        },
+        {
+            "observation_refs_and_versions": (
+                VersionedRecordRef(
+                    record_ref=UUID(int=921),
+                    version="order-v7",
+                ),
+            )
+        },
+        {
+            "observation_refs_and_versions": (
+                VersionedRecordRef(
+                    record_ref=OBSERVATION_ID,
+                    version="order-v999",
+                ),
+            )
+        },
+    ],
+)
+def test_persistence_grader_closes_presentation_manifest_internal_refs(
+    manifest_update: dict[str, object],
+) -> None:
+    evidence = _evidence()
+    presentation_manifest = evidence.context_manifests[1].model_copy(
+        update=manifest_update
+    )
+
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(
+            context_manifests=(
+                evidence.context_manifests[0],
+                presentation_manifest,
+            )
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    "manifest_update",
+    [
+        {"task_state_ref_and_version": None},
+        {"observation_refs_and_versions": ()},
+    ],
+)
+def test_persistence_grader_classifies_missing_presentation_refs(
+    manifest_update: dict[str, object],
+) -> None:
+    evidence = _evidence()
+    presentation_manifest = evidence.context_manifests[1].model_copy(
+        update=manifest_update
+    )
+
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(
+            context_manifests=(
+                evidence.context_manifests[0],
+                presentation_manifest,
+            )
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+@pytest.mark.parametrize(
+    ("purpose", "expected_reason"),
+    [
+        (None, EvalGraderReasonCode.MISSING_RECORD),
+        ("REQUEST_UNDERSTANDING", EvalGraderReasonCode.ASSERTION_FAILED),
+    ],
+)
+def test_manifest_purpose_is_required_and_authenticated_by_expected_counts(
+    purpose: str | None,
+    expected_reason: EvalGraderReasonCode,
+) -> None:
+    trace_events = tuple(
+        event.model_copy(update={"model_call_purpose": purpose})
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+        and event.context_manifest_id == CONTEXT_2
+        else event
+        for event in _trace_events()
+    )
+
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(trace_events=trace_events),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is expected_reason
+
+
+def test_manifest_purpose_is_bound_by_gate_graph_not_tuple_order() -> None:
+    evidence = _evidence()
+    reordered = grader_registry()["PersistenceGrader"].grade(
+        _evidence(context_manifests=tuple(reversed(evidence.context_manifests))),
+        _expectations(),
+    )
+    assert reordered.status is EvalGraderStatus.PASS
+
+    swapped_purposes = tuple(
+        event.model_copy(
+            update={
+                "model_call_purpose": (
+                    "PRESENTATION"
+                    if event.context_manifest_id == CONTEXT_1
+                    else "REQUEST_UNDERSTANDING"
+                )
+            }
+        )
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+        else event
+        for event in evidence.trace_events
+    )
+    swapped = grader_registry()["PersistenceGrader"].grade(
+        _evidence(trace_events=swapped_purposes),
+        _expectations(),
+    )
+
+    assert swapped.status is EvalGraderStatus.FAIL
+    assert swapped.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+@pytest.mark.parametrize(
+    ("manifests", "expected_reason"),
+    [
+        (
+            lambda evidence: (evidence.context_manifests[0],),
+            EvalGraderReasonCode.MISSING_RECORD,
+        ),
+        (
+            lambda evidence: (
+                *evidence.context_manifests,
+                evidence.context_manifests[1].model_copy(
+                    update={
+                        "context_manifest_id": UUID(int=922),
+                        "model_call_id": UUID(int=923),
+                    }
+                ),
+            ),
+            EvalGraderReasonCode.ASSERTION_FAILED,
+        ),
+    ],
+)
+def test_persistence_grader_distinguishes_missing_and_extra_manifests(
+    manifests: Callable[[EvalEvidence], tuple[ContextManifest, ...]],
+    expected_reason: EvalGraderReasonCode,
+) -> None:
+    evidence = _evidence()
+
+    result = grader_registry()["PersistenceGrader"].grade(
+        _evidence(context_manifests=manifests(evidence)),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is expected_reason
+
+
+@pytest.mark.parametrize(
+    "grader_name",
+    ("PersistenceGrader", "TraceCompletenessGrader"),
+)
+def test_message_refs_resolve_only_from_authoritative_message_record(
+    grader_name: str,
+) -> None:
+    evidence = _evidence()
+    foreign_message_ref = UUID(int=924)
+    assert evidence.request_understanding_output is not None
+    output = evidence.request_understanding_output
+    delta = output.task_delta_candidates[0]
+    input_candidate = delta.input_candidates[0].model_copy(
+        update={"source_ref": foreign_message_ref}
+    )
+    foreign_output = output.model_copy(
+        update={
+            "message_ref": foreign_message_ref,
+            "task_delta_candidates": (
+                delta.model_copy(update={"input_candidates": (input_candidate,)}),
+            ),
+        }
+    )
+    binding = evidence.input_bindings[0].model_copy(
+        update={"source_refs": (foreign_message_ref,)}
+    )
+    request_unit = evidence.request_units[0].model_copy(
+        update={"goal_source_refs": (foreign_message_ref,)}
+    )
+    manifests = tuple(
+        manifest.model_copy(update={"selected_message_refs": (foreign_message_ref,)})
+        for manifest in evidence.context_manifests
+    )
+    trace_events = tuple(
+        event.model_copy(update={"message_ref": foreign_message_ref})
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+        else event
+        for event in evidence.trace_events
+    )
+
+    result = grader_registry()[grader_name].grade(
+        _evidence(
+            request_understanding_output=foreign_output,
+            input_bindings=(binding,),
+            request_units=(request_unit,),
+            context_manifests=manifests,
+            trace_events=trace_events,
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_toolset_replay_rejects_consistent_untrusted_hash() -> None:
+    evidence = _evidence()
+    untrusted_hash = f"sha256:{'b' * 64}"
+    manifests = tuple(
+        manifest.model_copy(update={"model_visible_toolset_hash": untrusted_hash})
+        for manifest in evidence.context_manifests
+    )
+    trace_events = tuple(
+        event.model_copy(update={"model_visible_toolset_hash": untrusted_hash})
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+        else event
+        for event in evidence.trace_events
+    )
+
+    result = grader_registry()["ToolsetReplayGrader"].grade(
+        _evidence(
+            context_manifests=manifests,
+            trace_events=trace_events,
+        ),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_toolset_replay_requires_resolved_typed_artifact() -> None:
+    result = grader_registry()["ToolsetReplayGrader"].grade(
+        _evidence(model_visible_toolset_artifacts=()),
+        _expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
 
 
 def test_renderer_fact_grader_rejects_any_extra_unapproved_fact() -> None:
