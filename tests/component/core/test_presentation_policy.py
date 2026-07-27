@@ -125,4 +125,3 @@ def test_only_exact_safe_get_order_observation_provenance_is_accepted(
 ) -> None:
     with pytest.raises(PresentationPolicyError, match="safe Observation"):
         validate_presentation_plan(plan=_plan(), observation=observation)
-

@@ -857,4 +857,3 @@ def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -
     assert service.after_revalidation_hook is not None
     assert "script" not in vars(service)
     assert "fixture" not in vars(service)
-
