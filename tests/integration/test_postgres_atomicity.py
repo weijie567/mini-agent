@@ -5,7 +5,7 @@ import sys
 import threading
 from datetime import timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -21,6 +21,7 @@ from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     CreateRunCommand,
+    CreateToolCallCommand,
     DispatchToolCallCommand,
     InsertOnlyWriteResult,
     MarkRunIncompleteForRecoveryCommand,
@@ -96,6 +97,43 @@ def _encoded_record_set_for_dispatch(*, effect: ToolEffect):
     return tuple(envelopes), created_tool_call
 
 
+def _encoded_graph_and_new_tool_call():
+    envelopes = []
+    new_tool_call = None
+    for case in _record_cases():
+        record = case.record
+        logical_children = case.logical_children
+        if case.code is P0RecordCode.AGENT_RUN_RECORD:
+            record = record.model_copy(update={"status": AgentRunStatus.RUNNING})
+        elif case.code is P0RecordCode.RUN_TASK_LINK_RECORD:
+            record = record.model_copy(update={"result_task_state_version": None})
+        elif case.code is P0RecordCode.TOOL_CALL_RECORD:
+            record = record.model_copy(
+                update={
+                    "status": ToolCallStatus.INTERRUPTED,
+                    "finished_at": record.started_at + timedelta(milliseconds=1),
+                    "interruption_reason": "PROCESS_RESTART_DETECTED",
+                }
+            )
+            new_tool_call = case.record.model_copy(
+                update={
+                    "tool_call_id": uuid4(),
+                    "attempt_count": 0,
+                    "status": ToolCallStatus.CREATED,
+                }
+            )
+        envelopes.append(
+            encode_persistence_record(
+                case.code,
+                record,
+                external_references=case.external_references,
+                logical_children=logical_children,
+            )
+        )
+    assert new_tool_call is not None
+    return tuple(envelopes), CreateToolCallCommand(created_record=new_tool_call)
+
+
 async def _seed_initial_graph_prerequisites(
     adapter: PostgresRecordAdapter,
 ):
@@ -139,6 +177,44 @@ def _empty_graph_recovery_command(closure) -> ApplyRestartRecoveryCommand:
         tool_call_transitions=(),
         task_transitions=(),
         terminal_run_task_links=(),
+        recovery_trace_events=_recovery_trace_events(
+            run_transition=run_transition,
+            task_transitions=(),
+            tool_call_transitions=(),
+        ),
+    )
+
+
+def _linked_graph_recovery_command(closure) -> ApplyRestartRecoveryCommand:
+    completed_at = closure.active_run_record.started_at + timedelta(seconds=1)
+    run_transition = MarkRunIncompleteForRecoveryCommand(
+        expected_active_record=closure.active_run_record,
+        incomplete_record=closure.active_run_record.model_copy(
+            update={
+                "status": AgentRunStatus.INCOMPLETE,
+                "completed_at": completed_at,
+                "stop_reason": StopReason.PROCESS_RESTART_DETECTED,
+            }
+        ),
+    )
+    terminal_links = tuple(
+        link.model_copy(
+            update={
+                "result_task_state_version": next(
+                    aggregate.task_record.state_version
+                    for aggregate in closure.task_aggregates
+                    if aggregate.task_record.task_id == link.task_id
+                )
+            }
+        )
+        for link in closure.run_task_links
+    )
+    return ApplyRestartRecoveryCommand(
+        expected_closure=closure,
+        run_transition=run_transition,
+        tool_call_transitions=(),
+        task_transitions=(),
+        terminal_run_task_links=terminal_links,
         recovery_trace_events=_recovery_trace_events(
             run_transition=run_transition,
             task_transitions=(),
@@ -432,6 +508,94 @@ async def test_recovery_rechecks_empty_closure_after_initial_graph_commits(
             )
     finally:
         initial_graph_committed.set()
+        engine.dispose()
+
+
+async def test_tool_call_insert_first_forces_recovery_conflict_without_orphan(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    start_barrier = threading.Barrier(2)
+    tool_write_staged = threading.Event()
+    recovery_started = threading.Event()
+    try:
+        envelopes, create_command = _encoded_graph_and_new_tool_call()
+        with session_factory.begin() as session:
+            records._persist_envelopes(session, envelopes)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        assert closure.tool_call_aggregates == ()
+        recovery_command = _linked_graph_recovery_command(closure)
+
+        original_touch_recovery_anchor = records._touch_recovery_anchor
+
+        def stage_tool_before_commit(session, run_row):
+            original_touch_recovery_anchor(session, run_row)
+            tool_write_staged.set()
+            assert recovery_started.wait(timeout=5)
+
+        monkeypatch.setattr(
+            records,
+            "_touch_recovery_anchor",
+            stage_tool_before_commit,
+        )
+
+        def insert_first():
+            start_barrier.wait(timeout=5)
+            return asyncio.run(records.insert_tool_call(create_command))
+
+        def recover_after_insert_is_staged():
+            start_barrier.wait(timeout=5)
+            assert tool_write_staged.wait(timeout=5)
+            recovery_started.set()
+            return asyncio.run(
+                recovery.claim_and_apply_restart_recovery(recovery_command)
+            )
+
+        insert_result, recovery_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(insert_first),
+                asyncio.to_thread(recover_after_insert_is_staged),
+            ),
+            timeout=15,
+        )
+
+        assert insert_result is InsertOnlyWriteResult.INSERTED
+        assert recovery_result is RecoveryWriteResult.CLOSURE_CONFLICT
+        with session_factory() as session:
+            run_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                    P0RecordModel.run_id
+                    == create_command.created_record.run_id,
+                )
+            )
+            tool_row = session.scalar(
+                select(P0RecordModel).where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TOOL_CALL_RECORD.value,
+                        P0RecordModel.logical_identity
+                        == [
+                            [
+                                "tool_call_id",
+                                str(
+                                    create_command.created_record.tool_call_id
+                                ),
+                            ]
+                        ],
+                    )
+                )
+            assert run_row is not None
+            assert tool_row is not None
+            assert run_row.lifecycle_status == AgentRunStatus.RUNNING.value
+            assert tool_row.lifecycle_status == ToolCallStatus.CREATED.value
+    finally:
+        recovery_started.set()
         engine.dispose()
 
 

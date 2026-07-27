@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import OperationalError
 
 from mini_agent.application.persistence import (
+    P0PersistenceIntegrityCategory,
     P0PersistenceIntegrityError,
     P0RecordCode,
     encode_persistence_record,
@@ -18,6 +22,7 @@ from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
     ConditionalWriteResult,
     CreateRunCommand,
+    CreateToolCallCommand,
     InterruptToolCallForRecoveryCommand,
     MarkRunIncompleteForRecoveryCommand,
     RecoveryWriteResult,
@@ -27,7 +32,10 @@ from mini_agent.core.tool_system import ToolCallStatus, ToolEffect
 from mini_agent.core.trace import AgentRunStatus, StopReason
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
-from mini_agent.infrastructure.persistence.models import P0RecordModel
+from mini_agent.infrastructure.persistence.models import (
+    P0RecordModel,
+    P0RecordReferenceModel,
+)
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
@@ -155,6 +163,56 @@ def _encoded_full_recovery_graph(*, effect: ToolEffect):
     return tuple(envelopes)
 
 
+def _encoded_graph_and_new_tool_call():
+    envelopes = []
+    new_tool_call = None
+    for case in _record_cases():
+        record = case.record
+        logical_children = case.logical_children
+        if case.code is P0RecordCode.AGENT_RUN_RECORD:
+            record = record.model_copy(update={"status": AgentRunStatus.RUNNING})
+        elif case.code is P0RecordCode.RUN_TASK_LINK_RECORD:
+            record = record.model_copy(update={"result_task_state_version": None})
+        elif case.code is P0RecordCode.TOOL_CALL_RECORD:
+            record = record.model_copy(
+                update={
+                    "status": ToolCallStatus.INTERRUPTED,
+                    "finished_at": record.started_at + timedelta(milliseconds=1),
+                    "interruption_reason": "PROCESS_RESTART_DETECTED",
+                }
+            )
+            new_tool_call = case.record.model_copy(
+                update={
+                    "tool_call_id": uuid4(),
+                    "attempt_count": 0,
+                    "status": ToolCallStatus.CREATED,
+                }
+            )
+        envelopes.append(
+            encode_persistence_record(
+                case.code,
+                record,
+                external_references=case.external_references,
+                logical_children=logical_children,
+            )
+        )
+    assert new_tool_call is not None
+    return tuple(envelopes), CreateToolCallCommand(created_record=new_tool_call)
+
+
+def _assert_bounded_integrity_error(
+    error: P0PersistenceIntegrityError,
+    *,
+    category: P0PersistenceIntegrityCategory,
+    forbidden_values: tuple[str, ...],
+) -> None:
+    assert error.category is category
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    projection = f"{error!s} {error!r} {error.args!r}"
+    assert all(value not in projection for value in forbidden_values)
+
+
 async def test_recovery_loader_uses_repeatable_snapshot_and_limit_two_queries(
     eval_postgres_namespace,
 ) -> None:
@@ -221,6 +279,149 @@ async def test_recovery_loader_rejects_logical_child_overflow_before_decode(
         with pytest.raises(P0PersistenceIntegrityError):
             await recovery.load_next_restart_recovery_closure()
     finally:
+        engine.dispose()
+
+
+async def test_recovery_bounds_malformed_normalized_reference(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    raw_secret = "Cookie=p0-session-reference-secret"
+    try:
+        with session_factory.begin() as session:
+            records._persist_envelopes(
+                session,
+                _encoded_full_recovery_graph(effect=ToolEffect.READ),
+            )
+
+        with session_factory() as session:
+            reference = session.scalar(
+                select(P0RecordReferenceModel).where(
+                    P0RecordReferenceModel.source_record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                    P0RecordReferenceModel.target_record_code
+                    == P0RecordCode.CONVERSATION_RECORD.value,
+                )
+            )
+            assert reference is not None
+            reference.target_logical_identity = [
+                ["conversation_id", {"raw_secret": raw_secret}]
+            ]
+            session.flush()
+            with pytest.raises(P0PersistenceIntegrityError) as captured:
+                recovery._load_closure_in_transaction(session)
+            session.rollback()
+
+        _assert_bounded_integrity_error(
+            captured.value,
+            category=P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH,
+            forbidden_values=(
+                raw_secret,
+                "ValidationError",
+                "target_logical_identity",
+            ),
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_recovery_first_rejects_late_tool_call_without_any_write(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    start_barrier = threading.Barrier(2)
+    insert_waiting = threading.Event()
+    recovery_committed = threading.Event()
+    try:
+        envelopes, create_command = _encoded_graph_and_new_tool_call()
+        with session_factory.begin() as session:
+            records._persist_envelopes(session, envelopes)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        assert closure.tool_call_aggregates == ()
+        recovery_command = _recovery_command(closure)
+
+        original_row_for_identity = records._row_for_identity
+
+        def wait_for_recovery_before_parent_lock(*args, **kwargs):
+            if (
+                kwargs.get("for_update")
+                and kwargs.get("record_code")
+                is P0RecordCode.AGENT_RUN_RECORD
+            ):
+                insert_waiting.set()
+                assert recovery_committed.wait(timeout=5)
+            return original_row_for_identity(*args, **kwargs)
+
+        monkeypatch.setattr(
+            records,
+            "_row_for_identity",
+            wait_for_recovery_before_parent_lock,
+        )
+
+        def insert_after_recovery():
+            start_barrier.wait(timeout=5)
+            try:
+                return asyncio.run(records.insert_tool_call(create_command))
+            except Exception as error:
+                return error
+
+        def apply_recovery_first():
+            start_barrier.wait(timeout=5)
+            assert insert_waiting.wait(timeout=5)
+            try:
+                return asyncio.run(
+                    recovery.claim_and_apply_restart_recovery(
+                        recovery_command
+                    )
+                )
+            finally:
+                recovery_committed.set()
+
+        insert_result, recovery_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(insert_after_recovery),
+                asyncio.to_thread(apply_recovery_first),
+            ),
+            timeout=15,
+        )
+
+        assert recovery_result is RecoveryWriteResult.APPLIED
+        assert type(insert_result) is P0PersistenceIntegrityError
+        assert (
+            insert_result.category
+            is P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+        with session_factory() as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TOOL_CALL_RECORD.value,
+                        P0RecordModel.logical_identity
+                        == [
+                            [
+                                "tool_call_id",
+                                str(
+                                    create_command.created_record.tool_call_id
+                                ),
+                            ]
+                        ],
+                    )
+                )
+                == 0
+            )
+    finally:
+        recovery_committed.set()
         engine.dispose()
 
 

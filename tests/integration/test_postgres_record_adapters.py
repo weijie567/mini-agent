@@ -272,6 +272,48 @@ async def test_unknown_physical_record_code_has_no_raw_exception_context_or_secr
         engine.dispose()
 
 
+async def test_owner_scoped_read_bounds_malformed_physical_envelope(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    conversation = _record_cases()[0].record
+    raw_secret = "Cookie=p0-session-envelope-secret"
+    try:
+        await adapter.save_conversation(conversation)
+        with adapter.session_factory.begin() as session:
+            row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.CONVERSATION_RECORD.value
+                )
+            )
+            assert row is not None
+            malformed = json.loads(json.dumps(row.envelope))
+            malformed["logical_identity"] = [
+                ["conversation_id", {"raw_secret": raw_secret}]
+            ]
+            row.envelope = malformed
+
+        with pytest.raises(P0PersistenceIntegrityError) as captured:
+            await adapter.load_conversation_for_owner(
+                owner_scope=_owner_scope(conversation.owner_customer_id),
+                conversation_id=conversation.conversation_id,
+            )
+
+        _assert_bounded_integrity_error(
+            captured.value,
+            category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+            forbidden_values=(
+                raw_secret,
+                "ValidationError",
+                "logical_identity",
+            ),
+        )
+    finally:
+        engine.dispose()
+
+
 async def test_owner_scope_is_applied_before_payload_and_stored_owner_never_grants(
     eval_postgres_namespace,
 ) -> None:
