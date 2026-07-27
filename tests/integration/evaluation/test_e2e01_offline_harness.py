@@ -338,6 +338,18 @@ class SyntheticSut:
                 outcome=outcome,
                 message="合成结果",
             ),
+            "schema_assertions_pass": True,
+            "identity_boundary_assertions_pass": True,
+            "request_understanding_assertions_pass": True,
+            "input_binding_assertions_pass": True,
+            "task_state_assertions_pass": True,
+            "tool_call_assertions_pass": True,
+            "observation_assertions_pass": True,
+            "disclosure_assertions_pass": True,
+            "renderer_fact_assertions_pass": True,
+            "error_mapping_assertions_pass": True,
+            "persistence_assertions_pass": True,
+            "toolset_replay_assertions_pass": True,
         }
         evidence_values.update(self.evidence_overrides)
         evidence = EvalEvidence(**evidence_values)

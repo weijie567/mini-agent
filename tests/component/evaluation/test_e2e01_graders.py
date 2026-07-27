@@ -115,6 +115,9 @@ def _valid_evidence(**overrides: object) -> EvalEvidence:
             message="合成结果",
         ),
     }
+    values.update(
+        {field_name: True for field_name in CHECK_FIELD_BY_GRADER.values()}
+    )
     values.update(overrides)
     return EvalEvidence(**values)
 
@@ -156,6 +159,17 @@ def test_missing_component_evidence_uses_stable_missing_record_reason() -> None:
     result = grader_registry()["ObservationGrader"].grade(
         _valid_evidence(observation_assertions_pass=None)
     )
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+def test_omitted_component_assertion_fails_closed() -> None:
+    payload = _valid_evidence().model_dump()
+    payload.pop("observation_assertions_pass")
+    evidence = EvalEvidence.model_validate(payload)
+
+    result = grader_registry()["ObservationGrader"].grade(evidence)
+
     assert result.status is EvalGraderStatus.FAIL
     assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
 
