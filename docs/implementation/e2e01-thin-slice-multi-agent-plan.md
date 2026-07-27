@@ -442,7 +442,23 @@ README.md
 docs/implementation/e2e01-thin-slice-multi-agent-plan.md
 ```
 
-它不修改historical Plans、GOVERNANCE、AGENTS、Business / Eval canonical owners或Case lifecycle。Cross-file scan确认这些active owners的实现状态说明仍停留在W1，因此当前PR显式记录`ACTIVE_OWNER_STATUS_ALIGNMENT`，由对应owner在独立PR中关闭；未完成前不得声称仓库完全aligned，也不得签发01-08。Planning PR本身不证明01-07A Runtime已经开始或完成。
+该historical planning PR没有修改GOVERNANCE、AGENTS、Business / Eval canonical owners或Case lifecycle。01-07A随后通过PR #37/#38完成，Business / Eval / project-rule状态分别通过PR #39–#41对齐，均未推进Case lifecycle。
+
+本次01-07B planning-status PR精确allowlist为：
+
+```text
+README.md
+.planning/PROJECT.md
+.planning/REQUIREMENTS.md
+.planning/ROADMAP.md
+.planning/STATE.md
+.planning/phases/01-cycle-1-e2e-01/01-07A-SUMMARY.md
+.planning/phases/01-cycle-1-e2e-01/01-07B-PLAN.md
+.planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md
+docs/implementation/e2e01-thin-slice-multi-agent-plan.md
+```
+
+它不修改historical Plans、GOVERNANCE、AGENTS、active canonical owners、源码、测试、Eval artifacts或Case lifecycle。Cross-file scan确认`PROJECT_DIRECTION.md`的实现状态段仍需由其owner独立对齐；当前PR只记录该开放项。Planning PR本身不证明01-07B Eval实现已经开始或完成。
 
 ### W2：组件实现（并行）
 
@@ -478,9 +494,39 @@ Gate：三方只通过冻结的 Port / DTO / Fixture contract 对接；不得修
 
 Plan 01-08，Owner：Integrator。
 
-Real Eval接入前的只读planning/checker核查发现三个Runtime-owned Trace blocker：`ContextManifestRecorded.model_call_purpose`、fixed-result `ResponseRendered`与stale-state hook active-run identity。根据一个Packet不跨ownership boundary的规则，先签发插入式Plan 01-07A，exact base为`eee1c0e...`，只允许`agent_run_service.py`及其Component test修改。01-07A reviewed merge与post-merge gate形成新的exact integration SHA后，才签发01-08；Eval SUT禁止补造缺失Trace。
+Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned Trace blocker：`ContextManifestRecorded.model_call_purpose`、fixed-result `ResponseRendered`与stale-state hook active-run identity。插入式Plan 01-07A据此从`eee1c0e...`执行，已通过planning/Runtime PR #37/#38 reviewed merge为`4cfac0a...`；Business / Eval / project-rule状态PR #39–#41随后形成current exact integration `8544137...`，Case lifecycle保持0/8。
 
-- 只在 `bootstrap.py` 装配具体 Adapter。
+01-08第二轮preflight确认以下不能由Integrator隐含修补的owner boundary：
+
+- Eval execution boundary：`EvalCaseSut`输入接收完整Case，Scripted Provider保留semantic script/`expected_control_result`，output又要求SUT填semantic `case_id`；nested message/step字段也没有closed projection。Trace grader只检查存在性/计数/时间，未验证normal、not-found、Gateway-reject、Request Understanding/provider/input fault与presentation fault各自的安全因果DAG；
+- Request Understanding persistence：Intent owner要求contextualization、actual candidates、validation/accepted/rejected refs、base/result versions与created_at；当前output/record/source、Thin Slice mapping、Application codec却没有形成logical record version与model-output version的闭环；
+- P0 `get_order` source version：Memory通用字段可保持optional，但Thin Slice尚未裁决server-private唯一来源/算法；`GetOrderResult`没有version，Runtime把schema-like fallback写入Manifest，现有PersistenceGrader要求Observation/Manifest exact相等；
+- Application / Infrastructure evidence boundary：Application没有expectation-free、owner-scoped、transactionally-consistent exact-Run closure DTO/Port；Infra不能直接发明该Port或跨多个session拼接`EvalEvidence`；
+- Eval mapper：不存在把真实HTTP结果与Application closure映射为grader-facing `EvalEvidence`的Eval-owner实现，Request Understanding output不能由Provider capture、script或expectations补造；
+- ModelProvider failure taxonomy：Thin Slice §10.3已经规定Request Understanding envelope / zero-or-multiple Function Call等协议错误为`PROVIDER_PROTOCOL_ERROR`，而Request Understanding Pydantic/source/authority/InputBinding/trusted-field拒绝为`INPUT_INVALID`；当前Scripted Provider让`ValidationError`逃逸，Qwen Adapter把它与协议错误一起折叠为`ProviderProtocolError`，Runtime也没有可安全捕获的独立bounded signal，两个现有invalid-RU script不能通过real SUT形成canonical结果；
+- credentialed Qwen：Adapter与zero-network preflight已存在，但没有消费real SUT的独立runner。
+
+因此先从`8544137...`签发插入式Plan 01-07B，只允许Harness/Grader/Scripted Provider及三份对应tests修改，关闭closed execution input/output、zero-argument non-semantic nonce correlation、actual mismatch与variant-scoped safety-causal Trace gaps。01-07B reviewed merge后，严格按四轴ownership拆分：
+
+```text
+{01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling}
+→ {01-07D RU exact mapping, 01-07H Core/Order DTO consumer}
+→ {01-07E Application persistence codec, 01-07F RU Core implementation}
+→ 01-07I Application exact-Run Evidence Port + ModelProvider failure contract
+→ 01-07J Runtime consumer + INPUT_INVALID mapping
+→ {01-07K Infra strict reader, 01-07L Eval mapper + Scripted/Qwen consumers}
+→ 01-08 Composition Root
+→ 01-08A credentialed Qwen runner
+```
+
+箭头表示前一花括号内所有Packet必须由Integrator串行review/merge，形成一个共同的新exact integration SHA，下一组才能签发；同一花括号只表示文件/ownership不重叠时可以并行写入，Integrator仍串行合并。特别是01-07D与01-07G都消费/写入Thin Slice owner文件，因此D/H只能在C/G均合并后的同一barrier上启动，不能各用不同predecessor；同理E/F必须等D/H全部合并形成下一共同barrier后才签发。01-07C/D、01-07G/H分别保留semantic/mapping与Python-source consumer边界；01-07D/E沿用01-03 mapping→01-04 codec precedent。若owner ruling要求额外migration、全局Memory version升级或新的外部契约，停止并新增Packet/分母，不扩大既有allowlist。
+
+- 01-07I以Application Port declaration owner身份同时冻结exact-Run Evidence Port和fresh parameterless、raw-diagnostic-free的Request Understanding candidate-invalid signal；`ModelProvider`合同明确只有Request Understanding output的Pydantic/trusted-field拒绝使用该signal，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍使用fresh `ProviderProtocolError`。建议精确owner files为`src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`及现有records/ports contract tests；它不得实现Runtime catch或Adapter。
+- 01-07J只在Runtime的`propose_next_move`边界消费01-07I signal并形成`COMPLETED / INPUT_INVALID`，不得直接catch raw `pydantic.ValidationError`、`ValueError`或`Exception`，不得记录raw diagnostics，也不得创建Task / RequestUnit / GateDecision / ToolCall；`ProviderProtocolError`仍映射`PROVIDER_PROTOCOL_ERROR`。建议精确owner files为`src/mini_agent/application/agent_run_service.py`及其Component test。
+- 01-07L在HTTP/closure mapper之外消费01-07I signal：Scripted Provider与Qwen Adapter都只把Request Understanding output Pydantic拒绝映射为该signal，Presentation校验与transport/HTTP/JSON/zero-or-multiple/wrong-name继续映射`ProviderProtocolError`，并清除raw exception cause/context。它必须覆盖`invalid-request-understanding-schema`和`trusted-field-override`的真实Runtime `INPUT_INVALID`结果及协议分支不漂移；其Qwen ownership沿用01-07 Plan §Task Packet Scope明确的“sole Infra path is Eval-owned Qwen ModelProvider Adapter”，不推广为通用Infrastructure/model ownership。建议消费files包括两个Provider实现、对应Component tests与必要的offline Harness test。01-07K继续只拥有strict reader/order physical adapter。
+- I/J/L的STRIDE gate同时防止Tampering/Spoofing（Adapter不得用错误类型自行改写canonical stop classification）与Information Disclosure（signal必须fresh、parameterless，`str`/`repr`/`args`不含raw value，`__cause__`/`__context__`为`None`，Run/Trace/response不保留原始Pydantic/Provider诊断）；每个consumer test都必须分别断言分类和清除边界。
+- 上述I/J/L是三个不同ownership boundary，必须各自形成Plan、RED/GREEN、exact-head review与串行merge；它们都是尚未签发的既有slot，所以目标总数仍为28。只有发现I无法在同一Application owner Packet拥有Port declaration与bounded signal source时，才新增Packet并同步分母。
+- 只在 `bootstrap.py` 装配具体 Adapter；01-07K拥有strict evidence reader、01-07L拥有HTTP/closure mapper及上述Eval-owned Provider consumers，01-08不重复实现。
 - 按 Spec 第 10.1 节逐项验证完整写入门禁：
   1. 原始 `Message` 可靠保存后才运行 Request Understanding；
   2. accepted Delta、Task / RequestUnit 与 `InputBinding` 在 Gateway 接受候选前持久化；
@@ -490,7 +536,7 @@ Real Eval接入前的只读planning/checker核查发现三个Runtime-owned Trace
 - 从 HTTP 边界运行 `E2E01-01/04`。
 - 验证普通 Trace、Context Manifest 和响应不含 Runtime-private 身份或 Bob 数据。
 - 产生关联 `trace_ref` 和版本 manifest 的结构化 Eval Result。
-- Default offline Composition Root显式注入每Case独立的Scripted Provider；现有Scripted Provider不能作为global concurrent local app singleton。`mini_agent.main:app`的默认local Provider与credentialed Qwen runner仍需在01-08 planning时显式裁决，不能从Eval fixture猜测产品运行语义。
+- Default offline Composition Root显式注入每Case独立的Scripted Provider；现有Scripted Provider不能作为global concurrent local app singleton。`request_understanding_output`只能来自01-07C–01-07F冻结并持久化的RU record/child closure，再由01-07K读取、01-07L映射；不能从Provider transient capture、accepted delta、script或expectations逆向合成。`trace_ref := run_id`只可作为P0 Eval bridge的opaque correlation，owner scope仍必须来自实际Session context，不能把它当作授权或伪造单一Trace record。`mini_agent.main:app`的默认local Provider不属于离线最小纵向Packet；credentialed Qwen runner只由01-08A拥有，不能从Eval fixture猜测产品运行语义。01-08A只连接并执行01-07L已经reviewed的Qwen Adapter，不得再重新定义failure taxonomy。
 
 ### W4：Post-execution 独立审查与发布门禁（不是 GSD Plan）
 
@@ -500,7 +546,7 @@ Real Eval接入前的只读planning/checker核查发现三个Runtime-owned Trace
 4. 真实 Qwen 配置存在时才运行 `qwen_baseline`；缺失时必须是 `SKIPPED / NOT_RUN`。
 5. 只有所有 DoD 有可复现证据后，才更新 Coverage Matrix 生命周期和 `AGENTS.md` canonical 命令。
 
-W4 是 01-01 至 01-08 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D / 01-04E / 01-04F / 01-04G / 01-04H只作为阻断依赖 Packet记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
+W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、01-07A–01-07L与01-08A只作为阻断依赖 Packet记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
 
 ## 8. 集成门禁
 
@@ -587,7 +633,7 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，并在PR #29 latest overlay复验后串行合并01-07；current exact integration为`eee1c0e46e1bca1160dea54d586d477c173daadc`。本次继续用GSD planner/checker只读建议与Integrator single-writer planning-status PR签发01-07A；execution base使用已验证的current exact SHA，不使用未来SHA占位符或自引用。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，在PR #29 latest overlay复验后串行合并01-07，并以PR #37/#38完成01-07A；PR #39–#41形成current exact integration `8544137cfbcaebda603cd3000312fb5d2406327c`。本次继续用GSD planner/checker只读建议与Integrator single-writer planning-status PR签发01-07B；execution base使用已验证的current exact SHA，不使用未来SHA占位符或自引用。
 
 ### 11.1 Activation Gate（`COMPLETE / EFFECTIVE`）
 
@@ -645,13 +691,13 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；当前 integration head 为 `eee1c0e46e1bca1160dea54d586d477c173daadc`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / 01-07A_PLANNED` | activation PR #10生效；01-01至01-07已evidence-indexed；01-07A受控Plan固定`eee1c0e...`/new branch/worktree/exact two files并等待planning PR review/merge；01-08等待其reviewed merge |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；当前 integration head 为 `8544137cfbcaebda603cd3000312fb5d2406327c`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
+| GSD | `ACTIVE / EFFECTIVE / 01-07B_PLANNED` | activation PR #10生效；01-01至01-07A已evidence-indexed；01-07B受控Plan固定`8544137...`/new branch/worktree/exact six files并等待planning PR review/merge；01-07C–01-07L/01-08/01-08A等待各自前置exact base |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL REVIEWED_MERGED` | Runtime PR #34 merge `fb607019...`、Infra PR #36 merge `8e21652...`、Eval PR #29 merge/current `eee1c0e...`；historical PR #28/#30保留review evidence；post-merge为191 Eval focused / 40 migration / 936 full（1 deselected）与Graphify PASS |
+| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE ALIGNMENT REVIEWED_MERGED` | Runtime PR #34 merge `fb607019...`、Infra PR #36 merge `8e21652...`、Eval PR #29 merge `eee1c0e...`、01-07A PR #38 merge `4cfac0a...`；historical PR #28/#30保留review evidence；post-01-07A为100 Runtime focused / 40 migration / 936 full（1 deselected）与Graphify PASS |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted Packets 01-04D/E/F/G/H、replacement 01-05R/01-06R与01-07已完成；numbered Plan evidence口径是7/8，当前目标Task Packet完成口径是12/16，磁盘上正式签发15个Plan（7 numbered + 6 inserted D–H/07A + 2 replacements 05R/06R，`01-08-PLAN.md`尚不存在），canonical lifecycle与派生checkbox仍保持0/8。01-07A等待planning review/merge与execution；01-08等待新的exact base。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted Packets 01-04D/E/F/G/H/07A、replacement 01-05R/01-06R与01-07已完成；numbered Plan evidence口径是7/8，新增依赖后当前目标Task Packet完成口径是13/28，磁盘上正式签发16个Plan（7 numbered + 7 inserted D–H/07A/07B + 2 replacements 05R/06R），canonical lifecycle与派生checkbox仍保持0/8。01-07B等待planning review/merge与execution；01-07C–01-07L/01-08/01-08A等待各自前置exact base。任何“实现完成”“可运行”“已通过”结论仍必须取得independent exact-head review、latest-integration replay、serial merge及post-merge验证。
