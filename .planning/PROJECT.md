@@ -37,7 +37,7 @@
 
 ## 当前执行边界
 
-- 当前 integration head为Project Direction owner状态对齐PR #54 merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`，tree为`e739d8a747b21adaac9b624ab4cb0c4b8080caba`；它只修正实现证据快照，不替换01-07C/01-07G共同execution barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669` / tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。historical Runtime / Infra feature仍以`c35687d...`为只读证据；replacement Runtime / Infra分别从`64992cf...`与`fb607019...`执行并已合并。
+- 本状态索引PR #55的latest-integration base为Project Direction owner状态对齐PR #54 merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0` / tree `e739d8a747b21adaac9b624ab4cb0c4b8080caba`；该predecessor只修正实现证据快照，不替换01-07C/01-07G共同execution barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669` / tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。historical Runtime / Infra feature仍以`c35687d...`为只读证据；replacement Runtime / Infra分别从`64992cf...`与`fb607019...`执行并已合并。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。

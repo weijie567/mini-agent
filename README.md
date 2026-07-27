@@ -10,7 +10,7 @@ W1 基础骨架与 W2 组件实现已经进入 `integration/e2e01-thin`：
 - Core / Application 的身份、Request Understanding、Task、Tool、Observation、Trace 等 contract；
 - 受控 Runtime、Session / HTTP Adapter、PostgreSQL record / `get_order` Adapter与恢复路径；
 - `e2e01-thin-fixture-v1`、versioned Eval artifacts、Scripted / Qwen Provider Adapter、Harness、Graders及结构化 Result / Failure machinery；
-- 当前 exact integration `ffcc562487be458073f4229e4f6f7b353bc8d9e0` 已包含 01-07B Eval evidence boundary、01-07C/01-07G owner rulings及Project Direction状态对齐；C/G共同execution barrier仍为`327b39d...`，最新等价tree full gate为 `1493 passed, 1 deselected, 12 warnings`。
+- PR #55 的latest-integration base为Project Direction状态对齐merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`；本状态索引发布后，01-07B Eval evidence boundary、01-07C/01-07G owner rulings与active/derived状态形成同一合并结果。C/G共同execution barrier仍为`327b39d...`，latest-integration overlay full gate为 `1493 passed, 1 deselected, 12 warnings`。
 
 这不表示首条纵向切片已经可运行或 Case 已通过。Composition Root、real `EvalCaseSut`、PostgreSQL evidence reader、真实 HTTP → Runtime → PostgreSQL → Eval 纵向装配、Trajectory / E2E Result与 credentialed Qwen runner仍未实现；Case 生命周期继续是 `CONTRACT_DEFINED`。
 

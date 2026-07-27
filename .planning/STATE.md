@@ -6,8 +6,8 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "07G"
 status: "in_progress"
-last_updated: "2026-07-28T03:46:13+08:00"
-last_activity: "2026-07-28 — 01-07C/01-07G formed B_CG 327b39d; Project Direction owner status PR #54 merged ffcc562; status-evidence PR next"
+last_updated: "2026-07-28T04:01:50+08:00"
+last_activity: "2026-07-28 — 01-07C/01-07G formed B_CG 327b39d; Project Direction and derived evidence aligned through PR #54/#55; D/H planning next"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -38,7 +38,7 @@ Total Phases: 6
 Total Plans in Phase: 8
 Status: 01-07C and 01-07G complete / 01-07D and 01-07H planning next
 Last Activity: 2026-07-28
-Last Activity Description: 01-07G PR #50与01-07C r1 PR #53形成共同barrier`327b39d...`；Project Direction exact one-file owner状态对齐PR #54随后reviewed merge为`ffcc562...`，不改变D/H execution base
+Last Activity Description: 01-07G PR #50与01-07C r1 PR #53形成共同barrier`327b39d...`；Project Direction exact one-file owner状态由PR #54对齐，派生证据由PR #55索引，不改变D/H execution base
 Progress: 0%
 
 ## Current Position
@@ -46,19 +46,18 @@ Progress: 0%
 Phase: 1 of 6（第一最薄 E2E-01）
 Plan: 7 of 8（01-04E/F/G/H、01-05R、01-06R、01-07、01-07A、01-07B、01-07C与01-07G均已evidence-indexed；01-07D–01-07M/01-08/01-08A等待各自前置exact integration SHA）
 Status: `ACTIVE / 01-07C_01-07G_COMPLETE / 01-07D_01-07H_PLANNING_NEXT`
-Last activity: 2026-07-28 — C/G共同barrier`327b39d...`通过1493-test与Graphify全量安全重建；owner状态PR #54 merge `ffcc562...`关闭active cross-file冲突；目标Packet完成口径16/29、正式签发18个Plan；canonical lifecycle仍为0/8
+Last activity: 2026-07-28 — C/G共同barrier`327b39d...`通过1493-test与Graphify全量安全重建；PR #54/#55依次关闭active owner与derived status冲突；目标Packet完成口径16/29、正式签发18个Plan；canonical lifecycle仍为0/8
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. Project Direction exact one-file owner状态PR #54已先行merge `ffcc562...`；现在通过当前C/G dedicated status-evidence PR，只索引已合并证据，不修改active canonical owner或推进Case lifecycle。
-2. 从共同barrier`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`分别创建01-07D与01-07H single-target planning Worktree / branch / PR；两个Plan都固定同一execution base，且不得在一个planning PR中合并签发。
-3. 两个planning PR分别reviewed merge后，从固定`B_CG`建立D/H独立feature Worktree；D只写Thin Slice active mapping，H只做Core/Order additive optional DTO与owned tests。两个writer可并行，Integrator仍串行merge并形成下一共同barrier。
-4. D/H共同barrier后，分别签发ownership不重叠的01-07E persistence codec与01-07F RU Core；完成双review、overlay与串行merge后才进入01-07I。
-5. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
-6. 01-07J还必须在Observation前把缺失/损坏source version的FOUND fail closed；随后从新exact SHA并行签发01-07K Infra reader/version producer与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
-7. 01-07K/L共同barrier后签发01-07M Core source-version contract closure并收紧FOUND validator；01-07M reviewed merge后才签发01-08，01-08 reviewed merge后签发01-08A，缺凭据只能形成`NOT_RUN / SKIPPED`。
-8. 全部实现与真实证据完成后才执行受控code review/fix、validation、Eval review、安全审计、UAT与integration-to-main release PR。
+1. 从共同barrier`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`分别创建01-07D与01-07H single-target planning Worktree / branch / PR；两个Plan都固定同一execution base，且不得在一个planning PR中合并签发。
+2. 两个planning PR分别reviewed merge后，从固定`B_CG`建立D/H独立feature Worktree；D只写Thin Slice active mapping，H只做Core/Order additive optional DTO与owned tests。两个writer可并行，Integrator仍串行merge并形成下一共同barrier。
+3. D/H共同barrier后，分别签发ownership不重叠的01-07E persistence codec与01-07F RU Core；完成双review、overlay与串行merge后才进入01-07I。
+4. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
+5. 01-07J还必须在Observation前把缺失/损坏source version的FOUND fail closed；随后从新exact SHA并行签发01-07K Infra reader/version producer与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
+6. 01-07K/L共同barrier后签发01-07M Core source-version contract closure并收紧FOUND validator；01-07M reviewed merge后才签发01-08，01-08 reviewed merge后签发01-08A，缺凭据只能形成`NOT_RUN / SKIPPED`。
+7. 全部实现与真实证据完成后才执行受控code review/fix、validation、Eval review、安全审计、UAT与integration-to-main release PR。
 
 ## Decisions
 
@@ -128,5 +127,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-28
-Stopped At: 01-07C/01-07G共同barrier、post-merge full与Graphify全量安全重建已完成，Project Direction owner状态PR #54已merge；当前status-evidence PR通过后，从`327b39d...`分别签发01-07D与01-07H
+Stopped At: 01-07C/01-07G共同barrier、post-merge full、Graphify全量安全重建及PR #54/#55 active/derived状态对齐已完成；下一步从`327b39d...`分别签发01-07D与01-07H
 Resume File: [phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md](phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md)
