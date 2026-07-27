@@ -1,8 +1,8 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-04H-01-07C-planned-with-01-05R-01-06R
-status: execution_evidence_complete_through_01_07B_and_01_07C_planned
+scope: 01-04H-01-07G-planned-with-01-05R-01-06R
+status: execution_evidence_complete_through_01_07B_and_01_07C_01_07G_planned
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-07-27"
@@ -11,7 +11,7 @@ created: "2026-07-27"
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A、historical 01-05/06、current 01-07B execution feedback sampling，以及已签发但未执行的01-07C owner-document机械验证。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
+> 本文件只定义已完成01-04H/01-05R/01-06R/01-07/01-07A、historical 01-05/06、current 01-07B execution feedback sampling，以及已签发但未执行的01-07C/01-07G owner-document机械验证。Case、指标、Critical failure 与生命周期仍由 canonical Eval owner 持有；这里的绿色测试不能替代01-08真实纵向证据或post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -61,6 +61,8 @@ created: "2026-07-27"
 | 01-07B-02 | 01-07B | 14 | E2E01-01/04 | EVB-R01/EVB-S01 | closed execution-message/behavior-step projection与occurrence-aware variant-scoped safety-causal partial order；每个正常/故障variant的适用edge violation必须FAIL，合法额外事件继续PASS | Eval contract | `uv run pytest tests/component/evaluation/test_e2e01_graders.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/integration/evaluation/test_e2e01_offline_harness.py`；`uv run pytest` | ✅ extend | ✅ green |
 | 01-07C-01 | 01-07C | 15 | E2E01-01/04 | RUS-S01/RUS-T01/RUS-R01/RUS-I01/RUS-E01 | durable aggregate、独立版本轴、candidate/validation/accepted closure与可信时间的owner裁决 | Owner-document contract | `test "$(git diff --name-only 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD)" = "docs/architecture/intent-design-reference.md"`；focused `rg` field/axis scan | ✅ owner exists | ⬜ pending |
 | 01-07C-02 | 01-07C | 15 | E2E01-01/04 | RUS-D01/RUS-I01 | exact-version、compatibility、migration与rollback fail-closed裁决；跨文件只读影响扫描 | Owner-document contract | `git diff --check 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD`；focused `rg` compatibility scan；`uv run pytest` | ✅ owner exists | ⬜ pending |
+| 01-07G-01 | 01-07G | 15 | E2E01-01/04 | OSV-S01/OSV-T01/OSV-R01/OSV-I01/OSV-E01 | trusted owner-scoped authority、strict safe projection、canonical content hash、fixed vector及runtime-private exposure裁决 | Owner-document contract | `test "$(git diff --name-only 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD)" = "docs/implementation/e2e01-thin-slice-implementation-spec.md"`；focused algorithm/vector `rg` scan | ✅ owner exists | ⬜ pending |
+| 01-07G-02 | 01-07G | 15 | E2E01-01/04 | OSV-D01/OSV-I01 | final FOUND/non-found/system-failure closed matrix、H additive→J fail-closed→K producer→M Core contract green migration、exact-copy、compatibility/ABA及rollback裁决 | Owner-document contract | `git diff --check 3f0753f7bef87fc02f314e28fe8b07860a819701...HEAD`；focused outcome/staged-propagation `rg` scan；`uv run pytest` | ✅ owner exists | ⬜ pending |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
@@ -75,6 +77,7 @@ Wave 0 是各 Packet的首个测试提交，不新增共享 bootstrap：
 - 01-07A：只扩展既有AgentRun Component test取得一个真实RED，再修改对应Runtime source；已完成reviewed merge。
 - 01-07B：扩展既有Grader、ScriptedProvider与Harness三份tests，以两条独立命令取得Case/Script oracle和Trace precedence RED，再修改对应三份Eval source；不创建real SUT或PG reader。
 - 01-07C：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task分别使用exact one-file containment + focused owner scan，以及`git diff --check` + compatibility scan + full suite作为可执行Nyquist验证，状态保持pending直至feature handoff。
+- 01-07G：contract-only owner文档Packet，不创建test/bootstrap且不伪造TDD RED；两个Task分别使用exact one-file containment + algorithm/vector scan，以及`git diff --check` + outcome/exact-copy scan + full suite作为可执行Nyquist验证，状态保持pending直至feature handoff。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
 原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环，因此当前scope的`wave_0_complete=true`。该状态只表示测试先行证据完整，不推进Case lifecycle。
@@ -244,7 +247,7 @@ git diff --check
 
 01-07B必须先用两条独立test-only RED证明完整`EvalCaseArtifact`、嵌套message extra key与semantic `model_script_ref`/`ModelScriptArtifact.expected_control_result`/nested step answer-like key可达，SUT output被迫携带semantic `case_id`且没有one-time non-semantic nonce correlation，以及reordered Trace false PASS；再以exact six-file GREEN引入只含opaque `execution_ref`、closed role/content message、trusted Session-fixture ref或closed behavior-specific step/runtime fault/opaque identity的execution-only SUT/Provider projection。`execution_ref`与Provider execution identity必须由不接收Case/script/expectation参数的zero-argument injected nonce factory分别生成，production default为`uuid4`；collision/reuse以及`uuid5`/hash等semantic deterministic derivation必须FAIL。SUT result只回传one-time `execution_ref`与unbound evidence/observable，Harness拒绝unknown/mismatch/replay并在成功关联后独自绑定authenticated `case_id`。Trace使用每个现有Case/script variant的closed safety-causal DAG：正常、not-found、Gateway拒绝、Request Understanding/provider/input fault与presentation fault各自canonical PASS，每条适用edge swap与缺失required endpoint必须FAIL；with-Task路径还必须验证`ResponseRendered → last TaskStateChanged → RunStopped`（含state-advanced fault），task-less路径验证`ResponseRendered → RunStopped`，合法额外事件继续PASS。Actual/expected mismatch必须形成正常grader `FAIL`，不能被SUT按answers补造为PASS。它不创建real SUT、PG reader、HTTP E2E或Eval lifecycle更新。
 
-01-07B也不改变外部`ModelProvider`失败合同。当前invalid Request Understanding schema / trusted-field override在Scripted Provider会让raw `ValidationError`逃逸，Qwen Adapter又把同类Pydantic失败折叠为`ProviderProtocolError`，都不能形成Thin Slice §10.3规定的`COMPLETED / INPUT_INVALID`。该已确认阻断按owner边界进入未签发的既有Packet：01-07I的records/ports contract tests先冻结fresh parameterless、raw-diagnostic-free candidate-invalid signal，并保持framing/transport/zero-or-multiple/wrong-call及Presentation validation为`ProviderProtocolError`；01-07J的AgentRunService Component test证明只捕获该signal、无Task / RequestUnit / Gate / Tool / raw diagnostics并安全完成；01-07L沿用01-07既有Eval ownership修改Scripted与Qwen consumers及tests，并以必要的real-Runtime Eval test证明两个invalid-RU scripts得到`INPUT_INVALID`、协议与Presentation分支不漂移。01-07K仍只拥有strict reader/order physical adapter。I→J→{K,L}的reviewed common barrier形成前不得签发01-08；这些是既有slot，目标总数保持28。
+01-07B也不改变外部`ModelProvider`失败合同。当前invalid Request Understanding schema / trusted-field override在Scripted Provider会让raw `ValidationError`逃逸，Qwen Adapter又把同类Pydantic失败折叠为`ProviderProtocolError`，都不能形成Thin Slice §10.3规定的`COMPLETED / INPUT_INVALID`。该已确认阻断按owner边界进入未签发的既有Packet：01-07I的records/ports contract tests先冻结fresh parameterless、raw-diagnostic-free candidate-invalid signal，并保持framing/transport/zero-or-multiple/wrong-call及Presentation validation为`ProviderProtocolError`；01-07J的AgentRunService Component test证明只捕获该signal、无Task / RequestUnit / Gate / Tool / raw diagnostics并安全完成；01-07L沿用01-07既有Eval ownership修改Scripted与Qwen consumers及tests，并以必要的real-Runtime Eval test证明两个invalid-RU scripts得到`INPUT_INVALID`、协议与Presentation分支不漂移。01-07K仍只拥有strict reader/order physical adapter。source-version另采用H additive表示、J在Observation前对缺/坏version fail closed、K producer生成、M最终收紧Core FOUND validator的四阶段green migration；每个Packet都必须独立通过full suite。I→J→{K,L}→M的reviewed common barrier形成前不得签发01-08；新增M后目标总数为29。
 
 ## Manual-only Verification
 
@@ -281,4 +284,4 @@ git diff --check
 - [x] 01-07B exact base/new identity/six-file ownership与真实RED→GREEN已完成；planning/status PR #42–#43、feature PR #44、双review、latest-integration overlay与post-merge gate均通过。
 - [x] 01-07B完成planning、实现、review、merge与post-merge gate；Summary索引精确证据，Case lifecycle仍为0/8。
 
-**Approval:** `W2_THROUGH_01-07B_SERIAL_MERGE_COMPLETE / 01-07C_PLAN_ISSUED / PROJECT_DIRECTION_ALIGNMENT_REQUIRED / 01-07G_PLANNING_BLOCKED`。01-07B已通过planning/status、implementation exact-head/overlay review、merge与post-merge gates。01-07C现已固定execution base `3f0753f7...`与Intent owner单文件Task Packet，但feature execution尚未开始。下一步必须以独立Project Direction owner PR移除或对齐仍为16的易漂移Plan计数；该PR reviewed merge前，01-07G planning与C/G feature dispatch均blocked。owner状态对齐后，01-07G才通过独立single-target planning PR签发同一execution base；C/G两者均reviewed merge后形成共同barrier，再按既定顺序推进mapping、codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID` mapping、Infra reader及Eval mapper/Scripted-Qwen consumers。全部前置reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论。
+**Approval:** `W2_THROUGH_01-07B_SERIAL_MERGE_COMPLETE / 01-07C_01-07G_PLANS_ISSUED / FEATURE_DISPATCH_NEXT`。01-07B已通过planning/status、implementation exact-head/overlay review、merge与post-merge gates。01-07C与01-07G现在都固定execution base `3f0753f7...`和互不重叠的单owner文件Task Packet，但两个feature execution均尚未开始；Project Direction owner alignment PR #47已reviewed merge并移除active owner对易漂移GSD计数的重复维护。本01-07G planning PR reviewed merge后，Integrator才从共同exact base建立C/G两个独立feature Worktree并行写入，分别完成exact-head双review，再串行合并形成共同barrier。之后按既定顺序推进mapping、codec/Core、Evidence Port/Provider failure signal、Runtime `INPUT_INVALID`和version fail-closed mapping、Infra reader/version producer、Eval mapper/Scripted-Qwen consumers，以及K/L共同barrier后的01-07M Core contract closure。01-07M reviewed merge后才签发01-08，01-08 reviewed merge后再签发01-08A credentialed runner，之后才进入post-execution quality gate。本文件不批准Case、credentialed Baseline、release或lifecycle结论；新增M后当前Task Packet完成为14/29，canonical lifecycle仍为0/8。
