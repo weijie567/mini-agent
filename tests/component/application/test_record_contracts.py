@@ -2757,6 +2757,17 @@ def test_terminal_turn_revalidation_rejects_hidden_outer_storage(
 
 def test_terminal_turn_valid_copy_revalidation_and_pickle_remain_compatible() -> None:
     command = _completed_finalization()
+    nested_field_names = (
+        "expected_active_record",
+        "terminal_record",
+        "expected_active_links",
+        "terminal_links",
+        "result_task_records",
+        "task_transition",
+        "terminal_result",
+        "assistant_message",
+        "terminal_trace_events",
+    )
 
     shallow = command.model_copy()
     deep = command.model_copy(deep=True)
@@ -2775,13 +2786,18 @@ def test_terminal_turn_valid_copy_revalidation_and_pickle_remain_compatible() ->
         assert rebuilt == command
         assert rebuilt.model_fields_set == command.model_fields_set
     assert shallow is not command
-    assert shallow.expected_active_record is command.expected_active_record
-    assert deep.expected_active_record is not command.expected_active_record
+    assert set(nested_field_names) == set(FinalizeRunCommand.model_fields)
+    for field_name in nested_field_names:
+        assert getattr(shallow, field_name) is getattr(command, field_name)
+        assert getattr(deep, field_name) is not getattr(command, field_name)
 
 
 def test_terminal_turn_subclass_copy_preserves_unset_default_factory_value() -> None:
     class FinalizeRunCommandWithNonce(FinalizeRunCommand):
         nonce: UUID = Field(default_factory=uuid4)
+        payload: list[dict[str, str]] = Field(
+            default_factory=lambda: [{"source": "default"}]
+        )
 
     command = _completed_finalization()
     base_values = {
@@ -2791,18 +2807,33 @@ def test_terminal_turn_subclass_copy_preserves_unset_default_factory_value() -> 
     extended = FinalizeRunCommandWithNonce(**base_values)
     original_fields_set = extended.model_fields_set
     replacement_nonce = uuid4()
+    replacement_payload = [{"source": "updated"}]
 
     shallow = extended.model_copy()
     deep = extended.model_copy(deep=True)
-    updated = extended.model_copy(update={"nonce": replacement_nonce})
+    updated = extended.model_copy(
+        update={
+            "nonce": replacement_nonce,
+            "payload": replacement_payload,
+        }
+    )
 
-    assert "nonce" not in original_fields_set
+    assert not {"nonce", "payload"} & original_fields_set
     assert shallow.nonce == extended.nonce
     assert deep.nonce == extended.nonce
+    assert shallow.payload is extended.payload
+    assert shallow.payload[0] is extended.payload[0]
+    assert deep.payload == extended.payload
+    assert deep.payload is not extended.payload
+    assert deep.payload[0] is not extended.payload[0]
     assert shallow.model_fields_set == original_fields_set
     assert deep.model_fields_set == original_fields_set
     assert updated.nonce == replacement_nonce
-    assert updated.model_fields_set == original_fields_set | {"nonce"}
+    assert updated.payload == replacement_payload
+    assert updated.model_fields_set == original_fields_set | {
+        "nonce",
+        "payload",
+    }
 
 
 def test_terminal_turn_frozen_assignment_sanitizes_raw_input() -> None:

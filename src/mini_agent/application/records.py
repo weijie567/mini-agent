@@ -695,16 +695,28 @@ class FinalizeRunCommand(
             )
         else:
             restored_fields_set = set(copied_source.model_fields_set)
+            updated_field_names: set[str] = set()
             if update:
+                updated_field_names.update(update)
+                if not updated_field_names.issubset(complete_projection):
+                    raise _new_finalize_validation_error(
+                        "FinalizeRunCommand must be canonical"
+                    ) from None
                 complete_projection.update(update)
-                restored_fields_set.update(update)
+                restored_fields_set.update(updated_field_names)
             rebuilt = type(self).model_validate(complete_projection)
+            for field_name in updated_field_names:
+                object.__setattr__(
+                    copied_source,
+                    field_name,
+                    getattr(rebuilt, field_name),
+                )
             object.__setattr__(
-                rebuilt,
+                copied_source,
                 "__pydantic_fields_set__",
                 restored_fields_set,
             )
-            return rebuilt
+            return copied_source
         raise sanitized_error from None
 
     @classmethod
