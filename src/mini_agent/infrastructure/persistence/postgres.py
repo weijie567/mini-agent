@@ -64,6 +64,7 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import (
     AgentRunRecord,
     AgentRunStatus,
+    StopReason,
     TraceEvent,
     TraceEventType,
 )
@@ -94,10 +95,12 @@ _PRIVATE_RECORD_CODES = frozenset(
     }
 )
 _RECORD_CODE_BY_VALUE = {code.value: code for code in P0RecordCode}
-_TRACE_EVENT_TYPE_ORDER = {
-    event_type: ordinal
-    for ordinal, event_type in enumerate(TraceEventType)
-}
+_NORMAL_TERMINAL_TRACE_EVENT_TYPES = frozenset(
+    {
+        TraceEventType.TASK_STATE_CHANGED,
+        TraceEventType.RUN_STOPPED,
+    }
+)
 
 
 class P0PersistenceSystemError(Exception):
@@ -1783,28 +1786,87 @@ class PostgresRecordAdapter:
             expected_type=RunTaskLinkRecord,
         )
 
+    @_bounded_database_failures
     async def list_trace_events_for_owner(
         self,
         *,
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
     ) -> tuple[TraceEvent, ...]:
-        events = await self._list_for_owner(
-            owner_scope=owner_scope,
-            record_code=P0RecordCode.TRACE_EVENT_RECORD,
-            filters=(P0RecordModel.run_id == run_id,),
-            expected_type=TraceEvent,
-        )
-        return tuple(
-            sorted(
-                events,
-                key=lambda event: (
-                    event.occurred_at,
-                    _TRACE_EVENT_TYPE_ORDER[event.event_type],
-                    str(event.trace_event_id),
-                ),
+        with self.session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value,
+                        P0RecordModel.scope_owner_customer_id
+                        == owner_scope.customer_id,
+                        P0RecordModel.run_id == run_id,
+                    )
+                    .order_by(
+                        P0RecordModel.stored_at,
+                        P0RecordModel.record_id,
+                    )
+                )
             )
-        )
+            physical_history: list[tuple[datetime, TraceEvent]] = []
+            for row in rows:
+                record = self._validate_physical_projection(
+                    session,
+                    row,
+                    expected_owner=owner_scope.customer_id,
+                ).source_record
+                if type(record) is not TraceEvent:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                    )
+                physical_history.append(
+                    (row.stored_at, cast(TraceEvent, record))
+                )
+
+        ordered: list[TraceEvent] = []
+        group_start = 0
+        while group_start < len(physical_history):
+            stored_at = physical_history[group_start][0]
+            group_end = group_start + 1
+            while (
+                group_end < len(physical_history)
+                and physical_history[group_end][0] == stored_at
+            ):
+                group_end += 1
+            group = tuple(
+                event
+                for _, event in physical_history[group_start:group_end]
+            )
+            event_by_type = {
+                event.event_type: event
+                for event in group
+            }
+            is_normal_terminal_tie = (
+                len(group) == 2
+                and set(event_by_type)
+                == _NORMAL_TERMINAL_TRACE_EVENT_TYPES
+                and event_by_type[
+                    TraceEventType.TASK_STATE_CHANGED
+                ].occurred_at
+                == event_by_type[TraceEventType.RUN_STOPPED].occurred_at
+                and event_by_type[
+                    TraceEventType.RUN_STOPPED
+                ].stop_reason
+                is not StopReason.PROCESS_RESTART_DETECTED
+            )
+            if is_normal_terminal_tie:
+                ordered.extend(
+                    (
+                        event_by_type[TraceEventType.TASK_STATE_CHANGED],
+                        event_by_type[TraceEventType.RUN_STOPPED],
+                    )
+                )
+            else:
+                ordered.extend(group)
+            group_start = group_end
+        return tuple(ordered)
 
     async def append_eval_result(
         self,
