@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -347,6 +348,21 @@ def _rebuild(instance: BaseModel, **updates: object) -> BaseModel:
     }
     values.update(updates)
     return type(instance)(**values)
+
+
+def _assert_validation_error_is_sanitized(
+    error: ValidationError,
+    *forbidden_values: str,
+) -> None:
+    projections = (
+        str(error),
+        repr(error),
+        repr(error.args),
+        repr(error.errors()),
+        error.json(),
+    )
+    for forbidden_value in forbidden_values:
+        assert all(forbidden_value not in projection for projection in projections)
 
 
 _COMPLETED_TERMINAL_MATRIX = (
@@ -2600,7 +2616,71 @@ def test_terminal_turn_revalidates_message_identity_without_disclosure() -> None
         _rebuild(tampered_message)
     with pytest.raises(ValidationError, match="canonical") as error:
         _rebuild(command, assistant_message=tampered_message)
-    assert secret not in str(error.value)
+    _assert_validation_error_is_sanitized(error.value, secret)
+
+
+def test_terminal_turn_semantic_error_does_not_retain_valid_private_content() -> None:
+    command = _completed_finalization()
+    customer_id = "customer-A"
+    message_content = f"{customer_id} 的订单 O-1001"
+    mismatched_message = _rebuild(
+        command.assistant_message,
+        content=message_content,
+    )
+
+    with pytest.raises(ValidationError, match="content") as error:
+        _rebuild(command, assistant_message=mismatched_message)
+    _assert_validation_error_is_sanitized(
+        error.value,
+        customer_id,
+        message_content,
+        "O-1001",
+    )
+
+
+@pytest.mark.parametrize(
+    "validate",
+    (
+        lambda secret: FinalizeRunCommand(unexpected=secret),
+        lambda secret: FinalizeRunCommand.model_validate(secret),
+        lambda secret: FinalizeRunCommand.model_validate_json(f'"{secret}"'),
+        lambda secret: FinalizeRunCommand.model_validate_strings(secret),
+    ),
+    ids=(
+        "constructor",
+        "model_validate",
+        "model_validate_json",
+        "model_validate_strings",
+    ),
+)
+def test_terminal_turn_public_validation_entries_sanitize_raw_input(
+    validate: Callable[[str], object],
+) -> None:
+    secret = "customer-A SECRET"
+
+    with pytest.raises(ValidationError) as error:
+        validate(secret)
+    _assert_validation_error_is_sanitized(error.value, secret)
+
+
+def test_terminal_turn_sanitizer_preserves_strict_json_validation() -> None:
+    command = _completed_finalization()
+
+    rebuilt = FinalizeRunCommand.model_validate_json(
+        command.model_dump_json(),
+        strict=True,
+    )
+
+    assert rebuilt == command
+
+
+def test_terminal_turn_frozen_assignment_sanitizes_raw_input() -> None:
+    command = _completed_finalization()
+    secret = "customer-A SECRET"
+
+    with pytest.raises(ValidationError, match="Instance is frozen") as error:
+        command.assistant_message = secret
+    _assert_validation_error_is_sanitized(error.value, secret)
 
 
 def test_terminal_turn_recursively_revalidates_nested_task_transition() -> None:
@@ -2618,7 +2698,7 @@ def test_terminal_turn_recursively_revalidates_nested_task_transition() -> None:
         _rebuild(tampered_state_transition)
     with pytest.raises(ValidationError, match="canonical") as error:
         _rebuild(command, task_transition=tampered_transition)
-    assert secret not in str(error.value)
+    _assert_validation_error_is_sanitized(error.value, secret)
 
 
 def test_terminal_turn_rejects_non_exact_new_projection_model_types() -> None:
@@ -2709,7 +2789,7 @@ def test_terminal_turn_rejects_hidden_outer_and_nested_model_storage() -> None:
     ):
         with pytest.raises(ValidationError, match="canonical") as error:
             _rebuild(command, **{field_name: value})
-        assert secret not in str(error.value)
+        _assert_validation_error_is_sanitized(error.value, secret)
 
 
 def test_completed_task_transition_respects_active_link_base_lower_bound() -> None:

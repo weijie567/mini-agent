@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self, TypeVar
+from typing import Any, Annotated, Self, TypeVar
 from uuid import UUID
 
 from pydantic import (
@@ -478,9 +478,146 @@ _TERMINAL_TRACE_ALLOWED_FIELDS = {
     TraceEventType.RUN_STOPPED: _TERMINAL_TRACE_COMMON_FIELDS
     | {"user_outcome", "stop_reason"},
 }
+_FINALIZE_VALIDATION_FALLBACK = "FinalizeRunCommand validation failed"
+_FINALIZE_SAFE_ERROR_TYPE_MESSAGES = {
+    "frozen_instance": "Instance is frozen",
+}
+_FINALIZE_SAFE_VALIDATION_MESSAGES = frozenset(
+    {
+        "terminal result must be canonical",
+        "ASSISTANT Message must be canonical",
+        "Task transition must be recursively canonical",
+        "terminal TraceEvent must be canonical",
+        "Run finalization expects RUNNING status",
+        "Run finalization rejects a dirty expected active Run",
+        "Run finalization requires a terminal Run",
+        "normal Run finalization cannot use recovery-only stop reason",
+        "normal terminal Run cannot carry incomplete_reason",
+        "COMPLETED Run requires conversation_id",
+        "FAILED Run cannot carry stop_reason",
+        "Run finalization cannot change stable fields",
+        "active RunTaskLink must belong to the Run",
+        "active RunTaskLink must have no result Task version",
+        "RunTaskLink identities must be unique",
+        "terminal RunTaskLink must belong to the Run",
+        "terminal RunTaskLink requires a result Task version",
+        "Run finalization requires the exact RunTaskLink set",
+        "terminal RunTaskLink must preserve its active projection",
+        "result Task identities must be unique",
+        "Run finalization requires one exact result Task per link Task identity",
+        "RunTaskLink result Task version must match result Task",
+        (
+            "FAILED Run requires empty Task transition, terminal result, "
+            "ASSISTANT Message and terminal Trace projections"
+        ),
+        "COMPLETED Run with a link requires its Task transition",
+        "COMPLETED Run without a link cannot carry a Task transition",
+        "COMPLETED Run requires a terminal result",
+        "terminal result requires an exact AgentRunResult",
+        "COMPLETED Run requires an ASSISTANT Message",
+        "ASSISTANT Message requires an exact MessageRecord",
+        "Run without a Task cannot carry result Tasks",
+        "Run without a Task terminal Trace may contain only RunStopped",
+        "Task transition expected and next Task must equal the link Task",
+        "Task transition cannot precede active link base Task version",
+        "terminal Task and RequestUnit require the same status/version",
+        "result Task projection must equal the exact next Task",
+        "Task transition cannot follow Run completion",
+        (
+            "Task terminal Trace must be ordered exactly as "
+            "TaskStateChanged, RunStopped"
+        ),
+        "COMPLETED Run projection is outside the closed terminal matrix",
+        "terminal result must bind the terminal Run",
+        "ASSISTANT Message requires schema_version message_record.p0.v1",
+        "ASSISTANT Message requires ASSISTANT direction",
+        "ASSISTANT Message must bind the terminal Conversation",
+        "ASSISTANT Message content must equal terminal result",
+        "ASSISTANT Message timestamp must equal Run completion",
+        "terminal Trace event identities must be unique",
+        "every terminal Trace event must bind the terminal Run",
+        (
+            "TaskStateChanged terminal Trace only allows its exact per-kind "
+            "projection"
+        ),
+        (
+            "RunStopped terminal Trace only allows its exact per-kind projection"
+        ),
+        "TaskStateChanged must bind the terminal Task/RequestUnit",
+        "TaskStateChanged timestamp must equal Task transition",
+        "RunStopped stop reason must equal terminal Run",
+        "RunStopped outcome must equal terminal result",
+        "RunStopped timestamp must equal Run completion",
+    }
+)
 
 
-class FinalizeRunCommand(_StrictRuntimePrivateRecord):
+def _bounded_finalize_validation_message(
+    line_error: Mapping[str, object],
+) -> str:
+    error_type = line_error.get("type")
+    if type(error_type) is str:
+        safe_error_type_message = _FINALIZE_SAFE_ERROR_TYPE_MESSAGES.get(
+            error_type
+        )
+        if safe_error_type_message is not None:
+            return safe_error_type_message
+    context = line_error.get("ctx")
+    if not isinstance(context, Mapping):
+        return _FINALIZE_VALIDATION_FALLBACK
+    source_error = context.get("error")
+    if type(source_error) is not ValueError or len(source_error.args) != 1:
+        return _FINALIZE_VALIDATION_FALLBACK
+    candidate = source_error.args[0]
+    if (
+        type(candidate) is str
+        and candidate in _FINALIZE_SAFE_VALIDATION_MESSAGES
+    ):
+        return candidate
+    return _FINALIZE_VALIDATION_FALLBACK
+
+
+def _sanitize_finalize_validation_error(
+    error: ValidationError,
+) -> ValidationError:
+    source_line_errors = error.errors(
+        include_url=False,
+        include_context=True,
+        include_input=False,
+    )
+    safe_message = (
+        _bounded_finalize_validation_message(source_line_errors[0])
+        if source_line_errors
+        else _FINALIZE_VALIDATION_FALLBACK
+    )
+    return ValidationError.from_exception_data(
+        "FinalizeRunCommand",
+        [
+            {
+                "type": "value_error",
+                "loc": ("finalize_run_command",),
+                "input": None,
+                "ctx": {"error": ValueError(safe_message)},
+            }
+        ],
+        input_type="python",
+        hide_input=True,
+    )
+
+
+class _FinalizeRunCommandMeta(type(_StrictRuntimePrivateRecord)):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().__call__(*args, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+
+class FinalizeRunCommand(
+    _StrictRuntimePrivateRecord,
+    metaclass=_FinalizeRunCommandMeta,
+):
     """One validated aggregate for a normal terminal turn."""
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -506,6 +643,60 @@ class FinalizeRunCommand(_StrictRuntimePrivateRecord):
         tuple[TraceEvent, ...],
         Field(max_length=2),
     ] = ()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        try:
+            super().__setattr__(name, value)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        else:
+            return
+        raise sanitized_error from None
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            super().__delattr__(name)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        else:
+            return
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        **kwargs: Any,
+    ) -> Self:
+        try:
+            return super().model_validate(obj, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        **kwargs: Any,
+    ) -> Self:
+        try:
+            return super().model_validate_json(json_data, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
+
+    @classmethod
+    def model_validate_strings(
+        cls,
+        obj: Any,
+        **kwargs: Any,
+    ) -> Self:
+        try:
+            return super().model_validate_strings(obj, **kwargs)
+        except ValidationError as error:
+            sanitized_error = _sanitize_finalize_validation_error(error)
+        raise sanitized_error from None
 
     @field_validator("task_transition")
     @classmethod
