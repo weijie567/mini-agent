@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜P0 Eval Coverage Matrix
 
-更新日期：2026-07-26  
+更新日期：2026-07-27<br>
 状态：P0 规范性评测覆盖契约  
 适用范围：两条 P0 E2E、跨组件风险、首批 Eval Case family 与激活顺序
 
-> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 W1 contract 源码、versioned Fixture / Dataset artifacts 与 consistency tests，但没有 Eval Harness、HTTP / Trajectory E2E、Baseline 或结果报告；下列 Case 当前均为 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
+> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 versioned Fixture / Dataset artifacts 与 loader、`ScriptedModelProvider`、`QwenResponsesAdapter`、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery 及对应测试；现有 Harness 执行只使用 synthetic / in-memory SUT 与 Port，不是真实 Runtime / HTTP / PostgreSQL 纵向链。真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root、HTTP / Trajectory / E2E Result、credentialed Qwen Baseline 与结果报告仍未出现；下列 Case 当前均为 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
 
 ## 1. Owner 与使用规则
 
@@ -197,7 +197,7 @@ release_gate = FAIL
 → 回复与 Trace
 ```
 
-上述两个 Case 的具体编码与双轨执行契约见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。创建 Spec 不改变生命周期状态；只有仓库出现可复现源码、Fixture、Harness 和结构化 Eval Result 后，Case 才能改为 `EXECUTABLE`。
+上述两个 Case 的具体编码与双轨执行契约见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。创建 Spec 或只完成 Component / in-process Eval machinery 都不改变生命周期状态；只有真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 和真实 HTTP / Trajectory / E2E 执行能够生成可复现的结构化 Eval Result 后，Case 才能改为 `EXECUTABLE`。
 
 ### Cycle 2：完成 E2E-01
 
@@ -266,19 +266,20 @@ grading:
     - T
 ```
 
-通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义目标编码，W1 artifacts 已落盘但因缺少 Harness / HTTP 纵向链仍不可执行；`E2E01-05` 等待 Cycle 2 的 scoped contract。
+完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码，其 artifacts / loader、Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness` 和结构化 Result / Failure machinery 已落盘。当前 Harness 测试仍依赖 `SyntheticSut` 与 in-memory Trace / Result fake，缺少真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 和 HTTP / Trajectory / E2E Result，因此 Case 仍不可执行；`E2E01-05` 等待 Cycle 2 的 scoped contract。
 
 ## 9. 当前验证状态
 
 | 项目 | 状态 |
 |---|---|
 | Strategy 与 Case contract | `CONFIRMED`：已由 active 文档定义 |
-| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED`：W1 contract / artifact 源码与测试已出现，但尚无 Harness、HTTP / Trajectory E2E 或结构化 Eval Result 运行证据 |
+| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED / COMPONENT_MACHINERY_PRESENT`：artifacts / loader、双 Provider Adapter、13 个确定性 Grader、in-process Harness 与结构化 Result / Failure machinery 已出现；尚无真实纵向运行结果 |
 | `G-RAG-INFRA` | `CONTRACT_DEFINED / PARTIAL_PREREQUISITE`：固定 pgvector Compose 与基础 migration 已出现；RAG capability probe、Corpus / Index 和 Gate Result 均未出现，不能宣称 RAG 基础设施 Gate 已激活 |
 | 15 个 Case family | `CONTRACT_DEFINED` |
-| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / ARTIFACT_PRESENT`：尚无 Harness，因此不是可执行 Dataset |
-| Eval Harness / Grader 实现 | `NOT_FOUND` |
-| Baseline / Regression Report | `NOT_FOUND` |
+| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / LOADABLE_ARTIFACT_PRESENT`：authenticated loader 可加载并校验；因没有真实 `EvalCaseSut` 纵向链，仍不是可执行 Dataset |
+| Eval loader / Provider / Grader / Harness / Result machinery | `CONFIRMED / COMPONENT_ONLY`：exact-base focused suite 的 191 项测试通过；Harness 测试使用 `SyntheticSut` 与 in-memory Trace / Result fake，Qwen Adapter 测试使用 MockTransport |
+| 真实 Eval 纵向链 | `NOT_FOUND`：真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与 HTTP / Trajectory / E2E Result 均未出现 |
+| Qwen Baseline / Regression Report | `ADAPTER_PRESENT / REAL_RUN_NOT_FOUND`：`QwenResponsesAdapter` 与空 `NOT_RUN` 零网络 preflight 已出现；credentialed runner、真实 Baseline Result 与报告未出现 |
 | 普通质量、延迟和成本阈值 | `OPEN` |
 | 线上监控与真实产品指标 | `OPEN`，且不属于当前已验证能力 |
 
