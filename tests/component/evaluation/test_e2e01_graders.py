@@ -115,6 +115,20 @@ OBSERVATION_ID = UUID("00000000-0000-4000-8000-000000000514")
 TOOL_RESULT_REF = UUID("00000000-0000-4000-8000-000000000517")
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=UTC)
 TOOLSET_HASH = compute_model_visible_toolset_hash((get_order_tool_spec(),))
+LEAKY_DATETIME_SECRET = "leaky-datetime-secret"
+
+
+class LeakyDatetime(datetime):
+    strftime_calls = 0
+
+    def strftime(self, format: str) -> str:
+        type(self).strftime_calls += 1
+        return f"{super().strftime(format)}{LEAKY_DATETIME_SECRET}"
+
+
+class DerivedUUID(UUID):
+    pass
+
 
 REQUIRED_EVENTS = (
     TraceEventType.MESSAGE_ACCEPTED,
@@ -1036,6 +1050,98 @@ def test_nested_raw_enum_observation_projection_fails_closed() -> None:
         result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
         for result in results
     )
+
+
+def test_leaky_datetime_subclass_fails_closed_before_renderer_use(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canonical = _observation()
+    leaky_projection = canonical.normalized_value.model_copy(
+        update={
+            "ordered_at": LeakyDatetime(
+                2026,
+                7,
+                20,
+                2,
+                15,
+                tzinfo=UTC,
+            )
+        }
+    )
+    leaky_observation = canonical.model_copy(
+        update={"normalized_value": leaky_projection}
+    )
+    untrusted_message = _rendered_message(leaky_observation)
+    evidence = _evidence(
+        observations=(leaky_observation,),
+        observation_persistence_envelopes=(_observation_envelope(leaky_observation),),
+        agent_result=AgentRunResult(
+            run_id=RUN_ID,
+            outcome=AgentOutcome.COMPLETED,
+            message=untrusted_message,
+        ),
+    )
+    assert LEAKY_DATETIME_SECRET in untrusted_message
+    LeakyDatetime.strftime_calls = 0
+
+    results = tuple(
+        grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        for grader_name in GRADER_NAMES
+    )
+    assert tuple(result.grader_name for result in results) == GRADER_NAMES
+    assert all(result.status is EvalGraderStatus.FAIL for result in results)
+    assert all(
+        result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for result in results
+    )
+
+    canonical_outcome = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical_outcome.status is EvalResultStatus.FAIL
+    assert LEAKY_DATETIME_SECRET not in canonical_outcome.model_dump_json()
+    assert LEAKY_DATETIME_SECRET not in caplog.text
+    assert LeakyDatetime.strftime_calls == 0
+
+
+def test_uuid_subclass_observation_storage_fails_every_canonical_grader() -> None:
+    canonical = _observation()
+    derived_observation = canonical.model_copy(
+        update={
+            "observation_id": DerivedUUID(
+                hex=canonical.observation_id.hex,
+            )
+        }
+    )
+    evidence = _evidence(
+        observations=(derived_observation,),
+        observation_persistence_envelopes=(_observation_envelope(canonical),),
+    )
+
+    results = tuple(
+        grader_registry()[grader_name].grade(
+            evidence,
+            _expectations(),
+        )
+        for grader_name in GRADER_NAMES
+    )
+    assert all(result.status is EvalGraderStatus.FAIL for result in results)
+    assert all(
+        result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        for result in results
+    )
+
+    canonical_outcome = grade_evidence(
+        GRADER_NAMES,
+        evidence,
+        _expectations(),
+    )
+    assert canonical_outcome.status is EvalResultStatus.FAIL
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from itertools import permutations
 from types import MappingProxyType
 from typing import Annotated, Protocol
@@ -393,6 +394,10 @@ def _recursive_python_field_projection(
             return projected_items, (dict, tuple(item_signatures))
         finally:
             active_ids.remove(value_id)
+    if isinstance(value, datetime) and type(value) is not datetime:
+        raise ValueError("non-canonical datetime storage")
+    if isinstance(value, UUID) and type(value) is not UUID:
+        raise ValueError("non-canonical UUID storage")
     return value, type(value)
 
 
