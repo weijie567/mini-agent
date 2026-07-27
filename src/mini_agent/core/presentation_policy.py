@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .memory import (
     ObservationVisibility,
@@ -40,6 +40,15 @@ def validate_presentation_plan(
         if type(plan) is not PresentationPlan:
             raise PresentationPolicyError("canonical PresentationPlan required")
         raise PresentationPolicyError("PresentationPlan must remain fact-free")
+    try:
+        canonical_plan = PresentationPlan.model_validate(
+            dict(vars(plan)),
+            strict=True,
+        )
+    except ValidationError:
+        raise PresentationPolicyError(
+            "PresentationPlan must remain fact-free and canonical"
+        ) from None
 
     safe_observation = (
         _is_exact_contract_model(observation, OrderObservation)
@@ -57,4 +66,4 @@ def validate_presentation_plan(
     )
     if not safe_observation:
         raise PresentationPolicyError("safe Observation provenance required")
-    return plan
+    return canonical_plan

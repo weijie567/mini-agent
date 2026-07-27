@@ -110,6 +110,37 @@ def test_plain_dict_cannot_bypass_the_canonical_plan_contract() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("tone", "MODEL_CHOSEN_UNSAFE_TONE"),
+        ("opening_variant", "FREE_TEXT_OPENING"),
+        ("closing_variant", "UNBOUNDED_PROMISE"),
+        (
+            "field_order",
+            (
+                PresentationField.ORDER_NUMBER,
+                PresentationField.STATUS,
+                PresentationField.ITEMS,
+                PresentationField.ORDERED_AT,
+                PresentationField.ORDERED_AT,
+            ),
+        ),
+    ],
+)
+def test_bypassed_existing_plan_fields_are_strictly_revalidated(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    bypassed = _plan().model_copy(update={field_name: invalid_value})
+
+    with pytest.raises(PresentationPolicyError, match="canonical"):
+        validate_presentation_plan(
+            plan=bypassed,
+            observation=_observation(),
+        )
+
+
+@pytest.mark.parametrize(
     "observation",
     [
         _observation().model_copy(update={"source_tool": "search_orders"}),
