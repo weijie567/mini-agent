@@ -13,6 +13,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
 from mini_agent.application.persistence import (
+    P0PersistenceIntegrityCategory,
+    P0PersistenceIntegrityError,
     P0RecordCode,
     P0RecordReference,
     decode_persistence_record,
@@ -568,6 +570,118 @@ def _same_timestamp_terminal_trace_command() -> FinalizeRunCommand:
                 run_stopped,
             ),
         }
+    )
+
+
+async def _seed_tool_call_support_for_finalization(
+    adapter: PostgresRecordAdapter,
+    command: FinalizeRunCommand,
+) -> CreateToolCallCommand:
+    transition = command.task_transition
+    assert transition is not None
+    record_by_code = {
+        case.code: case.record
+        for case in _record_cases()
+    }
+    toolset_artifact = record_by_code[
+        P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
+    ]
+    manifest_template = record_by_code[
+        P0RecordCode.CONTEXT_MANIFEST_RECORD
+    ]
+    gate_template = record_by_code[P0RecordCode.GATE_DECISION_RECORD]
+    tool_call_template = record_by_code[P0RecordCode.TOOL_CALL_RECORD]
+    task_state_ref = manifest_template.task_state_ref_and_version
+    assert task_state_ref is not None
+    model_call_id = uuid4()
+    context_manifest_id = uuid4()
+    gate_decision_id = uuid4()
+    binding_ref = (
+        transition.expected_request_unit_record.input_binding_refs[0]
+    )
+    context_manifest = manifest_template.model_copy(
+        update={
+            "context_manifest_id": context_manifest_id,
+            "run_id": command.expected_active_record.run_id,
+            "model_call_id": model_call_id,
+            "selected_message_refs": (
+                transition.expected_request_unit_record.goal_source_refs[0],
+            ),
+            "task_state_ref_and_version": task_state_ref.model_copy(
+                update={
+                    "task_id": transition.expected_task_record.task_id,
+                    "state_version": (
+                        transition.expected_task_record.state_version
+                    ),
+                }
+            ),
+            "observation_refs_and_versions": (),
+            "assembled_at": command.expected_active_record.started_at,
+        }
+    )
+    gate_decision = gate_template.model_copy(
+        update={
+            "gate_decision_id": gate_decision_id,
+            "model_call_id": model_call_id,
+            "context_manifest_id": context_manifest_id,
+            "argument_binding_refs": (binding_ref,),
+            "proposed_base_task_state_version": (
+                transition.expected_task_record.state_version
+            ),
+            "validated_task_state_version": (
+                transition.expected_task_record.state_version
+            ),
+            "decided_at": command.expected_active_record.started_at,
+        }
+    )
+    created_tool_call = tool_call_template.model_copy(
+        update={
+            "tool_call_id": uuid4(),
+            "run_id": command.expected_active_record.run_id,
+            "task_id": transition.expected_task_record.task_id,
+            "request_unit_id": (
+                transition.expected_request_unit_record.request_unit_id
+            ),
+            "model_call_id": model_call_id,
+            "context_manifest_id": context_manifest_id,
+            "gate_decision_id": gate_decision_id,
+            "validated_task_state_version": (
+                transition.expected_task_record.state_version
+            ),
+            "argument_binding_refs": (binding_ref,),
+            "attempt_count": 0,
+            "status": ToolCallStatus.CREATED,
+            "started_at": command.expected_active_record.started_at,
+            "finished_at": None,
+            "failure_code": None,
+            "timeout_phase": None,
+            "interruption_reason": None,
+            "result_ref": None,
+        }
+    )
+    await adapter.put_toolset_artifact(toolset_artifact)
+    await adapter.save_context_manifest(context_manifest)
+    await adapter.save_gate_decision(gate_decision)
+    return CreateToolCallCommand(created_record=created_tool_call)
+
+
+def _dispatch_tool_call_command(
+    created_record,
+) -> DispatchToolCallCommand:
+    running_record = created_record.model_copy(
+        update={
+            "attempt_count": 1,
+            "status": ToolCallStatus.RUNNING,
+        }
+    )
+    return DispatchToolCallCommand(
+        expected_created_record=created_record,
+        running_record=running_record,
+        started_attempt=ToolAttemptRecord(
+            tool_call_id=created_record.tool_call_id,
+            attempt_no=1,
+            started_at=created_record.started_at,
+        ),
     )
 
 
@@ -1228,13 +1342,19 @@ async def test_finalize_run_persists_exact_complete_terminal_projection(
         engine.dispose()
 
 
+@pytest.mark.parametrize("same_timestamp", (True, False))
 async def test_finalize_run_lists_same_timestamp_terminal_traces_semantically(
     eval_postgres_namespace,
+    same_timestamp: bool,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     try:
-        command = _same_timestamp_terminal_trace_command()
+        command = (
+            _same_timestamp_terminal_trace_command()
+            if same_timestamp
+            else _physical_finalization_command(with_task=True)
+        )
         await _seed_finalization_prerequisites(adapter, command)
         assert (
             await adapter.finalize_run_if_active(command)
@@ -1403,6 +1523,234 @@ async def test_trace_listing_preserves_history_and_recovery_physical_order(
                 run_id=command.expected_active_record.run_id,
             )
             == expected_history
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_finalize_run_rechecks_active_tool_calls_after_run_lock(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    finalizer = PostgresRecordAdapter(session_factory)
+    tool_call_writer = PostgresRecordAdapter(session_factory)
+    prelock_closure_materialized = threading.Event()
+    tool_call_committed = threading.Event()
+    pause_guard = threading.Lock()
+    paused = False
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(tool_call_writer, command)
+        create_command = await _seed_tool_call_support_for_finalization(
+            tool_call_writer,
+            command,
+        )
+        original_lock_rows_stably = finalizer._lock_rows_stably
+
+        def pause_before_first_lock(session, rows):
+            nonlocal paused
+            materialized = tuple(rows)
+            with pause_guard:
+                should_pause = not paused
+                paused = True
+            if should_pause:
+                assert tuple(
+                    row.record_code for row in materialized
+                ) == (P0RecordCode.AGENT_RUN_RECORD.value,)
+                prelock_closure_materialized.set()
+                assert tool_call_committed.wait(timeout=5)
+            return original_lock_rows_stably(session, materialized)
+
+        monkeypatch.setattr(
+            finalizer,
+            "_lock_rows_stably",
+            pause_before_first_lock,
+        )
+
+        def finalize_in_thread():
+            return asyncio.run(finalizer.finalize_run_if_active(command))
+
+        finalize_task = asyncio.create_task(
+            asyncio.to_thread(finalize_in_thread)
+        )
+        assert await asyncio.to_thread(
+            prelock_closure_materialized.wait,
+            5,
+        )
+        try:
+            insert_result = await tool_call_writer.insert_tool_call(
+                create_command
+            )
+            after_insert = _physical_snapshot(session_factory)
+        finally:
+            tool_call_committed.set()
+        finalize_result = await asyncio.wait_for(finalize_task, timeout=15)
+
+        assert insert_result is InsertOnlyWriteResult.INSERTED
+        assert finalize_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        assert _physical_snapshot(session_factory) == after_insert
+        assert (
+            await finalizer.load_run_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=command.expected_active_record.run_id,
+            )
+            == command.expected_active_record
+        )
+        assert (
+            await finalizer.load_tool_call_for_owner(
+                owner_scope=_owner_scope(),
+                tool_call_id=create_command.created_record.tool_call_id,
+            )
+            == create_command.created_record
+        )
+        assert (
+            await finalizer.list_trace_events_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=command.expected_active_record.run_id,
+            )
+            == ()
+        )
+        assert command.assistant_message is not None
+        with session_factory() as session:
+            assert (
+                _row_for_envelope(
+                    session,
+                    encode_persistence_record(
+                        P0RecordCode.MESSAGE_RECORD,
+                        command.assistant_message,
+                    ),
+                )
+                is None
+            )
+    finally:
+        tool_call_committed.set()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "active_status",
+    (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),
+)
+async def test_finalize_run_rejects_existing_active_tool_call_without_writes(
+    eval_postgres_namespace,
+    active_status: ToolCallStatus,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        create_command = await _seed_tool_call_support_for_finalization(
+            adapter,
+            command,
+        )
+        assert (
+            await adapter.insert_tool_call(create_command)
+            is InsertOnlyWriteResult.INSERTED
+        )
+        if active_status is ToolCallStatus.RUNNING:
+            assert (
+                await adapter.start_tool_call_if_created(
+                    _dispatch_tool_call_command(
+                        create_command.created_record
+                    )
+                )
+                is ToolDispatchFenceWriteResult.APPLIED
+            )
+
+        before = _physical_snapshot(adapter.session_factory)
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is ConditionalWriteResult.PROJECTION_CONFLICT
+        )
+        assert _physical_snapshot(adapter.session_factory) == before
+    finally:
+        engine.dispose()
+
+
+async def test_finalize_wins_before_tool_call_insert_leaves_no_orphan(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        create_command = await _seed_tool_call_support_for_finalization(
+            adapter,
+            command,
+        )
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is ConditionalWriteResult.APPLIED
+        )
+        before = _physical_snapshot(adapter.session_factory)
+
+        with pytest.raises(P0PersistenceIntegrityError) as captured:
+            await adapter.insert_tool_call(create_command)
+
+        assert (
+            captured.value.category
+            is P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+        assert _physical_snapshot(adapter.session_factory) == before
+        assert (
+            await adapter.load_tool_call_for_owner(
+                owner_scope=_owner_scope(),
+                tool_call_id=create_command.created_record.tool_call_id,
+            )
+            is None
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_terminal_tool_call_does_not_block_run_finalization(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    try:
+        command = _physical_finalization_command(with_task=True)
+        await _seed_finalization_prerequisites(adapter, command)
+        create_command = await _seed_tool_call_support_for_finalization(
+            adapter,
+            command,
+        )
+        terminal_tool_call = create_command.created_record.model_copy(
+            update={
+                "status": ToolCallStatus.INTERRUPTED,
+                "finished_at": (
+                    create_command.created_record.started_at
+                    + timedelta(microseconds=1)
+                ),
+                "interruption_reason": "PROCESS_RESTART_DETECTED",
+            }
+        )
+        with adapter.session_factory.begin() as session:
+            assert adapter._persist_envelopes(
+                session,
+                (
+                    encode_persistence_record(
+                        P0RecordCode.TOOL_CALL_RECORD,
+                        terminal_tool_call,
+                    ),
+                ),
+            ) == (True,)
+
+        assert (
+            await adapter.finalize_run_if_active(command)
+            is ConditionalWriteResult.APPLIED
+        )
+        _assert_persisted_finalization(adapter, command)
+        assert (
+            await adapter.load_tool_call_for_owner(
+                owner_scope=_owner_scope(),
+                tool_call_id=terminal_tool_call.tool_call_id,
+            )
+            == terminal_tool_call
         )
     finally:
         engine.dispose()
