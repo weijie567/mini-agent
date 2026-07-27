@@ -65,15 +65,20 @@ Output: 仅修改 `docs/architecture/intent-design-reference.md` 的一个文档
 <packet_contract>
 repository: `https://github.com/weijie567/mini-agent`
 remote: `origin`
-head_branch: `codex/e2e01-01-ru-semantic-ruling`
+head_branch: `codex/e2e01-01-ru-semantic-ruling-r1`
 base_branch: `integration/e2e01-thin`
 base_sha: `3f0753f7bef87fc02f314e28fe8b07860a819701`
 base_tree: `b5214d3b7140ca305566a9cb802a21388a92464c`
-worktree_id: `e2e01-01-ru-semantic-ruling`
+worktree_id: `e2e01-01-ru-semantic-ruling-r1`
 writer: `Intent canonical-owner sole writer, supervised by /root Integrator`
 agent_role: `gsd-doc-writer`
 
 物理 Worktree path 只由 Integrator 在 private dispatch handoff 中传递，不持久化到公开 Plan 或 PR；公开身份只使用 `worktree_id`。
+
+Revision lineage:
+
+- 原执行 identity `codex/e2e01-01-ru-semantic-ruling` 的 Draft PR #51 / remote head `46f38909ca14f864dbc6d147485b09b58294ba9e` 经 exact-head canonical / security review 得到 `CRITICAL / HIGH / MEDIUM = 0 / 1 / 1`，已关闭并保留为 `BLOCKED / SUPERSEDED` 证据。
+- `r1` 仍是同一个 `01-07C` Task Packet：固定 `base_sha` / `base_tree`、sole owner、allowlist、依赖、任务范围、denominator 与 lifecycle 均不变。新 Worktree 必须从固定 base clean 创建；不得 cherry-pick、force-push、rebase 或改写旧 reviewed ref，最终 head 仍须相对 base 恰好一个 commit。
 
 owned_files:
 
