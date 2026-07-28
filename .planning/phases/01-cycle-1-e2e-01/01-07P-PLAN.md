@@ -23,20 +23,22 @@ must_haves:
     - "upgrade只原子替换同名ck_p0_records_code_version_closed并保留已有v1 row；不写、改、删、backfill、reconstruct或read-time rewrite任何payload。"
     - "downgrade在同一migration transaction内锁定p0_records并用bounded EXISTS检查RU-v2 row；存在时用固定无PII诊断fail closed，且revision、row与expanded constraint全部保持0003状态。"
     - "physical v1/v2 admission不等于active registry、codec/read/write routing、多版本Runtime compatibility、owner/provenance/closure validation、data migration或readiness。"
-    - "01-07P与01-07I从同一exact B_FE_EXPAND在独立Worktree并行实现，文件交集为0；必须串行review/merge，只有两者共同完成才形成B_IP。"
+    - "01-07P原始RED/GREEN与01-07I从同一exact B_FE_EXPAND在独立Worktree并行实现且文件交集为0；因01-07E阶段性consumer oracle阻断P full gate，最终P-r1必须从reviewed I + dedicated oracle-fix后的exact B_I_E_ORACLE_FIX重放同一三文件patch并重新review，只有P-r1串行merge才形成B_IP。"
   artifacts:
     - "单一Alembic revision 20260728_0003及其无损fail-closed downgrade。"
     - "SQLAlchemy exact 18-pair metadata projection与migration-chain integration tests。"
   key_links:
     - "Thin Slice p0-ru-v2-cutover-r1 version catalog / DEPENDENCY_EXPAND → physical code/version admission only。"
     - "Memory §15.2 exact-version/integrity/migration rules → unsupported pair拒绝、无read-time migration、fail-closed downgrade。"
-    - "P0-RU-V2-EXECUTION-MAP：B_FE_EXPAND → {01-07I,01-07P} → B_IP。"
+    - "P0-RU-V2-EXECUTION-MAP仍拥有B_FE_EXPAND → {01-07I,01-07P} → B_IP；本r1只记录code-review remediation后的acceptance replay，不新增产品Packet、改变Wave 21依赖图或改变39-task denominator。"
 ---
 
 # Phase 1 Plan 01-07P｜Request Understanding v2 physical expand
 
-> **ISSUED DEPENDENCY_EXPAND TASK PACKET / IMPLEMENTATION NOT STARTED**
+> **R1 REISSUED DEPENDENCY_EXPAND TASK PACKET / ORIGINAL FEATURE FROZEN**
 > 本 Packet 只扩展 PostgreSQL physical code/version admission。migration、metadata或测试通过都不表示 RU v2 payload、strict reader、Runtime、Provider/Eval、active switch、Trajectory / E2E Result 或产品 readiness 已完成。
+>
+> 原始三文件实现从exact `B_FE_EXPAND`形成head `14c1abd9e81c91ee38d4324efb0f1b82e2869c17`，其focused 48与database 119通过，但full gate被01-07E遗留的阶段性consumer-absence oracle唯一阻断。该缺陷已由dedicated [PR #84](https://github.com/weijie567/mini-agent/pull/84) 在exact head `1e28b85e1bbf3b0f85561092d6e639b2ffaebfa2`取得独立`0/0/0/0`并reviewed merge为`B_I_E_ORACLE_FIX = 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`。原PR #82只保留为RED/GREEN与失败证据，不得merge；本r1从修正barrier重放相同P-owned patch并重新走feature/full/review/overlay gate。
 
 > **DERIVED / NON_NORMATIVE**
 > Request Understanding语义、exact logical mapping、Memory migration边界与execution order仍由对应active owner拥有。本Plan只冻结Infrastructure mechanics，不反向覆盖owner。
@@ -131,7 +133,7 @@ _CODE_VERSION_PAIRS = tuple(
 
 五个pre-existing top-level class/function definitions `_sql_values`、`Base`、`P0RecordModel`、`P0RecordReferenceModel`、`MockOrderModel` 的source segment与AST保持不变。允许delta仅为Application import和`_CODE_VERSION_PAIRS` assignment；其他module constants不得改写。
 
-protected-model oracle必须从exact B_FE blob机械比较candidate AST：
+protected-model oracle必须从exact r1 base blob机械比较candidate AST，并额外证明这些protected blobs仍与原始exact `B_FE_EXPAND`相同：
 
 - 5个class/function source segment、AST与single binding exact；
 - 唯一approved `ImportFrom mini_agent.application.persistence` delta是`P0_PERSISTENCE_REGISTRY → P0_RECORD_SCHEMA_VERSION_CATALOG`，`P0RecordCode`保留；
@@ -203,13 +205,13 @@ physical direct-insert tests只探测DB constraint，不能称为codec-valid dur
 <packet_contract>
 repository: `https://github.com/weijie567/mini-agent`
 remote: `origin`
-head_branch: `codex/e2e01-01-ru-v2-physical-expand`
+head_branch: `codex/e2e01-01-ru-v2-physical-expand-r1`
 base_branch: `integration/e2e01-thin`
-base_sha: `294ada386ec160ec2a48fc8883b5a38f1880e4ba`
-base_tree: `97b0928100edae965004338d52ce87dff7325fd1`
-input_barrier: `B_FE_EXPAND`
+base_sha: `0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`
+base_tree: `53f0d499fe7d62b515cf35382ec7699958bf7bb9`
+input_barrier: `B_I_E_ORACLE_FIX / REVIEW REMEDIATION REPLAY BASE`
 output_barrier: `B_IP / ONLY AFTER 01-07I AND 01-07P BOTH REVIEWED-SERIAL-MERGED`
-worktree_id: `e2e01-01-ru-v2-physical-expand`
+worktree_id: `e2e01-01-ru-v2-physical-expand-r1`
 writer: `Infrastructure migration-chain sole writer with owned test, supervised by /root Integrator`
 agent_role: `infra-engineer`
 active_routing: `false`
@@ -219,10 +221,15 @@ planning_and_owner_provenance:
 - exact 01-07I Plan merge `24451c7103b553023546549aebdeb3e3421cbe8a`，blob `15e114001cb81fdcf457f12a5156c9ed00085cbd`
 - exact execution map/status commit before I Plan `dcbba968cb1368d0a5a82e0d0203e4bbb6fc4c63`，multi-agent plan blob `243862e72ab72f885279eda5b1a89548fa2a1159`
 - exact `B_FE_EXPAND` merge `294ada386ec160ec2a48fc8883b5a38f1880e4ba`，tree `97b0928100edae965004338d52ce87dff7325fd1`
+- original 01-07P Plan merge `7a476bada3fb13a7c1eee90023c18569f7407d48`，Plan blob `f60f5080d5bcc3a2295b4dd55859e215b6d9a936`
+- original P RED `e6b8e44704357892760ce3b03a6e5201342cc4cb` / GREEN head `14c1abd9e81c91ee38d4324efb0f1b82e2869c17`，tree `a70b61de1099d31feddf0941b3a5e2e65eaa0652`；focused 48与database 119通过，full仅因旧01-07E oracle失败，原PR #82不得merge
+- reviewed 01-07I merge `b14a15d60b17eda8d8b5aed892c5d00f16005310`，tree `0825efeff47730e17974ea7d65bfd3af9a58fe51`
+- dedicated 01-07E oracle-fix reviewed head `1e28b85e1bbf3b0f85561092d6e639b2ffaebfa2` / tree `53f0d499fe7d62b515cf35382ec7699958bf7bb9`，PR #84 merge `0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`；pre-P full 1759与P overlay full 1767通过
+- canonical execution-owner remediation reviewed head `2fcc29f17bf9a4ce1bd6df28de112c0e8309131b` / tree `b57b1944a8ec5239677f2954490394b3899865cd`，PR #85 merge `67e7aacca0c7db46e0f87e2a817aea47fa15aeb7`，execution-map blob `d5fb6117253a81f5ff19a6e9a798c7b08318127a`；它只授权同一01-07P Packet的r1 acceptance replay，不替换feature base
 - Thin Slice owner blob `233a9c06ef6ef9300bef1a0e4f86659b0ec26a13`
 - Memory owner blob `5c27ba3bd2ed74e5164bdd0812133041ed96f242`
 - 01-07E catalog source blob `1e085e066847b69fd4f49e6b8ce6c732391644b3`
-- official 01-07P Plan merge SHA/blob由Integrator在Plan PR reviewed merge后捕获；planning merge不替换feature base `B_FE_EXPAND`
+- official 01-07P-r1 Plan correction merge SHA/blob由Integrator在execution preflight捕获；planning merge不替换feature base `B_I_E_ORACLE_FIX`
 
 owned_files_at_base:
 
@@ -256,23 +263,24 @@ commit_contract:
 
 1. RED `test(01-07P): define request understanding v2 physical expand`：只改`tests/integration/test_database_migrations.py`；migration target仍NOT_FOUND且models blob仍等于base。focused命令只因0003/18-pair/downgrade合同缺失失败。
 2. GREEN `feat(01-07P): expand request understanding v2 physical schema`：只新增0003并修改models；不重写RED。
-3. 正常feature history相对B_FE_EXPAND恰为上述两个commit。Finding修复只能追加`fix(01-07P): ...`，不得amend/rebase/force-push已审历史。
+3. P-r1以普通cherry-pick从原始两个commit重放，因新parent形成fresh SHA但patch/顺序/subject保持；正常feature history相对`B_I_E_ORACLE_FIX`前两个commit恰为上述RED/GREEN。Finding修复只能追加`fix(01-07P): ...`，不得amend/rebase/force-push已审历史。
 
 integration_order_ruling:
 
-- I/P实现可并行，但Integrator先完成01-07I canonical full gate、exact review、latest overlay与serial merge。
-- 01-07P开发期只运行disposable `db-test` namespace focused/regression；不得在I gate完成前把共享dev DB升级到0003。
-- I merged后，先在P exact feature head运行canonical dev migration/full gate并完成独立review；再基于latest integration创建P overlay，重复canonical full gate与final review后第二个串行merge。该merge的exact SHA/tree才可命名`B_IP`。
-- 这是共享canonical DB revision不可被旧I worktree识别所需的execution scheduling，不改变I/P共同feature base或symbolic map。
+- I/P原始实现并行，Integrator已先完成01-07I canonical full gate、exact review、latest overlay与serial merge。
+- P原始head在I merged后完成共享dev 0003 migration、focused/database gate；full唯一失败证明01-07E test oracle与已签发P consumer冲突。不得通过扩大P三文件allowlist、隐藏失败或只依赖overlay绕过。
+- PR #84先在独立Application test ownership中修复oracle并reviewed merge；P-r1现在从exact `B_I_E_ORACLE_FIX`只重放原始三文件patch，重新运行canonical migration/full与独立exact-head review。
+- P-r1再基于latest integration创建overlay，重复scope、migration、database regression、canonical full与final review后串行merge。该merge exact SHA/tree才可命名`B_IP`。
+- 这是review finding remediation与acceptance replay，不改变产品cutover stage、I/P原始并行证据、Wave 21依赖图、execution-map Packet集合或39-task denominator。
 
 contract_changes: `YES / PHYSICAL ADDITIVE DEPENDENCY_EXPAND ONLY` — 同名code/version check从17→18 pair；无logical/active/data/reader/writer contract switch。
 security_impact: `YES` — exact pair admission、catalog/DDL parity、unsupported pair拒绝、无silent-data-loss downgrade与bounded diagnostics；不改变身份/授权。
 eval_impact: `YES / MIGRATION INTEGRATION CONTRACT ONLY` — 增加future E2E01-01/04 physical dependency证据；不改Dataset、Grader、Result、threshold、Case lifecycle、Trajectory/E2E状态。
-new_dependencies: `NONE`
+new_dependencies: `NONE / REVIEW REMEDIATION ONLY`
 graphify_disposition: `DISABLED_BY_USER / NOT_RUN / NOT_A_GATE`
 rollback: 合并前关闭PR；合并后若无v2 row且active switch未开始，先阻断downstream/writer、逐环境downgrade到0002，再普通revert PR撤销P；若存在v2 row，downgrade故意BLOCK，必须另签reverse data migration或verified backup restore。禁止delete/rewrite/fallback/reset/force-push/readiness claim。
 
-handoff_format: branch、exact feature base/Plan/head/commits/tree、owned/protected base/head blobs、RED/GREEN输出、18-pair与schema-delta矩阵、downgrade atomicity证据、focused/database/full gate、allowlist/commit containment、feature/overlay review、nonclaims、风险、B_IP merge SHA/tree与rollback。
+handoff_format: original与r1 branch、exact B_FE/B_I_E_ORACLE_FIX/Plan/head/commits/tree、patch-equivalence、owned/protected base/head blobs、RED/GREEN与旧oracle失败输出、18-pair与schema-delta矩阵、downgrade atomicity证据、focused/database/full gate、allowlist/commit containment、feature/overlay review、nonclaims、风险、B_IP merge SHA/tree与rollback。
 </packet_contract>
 
 <threat_model>
@@ -321,9 +329,9 @@ Feature writer必须先证明exact base/scope：
 ```bash
 set -euo pipefail
 
-base_sha=294ada386ec160ec2a48fc8883b5a38f1880e4ba
-base_tree=97b0928100edae965004338d52ce87dff7325fd1
-expected_branch=codex/e2e01-01-ru-v2-physical-expand
+base_sha=0fb4d0ba5fb9d673f2d116041ce023dd367a52ec
+base_tree=53f0d499fe7d62b515cf35382ec7699958bf7bb9
+expected_branch=codex/e2e01-01-ru-v2-physical-expand-r1
 
 test "$(git branch --show-current)" = "$expected_branch"
 test "$(git rev-parse "${base_sha}^{tree}")" = "$base_tree"
@@ -339,6 +347,29 @@ test "$(git rev-parse "${base_sha}:alembic/env.py")" = 4c32b2cd0603bb04246cce762
 expected_files=$'alembic/versions/20260728_0003_request_understanding_v2_expand.py\nsrc/mini_agent/infrastructure/persistence/models.py\ntests/integration/test_database_migrations.py'
 test "$(git diff --name-only "${base_sha}...HEAD" | LC_ALL=C sort)" = "$expected_files"
 git diff --check "${base_sha}...HEAD"
+
+owned_files=(
+  alembic/versions/20260728_0003_request_understanding_v2_expand.py
+  src/mini_agent/infrastructure/persistence/models.py
+  tests/integration/test_database_migrations.py
+)
+original_patch_sha=$(
+  git diff --binary \
+    294ada386ec160ec2a48fc8883b5a38f1880e4ba...14c1abd9e81c91ee38d4324efb0f1b82e2869c17 \
+    -- "${owned_files[@]}" |
+    shasum -a 256 |
+    awk '{print $1}'
+)
+test "$original_patch_sha" = \
+  4e85ed2fc3d14277339e4d15e9d2ba6de847c1cc24f7bbc55835a482323521f2
+replay_green_sha=$(git rev-list --reverse "${base_sha}..HEAD" | sed -n '2p')
+test -n "$replay_green_sha"
+replay_green_patch_sha=$(
+  git diff --binary "${base_sha}...${replay_green_sha}" -- "${owned_files[@]}" |
+    shasum -a 256 |
+    awk '{print $1}'
+)
+test "$replay_green_patch_sha" = "$original_patch_sha"
 
 test "$(git log --reverse --format=%s "${base_sha}..HEAD" | sed -n '1p')" = \
   "test(01-07P): define request understanding v2 physical expand"
@@ -375,7 +406,12 @@ Migration tests必须机械证明：
 Protected models delta必须运行以下独立Git-object oracle；它不是production test：
 
 ```bash
-uv run python - 294ada386ec160ec2a48fc8883b5a38f1880e4ba <<'PY'
+test "$(git rev-parse 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec:src/mini_agent/infrastructure/persistence/models.py)" = \
+  "$(git rev-parse 294ada386ec160ec2a48fc8883b5a38f1880e4ba:src/mini_agent/infrastructure/persistence/models.py)"
+test "$(git rev-parse 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec:tests/integration/test_database_migrations.py)" = \
+  "$(git rev-parse 294ada386ec160ec2a48fc8883b5a38f1880e4ba:tests/integration/test_database_migrations.py)"
+
+uv run python - 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec <<'PY'
 import ast
 import subprocess
 import sys
@@ -475,7 +511,7 @@ git diff --name-only \
   alembic src tests
 ```
 
-必须恰为I四文件+P三文件；source/test/infra之外的planning/status commits不计入feature ownership。记录exact `B_IP` SHA/tree后才可签发01-07K/01-07L。
+必须恰为I四文件+P三文件+reviewed 01-07E oracle-fix单一test文件；oracle-fix不计入P feature ownership，source/test/infra之外的planning/status commits也不计入feature ownership。记录exact `B_IP` SHA/tree后才可签发01-07K/01-07L。
 
 </verification>
 
@@ -485,6 +521,6 @@ git diff --name-only \
 2. PostgreSQL/metadata恰为17 code / 18 exact pairs，只有RU dual；其他schema零delta。
 3. migration source self-contained且models delta受oracle约束；approved lock真实阻断并发write。upgrade保留v1 data；downgrade遇v2 data原子fail closed且无PII诊断。
 4. 三文件allowlist外零改动；active registry/codec/Adapter/Runtime/Eval均未切换。
-5. I/P独立实现、串行review/merge；P latest-overlay final PASS后才形成B_IP。
+5. I/P原始独立实现证据保留；01-07E oracle-fix独立reviewed merge，P-r1从修正exact base重放且feature/latest-overlay双PASS后才形成B_IP。
 
 </success_criteria>
