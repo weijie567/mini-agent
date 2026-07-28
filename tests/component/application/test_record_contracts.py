@@ -6462,6 +6462,8 @@ def _gate_decision_trace(
         "event_type": TraceEventType.GATE_DECISION_RECORDED,
         "run_id": closure.run_record.run_id,
         "occurred_at": gate.decided_at,
+        "task_id": closure.task_records[0].task_id,
+        "request_unit_id": closure.request_unit_records[0].request_unit_id,
         "model_call_id": gate.model_call_id,
         "context_manifest_id": gate.context_manifest_id,
         "requested_tool_name": gate.requested_provider_tool_name,
@@ -6653,3 +6655,158 @@ def test_exact_run_evidence_preserves_other_payload_correlations() -> None:
         trace_events=(*closure.trace_events, correlation_event),
     )
     assert correlation_event in rebuilt.trace_events
+
+
+def _two_task_gate_exact_run_evidence(
+    *,
+    argument_binding_valid: bool,
+    manifest_task_ref: bool = False,
+) -> ExactRunEvidenceClosure:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    manifest = closure.context_manifests[0]
+    if manifest_task_ref:
+        manifest = _rebuild(
+            manifest,
+            task_state_ref_and_version=TaskStateRefAndVersion(
+                task_id=closure.task_records[0].task_id,
+                state_version=1,
+            ),
+        )
+        closure = _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(manifest,),
+        )
+    gate = GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name=(
+            "get_order" if argument_binding_valid else None
+        ),
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=argument_binding_valid,
+        argument_binding_refs=(
+            closure.input_binding_records[0].binding_id,
+        ),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=(2 if manifest_task_ref else 1),
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=(
+            GateDecisionValue.ACCEPT
+            if argument_binding_valid
+            else GateDecisionValue.REJECT
+        ),
+        reason_code=(
+            None
+            if argument_binding_valid
+            else GateReasonCode.ARGUMENT_BINDING_MISMATCH
+        ),
+        decided_at=UTC_NOW + timedelta(microseconds=100),
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        gate_decisions=(gate,),
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("task_id", "request_unit_id"),
+)
+def test_exact_run_evidence_rejects_gate_trace_without_root_pair(
+    missing_field: str,
+) -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        **{missing_field: None},
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded requires a root Task/RequestUnit pair",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_binding_valid_gate_on_other_task() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=True,
+    )
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded bindings must belong to its RequestUnit",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_allows_binding_mismatch_gate_on_other_task() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=False,
+    )
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, gate_event),
+    )
+    assert gate_event.gate_reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+    assert len(rebuilt.task_records) == 2
+
+
+def test_exact_run_evidence_closes_gate_trace_to_manifest_task_only() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=False,
+        manifest_task_ref=True,
+    )
+    gate = closure.gate_decisions[0]
+    manifest = closure.context_manifests[0]
+    matching_event = _gate_decision_trace(closure, gate)
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, matching_event),
+    )
+    assert manifest.task_state_ref_and_version.state_version == 1
+    assert matching_event.validated_task_state_version == 2
+    assert len(rebuilt.gate_decisions) == 1
+
+    mismatching_event = _rebuild(
+        matching_event,
+        trace_event_id=uuid4(),
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded Task must match ContextManifest",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, mismatching_event),
+        )

@@ -3618,8 +3618,14 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     + 1
                 )
 
-        gate_trace_projection_counts = Counter(
-            (
+        gate_trace_events_by_projection: dict[
+            tuple[object, ...],
+            list[TraceEvent],
+        ] = {}
+        for event in self.trace_events:
+            if event.event_type is not TraceEventType.GATE_DECISION_RECORDED:
+                continue
+            projection = (
                 event.model_call_id,
                 event.context_manifest_id,
                 event.requested_tool_name,
@@ -3628,11 +3634,16 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 event.gate_decision,
                 event.gate_reason_code,
             )
-            for event in self.trace_events
-            if event.event_type is TraceEventType.GATE_DECISION_RECORDED
-        )
-        gate_owner_projection_counts = Counter(
-            (
+            gate_trace_events_by_projection.setdefault(projection, []).append(
+                event
+            )
+
+        gate_owner_records_by_projection: dict[
+            tuple[object, ...],
+            list[GateDecision],
+        ] = {}
+        for gate in self.gate_decisions:
+            projection = (
                 gate.model_call_id,
                 gate.context_manifest_id,
                 gate.requested_provider_tool_name,
@@ -3641,12 +3652,58 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 gate.decision,
                 gate.reason_code,
             )
-            for gate in self.gate_decisions
+            gate_owner_records_by_projection.setdefault(projection, []).append(
+                gate
+            )
+
+        gate_trace_projection_counts = Counter(
+            {
+                projection: len(events)
+                for projection, events in gate_trace_events_by_projection.items()
+            }
+        )
+        gate_owner_projection_counts = Counter(
+            {
+                projection: len(gates)
+                for projection, gates in gate_owner_records_by_projection.items()
+            }
         )
         if not gate_trace_projection_counts <= gate_owner_projection_counts:
             raise ValueError(
                 "GateDecisionRecorded must match an owner GateDecision projection"
             )
+
+        for projection, events in gate_trace_events_by_projection.items():
+            owners = gate_owner_records_by_projection[projection]
+            for event in events:
+                if event.task_id is None or event.request_unit_id is None:
+                    raise ValueError(
+                        "GateDecisionRecorded requires a root Task/RequestUnit pair"
+                    )
+                manifest = manifest_by_id[event.context_manifest_id]
+                if (
+                    manifest.task_state_ref_and_version is not None
+                    and event.task_id
+                    != manifest.task_state_ref_and_version.task_id
+                ):
+                    raise ValueError(
+                        "GateDecisionRecorded Task must match ContextManifest"
+                    )
+
+            gate_binding_refs = set(owners[0].argument_binding_refs)
+            cross_unit_binding_count = sum(
+                not gate_binding_refs.issubset(
+                    unit_by_id[event.request_unit_id].input_binding_refs
+                )
+                for event in events
+            )
+            binding_invalid_owner_count = sum(
+                not owner.argument_binding_valid for owner in owners
+            )
+            if cross_unit_binding_count > binding_invalid_owner_count:
+                raise ValueError(
+                    "GateDecisionRecorded bindings must belong to its RequestUnit"
+                )
 
         for call_id, normalized in normalized_tool_result_events_by_call.items():
             call = call_by_id[call_id]
