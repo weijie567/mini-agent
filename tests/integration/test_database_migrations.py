@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 import pytest
@@ -297,6 +299,48 @@ def _assert_lock_timeout(
             transaction.rollback()
 
 
+def _wait_for_real_downgrade_lock(
+    engine: Engine,
+    *,
+    schema: str,
+    timeout_seconds: float = 5.0,
+) -> None:
+    lock_observed = text(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_locks AS held
+            JOIN pg_class AS relation
+              ON relation.oid = held.relation
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = :schema
+              AND relation.relname = 'p0_records'
+              AND held.mode = 'ShareRowExclusiveLock'
+              AND held.granted
+              AND EXISTS (
+                  SELECT 1
+                  FROM pg_locks AS waiting
+                  WHERE waiting.pid = held.pid
+                    AND waiting.relation = held.relation
+                    AND waiting.mode = 'AccessExclusiveLock'
+                    AND NOT waiting.granted
+              )
+        )
+        """
+    )
+    deadline = monotonic() + timeout_seconds
+    while monotonic() < deadline:
+        with engine.connect() as connection:
+            if connection.scalar(lock_observed, {"schema": schema}) is True:
+                return
+        sleep(0.01)
+    pytest.fail(
+        "real downgrade did not hold ShareRowExclusiveLock "
+        "while waiting for constraint DDL"
+    )
+
+
 def test_request_understanding_v2_expand_migration_source_is_self_contained() -> None:
     assert _MIGRATION_PATH.is_file()
     source = _MIGRATION_PATH.read_text()
@@ -376,12 +420,47 @@ def test_request_understanding_v2_expand_migration_source_is_self_contained() ->
     assert len(downgrade_matches) == 1
     downgrade_source = ast.get_source_segment(source, downgrade_matches[0])
     assert downgrade_source is not None
-    lock_index = downgrade_source.index(
-        "LOCK TABLE p0_records IN SHARE ROW EXCLUSIVE MODE"
+
+    class _NormalizeStringWhitespace(ast.NodeTransformer):
+        def visit_Constant(self, node: ast.Constant) -> ast.Constant:
+            if isinstance(node.value, str):
+                return ast.copy_location(
+                    ast.Constant(value=" ".join(node.value.split())),
+                    node,
+                )
+            return node
+
+    expected_downgrade = ast.parse(
+        """
+def downgrade() -> None:
+    connection = op.get_bind()
+    connection.execute(
+        sa.text("LOCK TABLE p0_records IN SHARE ROW EXCLUSIVE MODE")
     )
-    exists_index = downgrade_source.index("SELECT EXISTS")
-    ddl_index = downgrade_source.index("_replace_code_version_constraint")
-    assert lock_index < exists_index < ddl_index
+    has_v2_records = connection.scalar(
+        sa.text(
+            "SELECT EXISTS ( "
+            "SELECT 1 FROM p0_records "
+            "WHERE record_code = 'request_understanding_record' "
+            "AND record_schema_version = "
+            "'request_understanding_record.p0.v2'"
+            " )"
+        )
+    )
+    if has_v2_records is not False:
+        raise RuntimeError(_DOWNGRADE_BLOCKED_MESSAGE)
+    _replace_code_version_constraint(_V1_CODE_VERSION_PAIRS)
+"""
+    )
+    actual_downgrade = ast.parse(downgrade_source)
+    normalizer = _NormalizeStringWhitespace()
+    assert ast.dump(
+        normalizer.visit(actual_downgrade),
+        include_attributes=False,
+    ) == ast.dump(
+        normalizer.visit(expected_downgrade),
+        include_attributes=False,
+    )
     assert _DOWNGRADE_BLOCKED_MESSAGE in source
     assert "SELECT COUNT" not in source.upper()
     assert "UPDATE p0_records" not in source
@@ -908,11 +987,16 @@ def test_expand_downgrade_with_v2_row_fails_closed_and_atomically(
         postgres_namespace_factory.drop(namespace)
 
 
-def test_share_row_exclusive_lock_blocks_insert_and_update(
+def test_real_downgrade_share_row_exclusive_lock_blocks_insert_and_update(
     postgres_namespace_factory,
 ) -> None:
     namespace = postgres_namespace_factory.create("expand-lock-contract")
     engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
     existing_id = uuid4()
     recovery_id = uuid4()
     try:
@@ -925,15 +1009,31 @@ def test_share_row_exclusive_lock_blocks_insert_and_update(
                 marker="lock-existing-row",
             )
 
-        lock_connection = engine.connect()
-        lock_transaction = lock_connection.begin()
+        ddl_barrier_connection = engine.connect()
+        ddl_barrier_transaction = ddl_barrier_connection.begin()
+        downgrade_executor = ThreadPoolExecutor(max_workers=1)
+        downgrade_future = None
         try:
-            lock_connection.execute(
-                text(
-                    "LOCK TABLE p0_records "
-                    "IN SHARE ROW EXCLUSIVE MODE"
+            assert (
+                ddl_barrier_connection.scalar(
+                    text(
+                        "SELECT 1 FROM p0_records "
+                        "WHERE record_id = :record_id"
+                    ),
+                    {"record_id": existing_id},
                 )
+                == 1
             )
+            downgrade_future = downgrade_executor.submit(
+                command.downgrade,
+                config,
+                _PREVIOUS_MIGRATION_REVISION,
+            )
+            _wait_for_real_downgrade_lock(
+                engine,
+                schema=namespace.schema,
+            )
+
             _assert_lock_timeout(
                 engine,
                 P0RecordModel.__table__.insert().values(
@@ -952,31 +1052,45 @@ def test_share_row_exclusive_lock_blocks_insert_and_update(
                 .values(lifecycle_status="BLOCKED_UPDATE"),
             )
 
-            with engine.connect() as observer:
-                assert (
-                    observer.scalar(text("SELECT count(*) FROM p0_records"))
-                    == 1
+            assert (
+                ddl_barrier_connection.scalar(
+                    text("SELECT count(*) FROM p0_records")
                 )
-                assert observer.scalar(
-                    select(P0RecordModel.lifecycle_status).where(
-                        P0RecordModel.record_id == existing_id
-                    )
-                ) is None
+                == 1
+            )
+            assert ddl_barrier_connection.scalar(
+                select(P0RecordModel.lifecycle_status).where(
+                    P0RecordModel.record_id == existing_id
+                )
+            ) is None
         finally:
-            lock_transaction.rollback()
-            lock_connection.close()
+            ddl_barrier_transaction.rollback()
+            ddl_barrier_connection.close()
+            downgrade_executor.shutdown(wait=True)
+
+        assert downgrade_future is not None
+        downgrade_future.result(timeout=10)
+        assert _migration_revision(engine) == _PREVIOUS_MIGRATION_REVISION
 
         with engine.begin() as connection:
             _insert_physical_probe(
                 connection,
-                "request_understanding_record",
-                "request_understanding_record.p0.v2",
+                "conversation_record",
+                "conversation_record.p0.v1",
                 record_id=recovery_id,
-                marker="write-recovers-after-lock",
+                marker="write-recovers-after-downgrade-lock",
+            )
+            connection.execute(
+                P0RecordModel.__table__.update()
+                .where(P0RecordModel.record_id == existing_id)
+                .values(lifecycle_status="RECOVERED_AFTER_DOWNGRADE"),
             )
         assert _record_row(engine, recovery_id)["envelope"] == {
-            "physical_probe": "write-recovers-after-lock"
+            "physical_probe": "write-recovers-after-downgrade-lock"
         }
+        assert _record_row(engine, existing_id)["lifecycle_status"] == (
+            "RECOVERED_AFTER_DOWNGRADE"
+        )
     finally:
         engine.dispose()
         postgres_namespace_factory.drop(namespace)
