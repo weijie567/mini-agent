@@ -84,7 +84,7 @@ Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些�
 - `BLOCKED / B_O_STATUS`: 等待`B_O_PLANNING_STATUS`后由Project Direction sole writer独立形成。
 - `BLOCKED / 01-07F`: 等待exact `B_O_STATUS`。
 - `BLOCKED / 01-07E`: 等待reviewed `B_F`。
-- `OPEN / CROSS_FILE_ALIGNMENT_OUTSIDE_ALLOWLIST`: 仓库级影响扫描确认`PROJECT_DIRECTION.md`仍是下一道map-owned one-file状态barrier；`README.md`另有两处D/H planned与旧`16/29`快照，但不在本七文件Task Packet allowlist或`B_O_STATUS` owned_files中。本Packet不越界修改，也不声称repository-wide aligned；在签发F前由execution owner裁决其独立对齐方式。
+- `OPEN / CROSS_FILE_ALIGNMENT_OUTSIDE_ALLOWLIST`: 仓库级影响扫描确认`PROJECT_DIRECTION.md:347`仍同时保留D/H未执行快照与未来Graphify semantic-refresh门禁，它是下一道map-owned one-file `B_O_STATUS`对齐目标。`README.md:13/66/68`还保留D/H planned / feature不存在、旧E/F顺序、`16/29`与20 Plans，以及未来Graphify refresh门禁；README不在本七文件Task Packet allowlist，也不在`B_O_STATUS` owned_files中，不能夹入Project Direction Packet。本Packet不越界修改，也不声称repository-wide aligned；README须由execution owner在签发F前裁决独立single-writer alignment及其是否形成额外非canonical gate。
 - `OPEN / 01-08_01-08A_ISSUANCE`: 等待唯一execution map完整形成`B_RU_V2_CONTRACT`；当前reviewed feature完成证据为`20/39`。
 - `OPEN`: 后续第2–6阶段尚无scoped implementation owner；不得生成实现细节。
 
