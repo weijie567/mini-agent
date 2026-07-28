@@ -408,6 +408,29 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
     if type(left) is not type(right):
         return False
     if isinstance(left, BaseModel):
+        try:
+            declared_fields = set(type(left).model_fields)
+            left_state_keys = set(left.__dict__)
+            right_state_keys = set(right.__dict__)
+            left_fields_set = set(left.model_fields_set)
+            right_fields_set = set(right.model_fields_set)
+        except (AttributeError, TypeError):
+            return False
+        if (
+            left_state_keys != right_state_keys
+            or not left_state_keys.issubset(declared_fields)
+            or not left_fields_set.issubset(declared_fields)
+            or not right_fields_set.issubset(declared_fields)
+        ):
+            return False
+        left_extra = getattr(left, "__pydantic_extra__", None)
+        right_extra = getattr(right, "__pydantic_extra__", None)
+        left_private = getattr(left, "__pydantic_private__", None)
+        right_private = getattr(right, "__pydantic_private__", None)
+        if not _runtime_values_match_exactly_v2(left_extra, right_extra):
+            return False
+        if not _runtime_values_match_exactly_v2(left_private, right_private):
+            return False
         return all(
             hasattr(left, field_name)
             and hasattr(right, field_name)
@@ -433,6 +456,78 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
     return left == right
 
 
+def _undeclared_model_state_keys_v2(
+    value: Any,
+    *,
+    active_ids: set[int] | None = None,
+) -> frozenset[str]:
+    visited = active_ids if active_ids is not None else set()
+    value_id = id(value)
+    if value_id in visited:
+        return frozenset()
+    if isinstance(value, (BaseModel, tuple, list, Mapping)):
+        visited.add(value_id)
+    try:
+        if isinstance(value, BaseModel):
+            declared_fields = set(type(value).model_fields)
+            actual_keys = set(value.__dict__)
+            try:
+                fields_set = set(value.model_fields_set)
+            except (AttributeError, TypeError):
+                fields_set = {"invalid_model_fields_set"}
+            extra = getattr(value, "__pydantic_extra__", None)
+            private = getattr(value, "__pydantic_private__", None)
+            if isinstance(extra, Mapping):
+                actual_keys.update(str(key) for key in extra)
+            if isinstance(private, Mapping):
+                actual_keys.update(str(key) for key in private)
+            undeclared = actual_keys.difference(declared_fields)
+            undeclared.update(
+                str(key)
+                for key in fields_set
+                if key not in declared_fields
+            )
+            for field_name in declared_fields:
+                if hasattr(value, field_name):
+                    undeclared.update(
+                        _undeclared_model_state_keys_v2(
+                            getattr(value, field_name),
+                            active_ids=visited,
+                        )
+                    )
+            return frozenset(undeclared)
+        if isinstance(value, Mapping):
+            result: set[str] = set()
+            for nested in value.values():
+                result.update(
+                    _undeclared_model_state_keys_v2(
+                        nested,
+                        active_ids=visited,
+                    )
+                )
+            return frozenset(result)
+        if isinstance(value, (tuple, list)):
+            result = set()
+            for nested in value:
+                result.update(
+                    _undeclared_model_state_keys_v2(
+                        nested,
+                        active_ids=visited,
+                    )
+                )
+            return frozenset(result)
+        return frozenset()
+    finally:
+        visited.discard(value_id)
+
+
+def _has_trusted_or_private_undeclared_state_v2(value: Any) -> bool:
+    for key in _undeclared_model_state_keys_v2(value):
+        if key.startswith("_") or find_trusted_argument_field({key: None}):
+            return True
+    return False
+
+
 def _canonical_request_input_v2(
     value: object,
 ) -> RequestUnderstandingInput:
@@ -441,8 +536,18 @@ def _canonical_request_input_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
     request_input = value
+    if _has_trusted_or_private_undeclared_state_v2(request_input):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+        )
+    try:
+        request_input_fields_set = set(request_input.model_fields_set)
+    except (AttributeError, TypeError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
     if (
-        "schema_version" not in request_input.model_fields_set
+        "schema_version" not in request_input_fields_set
         or not hasattr(request_input, "schema_version")
     ):
         _fail_request_understanding_v2(
@@ -556,6 +661,10 @@ def _canonical_request_output_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
     output = value
+    if _has_trusted_or_private_undeclared_state_v2(output):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+        )
     if not hasattr(output, "schema_version"):
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
@@ -614,6 +723,10 @@ def _canonical_candidate_validation_v2(
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
+        if _has_trusted_or_private_undeclared_state_v2(value):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+            )
         try:
             rebuilt = CandidateValidationRecordV2.model_validate(
                 value.model_dump(mode="python", round_trip=True)
@@ -642,6 +755,10 @@ def _canonical_accepted_task_deltas_v2(
         if type(value) is not AcceptedTaskDeltaV2:
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        if _has_trusted_or_private_undeclared_state_v2(value):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
             )
         try:
             rebuilt = AcceptedTaskDeltaV2.model_validate(

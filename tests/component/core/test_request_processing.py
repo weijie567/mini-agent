@@ -1345,3 +1345,157 @@ def test_v2_builder_projects_an_authorized_recent_message_reference() -> None:
     assert durable.source_quote_sha256 == sha256(
         source_quote.encode("utf-8")
     ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "injection_site",
+    [
+        "input",
+        "output",
+        "nested",
+        "decision",
+        "child",
+    ],
+)
+def test_v2_builder_rejects_trusted_fields_in_actual_model_instance_state(
+    injection_site: str,
+) -> None:
+    message_ref = uuid4()
+    message = "查询订单 O-4242"
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _output_v2(message_ref=message_ref, candidates=())
+    candidate_validation: tuple[CandidateValidationRecordV2, ...] = ()
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...] = ()
+
+    if injection_site == "input":
+        request_input = request_input.model_copy(
+            update={"customer_id": "attacker-selected"}
+        )
+    elif injection_site == "output":
+        output = output.model_copy(
+            update={"owner_customer_id": "attacker-selected"}
+        )
+    elif injection_site == "nested":
+        contextualization = output.contextualization.model_copy(
+            update={"auth_scopes": ("orders:read",)}
+        )
+        output = output.model_copy(
+            update={"contextualization": contextualization}
+        )
+    elif injection_site == "decision":
+        candidate_validation = (
+            _validation_v2(uuid4(), accept=False).model_copy(
+                update={"run_id": uuid4()}
+            ),
+        )
+    elif injection_site == "child":
+        accepted_task_deltas = (
+            _accepted_delta_v2(
+                candidate_ref=uuid4(),
+                message_ref=message_ref,
+            ).model_copy(update={"customer_id": "attacker-selected"}),
+        )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: message},
+            candidate_validation=candidate_validation,
+            accepted_task_deltas=accepted_task_deltas,
+        )
+
+    assert (
+        caught.value.reason_code
+        is RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+    )
+    assert "attacker-selected" not in str(caught.value)
+    assert "attacker-selected" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("injection_site", "expected_reason"),
+    [
+        (
+            "input",
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID,
+        ),
+        (
+            "output",
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID,
+        ),
+        (
+            "nested",
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID,
+        ),
+        (
+            "decision",
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED,
+        ),
+        (
+            "child",
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED,
+        ),
+    ],
+)
+def test_v2_builder_rejects_any_undeclared_model_instance_state(
+    injection_site: str,
+    expected_reason: (
+        RequestUnderstandingAggregateFailureCodeV2
+        | RequestUnderstandingAtomicFailureCodeV2
+    ),
+) -> None:
+    message_ref = uuid4()
+    message = "查询订单 O-4242"
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _output_v2(message_ref=message_ref, candidates=())
+    candidate_validation: tuple[CandidateValidationRecordV2, ...] = ()
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...] = ()
+
+    if injection_site == "input":
+        request_input = request_input.model_copy(
+            update={"unexpected_field": "unexpected-value"}
+        )
+    elif injection_site == "output":
+        output = output.model_copy(
+            update={"unexpected_field": "unexpected-value"}
+        )
+    elif injection_site == "nested":
+        contextualization = output.contextualization.model_copy(
+            update={"unexpected_field": "unexpected-value"}
+        )
+        output = output.model_copy(
+            update={"contextualization": contextualization}
+        )
+    elif injection_site == "decision":
+        candidate_validation = (
+            _validation_v2(uuid4(), accept=False).model_copy(
+                update={"unexpected_field": "unexpected-value"}
+            ),
+        )
+    elif injection_site == "child":
+        accepted_task_deltas = (
+            _accepted_delta_v2(
+                candidate_ref=uuid4(),
+                message_ref=message_ref,
+            ).model_copy(
+                update={"unexpected_field": "unexpected-value"}
+            ),
+        )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: message},
+            candidate_validation=candidate_validation,
+            accepted_task_deltas=accepted_task_deltas,
+        )
+
+    assert caught.value.reason_code is expected_reason
