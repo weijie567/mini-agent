@@ -113,6 +113,7 @@ class RequestUnderstandingOutputV2(ModelVisibleModel):
 - `QueryContextualizationCandidateV2.source_message_refs` unique；所有 resolved `source_ref` 都在其中。`RequestUnderstandingOutputV2` 再要求 parent `message_ref` 在其中。
 - v2 structural Candidate cardinality 是 0..n，`candidate_id` unique。
 - `task_delta_candidates` 绑定现有 protected `TaskDeltaCandidate` / `InputCandidate`，`next_move_candidate` 绑定现有 protected `NextMove`；这是 manifest 未另命名 nested shape 的实现映射，不是把 v1 output alias / union 成 v2。外层 v2 validator额外要求每个 InputCandidate `source_quote` 不超过128 code points、`source_ref == parent.message_ref`、`authority=USER_CLAIM`、`source_kind=CURRENT_MESSAGE`。
+- 当前薄切片只包含新目标 `ADD_GOAL`；v2 outer validator继续要求`next_move_candidate.base_task_state_version is None`。positive version即使能单独构造为`NextMove`，也不能进入canonical `RequestUnderstandingOutputV2`；sentinel `0`仍由`NextMove` strict field直接拒绝。
 - `ResolvedReferenceCandidateV2` 允许 `RECENT_MESSAGE` 只表示 model candidate；能否形成 durable projection仍取决于 trusted owner scope提供对应 authoritative message和 exact provenance。
 - 所有 class 继续继承 frozen、extra-forbid contract base；禁止 `customer_id`、authorization、business fact、Tool execution、span/hash、record identity、Task effect或可信时间进入 model-facing types。
 
@@ -164,10 +165,10 @@ class RequestUnderstandingClosureV2(RuntimePrivateModel):
 
 def build_request_understanding_closure_v2(
     *,
+    request_input: RequestUnderstandingInput,
     output: RequestUnderstandingOutputV2,
     authoritative_messages: Mapping[UUID, str],
     request_understanding_record_id: UUID,
-    run_id: UUID,
     candidate_validation: tuple[CandidateValidationRecordV2, ...],
     accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...],
     proposed_base_task_state_version: PositiveStateVersion | None,
@@ -179,8 +180,8 @@ def build_request_understanding_closure_v2(
 
 该名称和 runtime-private wrapper 是实现局部 API，不新增 canonical 持久化字段。它必须：
 
-1. 要求 exact `RequestUnderstandingOutputV2`、exact child/decision DTO和 UTC `now`；dict、v1 output、subclass、`model_construct`后形成的非法结构均 fail closed。
-2. `authoritative_messages` 是 trusted caller 已在 owner scope加载的 immutable message projection；Core不做I/O、不解析身份、不授予 owner scope。缺ref、非字符串、空原文、quote等于整条原文、零次或多次 exact occurrence均抛出只含稳定分类的 bounded `SOURCE_PROVENANCE_INVALID`。
+1. 要求 exact `RequestUnderstandingInput`、exact `RequestUnderstandingOutputV2`、exact child/decision DTO和 UTC `now`；dict、v1 output、subclass、missing参数或`model_construct`后形成的非法结构均 fail closed。`request_input.model_fields_set`必须显式包含`schema_version`，不接受protected v1 DTO的construction default替代本次实际gate。record的`run_id`与`model_input_schema_version`必须分别直接取自本次实际通过exact gate的`request_input.run_id`与`request_input.schema_version`，不能从常量、output、Prompt或当前默认值推断；`request_input.message_ref == output.message_ref`。
+2. `authoritative_messages` 是 trusted caller 已在 owner scope加载的 immutable message projection；Core不做I/O、不解析身份、不授予 owner scope。当前message的authoritative原文还必须与实际validated `request_input.original_query` exact相等。缺ref、非字符串、空原文、quote等于整条原文、零次或多次 exact occurrence均抛出只含稳定分类的 bounded `SOURCE_PROVENANCE_INVALID`。
 3. 对每个 resolved/input quote不做 trim、case-fold、Unicode normalization、regex近似或模糊匹配；枚举 overlapping exact occurrence，要求恰好一次；使用 Python `str` code-point start/end和`sha256(exact_slice.encode("utf-8")).hexdigest()`构造 durable leaf。
 4. source quote还必须精确覆盖对应 `candidate_value` 的受控 order-id来源；沿用 existing normalization只能用于该 candidate/value一致性检查，不能用于定位quote。durable projection保存 emitted candidate value，不把它改写为 business fact。
 5. record只由 trusted arguments与实际 output safe projection构建；model/caller没有span/hash字段入口。形成durable leaf后，返回对象与builder的bounded error均不保留raw quote；Provider schema `ValidationError` 的对外redaction仍由后续Adapter owner负责，本Packet不建立active transport。
@@ -238,8 +239,9 @@ protected_v1_surface:
 - allow_changed_existing_symbols: `[]`
 - oracle blobs与`owned_files_at_base`中三个source blob相同
 - definition counts: request_understanding=15、task_state=13、request_processing=13，总计41
-- 对每个oracle symbol同时比较 `ast.dump(include_attributes=False)` 与 exact source segment SHA-256；candidate必须仍恰好一个同名top-level binding
-- 禁止alias/reassignment、`setattr`、class attribute assignment、decorator/registry monkeypatch或其他top-level mutation绕过definition comparison
+- 对每个oracle symbol同时比较 `ast.dump(include_attributes=False)` 与 exact source segment SHA-256；candidate必须仍恰好一个同名module binding
+- 新增AST只允许append-only import、new-name alias/constant、undecorated class/function definition；检测Import/ImportFrom alias、Store/Delete/AugAssign/NamedExpr、`global`/`nonlocal`、protected attribute assignment、`setattr`/`delattr`、`globals`/`vars`/`exec`/`eval`与top-level call等重绑或间接mutation
+- gate内置import-alias、`del`、`globals()`、helper/global和`setattr` mutants；每个mutant必须被拒绝
 - 新imports使用独立追加语句，新definitions追加在最后；不编辑已有definition source segment
 
 owned_files:
@@ -268,7 +270,8 @@ dependencies:
 required_checks:
 
 - v2 fields、field order、literal versions、enum order、cardinality、uniqueness、extra-forbid、frozen与no-alias矩阵。
-- 0/129 quote、missing/extra field、wrong source kind、uncertainty reason/cardinality/ref uniqueness、missing current message、duplicate candidate ID均fail closed。
+- 0/129 quote、missing/extra field、wrong source kind、uncertainty reason/cardinality/ref uniqueness、missing current message、duplicate candidate ID、positive/zero base Task version均fail closed；`model_construct`绕过outer invariant也在builder再次拒绝。
+- builder必须绑定exact实际`RequestUnderstandingInput`且其`model_fields_set`显式包含`schema_version`；missing/defaulted/wrong/dict/subclass/`model_construct`非法input、input/output message mismatch与authoritative current message mismatch均bounded fail closed，record直接保存该input实际通过的schema version而非当前常量/default。
 - durable raw quote/identity/private-field extra拒绝，span/hash strict matrix与三个schema axes独立。
 - Unicode exact unique span/hash positive；zero/multiple/full-message/trim/casefold/Unicode-normalization negatives；resolved/input两类quote都投影且返回闭包不含raw quote。
 - zero/all-reject/partial/multi closure、missing/extra/duplicate/dangling/wrong-candidate child、accepted set、message/timestamp mismatch与per-Task chain fork/gap/rollback/reorder矩阵。
@@ -329,12 +332,12 @@ handoff_format: branch、exact base/planning/head/commits/tree、owner/Plan与�
   <files>tests/component/core/test_request_understanding_contract.py, tests/component/core/test_task_state_contract.py, tests/component/core/test_request_processing.py</files>
   <read_first>Intent owner §6/7/8/13、Memory exact-version/integrity rules、Thin Slice §5.1/§10.1.1 manifest、01-07O execution map、六个 B_O_STATUS owned blobs与protected oracle</read_first>
   <behavior>
-    - model-facing exact fields/literals/reasons/cardinality/order/frozen/extra rules。
+    - model-facing exact fields/literals/reasons/cardinality/order/frozen/extra/null-base rules。
     - durable leaf/record/child exact fields、span/hash、UTC、three-version axes、raw/private exclusion。
     - exact Unicode provenance projection和zero/all/partial/multi local closure正负矩阵。
     - 41个v1 definitions source/AST unchanged且无top-level rebinding/monkeypatch；现有v1行为继续通过。
   </behavior>
-  <action>只改三个test文件。用新v2类型/API imports和行为测试冻结本Plan的完整矩阵；Component tests不执行Git命令，41-symbol oracle comparison由本Plan verification中的独立机械gate负责。运行focused command取得真实RED，确认失败仅指向尚不存在的新v2 surface，然后提交精确RED message。</action>
+  <action>只改三个test文件。用新v2类型/API imports和行为测试冻结本Plan的完整矩阵，包括exact实际`RequestUnderstandingInput`绑定、positive/zero base-version与`model_construct`绕过；Component tests不执行Git命令，41-symbol oracle comparison和mutation suite由本Plan verification中的独立机械gate负责。运行focused command取得真实RED，确认失败仅指向尚不存在的新v2 surface，然后提交精确RED message。</action>
   <verify>
     <automated>uv run pytest tests/component/core/test_request_understanding_contract.py tests/component/core/test_task_state_contract.py tests/component/core/test_request_processing.py -q</automated>
     RED必须非零退出且失败原因是缺少01-07F新增surface；三个source blobs、其他test、Application/Infra/Eval/owner文件仍等于base。
@@ -414,7 +417,7 @@ FILES = (
     "src/mini_agent/core/request_processing.py",
 )
 
-def bindings(tree):
+def protected_bindings(tree):
     result = {}
     for node in tree.body:
         names = []
@@ -428,35 +431,125 @@ def bindings(tree):
             result.setdefault(name, []).append(node)
     return result
 
-for path in FILES:
-    old = subprocess.check_output(["git", "show", f"{ORACLE}:{path}"], text=True)
-    new = Path(path).read_text()
+def root_name(node):
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+def assert_protected(path, old, new):
     old_tree, new_tree = ast.parse(old), ast.parse(new)
-    old_bindings, new_bindings = bindings(old_tree), bindings(new_tree)
+    old_bindings = protected_bindings(old_tree)
+    protected = set(old_bindings)
+
+    # Strong append-only invariant: all pre-existing module bytes and AST nodes
+    # remain the exact prefix; only a controlled tail may be added.
+    assert new.startswith(old), (path, "existing-module-bytes")
+    assert len(new_tree.body) >= len(old_tree.body), (path, "module-body-shortened")
+    for old_node, new_node in zip(old_tree.body, new_tree.body, strict=False):
+        assert ast.dump(old_node, include_attributes=False) == ast.dump(
+            new_node, include_attributes=False
+        ), (path, "module-prefix-ast")
+
     for name, old_nodes in old_bindings.items():
         assert len(old_nodes) == 1, (path, name, "oracle-count")
-        assert len(new_bindings.get(name, ())) == 1, (path, name, "candidate-count")
-        old_node, new_node = old_nodes[0], new_bindings[name][0]
-        assert ast.dump(old_node, include_attributes=False) == ast.dump(new_node, include_attributes=False), (path, name, "ast")
+        old_node = old_nodes[0]
+        new_node = new_tree.body[old_tree.body.index(old_node)]
+        assert ast.dump(old_node, include_attributes=False) == ast.dump(
+            new_node, include_attributes=False
+        ), (path, name, "ast")
         old_segment = ast.get_source_segment(old, old_node)
         new_segment = ast.get_source_segment(new, new_node)
         assert old_segment is not None and new_segment is not None
         assert hashlib.sha256(old_segment.encode()).digest() == hashlib.sha256(new_segment.encode()).digest(), (path, name, "source")
 
-    forbidden = (
-        ast.Attribute,
+    allowed_tail = (
+        ast.Import,
+        ast.ImportFrom,
+        ast.Assign,
+        ast.AnnAssign,
+        ast.ClassDef,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
     )
-    protected = set(old_bindings)
-    for node in new_tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id in protected:
-                    raise AssertionError((path, target.value.id, "class-attribute-mutation"))
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            call = node.value
-            if isinstance(call.func, ast.Name) and call.func.id == "setattr" and call.args:
-                if isinstance(call.args[0], ast.Name) and call.args[0].id in protected:
-                    raise AssertionError((path, call.args[0].id, "setattr-mutation"))
+    tail = new_tree.body[len(old_tree.body):]
+    for node in tail:
+        assert isinstance(node, allowed_tail), (path, type(node).__name__, "tail-node")
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            assert node.name not in protected, (path, node.name, "definition-rebind")
+            assert not node.decorator_list, (path, node.name, "top-level-decorator")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                assert bound not in protected, (path, bound, "import-rebind")
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                assert bound not in protected, (path, bound, "import-from-rebind")
+        elif isinstance(node, ast.Assign):
+            assert all(isinstance(target, ast.Name) for target in node.targets), (
+                path,
+                "non-name-assignment",
+            )
+            assert all(target.id not in protected for target in node.targets), (
+                path,
+                "assignment-rebind",
+            )
+        elif isinstance(node, ast.AnnAssign):
+            assert isinstance(node.target, ast.Name), (path, "non-name-annassign")
+            assert node.target.id not in protected, (path, node.target.id, "annassign-rebind")
+
+    hazardous_calls = {"globals", "vars", "exec", "eval", "setattr", "delattr"}
+    for node in ast.walk(ast.Module(body=tail, type_ignores=[])):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            assert node.id not in protected, (path, node.id, "store-or-delete")
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            assert protected.isdisjoint(node.names), (path, node.names, "global-mutation")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id not in hazardous_calls, (
+                path,
+                node.func.id,
+                "dynamic-mutation",
+            )
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+            targets = getattr(node, "targets", (getattr(node, "target", None),))
+            for target in targets:
+                if target is not None:
+                    assert root_name(target) not in protected, (
+                        path,
+                        root_name(target),
+                        "protected-target",
+                    )
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "__dict__"
+        ):
+            assert root_name(node.value) not in protected, (
+                path,
+                root_name(node.value),
+                "protected-dict-mutation",
+            )
+
+for path in FILES:
+    old = subprocess.check_output(["git", "show", f"{ORACLE}:{path}"], text=True)
+    new = Path(path).read_text()
+    assert_protected(path, old, new)
+
+    protected_name = next(iter(protected_bindings(ast.parse(old))))
+    mutants = {
+        "import-alias": new + f"\nfrom builtins import object as {protected_name}\n",
+        "delete": new + f"\ndel {protected_name}\n",
+        "globals": new + f"\nglobals()[{protected_name!r}] = object()\n",
+        "helper-global": new
+        + f"\ndef _mutate_protected():\n    global {protected_name}\n    {protected_name} = object\n",
+        "setattr": new + f"\nsetattr({protected_name}, 'mutated', True)\n",
+    }
+    for mutant_name, mutant in mutants.items():
+        try:
+            assert_protected(path, old, mutant)
+        except AssertionError:
+            continue
+        raise AssertionError((path, mutant_name, "mutant-survived"))
 print("protected-v1: 41 definitions unchanged")
 PY
 
