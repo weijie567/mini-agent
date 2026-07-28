@@ -2943,6 +2943,27 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
             if any(symbol in path.read_text() for symbol in symbols)
         }
 
+    exact_reader_owner_files = {
+        "src/mini_agent/application/ports.py",
+        "tests/component/application/test_persistence_contract.py",
+        "tests/component/application/test_ports_contract.py",
+    }
+    exact_reader_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_postgres_record_adapters.py",
+        "src/mini_agent/evaluation/harness.py",
+        "tests/component/evaluation/test_e2e01_artifact_consistency.py",
+        "tests/integration/evaluation/test_e2e01_offline_harness.py",
+    }
+    exact_reader_matches = files_referencing(
+        "ExactRunEvidencePort",
+        "load_exact_run_evidence_for_owner",
+    )
+    assert exact_reader_owner_files <= exact_reader_matches
+    assert exact_reader_matches <= (
+        exact_reader_owner_files | exact_reader_dependency_files
+    )
+
     catalog_matches = files_referencing("P0_RECORD_SCHEMA_VERSION_CATALOG")
     assert codec_owner_files <= catalog_matches
     assert catalog_matches <= codec_owner_files | catalog_dependency_files
