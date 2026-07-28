@@ -506,32 +506,437 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 - ModelProvider failure taxonomy：Thin Slice §10.3已经规定Request Understanding envelope / zero-or-multiple Function Call等协议错误为`PROVIDER_PROTOCOL_ERROR`，而Request Understanding Pydantic/source/authority/InputBinding/trusted-field拒绝为`INPUT_INVALID`；当前Scripted Provider让`ValidationError`逃逸，Qwen Adapter把它与协议错误一起折叠为`ProviderProtocolError`，Runtime也没有可安全捕获的独立bounded signal，两个现有invalid-RU script不能通过real SUT形成canonical结果；
 - credentialed Qwen：Adapter与zero-network preflight已存在，但没有消费real SUT的独立runner。
 
-因此先从`8544137...`签发插入式Plan 01-07B，只允许Harness/Grader/Scripted Provider及三份对应tests修改，关闭closed execution input/output、zero-argument non-semantic nonce correlation、actual mismatch与variant-scoped safety-causal Trace gaps。01-07B reviewed merge后，严格按四轴ownership拆分：
+因此先从`8544137...`签发插入式Plan 01-07B，只允许Harness/Grader/Scripted Provider及三份对应tests修改，关闭closed execution input/output、zero-argument non-semantic nonce correlation、actual mismatch与variant-scoped safety-causal Trace gaps。01-07B reviewed merge后，后续ownership与barrier只由下列唯一、可机械解析的execution map表达；周围prose不维护第二套Packet顺序或allowlist。
 
-```text
-{01-07C RU semantic ruling, 01-07G Thin Slice source-version ruling}
-→ {01-07D RU exact mapping, 01-07H Core/Order additive DTO}
-→ {01-07E Application persistence codec, 01-07F RU Core implementation}
-→ 01-07I Application exact-Run Evidence Port + ModelProvider failure contract
-→ 01-07J Runtime consumer + INPUT_INVALID / source-version fail-closed mapping
-→ {01-07K Infra strict reader + order-version producer, 01-07L Eval mapper + Scripted/Qwen consumers}
-→ 01-07M Core source-version contract closure
-→ 01-08 Composition Root
-→ 01-08A credentialed Qwen runner
+<!-- P0-RU-V2-EXECUTION-MAP:START -->
+```json
+{
+  "manifest_version": "p0-ru-v2-execution-map-r1",
+  "canonical_input": {
+    "owner_path": "docs/implementation/e2e01-thin-slice-implementation-spec.md",
+    "manifest_version": "p0-ru-v2-cutover-r1",
+    "stages": [
+      "CORE_EXPAND",
+      "CODEC_EXPAND",
+      "DEPENDENCY_EXPAND",
+      "ACTIVE_SWITCH",
+      "CONTRACT"
+    ]
+  },
+  "lineage": {
+    "root_barrier": "B_DH",
+    "root_sha": "4a7e802e8aebc54e0582a1e4d99f140b56e7b131",
+    "remediation_packet": "01-07N",
+    "remediation_merge_sha": "a4b1edb4c50a2e3e826571194bac58f7b31eab6d",
+    "alignment_packet": "01-07O"
+  },
+  "pre_core_status_chain": [
+    {
+      "gate": "B_O_PLANNING_STATUS",
+      "writer": "planning-status sole writer",
+      "owned_files": [
+        ".planning/PROJECT.md",
+        ".planning/REQUIREMENTS.md",
+        ".planning/ROADMAP.md",
+        ".planning/STATE.md",
+        ".planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md",
+        ".planning/phases/01-cycle-1-e2e-01/01-07N-SUMMARY.md",
+        ".planning/phases/01-cycle-1-e2e-01/01-07O-SUMMARY.md"
+      ],
+      "advances_lifecycle": false
+    },
+    {
+      "gate": "B_O_STATUS",
+      "writer": "Project Direction sole writer",
+      "owned_files": [
+        "PROJECT_DIRECTION.md"
+      ],
+      "requires": "B_O_PLANNING_STATUS",
+      "advances_lifecycle": false
+    }
+  ],
+  "stages": [
+    {
+      "stage": "CORE_EXPAND",
+      "waves": [
+        {
+          "input_barrier": "B_O_STATUS",
+          "output_barrier": "B_F",
+          "packets": [
+            {
+              "packet_id": "01-07F",
+              "writer": "Request Understanding Core sole writer",
+              "branch": "codex/e2e01-01-ru-v2-core-expand",
+              "worktree_id": "e2e01-01-ru-v2-core-expand",
+              "owned_files": [
+                "src/mini_agent/core/request_understanding.py",
+                "src/mini_agent/core/task_state.py",
+                "src/mini_agent/core/request_processing.py",
+                "tests/component/core/test_request_understanding_contract.py",
+                "tests/component/core/test_task_state_contract.py",
+                "tests/component/core/test_request_processing.py"
+              ],
+              "active_routing": false,
+              "protected_v1_surface": {
+                "mode": "all-preexisting-top-level-definitions",
+                "base_sha": "a4b1edb4c50a2e3e826571194bac58f7b31eab6d",
+                "files": [
+                  "src/mini_agent/core/request_understanding.py",
+                  "src/mini_agent/core/task_state.py",
+                  "src/mini_agent/core/request_processing.py"
+                ],
+                "allow_changed_existing_symbols": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "CODEC_EXPAND",
+      "waves": [
+        {
+          "input_barrier": "B_F",
+          "output_barrier": "B_FE_EXPAND",
+          "packets": [
+            {
+              "packet_id": "01-07E",
+              "writer": "Application persistence codec sole writer",
+              "branch": "codex/e2e01-01-ru-v2-codec-expand",
+              "worktree_id": "e2e01-01-ru-v2-codec-expand",
+              "owned_files": [
+                "src/mini_agent/application/persistence.py",
+                "tests/component/application/test_persistence_contract.py"
+              ],
+              "active_routing": false,
+              "protected_v1_surface": {
+                "mode": "all-preexisting-top-level-definitions",
+                "base_barrier": "B_F",
+                "files": [
+                  "src/mini_agent/application/persistence.py"
+                ],
+                "allow_changed_existing_symbols": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "DEPENDENCY_EXPAND",
+      "waves": [
+        {
+          "input_barrier": "B_FE_EXPAND",
+          "output_barrier": "B_IP",
+          "packets": [
+            {
+              "packet_id": "01-07I",
+              "writer": "Application Port declaration sole writer",
+              "branch": "codex/e2e01-01-exact-run-evidence-port",
+              "worktree_id": "e2e01-01-exact-run-evidence-port",
+              "owned_files": [
+                "src/mini_agent/application/records.py",
+                "src/mini_agent/application/ports.py",
+                "tests/component/application/test_record_contracts.py",
+                "tests/component/application/test_ports_contract.py"
+              ],
+              "active_routing": false
+            },
+            {
+              "packet_id": "01-07P",
+              "writer": "Infrastructure migration-chain sole writer",
+              "branch": "codex/e2e01-01-ru-v2-physical-expand",
+              "worktree_id": "e2e01-01-ru-v2-physical-expand",
+              "owned_files": [
+                "alembic/versions/20260728_0003_request_understanding_v2_expand.py",
+                "src/mini_agent/infrastructure/persistence/models.py",
+                "tests/integration/test_database_migrations.py"
+              ],
+              "active_routing": false
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_IP",
+          "output_barrier": "B_DEPENDENCY",
+          "packets": [
+            {
+              "packet_id": "01-07K",
+              "writer": "Infrastructure persistence/read adapter sole writer",
+              "branch": "codex/e2e01-01-strict-readers",
+              "worktree_id": "e2e01-01-strict-readers",
+              "owned_files": [
+                "src/mini_agent/infrastructure/persistence/postgres.py",
+                "src/mini_agent/infrastructure/order/postgres.py",
+                "tests/integration/test_postgres_record_adapters.py",
+                "tests/integration/test_postgres_get_order.py"
+              ],
+              "active_routing": false
+            },
+            {
+              "packet_id": "01-07L",
+              "writer": "Eval Provider and mapper sole writer",
+              "branch": "codex/e2e01-01-eval-mapper",
+              "worktree_id": "e2e01-01-eval-mapper",
+              "owned_files": [
+                "src/mini_agent/evaluation/harness.py",
+                "src/mini_agent/evaluation/graders.py",
+                "src/mini_agent/evaluation/scripted_provider.py",
+                "src/mini_agent/infrastructure/model/qwen_responses.py",
+                "tests/component/evaluation/test_e2e01_artifact_consistency.py",
+                "tests/component/evaluation/test_e2e01_graders.py",
+                "tests/component/evaluation/test_e2e01_scripted_model_provider.py",
+                "tests/component/model/test_qwen_responses_adapter.py",
+                "tests/integration/evaluation/test_e2e01_offline_harness.py"
+              ],
+              "active_routing": false
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_DEPENDENCY",
+          "output_barrier": "B_DEPENDENCY_M",
+          "packets": [
+            {
+              "packet_id": "01-07M",
+              "writer": "Order Core contract sole writer",
+              "branch": "codex/e2e01-01-order-source-version-closure",
+              "worktree_id": "e2e01-01-order-source-version-closure",
+              "owned_files": [
+                "src/mini_agent/core/order.py",
+                "tests/component/core/test_memory_trace_presentation_contract.py"
+              ],
+              "active_routing": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "ACTIVE_SWITCH",
+      "waves": [
+        {
+          "input_barrier": "B_DEPENDENCY_M",
+          "output_barrier": "B_Q",
+          "packets": [
+            {
+              "packet_id": "01-07Q",
+              "writer": "Application persistence codec active-switch sole writer",
+              "branch": "codex/e2e01-01-ru-v2-codec-active-switch",
+              "worktree_id": "e2e01-01-ru-v2-codec-active-switch",
+              "owned_files": [
+                "src/mini_agent/application/persistence.py",
+                "tests/component/application/test_persistence_contract.py"
+              ],
+              "active_routing": true,
+              "requires_current_v1_isolation": true
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_Q",
+          "output_barrier": "B_ACTIVE",
+          "packets": [
+            {
+              "packet_id": "01-07J",
+              "writer": "Application Runtime consumer sole writer",
+              "branch": "codex/e2e01-01-runtime-v2-switch",
+              "worktree_id": "e2e01-01-runtime-v2-switch",
+              "owned_files": [
+                "src/mini_agent/application/agent_run_service.py",
+                "src/mini_agent/application/read_tool_executor.py",
+                "tests/component/application/test_agent_run_service.py",
+                "tests/component/application/test_read_tool_executor.py"
+              ],
+              "active_routing": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "CONTRACT",
+      "waves": [
+        {
+          "input_barrier": "B_ACTIVE",
+          "output_barrier": "B_SU",
+          "packets": [
+            {
+              "packet_id": "01-07S",
+              "writer": "Eval Provider v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-provider-contract",
+              "worktree_id": "e2e01-01-ru-v1-provider-contract",
+              "owned_files": [
+                "src/mini_agent/evaluation/harness.py",
+                "src/mini_agent/evaluation/graders.py",
+                "src/mini_agent/evaluation/scripted_provider.py",
+                "src/mini_agent/infrastructure/model/qwen_responses.py",
+                "tests/component/evaluation/test_e2e01_artifact_consistency.py",
+                "tests/component/evaluation/test_e2e01_graders.py",
+                "tests/component/evaluation/test_e2e01_scripted_model_provider.py",
+                "tests/component/model/test_qwen_responses_adapter.py",
+                "tests/integration/evaluation/test_e2e01_offline_harness.py"
+              ],
+              "removes_v1_surface": true
+            },
+            {
+              "packet_id": "01-07U",
+              "writer": "Application Runtime v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-runtime-contract",
+              "worktree_id": "e2e01-01-ru-v1-runtime-contract",
+              "owned_files": [
+                "src/mini_agent/application/agent_run_service.py",
+                "src/mini_agent/application/read_tool_executor.py",
+                "tests/component/application/test_agent_run_service.py",
+                "tests/component/application/test_read_tool_executor.py"
+              ],
+              "removes_v1_surface": true
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_SU",
+          "output_barrier": "B_X",
+          "packets": [
+            {
+              "packet_id": "01-07X",
+              "writer": "Infrastructure persistence adapter v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-infra-contract",
+              "worktree_id": "e2e01-01-ru-v1-infra-contract",
+              "owned_files": [
+                "src/mini_agent/infrastructure/persistence/postgres.py",
+                "tests/integration/test_postgres_record_adapters.py"
+              ],
+              "removes_v1_surface": true
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_X",
+          "output_barrier": "B_T",
+          "packets": [
+            {
+              "packet_id": "01-07T",
+              "writer": "Application persistence codec v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-codec-contract",
+              "worktree_id": "e2e01-01-ru-v1-codec-contract",
+              "owned_files": [
+                "src/mini_agent/application/persistence.py",
+                "tests/component/application/test_persistence_contract.py"
+              ],
+              "removes_v1_surface": true
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_T",
+          "output_barrier": "B_W",
+          "packets": [
+            {
+              "packet_id": "01-07W",
+              "writer": "Application Port and records v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-application-contract",
+              "worktree_id": "e2e01-01-ru-v1-application-contract",
+              "owned_files": [
+                "src/mini_agent/application/records.py",
+                "src/mini_agent/application/ports.py",
+                "tests/component/application/test_record_contracts.py",
+                "tests/component/application/test_ports_contract.py"
+              ],
+              "removes_v1_surface": true
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_W",
+          "output_barrier": "B_RU_V2_CONTRACT",
+          "packets": [
+            {
+              "packet_id": "01-07V",
+              "writer": "Request Understanding Core v1-contract sole writer",
+              "branch": "codex/e2e01-01-ru-v1-core-contract",
+              "worktree_id": "e2e01-01-ru-v1-core-contract",
+              "owned_files": [
+                "src/mini_agent/core/request_understanding.py",
+                "src/mini_agent/core/task_state.py",
+                "src/mini_agent/core/request_processing.py",
+                "tests/component/core/test_control_gateway.py",
+                "tests/component/core/test_identity_contract.py",
+                "tests/component/core/test_request_understanding_contract.py",
+                "tests/component/core/test_task_state_contract.py",
+                "tests/component/core/test_request_processing.py"
+              ],
+              "removes_v1_surface": true,
+              "must_be_last": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "serial_order": [
+    "01-07F",
+    "01-07E",
+    "01-07I+01-07P",
+    "01-07K+01-07L",
+    "01-07M",
+    "01-07Q",
+    "01-07J",
+    "01-07S+01-07U",
+    "01-07X",
+    "01-07T",
+    "01-07W",
+    "01-07V"
+  ],
+  "denominator": {
+    "previous_target": 29,
+    "added_packets": [
+      "01-07N",
+      "01-07O",
+      "01-07P",
+      "01-07Q",
+      "01-07S",
+      "01-07T",
+      "01-07U",
+      "01-07V",
+      "01-07W",
+      "01-07X"
+    ],
+    "target": 39,
+    "conditional_packet": {
+      "packet_id": "01-07R",
+      "status": "INACTIVE_OWNER_RULING_REQUIRED",
+      "purpose": "physical-v1-representation-retirement",
+      "activation_requires_execution_map_revision": true,
+      "target_if_activated": 40
+    }
+  },
+  "barrier_nonclaims": {
+    "B_FE_EXPAND": [
+      "active-registry-not-switched",
+      "legacy-codec-api-unchanged",
+      "postgresql-not-routed-to-v2",
+      "runtime-provider-eval-not-routed-to-v2",
+      "v1-contract-not-removed",
+      "readiness-not-proven"
+    ]
+  },
+  "next_after_contract": "01-08"
+}
 ```
+<!-- P0-RU-V2-EXECUTION-MAP:END -->
 
-箭头表示前一花括号内所有Packet必须由Integrator串行review/merge，形成一个共同的新exact integration SHA，下一组才能签发；同一花括号只表示文件/ownership不重叠时可以并行写入，Integrator仍串行合并。特别是01-07D与01-07G都消费/写入Thin Slice owner文件，因此D/H只能在C/G均合并后的同一barrier上启动，不能各用不同predecessor；同理E/F必须等D/H全部合并形成下一共同barrier后才签发。01-07C/D、01-07G/H分别保留semantic/mapping与Python-source consumer边界；01-07D/E沿用01-03 mapping→01-04 codec precedent。PR #48 review确认source-version不能在physical producer前一次性收紧Core validator，故新增01-07M并将目标分母从28改为29；若owner ruling要求其他migration、全局Memory version升级或新的外部契约，停止并继续新增Packet/分母，不扩大既有allowlist。
+该map只拥有execution拆分，不覆盖Thin Slice、Intent、Memory、Tool、Business或Eval语义；symbolic barrier只有对应Packet完成exact-head review、latest-integration replay与串行merge后才实例化。F与E可以使用独立Worktree，但F先从status-aligned `B_O_STATUS`形成`B_F`，E只能再从reviewed `B_F`形成`B_FE_EXPAND`；两者不再从`B_DH`同base并行。`B_FE_EXPAND`仍是non-routable additive barrier，不能被解释为active registry、PostgreSQL、Runtime、Provider/Eval、v1 contract或readiness已经切换。
 
 01-07C / 01-07G 已从共同 execution base `3f0753f7bef87fc02f314e28fe8b07860a819701` 完成“单目标Plan → owner feature → exact-head review → latest-integration overlay → 串行merge”。01-07G planning / feature PR #48/#50形成merge `bfc63c9444ee1af204cc3806eac7e7e84fc1bb19`；01-07C原feature PR #51因review发现`run_id`与durable contextualization缺口而关闭保留，r1 Plan / feature PR #52/#53关闭问题并形成共同 barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。该barrier的default full offline suite为`1493 passed, 1 deselected, 12 warnings`；Graphify受控全量重建为`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`，记录`699`个dangling endpoint、`687`组directed与`713`组undirected collapse candidate、`0` missing endpoint与`0` self-loop。Status-evidence review发现Project Direction仍保留C未开始快照后，独立exact one-file owner PR #54以`0/0/0` review与1493-test full gate关闭并merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`；该证据对齐不替换`B_CG`。01-07C / 01-07G因此为`COMPLETE / EVIDENCE_INDEXED`。
 
-01-07D / 01-07H现已完成独立Plan签发，状态为`01-07D_01-07H_PLANNED / FEATURE_DISPATCH_NEXT`：
+01-07D / 01-07H 已完成“Plan → feature → exact-head review → latest-integration replay → 串行merge”，状态为`COMPLETE / EVIDENCE_INDEXED`：
 
-- 01-07D Plan [PR #56](https://github.com/weijie567/mini-agent/pull/56) reviewed transport `7098670bd90f2e2fc2fef654b4f4064f919790d0`以final `CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`通过，squash merge `5d72cb70bf5dc97ae2f74ab1697a61e77a23b725` / tree `a2aaccc3881038003eb61ab9ef7ace27c116520a`，final Plan blob `e63b844301f8d74da80bc8a1d01bbf3eea689de8`；latest overlay full为`1493 passed, 1 deselected, 12 warnings in 87.91s`。
-- 01-07H Plan [PR #57](https://github.com/weijie567/mini-agent/pull/57) reviewed non-force latest-integration transport `3016969b2863349e7673515fdd88971df56d55c3`以final `CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`通过，squash merge `e6c8cbaf782ac64e0fced492b9b552f246d0e940` / tree `8c0132f444cd079f50c1b4222f6f4bd9703c1e50`，final Plan blob `52ffe6652284d75b8f2546d50439762b63dfdfa0`；latest overlay full为`1493 passed, 1 deselected, 12 warnings in 86.92s`。
-- 两个feature的execution base / tree仍严格固定为`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669` / `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`；planning merge只提供official Plan provenance，不能成为feature base。
-- D branch / logical Worktree为`codex/e2e01-01-ru-exact-mapping` / `e2e01-01-ru-exact-mapping`，只拥有`docs/implementation/e2e01-thin-slice-implementation-spec.md`，并禁止v1 alias、migration、backfill或fallback。H branch / logical Worktree为`codex/e2e01-01-order-source-version-additive-expand` / `e2e01-01-order-source-version-additive-expand`，只拥有`src/mini_agent/core/order.py`与`tests/component/core/test_memory_trace_presentation_contract.py`、`tests/component/application/test_read_tool_executor.py`、`tests/component/application/test_agent_run_service.py`。两个allowlist机械交集为0。
-- 当前没有D/H Summary、feature branch、feature commit或feature PR。Integrator下一步从`B_CG`创建两个feature Worktree / branch，可并行执行但必须各自exact-head review、latest-integration overlay，再串行merge并记录同时包含两个reviewed feature的共同exact barrier；任一单边merge、两个branch head或planning merge均不解锁01-07E/F。
-- 最近一次Graphify完成点为`676980e7244fcb1af670b66abdde205fe17cb65a`，早于PR #56/#57；D/H Plan与本次状态对齐的semantic refresh由Integrator在状态合并后执行，当前不声称图已覆盖这些变更。
+- 01-07D Plan / feature [PR #56](https://github.com/weijie567/mini-agent/pull/56) / [PR #59](https://github.com/weijie567/mini-agent/pull/59) 形成merge `5f793fd9aa667073c0a465383459fefb979d09c4`；01-07H Plan / feature [PR #57](https://github.com/weijie567/mini-agent/pull/57) / [PR #60](https://github.com/weijie567/mini-agent/pull/60) 随后形成共同barrier `B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131`、tree `a5a60292ccdf116aba4dacaaea366576e183c532`。共同barrier的完整串行suite为`1507 passed, 1 deselected, 12 warnings`；[PR #61](https://github.com/weijie567/mini-agent/pull/61) 已索引两份Summary与派生状态。
+- exact `B_DH` preflight发现旧的E/F同base并行授权无法闭合nested DTO、closed rejection、provenance replay和v1/v2 cutover。01-07N Plan / owner [PR #62](https://github.com/weijie567/mini-agent/pull/62) / [PR #63](https://github.com/weijie567/mini-agent/pull/63) 已以reviewed merge `a4b1edb4c50a2e3e826571194bac58f7b31eab6d`、tree `469e26460c1041d9ca5042d39ae9a57ded7d5442` 冻结 `p0-ru-v2-cutover-r1`；这项remediation没有实现任何Core、codec、migration或active routing。
+- 01-07O Plan [PR #64](https://github.com/weijie567/mini-agent/pull/64) 的reviewed head `9d9afe6b1242667c6e71d16d6f4fae8ea2956fa8`以final `blocker/critical/major/minor = 0/0/0/0`通过，squash merge为`274178bad8796e08831dcd9204b6610c19930982`，Plan blob为`ef63e5a79b61622e3b495d3ba8d49801e3054cbe`。本owner feature仍从exact remediation merge `a4b1edb...`执行；planning merge只提供official Plan provenance。
+- Integrator已在`a4b1edb...`完成Graphify安全全量AST + semantic-cache重建：`3158 nodes / 16915 edges / 72 hyperedges / 127 communities`，stale marker为0；保留`713`个dangling endpoint、`687`组directed与`709`组undirected collapse candidate诊断，`0` missing endpoint、`0` self-loop。该图覆盖01-07N，不提前声称覆盖尚未reviewed merge的01-07O feature。
+- 本execution-map feature reviewed merge只解锁两道status barrier：先由planning-status sole writer精确对齐map列出的七个`.planning/`文件，形成`B_O_PLANNING_STATUS`；再由Project Direction sole writer单写`PROJECT_DIRECTION.md`，形成`B_O_STATUS`。两道PR都必须独立reviewed merge且不推进canonical lifecycle；此前不得签发01-07F。
 
 - 01-07I以Application Port declaration owner身份同时冻结exact-Run Evidence Port和fresh parameterless、raw-diagnostic-free的Request Understanding candidate-invalid signal；`ModelProvider`合同明确只有Request Understanding output的Pydantic/trusted-field拒绝使用该signal，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍使用fresh `ProviderProtocolError`。建议精确owner files为`src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`及现有records/ports contract tests；它不得实现Runtime catch或Adapter。
 - 01-07H只做additive expand：增加optional且present时strict-pattern的`GetOrderResult.source_version`，non-FOUND继续禁止；它不得在01-07K producer前拒绝legacy `FOUND + None`，也不得声称final matrix已完成。相关FOUND test stubs可在其精确allowlist内前置迁移为显式合法test token，但test token不构成authority。
@@ -540,7 +945,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 - 01-07L在HTTP/closure mapper之外消费01-07I signal：Scripted Provider与Qwen Adapter都只把Request Understanding output Pydantic拒绝映射为该signal，Presentation校验与transport/HTTP/JSON/zero-or-multiple/wrong-name继续映射`ProviderProtocolError`，并清除raw exception cause/context。它必须覆盖`invalid-request-understanding-schema`和`trusted-field-override`的真实Runtime `INPUT_INVALID`结果及协议分支不漂移；其Qwen ownership沿用01-07 Plan §Task Packet Scope明确的“sole Infra path is Eval-owned Qwen ModelProvider Adapter”，不推广为通用Infrastructure/model ownership。建议消费files包括两个Provider实现、对应Component tests与必要的offline Harness test。01-07K继续只拥有strict reader/order physical adapter。
 - 01-07M只在01-07K/01-07L共同barrier后由Core owner收紧`GetOrderResult.FOUND` validator为non-empty exact-pattern source version必填，保留non-FOUND prohibition并运行full suite；不得修改Infra/Runtime或把persisted historical `OrderObservation.source_version?`全局升级为required。01-07M reviewed merge前01-08保持blocked。
 - I/J/L的STRIDE gate同时防止Tampering/Spoofing（Adapter不得用错误类型自行改写canonical stop classification）与Information Disclosure（signal必须fresh、parameterless，`str`/`repr`/`args`不含raw value，`__cause__`/`__context__`为`None`，Run/Trace/response不保留原始Pydantic/Provider诊断）；每个consumer test都必须分别断言分类和清除边界。
-- 上述H/J/K/M green migration与I/J/L failure taxonomy跨不同ownership boundary，必须各自形成Plan、可独立通过的focused/full gate、exact-head review与串行merge；新增M后目标总数为29。只有发现I无法在同一Application owner Packet拥有Port declaration与bounded signal source时，才继续新增Packet并同步分母。
+- 后续green migration、failure taxonomy、physical persistence、active switch与v1 contract closure跨越不同ownership boundary，必须逐Packet形成Plan、独立通过focused/full gate、exact-head review与串行merge。原目标29增加01-07N/O/P/Q/S/T/U/V/W/X后固定为39；01-07R默认inactive，只有owner裁决要求physical v1 representation retirement、先修订上述execution map时才激活并把目标变为40。任何其他新增依赖也必须先修订唯一map与分母，不得只改prose。
 - 只在 `bootstrap.py` 装配具体 Adapter；01-07K拥有strict evidence reader/order-version producer、01-07L拥有HTTP/closure mapper及上述Eval-owned Provider consumers，01-08不重复实现。
 - 按 Spec 第 10.1 节逐项验证完整写入门禁：
   1. 原始 `Message` 可靠保存后才运行 Request Understanding；
@@ -561,7 +966,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 4. 真实 Qwen 配置存在时才运行 `qwen_baseline`；缺失时必须是 `SKIPPED / NOT_RUN`。
 5. 只有所有 DoD 有可复现证据后，才更新 Coverage Matrix 生命周期和 `AGENTS.md` canonical 命令。
 
-W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、01-07A–01-07M与01-08A只作为阻断依赖 Packet记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
+W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、上方execution map列出的01-07A–01-07X Packet与01-08A只作为阻断依赖记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
 
 ## 8. 集成门禁
 
@@ -648,7 +1053,7 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，在PR #29 latest overlay复验后串行合并01-07，并以PR #37/#38完成01-07A；PR #39–#41形成01-07B execution base `8544137...`。01-07B继续使用GSD planner/checker只读建议与Integrator single-writer planning-status PR，通过PR #42–#43签发并对齐状态，再由PR #44 exact six-file feature、双review与latest-integration overlay完成merge `ccdafe87...`；[01-07B Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)索引精确证据。01-07C经PR #46签发、PR #49纠正公开路径、PR #52纠正review暴露的Plan缺口，并由PR #53完成r1 feature；01-07G经PR #48/#50完成Plan与feature。两者从同一execution base出发，最终共同barrier为`327b39d...`；Project Direction状态由独立owner PR #54对齐并merge `ffcc562...`，不改变execution base；[01-07C Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md)与[01-07G Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07G-SUMMARY.md)索引精确证据。01-07D / 01-07H又分别通过受控single-writer Plan PR #56/#57签发并reviewed merge；下一步从冻结的`B_CG`创建两个feature Worktree / branch，不能运行stock mutating workflow，也不能把planning merge当作execution base或feature完成证据。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，在PR #29 latest overlay复验后串行合并01-07，并以PR #37/#38完成01-07A；PR #39–#41形成01-07B execution base `8544137...`。01-07B继续使用GSD planner/checker只读建议与Integrator single-writer planning-status PR，通过PR #42–#43签发并对齐状态，再由PR #44 exact six-file feature、双review与latest-integration overlay完成merge `ccdafe87...`；[01-07B Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)索引精确证据。01-07C经PR #46签发、PR #49纠正公开路径、PR #52纠正review暴露的Plan缺口，并由PR #53完成r1 feature；01-07G经PR #48/#50完成Plan与feature。两者从同一execution base出发，最终共同barrier为`327b39d...`；Project Direction状态由独立owner PR #54对齐并merge `ffcc562...`，不改变execution base；[01-07C Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md)与[01-07G Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07G-SUMMARY.md)索引精确证据。01-07D / 01-07H通过Plan PR #56/#57与feature PR #59/#60完成并形成`B_DH = 4a7e802...`，PR #61索引证据；01-07N再通过Plan/owner PR #62/#63关闭cutover裁决并形成`a4b1edb...`。01-07O Plan PR #64只授权本页唯一execution-map修改；其feature reviewed merge后仍必须先走planning-status与Project Direction两道single-writer barrier，不能直接签发F，也不能运行stock mutating workflow。
 
 ### 11.1 Activation Gate（`COMPLETE / EFFECTIVE`）
 
@@ -706,13 +1111,15 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | Git baseline | `CONFIRMED` | baseline commit `5043043` |
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
-| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；01-07G / 01-07C code merge分别为PR #50 `bfc63c9444ee1af204cc3806eac7e7e84fc1bb19`与PR #53 `327b39da45cdcf564609a5385d52c4264da2c669`，Project Direction owner状态PR #54 merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`，D/H Plan PR #56/#57又merge `5d72cb70bf5dc97ae2f74ab1697a61e77a23b725` / `e6c8cbaf782ac64e0fced492b9b552f246d0e940`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / 01-07D_01-07H_PLANNED / FEATURE_DISPATCH_NEXT` | activation PR #10生效；D/H Plan PR #56/#57均final `0/0/0/0`并reviewed merge，Plan blobs为`e63b844...` / `52ffe665...`；feature base继续固定为C/G共同barrier`327b39d...`，下一步创建两个ownership交集为0的feature Worktree / branch |
+| GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；D/H feature PR #59/#60形成`B_DH = 4a7e802...`，01-07N Plan/owner PR #62/#63形成remediation merge `a4b1edb...`，01-07O Plan PR #64 reviewed merge为`274178b...`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
+| GSD | `ACTIVE / EFFECTIVE / 01-07O_EXECUTION_ALIGNMENT / STATUS_ALIGNMENT_NEXT` | activation PR #10生效；D/H与N均已`COMPLETE / EVIDENCE_INDEXED`，01-07O Plan exact head `9d9afe6...` final `0/0/0/0`并由PR #64 merge；本feature只写execution-plan owner，reviewed merge后依次等待`B_O_PLANNING_STATUS`与`B_O_STATUS` |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_OWNER_RULINGS REVIEWED_MERGED / D_H_FEATURE_NOT_DISPATCHED` | Runtime PR #34 merge `fb607019...`、Infra PR #36 merge `8e21652...`、Eval PR #29 merge `eee1c0e...`、01-07A PR #38 merge `4cfac0a...`、01-07B PR #44 merge `ccdafe87...`、01-07G PR #50 merge `bfc63c9...`、01-07C r1 PR #53 merge `327b39d...`；D/H只有Plan PR #56/#57，没有Summary、feature branch、commit或PR；共同feature base仍为`B_CG` |
+| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N REVIEWED_MERGED / O_STATUS_BARRIERS_NEXT` | Runtime PR #34 merge `fb607019...`、Infra PR #36 merge `8e21652...`、Eval PR #29 merge `eee1c0e...`、01-07A PR #38 merge `4cfac0a...`、01-07B PR #44 merge `ccdafe87...`、01-07G PR #50 merge `bfc63c9...`、01-07C r1 PR #53 merge `327b39d...`、D/H PR #59/#60形成`4a7e802...`、N PR #63形成`a4b1edb...`；O reviewed merge前F保持blocked |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H/07A/07B/07C/07G、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，目标Task Packet完成证据仍是16/29，canonical lifecycle与派生checkbox仍保持0/8。01-07D / 01-07H Plan已签发，使正式Plan总数成为20（7 numbered + 11 inserted `01-04D`–`01-04H` / `01-07A` / `01-07B` / `01-07C` / `01-07D` / `01-07G` / `01-07H` + 2 replacements `01-05R/01-06R`），但没有增加Task Packet完成数。下一步从`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`创建D/H独立feature Worktree / branch；D只写Thin Slice implementation spec，H只写Core/Order source与三份owned tests，两个allowlist交集为0。01-07E/F等待D/H两个reviewed feature merge形成共同barrier，01-07I–01-07M/01-08/01-08A继续等待各自前置共同barrier。Graphify最近完成点`676980e...`早于D/H Plan merge，本状态对齐后的semantic refresh是Integrator gate。任何“D/H feature完成”“切片可运行”或“Case已通过”结论仍必须取得后续owner implementation、independent exact-head review、latest-integration replay、serial merge及post-merge验证。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/G/H/N、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为19/39；01-07O尚须以本owner feature的exact-head review与merge才可登记为20/39。正式Plan总数为22（此前20加01-07N与01-07O）；Plan签发、execution-map落盘或Graphify更新都不等于Task Packet实现完成。
+
+下一步不是直接签发F：本feature reviewed merge后，Integrator先以dedicated planning-status sole writer只改map列出的七个`.planning/`文件并形成`B_O_PLANNING_STATUS`，再以Project Direction sole writer独立单写`PROJECT_DIRECTION.md`并形成`B_O_STATUS`。随后01-07F从该exact status barrier执行`CORE_EXPAND`并形成`B_F`，01-07E只能从reviewed `B_F`执行`CODEC_EXPAND`；后续严格服从唯一execution map。Graphify当前证据已覆盖01-07N merge `a4b1edb...`，本feature merge后仍须由Integrator执行AST + semantic refresh。任何“F/E已实现”“切片可运行”或“Case已通过”结论仍必须取得相应owner implementation、independent exact-head review、latest-integration replay、serial merge及post-merge验证。
