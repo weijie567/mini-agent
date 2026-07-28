@@ -1859,6 +1859,7 @@ def test_all_17_records_strict_json_round_trip(case: RecordCase) -> None:
 
 # 01-07E CODEC_EXPAND contract.  Imports deliberately live with the additive
 # tests so the protected v1 fixture/import surface above remains byte-stable.
+import ast
 import inspect
 import warnings
 from collections import Counter
@@ -2924,11 +2925,12 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
     }
     catalog_dependency_files = {
         "src/mini_agent/infrastructure/persistence/models.py",
-        "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_database_migrations.py",
+    }
+    versioned_encode_dependency_files = {
         "tests/integration/test_postgres_record_adapters.py",
     }
-    versioned_codec_dependency_files = {
+    versioned_decode_dependency_files = {
         "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
     }
@@ -2945,14 +2947,49 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
     assert codec_owner_files <= catalog_matches
     assert catalog_matches <= codec_owner_files | catalog_dependency_files
 
-    versioned_codec_matches = files_referencing(
-        "encode_persistence_record_versioned",
-        "decode_persistence_record_versioned",
+    versioned_encode_matches = files_referencing(
+        "encode_persistence_record_versioned"
     )
-    assert codec_owner_files <= versioned_codec_matches
-    assert versioned_codec_matches <= (
-        codec_owner_files | versioned_codec_dependency_files
+    assert codec_owner_files <= versioned_encode_matches
+    assert versioned_encode_matches <= (
+        codec_owner_files | versioned_encode_dependency_files
     )
+
+    versioned_decode_matches = files_referencing(
+        "decode_persistence_record_versioned"
+    )
+    assert codec_owner_files <= versioned_decode_matches
+    assert versioned_decode_matches <= (
+        codec_owner_files | versioned_decode_dependency_files
+    )
+
+    postgres_path = (
+        repository_root / "src/mini_agent/infrastructure/persistence/postgres.py"
+    )
+    postgres_tree = ast.parse(postgres_path.read_text())
+    versioned_decode_methods = {
+        method.name
+        for node in postgres_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PostgresRecordAdapter"
+        for method in node.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if any(
+            isinstance(descendant, ast.Call)
+            and (
+                (
+                    isinstance(descendant.func, ast.Name)
+                    and descendant.func.id == "decode_persistence_record_versioned"
+                )
+                or (
+                    isinstance(descendant.func, ast.Attribute)
+                    and descendant.func.attr
+                    == "decode_persistence_record_versioned"
+                )
+            )
+            for descendant in ast.walk(method)
+        )
+    }
+    assert versioned_decode_methods <= {"load_exact_run_evidence_for_owner"}
 
     assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
     assert all(
