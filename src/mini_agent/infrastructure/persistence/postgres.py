@@ -5,12 +5,13 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from enum import Enum
 from functools import wraps
+from hashlib import sha256
 from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 from pydantic_core import to_jsonable_python
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -23,6 +24,7 @@ from mini_agent.application.persistence import (
     P0RecordCode,
     P0RecordReference,
     decode_persistence_record,
+    decode_persistence_record_versioned,
     encode_persistence_record,
 )
 from mini_agent.application.records import (
@@ -36,6 +38,7 @@ from mini_agent.application.records import (
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
+    ExactRunEvidenceClosure,
     FinalizeRunCommand,
     FinalizeToolCallCommand,
     InsertOnlyWriteResult,
@@ -50,14 +53,18 @@ from mini_agent.application.records import (
 from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
     InputBinding,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
+    TaskStateTransition,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
     ModelVisibleToolsetArtifact,
+    ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
@@ -108,6 +115,364 @@ _ACTIVE_TOOL_CALL_STATUSES = frozenset(
         ToolCallStatus.RUNNING,
     }
 )
+_EXACT_RUN_VERSION_BY_CODE = {
+    P0RecordCode.CONVERSATION_RECORD: "conversation_record.p0.v1",
+    P0RecordCode.MESSAGE_RECORD: "message_record.p0.v1",
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+        "request_understanding_record.p0.v2"
+    ),
+    P0RecordCode.TASK_RECORD: "task_record.p0.v1",
+    P0RecordCode.REQUEST_UNIT_RECORD: "request_unit_record.p0.v1",
+    P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+        "conversation_task_link_record.p0.v1"
+    ),
+    P0RecordCode.RUN_TASK_LINK_RECORD: "run_task_link_record.p0.v1",
+    P0RecordCode.INPUT_BINDING_RECORD: "input_binding_record.p0.v1",
+    P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT: (
+        "model_visible_toolset_artifact.p0.v1"
+    ),
+    P0RecordCode.AGENT_RUN_RECORD: "agent_run_record.p0.v1",
+    P0RecordCode.GATE_DECISION_RECORD: "gate_decision_record.p0.v1",
+    P0RecordCode.TOOL_CALL_RECORD: "tool_call_record.p0.v1",
+    P0RecordCode.OBSERVATION_RECORD: "observation_record.p0.v1",
+    P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
+    P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v1",
+}
+_EXACT_RUN_PRIVATE_CODES = frozenset(
+    code
+    for code in _EXACT_RUN_VERSION_BY_CODE
+    if code is not P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
+)
+_EXACT_RUN_FAMILY_CAP = {
+    P0RecordCode.CONVERSATION_RECORD: 1,
+    P0RecordCode.MESSAGE_RECORD: 64,
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: 1,
+    P0RecordCode.TASK_RECORD: 64,
+    P0RecordCode.REQUEST_UNIT_RECORD: 64,
+    P0RecordCode.CONVERSATION_TASK_LINK_RECORD: 64,
+    P0RecordCode.RUN_TASK_LINK_RECORD: 64,
+    P0RecordCode.INPUT_BINDING_RECORD: 64,
+    P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT: 2,
+    P0RecordCode.AGENT_RUN_RECORD: 1,
+    P0RecordCode.GATE_DECISION_RECORD: 1,
+    P0RecordCode.TOOL_CALL_RECORD: 1,
+    P0RecordCode.OBSERVATION_RECORD: 1,
+    P0RecordCode.CONTEXT_MANIFEST_RECORD: 2,
+    P0RecordCode.TRACE_EVENT_RECORD: 64,
+}
+_EXACT_RUN_REFERENCE_CAP = 64
+_EXACT_RUN_RAW_CHILD_CAP = {
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: 64,
+    P0RecordCode.TASK_RECORD: 64,
+    P0RecordCode.TOOL_CALL_RECORD: 1,
+}
+_EXACT_RUN_PROJECTION_CODES = (
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+    P0RecordCode.TASK_RECORD,
+    P0RecordCode.REQUEST_UNIT_RECORD,
+    P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+    P0RecordCode.RUN_TASK_LINK_RECORD,
+    P0RecordCode.AGENT_RUN_RECORD,
+    P0RecordCode.TOOL_CALL_RECORD,
+    P0RecordCode.CONTEXT_MANIFEST_RECORD,
+    P0RecordCode.TRACE_EVENT_RECORD,
+)
+_EXACT_RUN_FORWARD_RELATIONS = frozenset(
+    {
+        (
+            P0RecordCode.MESSAGE_RECORD,
+            "conversation_id",
+            P0RecordCode.CONVERSATION_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "message_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "contextualization_resolved_source_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "contextualization_source_message_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "task_delta_input_source_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "input_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "accepted_delta_task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "goal_source_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "input_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            "observation_ref",
+            P0RecordCode.OBSERVATION_RECORD,
+        ),
+        (
+            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            "conversation_id",
+            P0RecordCode.CONVERSATION_RECORD,
+        ),
+        (
+            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            "task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            "run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            "task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "source_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "supersedes",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        ),
+        (
+            P0RecordCode.AGENT_RUN_RECORD,
+            "conversation_id",
+            P0RecordCode.CONVERSATION_RECORD,
+        ),
+        (
+            P0RecordCode.GATE_DECISION_RECORD,
+            "context_manifest_id",
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+        ),
+        (
+            P0RecordCode.GATE_DECISION_RECORD,
+            "argument_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "context_manifest_id",
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "gate_decision_id",
+            P0RecordCode.GATE_DECISION_RECORD,
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "argument_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            "supersedes",
+            P0RecordCode.OBSERVATION_RECORD,
+        ),
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            "source_tool_call_id",
+            P0RecordCode.TOOL_CALL_RECORD,
+        ),
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            "source_run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            "source_task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            "source_request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        ),
+        (
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            "run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            "selected_message_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            "task_state_ref",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            "observation_ref",
+            P0RecordCode.OBSERVATION_RECORD,
+        ),
+        (
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            "model_visible_toolset_hash",
+            P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "run_id",
+            P0RecordCode.AGENT_RUN_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "message_ref",
+            P0RecordCode.MESSAGE_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "task_id",
+            P0RecordCode.TASK_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "input_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "context_manifest_id",
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "model_visible_toolset_hash",
+            P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "argument_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "tool_call_id",
+            P0RecordCode.TOOL_CALL_RECORD,
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "observation_ref",
+            P0RecordCode.OBSERVATION_RECORD,
+        ),
+        (
+            P0RecordCode.TASK_RECORD,
+            "request_unit_id",
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        ),
+    }
+)
+_EXACT_RUN_REVERSE_RELATIONS = {
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+        ("run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("accepted_delta_task_id", P0RecordCode.TASK_RECORD),
+    ),
+    P0RecordCode.REQUEST_UNIT_RECORD: (
+        ("task_id", P0RecordCode.TASK_RECORD),
+    ),
+    P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+        ("task_id", P0RecordCode.TASK_RECORD),
+    ),
+    P0RecordCode.RUN_TASK_LINK_RECORD: (
+        ("run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("task_id", P0RecordCode.TASK_RECORD),
+    ),
+    P0RecordCode.INPUT_BINDING_RECORD: (
+        ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+    ),
+    P0RecordCode.GATE_DECISION_RECORD: (
+        ("context_manifest_id", P0RecordCode.CONTEXT_MANIFEST_RECORD),
+        ("argument_binding_ref", P0RecordCode.INPUT_BINDING_RECORD),
+    ),
+    P0RecordCode.TOOL_CALL_RECORD: (
+        ("run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("task_id", P0RecordCode.TASK_RECORD),
+        ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+    ),
+    P0RecordCode.OBSERVATION_RECORD: (
+        ("source_tool_call_id", P0RecordCode.TOOL_CALL_RECORD),
+        ("source_run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("source_task_id", P0RecordCode.TASK_RECORD),
+        ("source_request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+    ),
+    P0RecordCode.CONTEXT_MANIFEST_RECORD: (
+        ("run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("task_state_ref", P0RecordCode.TASK_RECORD),
+    ),
+    P0RecordCode.TRACE_EVENT_RECORD: (
+        ("run_id", P0RecordCode.AGENT_RUN_RECORD),
+        ("task_id", P0RecordCode.TASK_RECORD),
+        ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+        ("tool_call_id", P0RecordCode.TOOL_CALL_RECORD),
+    ),
+    P0RecordCode.TASK_RECORD: (
+        ("request_unit_id", P0RecordCode.REQUEST_UNIT_RECORD),
+    ),
+}
 
 
 class P0PersistenceSystemError(Exception):
@@ -204,11 +569,878 @@ def _external_reference(
     )
 
 
+def _exact_run_key(
+    record_code: P0RecordCode,
+    logical_identity: list[list[object]],
+) -> tuple[P0RecordCode, str]:
+    return (
+        record_code,
+        _canonical_identity_text(logical_identity),
+    )
+
+
+def _exact_run_parse_envelope(
+    raw: dict[str, Any],
+) -> P0PersistenceEnvelope:
+    parsed: P0PersistenceEnvelope | None = None
+    validation_failed = False
+    try:
+        parsed = P0PersistenceEnvelope.model_validate_json(
+            json.dumps(
+                raw,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        validation_failed = True
+    if validation_failed or parsed is None:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+        ) from None
+    return parsed
+
+
+def _exact_run_normalized_references(
+    session: Session,
+    row: P0RecordModel,
+) -> tuple[P0RecordReference, ...]:
+    references = tuple(
+        session.scalars(
+            select(P0RecordReferenceModel)
+            .where(
+                P0RecordReferenceModel.source_record_code
+                == row.record_code,
+                P0RecordReferenceModel.source_logical_identity
+                == row.logical_identity,
+            )
+            .order_by(
+                P0RecordReferenceModel.ordinal,
+                P0RecordReferenceModel.relation,
+                P0RecordReferenceModel.target_record_code,
+                P0RecordReferenceModel.target_logical_identity,
+            )
+            .limit(_EXACT_RUN_REFERENCE_CAP + 1)
+        )
+    )
+    if len(references) > _EXACT_RUN_REFERENCE_CAP:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+        )
+    if tuple(reference.ordinal for reference in references) != tuple(
+        range(len(references))
+    ):
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    normalized: tuple[P0RecordReference, ...] | None = None
+    validation_failed = False
+    try:
+        normalized = tuple(
+            P0RecordReference.model_validate_json(
+                json.dumps(
+                    {
+                        "relation": reference.relation,
+                        "target_record_code": reference.target_record_code,
+                        "target_logical_identity": (
+                            reference.target_logical_identity
+                        ),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                strict=True,
+            )
+            for reference in references
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        validation_failed = True
+    if validation_failed or normalized is None:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        ) from None
+    return normalized
+
+
+def _exact_run_raw_child_count(row: P0RecordModel) -> int | None:
+    if not isinstance(row.envelope, dict):
+        return None
+    payload = row.envelope.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    children = payload.get("logical_children")
+    if not isinstance(children, list):
+        return None
+    return len(children)
+
+
+def _exact_run_reorder_json_like(
+    raw: object,
+    template: object,
+) -> object:
+    if isinstance(raw, dict) and isinstance(template, dict):
+        result = {
+            key: _exact_run_reorder_json_like(raw[key], template[key])
+            for key in template
+            if key in raw
+        }
+        result.update(
+            (key, value)
+            for key, value in raw.items()
+            if key not in result
+        )
+        return result
+    if isinstance(raw, list) and isinstance(template, list):
+        return [
+            _exact_run_reorder_json_like(
+                value,
+                template[index] if index < len(template) else None,
+            )
+            for index, value in enumerate(raw)
+        ]
+    return raw
+
+
+def _exact_run_versioned_decode_input(
+    row: P0RecordModel,
+    record_code: P0RecordCode,
+) -> dict[str, Any]:
+    if record_code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
+        return row.envelope
+    raw = json.loads(
+        json.dumps(
+            row.envelope,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        return row.envelope
+    source_data = payload.get("data")
+    child_payloads = payload.get("logical_children")
+    if not isinstance(source_data, dict) or not isinstance(
+        child_payloads,
+        list,
+    ):
+        return row.envelope
+    source: RequestUnderstandingRecordV2 | None = None
+    children: tuple[AcceptedTaskDeltaV2, ...] | None = None
+    validation_failed = False
+    try:
+        source = RequestUnderstandingRecordV2.model_validate_json(
+            json.dumps(
+                source_data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            strict=True,
+        )
+        children = tuple(
+            AcceptedTaskDeltaV2.model_validate_json(
+                json.dumps(
+                    child["data"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                strict=True,
+            )
+            for child in child_payloads
+            if isinstance(child, dict) and isinstance(child.get("data"), dict)
+        )
+        if len(children) != len(child_payloads):
+            validation_failed = True
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        validation_failed = True
+    if validation_failed or source is None or children is None:
+        return row.envelope
+    payload["data"] = _exact_run_reorder_json_like(
+        source_data,
+        source.model_dump(mode="json"),
+    )
+    for child_payload, child in zip(child_payloads, children):
+        child_payload["data"] = _exact_run_reorder_json_like(
+            child_payload["data"],
+            child.model_dump(mode="json"),
+        )
+    return raw
+
+
+def _exact_run_projection_values(
+    *,
+    record_code: P0RecordCode,
+    envelope: P0PersistenceEnvelope,
+    decoded: DecodedP0PersistenceRecord,
+    scope_owner_customer_id: str | None,
+) -> dict[str, object]:
+    record = decoded.source_record
+
+    def uuid_projection(field_name: str) -> UUID | None:
+        value = getattr(record, field_name, None)
+        return value if type(value) is UUID else None
+
+    lifecycle_status = _enum_value(getattr(record, "status", None))
+    state_version = getattr(record, "state_version", None)
+    attempt_count = getattr(record, "attempt_count", None)
+    recovery_sort_at = (
+        getattr(record, "started_at", None)
+        if record_code is P0RecordCode.AGENT_RUN_RECORD
+        else None
+    )
+    return {
+        "record_code": record_code.value,
+        "record_schema_version": _EXACT_RUN_VERSION_BY_CODE[record_code],
+        "logical_identity": _json_identity(envelope.logical_identity),
+        "direct_owner_customer_id": envelope.direct_owner_customer_id,
+        "scope_owner_customer_id": scope_owner_customer_id,
+        "conversation_id": uuid_projection("conversation_id"),
+        "run_id": uuid_projection("run_id"),
+        "task_id": uuid_projection("task_id"),
+        "request_unit_id": uuid_projection("request_unit_id"),
+        "lifecycle_status": lifecycle_status,
+        "state_version": (
+            state_version if type(state_version) is int else None
+        ),
+        "attempt_count": (
+            attempt_count if type(attempt_count) is int else None
+        ),
+        "recovery_sort_at": (
+            recovery_sort_at
+            if isinstance(recovery_sort_at, datetime)
+            else None
+        ),
+    }
+
+
+def _exact_run_decode_and_validate_row(
+    session: Session,
+    row: P0RecordModel,
+    *,
+    trusted_owner_customer_id: str,
+) -> tuple[
+    P0RecordCode,
+    DecodedP0PersistenceRecord,
+    P0PersistenceEnvelope,
+    tuple[P0RecordReference, ...],
+]:
+    record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+    if record_code is None:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
+        )
+    expected_version = _EXACT_RUN_VERSION_BY_CODE.get(record_code)
+    if expected_version is None:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    if row.record_schema_version != expected_version:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+        )
+    raw_child_count = _exact_run_raw_child_count(row)
+    raw_child_cap = _EXACT_RUN_RAW_CHILD_CAP.get(record_code)
+    if (
+        raw_child_count is not None
+        and raw_child_cap is not None
+        and raw_child_count > raw_child_cap
+    ):
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+        )
+    decoded = decode_persistence_record_versioned(
+        _exact_run_versioned_decode_input(row, record_code),
+        expected_record_code=record_code,
+        expected_schema_version=expected_version,
+        correlation_ref=uuid4(),
+    )
+    envelope = _exact_run_parse_envelope(row.envelope)
+    references = _exact_run_normalized_references(session, row)
+    expected_scope_owner = (
+        trusted_owner_customer_id
+        if record_code in _EXACT_RUN_PRIVATE_CODES
+        else None
+    )
+    if (
+        row.scope_owner_customer_id != expected_scope_owner
+        or (
+            envelope.direct_owner_customer_id is not None
+            and envelope.direct_owner_customer_id
+            != trusted_owner_customer_id
+        )
+    ):
+        raise _integrity(
+            P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+        )
+    if references != envelope.record_references:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    expected_projection = _exact_run_projection_values(
+        record_code=record_code,
+        envelope=envelope,
+        decoded=decoded,
+        scope_owner_customer_id=expected_scope_owner,
+    )
+    for field_name, expected_value in expected_projection.items():
+        if getattr(row, field_name) != expected_value:
+            if field_name in {
+                "direct_owner_customer_id",
+                "scope_owner_customer_id",
+            }:
+                category = (
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                )
+            elif field_name == "logical_identity":
+                category = P0PersistenceIntegrityCategory.IDENTITY_MISMATCH
+            elif field_name == "record_schema_version":
+                category = (
+                    P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+                )
+            else:
+                category = (
+                    P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                )
+            raise _integrity(category)
+    return record_code, decoded, envelope, references
+
+
 class PostgresRecordAdapter:
     """Synchronous-SQLAlchemy implementation of the frozen async record Ports."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
+
+    @_bounded_database_failures
+    async def load_exact_run_evidence_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> ExactRunEvidenceClosure | None:
+        if type(owner_scope) is not TrustedOwnerScope:
+            raise TypeError("owner_scope must be exact TrustedOwnerScope")
+        if type(run_id) is not UUID:
+            raise TypeError("run_id must be exact UUID")
+
+        trusted_owner = owner_scope.customer_id
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL "
+                        "REPEATABLE READ, READ ONLY"
+                    )
+                )
+                roots = tuple(
+                    session.scalars(
+                        select(P0RecordModel)
+                        .where(
+                            P0RecordModel.record_code
+                            == P0RecordCode.AGENT_RUN_RECORD.value,
+                            P0RecordModel.run_id == run_id,
+                            P0RecordModel.scope_owner_customer_id
+                            == trusted_owner,
+                        )
+                        .order_by(P0RecordModel.record_id)
+                        .limit(2)
+                    )
+                )
+                if not roots:
+                    return None
+                if len(roots) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+
+                root = roots[0]
+                root_key = _exact_run_key(
+                    P0RecordCode.AGENT_RUN_RECORD,
+                    root.logical_identity,
+                )
+                selected: dict[
+                    tuple[P0RecordCode, str],
+                    P0RecordModel,
+                ] = {root_key: root}
+                references_by_key: dict[
+                    tuple[P0RecordCode, str],
+                    tuple[P0RecordReference, ...],
+                ] = {}
+
+                def rows_for_code(
+                    record_code: P0RecordCode,
+                ) -> tuple[P0RecordModel, ...]:
+                    return tuple(
+                        row
+                        for (code, _identity), row in selected.items()
+                        if code is record_code
+                    )
+
+                def add_identity(
+                    record_code: P0RecordCode,
+                    logical_identity: list[list[object]],
+                ) -> bool:
+                    if record_code not in _EXACT_RUN_VERSION_BY_CODE:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    key = _exact_run_key(record_code, logical_identity)
+                    if key in selected:
+                        return False
+                    family_cap = _EXACT_RUN_FAMILY_CAP[record_code]
+                    if len(rows_for_code(record_code)) >= family_cap:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        )
+                    statement = select(P0RecordModel).where(
+                        P0RecordModel.record_code == record_code.value,
+                        P0RecordModel.logical_identity == logical_identity,
+                    )
+                    if record_code in _EXACT_RUN_PRIVATE_CODES:
+                        statement = statement.where(
+                            P0RecordModel.scope_owner_customer_id
+                            == trusted_owner
+                        )
+                    else:
+                        statement = statement.where(
+                            P0RecordModel.scope_owner_customer_id.is_(None)
+                        )
+                    candidates = tuple(
+                        session.scalars(
+                            statement
+                            .order_by(P0RecordModel.record_id)
+                            .limit(2)
+                        )
+                    )
+                    if not candidates:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    if len(candidates) != 1:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        )
+                    selected[key] = candidates[0]
+                    return True
+
+                _exact_run_decode_and_validate_row(
+                    session,
+                    root,
+                    trusted_owner_customer_id=trusted_owner,
+                )
+
+                while True:
+                    selected_count_before = len(selected)
+                    task_ids = tuple(
+                        sorted(
+                            {
+                                row.task_id
+                                for row in rows_for_code(
+                                    P0RecordCode.TASK_RECORD
+                                )
+                                if type(row.task_id) is UUID
+                            },
+                            key=str,
+                        )
+                    )
+                    request_unit_ids = tuple(
+                        sorted(
+                            {
+                                row.request_unit_id
+                                for row in rows_for_code(
+                                    P0RecordCode.REQUEST_UNIT_RECORD
+                                )
+                                if type(row.request_unit_id) is UUID
+                            },
+                            key=str,
+                        )
+                    )
+                    for record_code in _EXACT_RUN_PROJECTION_CODES:
+                        projection_filters = [
+                            P0RecordModel.run_id == run_id,
+                        ]
+                        if task_ids:
+                            projection_filters.append(
+                                P0RecordModel.task_id.in_(task_ids)
+                            )
+                        if request_unit_ids:
+                            projection_filters.append(
+                                P0RecordModel.request_unit_id.in_(
+                                    request_unit_ids
+                                )
+                            )
+                        family_cap = _EXACT_RUN_FAMILY_CAP[record_code]
+                        identities = tuple(
+                            session.scalars(
+                                select(P0RecordModel.logical_identity)
+                                .where(
+                                    P0RecordModel.record_code
+                                    == record_code.value,
+                                    P0RecordModel.scope_owner_customer_id
+                                    == trusted_owner,
+                                    or_(*projection_filters),
+                                )
+                                .order_by(P0RecordModel.logical_identity)
+                                .limit(family_cap + 1)
+                            )
+                        )
+                        if len(identities) > family_cap:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                            )
+                        for identity in identities:
+                            add_identity(record_code, identity)
+
+                    anchor_identities = {
+                        record_code: tuple(
+                            row.logical_identity
+                            for row in rows_for_code(record_code)
+                        )
+                        for record_code in _EXACT_RUN_FAMILY_CAP
+                    }
+                    for (
+                        source_code,
+                        reverse_edges,
+                    ) in _EXACT_RUN_REVERSE_RELATIONS.items():
+                        edge_filters = [
+                            and_(
+                                P0RecordReferenceModel.relation == relation,
+                                P0RecordReferenceModel.target_record_code
+                                == target_code.value,
+                                P0RecordReferenceModel.target_logical_identity
+                                == target_identity,
+                            )
+                            for relation, target_code in reverse_edges
+                            for target_identity in anchor_identities[target_code]
+                        ]
+                        if not edge_filters:
+                            continue
+                        family_cap = _EXACT_RUN_FAMILY_CAP[source_code]
+                        identities = tuple(
+                            session.scalars(
+                                select(
+                                    P0RecordReferenceModel.source_logical_identity
+                                )
+                                .distinct()
+                                .where(
+                                    P0RecordReferenceModel.source_record_code
+                                    == source_code.value,
+                                    or_(*edge_filters),
+                                )
+                                .order_by(
+                                    P0RecordReferenceModel.source_logical_identity
+                                )
+                                .limit(family_cap + 1)
+                            )
+                        )
+                        if len(identities) > family_cap:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                            )
+                        for identity in identities:
+                            add_identity(source_code, identity)
+
+                    for key, row in tuple(selected.items()):
+                        source_code = key[0]
+                        references = references_by_key.get(key)
+                        if references is None:
+                            references = _exact_run_normalized_references(
+                                session,
+                                row,
+                            )
+                            references_by_key[key] = references
+                        for reference in references:
+                            relation_key = (
+                                source_code,
+                                reference.relation,
+                                reference.target_record_code,
+                            )
+                            if (
+                                relation_key
+                                not in _EXACT_RUN_FORWARD_RELATIONS
+                            ):
+                                raise _integrity(
+                                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                                )
+                            add_identity(
+                                reference.target_record_code,
+                                _json_identity(
+                                    reference.target_logical_identity
+                                ),
+                            )
+
+                    if len(selected) == selected_count_before:
+                        break
+
+                raw_child_totals = {
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: 0,
+                    P0RecordCode.TASK_RECORD: 0,
+                    P0RecordCode.TOOL_CALL_RECORD: 0,
+                }
+                for record_code in raw_child_totals:
+                    for row in rows_for_code(record_code):
+                        count = _exact_run_raw_child_count(row)
+                        if count is not None:
+                            raw_child_totals[record_code] += count
+                if (
+                    raw_child_totals[
+                        P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                    ]
+                    > 64
+                    or raw_child_totals[P0RecordCode.TASK_RECORD] > 64
+                    or raw_child_totals[P0RecordCode.TOOL_CALL_RECORD] > 1
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+
+                decoded_by_code: dict[
+                    P0RecordCode,
+                    list[DecodedP0PersistenceRecord],
+                ] = {
+                    record_code: []
+                    for record_code in _EXACT_RUN_FAMILY_CAP
+                }
+                for key, row in sorted(
+                    selected.items(),
+                    key=lambda item: (item[0][0].value, item[0][1]),
+                ):
+                    (
+                        record_code,
+                        decoded,
+                        _envelope,
+                        references,
+                    ) = _exact_run_decode_and_validate_row(
+                        session,
+                        row,
+                        trusted_owner_customer_id=trusted_owner,
+                    )
+                    initial_references = references_by_key.get(key)
+                    if (
+                        initial_references is not None
+                        and references != initial_references
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    decoded_by_code[record_code].append(decoded)
+
+                exact_source_types = {
+                    P0RecordCode.CONVERSATION_RECORD: ConversationRecord,
+                    P0RecordCode.MESSAGE_RECORD: MessageRecord,
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+                        RequestUnderstandingRecordV2
+                    ),
+                    P0RecordCode.TASK_RECORD: TaskRecord,
+                    P0RecordCode.REQUEST_UNIT_RECORD: RequestUnitRecord,
+                    P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+                        ConversationTaskLinkRecord
+                    ),
+                    P0RecordCode.RUN_TASK_LINK_RECORD: RunTaskLinkRecord,
+                    P0RecordCode.INPUT_BINDING_RECORD: InputBinding,
+                    P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT: (
+                        ModelVisibleToolsetArtifact
+                    ),
+                    P0RecordCode.AGENT_RUN_RECORD: AgentRunRecord,
+                    P0RecordCode.GATE_DECISION_RECORD: GateDecision,
+                    P0RecordCode.TOOL_CALL_RECORD: ToolCallRecord,
+                    P0RecordCode.OBSERVATION_RECORD: OrderObservation,
+                    P0RecordCode.CONTEXT_MANIFEST_RECORD: ContextManifest,
+                    P0RecordCode.TRACE_EVENT_RECORD: TraceEvent,
+                }
+                for record_code, decoded_records in decoded_by_code.items():
+                    expected_type = exact_source_types[record_code]
+                    if any(
+                        type(decoded.source_record) is not expected_type
+                        for decoded in decoded_records
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                        )
+
+                conversations = decoded_by_code[
+                    P0RecordCode.CONVERSATION_RECORD
+                ]
+                runs = decoded_by_code[P0RecordCode.AGENT_RUN_RECORD]
+                if len(conversations) != 1 or len(runs) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                request_understanding_rows = decoded_by_code[
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                ]
+                if len(request_understanding_rows) > 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                request_understanding = (
+                    cast(
+                        RequestUnderstandingRecordV2,
+                        request_understanding_rows[0].source_record,
+                    )
+                    if request_understanding_rows
+                    else None
+                )
+                accepted_task_deltas = tuple(
+                    cast(AcceptedTaskDeltaV2, child)
+                    for decoded in request_understanding_rows
+                    for child in decoded.logical_children
+                )
+                task_state_transitions = tuple(
+                    cast(TaskStateTransition, child)
+                    for decoded in decoded_by_code[P0RecordCode.TASK_RECORD]
+                    for child in decoded.logical_children
+                )
+                tool_attempts = tuple(
+                    cast(ToolAttemptRecord, child)
+                    for decoded in decoded_by_code[
+                        P0RecordCode.TOOL_CALL_RECORD
+                    ]
+                    for child in decoded.logical_children
+                )
+                if (
+                    any(
+                        type(child) is not AcceptedTaskDeltaV2
+                        for child in accepted_task_deltas
+                    )
+                    or any(
+                        type(child) is not TaskStateTransition
+                        for child in task_state_transitions
+                    )
+                    or any(
+                        type(child) is not ToolAttemptRecord
+                        for child in tool_attempts
+                    )
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+
+                def sources(
+                    record_code: P0RecordCode,
+                ) -> tuple[BaseModel, ...]:
+                    return tuple(
+                        decoded.source_record
+                        for decoded in decoded_by_code[record_code]
+                    )
+
+                messages = cast(
+                    tuple[MessageRecord, ...],
+                    sources(P0RecordCode.MESSAGE_RECORD),
+                )
+                if request_understanding is not None:
+                    message_by_id = {
+                        message.message_id: message for message in messages
+                    }
+                    provenance_candidates = (
+                        *request_understanding.contextualization
+                        .resolved_reference_candidates,
+                        *(
+                            candidate
+                            for task_delta in (
+                                request_understanding.task_delta_candidates
+                            )
+                            for candidate in task_delta.input_candidates
+                        ),
+                    )
+                    for candidate in provenance_candidates:
+                        message = message_by_id.get(candidate.source_ref)
+                        if message is None:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                            )
+                        start = candidate.source_span_start
+                        end = candidate.source_span_end_exclusive
+                        if not 0 <= start < end <= len(message.content):
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                            )
+                        digest = sha256(
+                            message.content[start:end].encode("utf-8")
+                        ).hexdigest()
+                        if digest != candidate.source_quote_sha256:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                            )
+
+                closure: ExactRunEvidenceClosure | None = None
+                closure_failed = False
+                try:
+                    closure = ExactRunEvidenceClosure(
+                        conversation_record=cast(
+                            ConversationRecord,
+                            conversations[0].source_record,
+                        ),
+                        run_record=cast(
+                            AgentRunRecord,
+                            runs[0].source_record,
+                        ),
+                        message_records=messages,
+                        request_understanding_record=request_understanding,
+                        accepted_task_deltas=accepted_task_deltas,
+                        input_binding_records=cast(
+                            tuple[InputBinding, ...],
+                            sources(P0RecordCode.INPUT_BINDING_RECORD),
+                        ),
+                        task_records=cast(
+                            tuple[TaskRecord, ...],
+                            sources(P0RecordCode.TASK_RECORD),
+                        ),
+                        task_state_transitions=task_state_transitions,
+                        request_unit_records=cast(
+                            tuple[RequestUnitRecord, ...],
+                            sources(P0RecordCode.REQUEST_UNIT_RECORD),
+                        ),
+                        conversation_task_links=cast(
+                            tuple[ConversationTaskLinkRecord, ...],
+                            sources(
+                                P0RecordCode.CONVERSATION_TASK_LINK_RECORD
+                            ),
+                        ),
+                        run_task_links=cast(
+                            tuple[RunTaskLinkRecord, ...],
+                            sources(P0RecordCode.RUN_TASK_LINK_RECORD),
+                        ),
+                        gate_decisions=cast(
+                            tuple[GateDecision, ...],
+                            sources(P0RecordCode.GATE_DECISION_RECORD),
+                        ),
+                        tool_calls=cast(
+                            tuple[ToolCallRecord, ...],
+                            sources(P0RecordCode.TOOL_CALL_RECORD),
+                        ),
+                        tool_attempts=tool_attempts,
+                        observation_records=cast(
+                            tuple[OrderObservation, ...],
+                            sources(P0RecordCode.OBSERVATION_RECORD),
+                        ),
+                        context_manifests=cast(
+                            tuple[ContextManifest, ...],
+                            sources(P0RecordCode.CONTEXT_MANIFEST_RECORD),
+                        ),
+                        model_visible_toolset_artifacts=cast(
+                            tuple[ModelVisibleToolsetArtifact, ...],
+                            sources(
+                                P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
+                            ),
+                        ),
+                        trace_events=cast(
+                            tuple[TraceEvent, ...],
+                            sources(P0RecordCode.TRACE_EVENT_RECORD),
+                        ),
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    ValidationError,
+                    RecursionError,
+                ):
+                    closure_failed = True
+                if closure_failed or closure is None:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    ) from None
+                return closure
 
     @staticmethod
     def _decode_envelope(
