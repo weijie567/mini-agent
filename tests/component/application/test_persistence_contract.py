@@ -1859,6 +1859,7 @@ def test_all_17_records_strict_json_round_trip(case: RecordCase) -> None:
 
 # 01-07E CODEC_EXPAND contract.  Imports deliberately live with the additive
 # tests so the protected v1 fixture/import surface above remains byte-stable.
+import ast
 import inspect
 import warnings
 from collections import Counter
@@ -2918,21 +2919,154 @@ def test_ru_v2_source_collection_duplicates_fail_but_reference_duplicates_collap
 
 def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
     repository_root = Path(__file__).resolve().parents[3]
-    symbols = (
-        "P0_RECORD_SCHEMA_VERSION_CATALOG",
-        "encode_persistence_record_versioned",
-        "decode_persistence_record_versioned",
-    )
-    matches = {
-        path.relative_to(repository_root).as_posix()
-        for root in ("src", "tests")
-        for path in (repository_root / root).rglob("*.py")
-        if any(symbol in path.read_text() for symbol in symbols)
-    }
-    assert matches == {
+    codec_owner_files = {
         "src/mini_agent/application/persistence.py",
         "tests/component/application/test_persistence_contract.py",
     }
+    catalog_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/models.py",
+        "tests/integration/test_database_migrations.py",
+    }
+    versioned_encode_dependency_files = {
+        "tests/integration/test_postgres_record_adapters.py",
+    }
+    versioned_decode_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_postgres_record_adapters.py",
+    }
+
+    def files_referencing(*symbols: str) -> set[str]:
+        return {
+            path.relative_to(repository_root).as_posix()
+            for root in ("src", "tests")
+            for path in (repository_root / root).rglob("*.py")
+            if any(symbol in path.read_text() for symbol in symbols)
+        }
+
+    exact_reader_owner_files = {
+        "src/mini_agent/application/ports.py",
+        "tests/component/application/test_persistence_contract.py",
+        "tests/component/application/test_ports_contract.py",
+    }
+    exact_reader_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_postgres_record_adapters.py",
+        "src/mini_agent/evaluation/harness.py",
+        "tests/component/evaluation/test_e2e01_artifact_consistency.py",
+        "tests/integration/evaluation/test_e2e01_offline_harness.py",
+    }
+    exact_reader_matches = files_referencing(
+        "ExactRunEvidencePort",
+        "load_exact_run_evidence_for_owner",
+    )
+    assert exact_reader_owner_files <= exact_reader_matches
+    assert exact_reader_matches <= (
+        exact_reader_owner_files | exact_reader_dependency_files
+    )
+
+    catalog_matches = files_referencing("P0_RECORD_SCHEMA_VERSION_CATALOG")
+    assert codec_owner_files <= catalog_matches
+    assert catalog_matches <= codec_owner_files | catalog_dependency_files
+
+    versioned_encode_matches = files_referencing(
+        "encode_persistence_record_versioned"
+    )
+    assert codec_owner_files <= versioned_encode_matches
+    assert versioned_encode_matches <= (
+        codec_owner_files | versioned_encode_dependency_files
+    )
+
+    versioned_decode_matches = files_referencing(
+        "decode_persistence_record_versioned"
+    )
+    assert codec_owner_files <= versioned_decode_matches
+    assert versioned_decode_matches <= (
+        codec_owner_files | versioned_decode_dependency_files
+    )
+
+    postgres_path = (
+        repository_root / "src/mini_agent/infrastructure/persistence/postgres.py"
+    )
+    postgres_tree = ast.parse(postgres_path.read_text())
+    parent_by_node = {
+        child: parent
+        for parent in ast.walk(postgres_tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    decoder_imports = [
+        imported
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "mini_agent.application.persistence"
+        for imported in node.names
+        if imported.name == "decode_persistence_record_versioned"
+    ]
+    decoder_name_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "decode_persistence_record_versioned"
+    ]
+    decoder_attribute_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "decode_persistence_record_versioned"
+    ]
+    exact_reader_method_name = "load_exact_run_evidence_for_owner"
+    exact_reader_method_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Name)
+            and node.id == exact_reader_method_name
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr == exact_reader_method_name
+        )
+    ]
+    postgres_rel = postgres_path.relative_to(repository_root).as_posix()
+    if postgres_rel in versioned_decode_matches:
+        assert len(decoder_imports) == 1
+        assert decoder_imports[0].asname is None
+        assert decoder_name_references
+        assert not decoder_attribute_references
+        assert not exact_reader_method_references
+        for reference in decoder_name_references:
+            call = parent_by_node[reference]
+            assert isinstance(call, ast.Call) and call.func is reference
+
+            enclosing_function: ast.AST | None = call
+            while enclosing_function is not None and not isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                enclosing_function = parent_by_node.get(enclosing_function)
+            assert isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+            assert enclosing_function.name == exact_reader_method_name
+
+            enclosing_class: ast.AST | None = enclosing_function
+            while enclosing_class is not None and not isinstance(
+                enclosing_class,
+                ast.ClassDef,
+            ):
+                enclosing_class = parent_by_node.get(enclosing_class)
+            assert isinstance(enclosing_class, ast.ClassDef)
+            assert enclosing_class.name == "PostgresRecordAdapter"
+    else:
+        assert not decoder_imports
+        assert not decoder_name_references
+        assert not decoder_attribute_references
+
+    assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
+    assert all(
+        spec.record_schema_version == f"{code.value}.p0.v1"
+        for code, spec in P0_PERSISTENCE_REGISTRY.items()
+    )
 
     decoded = _decode_v2(_encode_v2(_request_understanding_v2_case("partial")))
     for forbidden_claim in (
