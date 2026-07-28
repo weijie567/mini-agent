@@ -160,7 +160,7 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
 5. `run_task_links` 的 Run 均为 root，Task refs 与 `task_records` exact-set；每个 Task owner 精确等于 Conversation owner，ConversationTaskLink / RequestUnit只引用 closure Task。
 6. 每个 Task 的 transitions 按 result version 形成完整、唯一、连续的 `2..task.state_version` history，status/time/Task/RequestUnit引用闭合；不能套用 restart `max_length=1`。
 7. 每个 ToolCall 的 Run/Task/RequestUnit/Manifest/Gate/InputBinding refs闭合；attempts 恰为唯一连续 `1..attempt_count` 并保持既有 lifecycle consistency。
-8. InputBinding source/supersedes、GateDecision、Observation、ContextManifest、ModelVisibleToolsetArtifact 与 Trace 中所有 populated top-level refs都在 closure 内解析；Observation source Run 必须是 root。每个供应 family 也必须被root-reachable relation引用，不能用“同Conversation”替代Run关联。
+8. InputBinding source/supersedes以及GateDecision、Observation、ContextManifest、ModelVisibleToolsetArtifact、Trace中的`TOP_LEVEL_P0_REFERENCE` / `EXTERNAL_REQUIRED_P0_REFERENCE` / `CHILD_TOP_LEVEL_P0_REFERENCE`必须在closure内解析；Observation source Run必须是root。`PAYLOAD_CORRELATION` / `CONDITIONAL_PAYLOAD_CORRELATION` / `LOGICAL_CHILD_CORRELATION`只按其semantic owner做本地一致性校验，不得要求解析为不存在的top-level record；非空`model_call_id`、`presentation_plan_ref`等合法correlation不能导致closure失败。每个供应family仍必须被root-reachable top-level relation引用，不能用“同Conversation”替代Run关联。
 9. 任一 duplicate、dangling、missing、extra、cross-run、cross-owner、version/history fork 或局部关系冲突导致整体 validation failure；不返回 partial closure。
 
 Application validation只证明“给定 graph 内部闭合”。数据库是否还存在未供应 row、metadata/envelope/reference是否与 decoded source exact一致、RU v2 provenance是否经 authoritative Message重算，仍由 01-07K 在同一 snapshot/fence 中证明。
@@ -279,7 +279,7 @@ handoff_format: branch、exact feature base/Plan provenance/head/commits/tree、
 <task type="auto" tdd="true">
   <name>Task 1: RED — freeze signal, v2 Provider target and exact-Run closure/Port</name>
   <files>tests/component/application/test_record_contracts.py, tests/component/application/test_ports_contract.py</files>
-  <action>只改两个test文件。冻结public names、exact field order/types、strict/frozen/extra behavior、minimal no-RU graph、RU v2 zero/all/partial/multi candidate graph、stale-state双transition graph、Tool attempt closure，以及duplicate/dangling/missing/extra/cross-run/cross-owner负例。断言signal零参数/fresh/fixed-safe/no-subclass/no-raw；断言additive ModelProviderV2 exact annotations/failure taxonomy且v1 ModelProvider未改；断言Port exact signature、runtime-checkable与None-vs-integrity/one-snapshot doc。测试不得连接DB、HTTP、Provider或Eval，不得用skip/xfail。</action>
+  <action>只改两个test文件。冻结public names、exact field order/types、strict/frozen/extra behavior、minimal no-RU graph、RU v2 zero/all/partial/multi candidate graph、stale-state双transition graph、Tool attempt closure，以及duplicate/dangling/missing/extra/cross-run/cross-owner负例。增加non-null `model_call_id` / `presentation_plan_ref`等payload-correlation正例和真正top-level dangling ref负例，防止把correlation伪装成record relation。断言signal零参数/fresh/fixed-safe/no-subclass/no-raw；断言additive ModelProviderV2 exact annotations/failure taxonomy且v1 ModelProvider未改；断言Port exact signature、runtime-checkable与None-vs-integrity/one-snapshot doc。测试不得连接DB、HTTP、Provider或Eval，不得用skip/xfail。</action>
   <verify>
     <automated>uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -q</automated>
     RED必须非零且只因01-07I surface/contract尚未出现；两个source blob仍等于B_FE_EXPAND。
