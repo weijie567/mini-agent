@@ -2163,6 +2163,19 @@ _ACCEPTED_TASK_DELTA_V2_SPEC = _P0LogicalChildSchemaSpec(
     projection_decisions=_ACCEPTED_TASK_DELTA_V2_PROJECTIONS,
 )
 
+_REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
+    tuple[P0RecordCode, str, P0LogicalChildCode],
+    _P0LogicalChildSchemaSpec,
+] = MappingProxyType(
+    {
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v2",
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        ): _ACCEPTED_TASK_DELTA_V2_SPEC,
+    }
+)
+
 P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
     tuple[P0RecordCode, str],
     P0RecordSchemaSpec,
@@ -2517,6 +2530,13 @@ def _request_understanding_v2_child_payloads(
 ]:
     if type(logical_children) is not tuple:
         _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    child_spec = _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG[
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            _REQUEST_UNDERSTANDING_V2_SPEC.record_schema_version,
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        )
+    ]
     parent = parent_record
     validated_children: list[ContractModel] = []
     for child in logical_children:
@@ -2614,7 +2634,7 @@ def _request_understanding_v2_child_payloads(
     child_references: list[P0RecordReference] = []
     for child in validated_children:
         child_data = child.model_dump(mode="json", warnings="error")
-        for rule in _ACCEPTED_TASK_DELTA_V2_SPEC.projection_decisions:
+        for rule in child_spec.projection_decisions:
             values = _projected_values(rule, child_data)
             if rule.classification is _D.CHILD_TOP_LEVEL_P0_REFERENCE:
                 child_references.extend(
@@ -2622,12 +2642,12 @@ def _request_understanding_v2_child_payloads(
                 )
         payloads.append(
             P0LogicalChildPayload(
-                child_code=_ACCEPTED_TASK_DELTA_V2_SPEC.child_code,
+                child_code=child_spec.child_code,
                 parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
                 parent_logical_identity=parent_identity,
                 logical_identity=_logical_identity(
                     child,
-                    _ACCEPTED_TASK_DELTA_V2_SPEC.identity_fields,
+                    child_spec.identity_fields,
                 ),
                 data=child_data,
             )
