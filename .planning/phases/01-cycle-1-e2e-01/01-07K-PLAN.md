@@ -367,6 +367,37 @@ test "$(git rev-parse "$base_sha:tests/integration/test_postgres_record_adapters
 test "$(git rev-parse "$base_sha:tests/integration/test_postgres_get_order.py")" = \
   df6bef3de4c4925f4ccbc2cdf6bc071beb2a0b42
 test -z "$(git status --short --untracked-files=all)"
+```
+
+以上 **Gate A / first-edit preflight** 必须在任何RED编辑前完整成功。实现与提交完成后，在feature Worktree另起shell完整运行 **Gate B / post-implementation final**；Gate B不再要求`HEAD == B_IP`，但重新证明同一个Packet identity、base tree/blobs与`3+N`历史：
+
+```bash
+set -euo pipefail
+
+base_sha=bbe14fadc0cd2e14ad35e19177b079fcab685dfc
+base_tree=65415ff5846892f257e95d8b8bd34f50752980a2
+expected_branch=codex/e2e01-01-strict-readers
+expected_worktree_id=e2e01-01-strict-readers
+expected_remote=https://github.com/weijie567/mini-agent.git
+current_root="$(git rev-parse --show-toplevel)"
+
+test "$(git remote get-url origin)" = "$expected_remote"
+test "$(git branch --show-current)" = "$expected_branch"
+test "$(basename "$current_root")" = "$expected_worktree_id"
+test "$(git worktree list --porcelain | awk -v root="$current_root" '
+  $1 == "worktree" { current = $2 }
+  $1 == "branch" && current == root { print $2 }
+')" = "refs/heads/$expected_branch"
+test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+test "$(git rev-parse "$base_sha^{tree}")" = "$base_tree"
+test "$(git rev-parse "$base_sha:src/mini_agent/infrastructure/persistence/postgres.py")" = \
+  62bf768242ba141479182121200f6d041a54e5ba
+test "$(git rev-parse "$base_sha:src/mini_agent/infrastructure/order/postgres.py")" = \
+  e1909e06bac2e64b8349154f66c2b777164f1847
+test "$(git rev-parse "$base_sha:tests/integration/test_postgres_record_adapters.py")" = \
+  aa760d7c5fabf0ebf0b749f43de5a33729658334
+test "$(git rev-parse "$base_sha:tests/integration/test_postgres_get_order.py")" = \
+  df6bef3de4c4925f4ccbc2cdf6bc071beb2a0b42
 
 uv sync --all-groups
 docker compose up --wait -d db
