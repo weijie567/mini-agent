@@ -2967,29 +2967,67 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
         repository_root / "src/mini_agent/infrastructure/persistence/postgres.py"
     )
     postgres_tree = ast.parse(postgres_path.read_text())
-    versioned_decode_methods = {
-        method.name
-        for node in postgres_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "PostgresRecordAdapter"
-        for method in node.body
-        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
-        if any(
-            isinstance(descendant, ast.Call)
-            and (
-                (
-                    isinstance(descendant.func, ast.Name)
-                    and descendant.func.id == "decode_persistence_record_versioned"
-                )
-                or (
-                    isinstance(descendant.func, ast.Attribute)
-                    and descendant.func.attr
-                    == "decode_persistence_record_versioned"
-                )
-            )
-            for descendant in ast.walk(method)
-        )
+    parent_by_node = {
+        child: parent
+        for parent in ast.walk(postgres_tree)
+        for child in ast.iter_child_nodes(parent)
     }
-    assert versioned_decode_methods <= {"load_exact_run_evidence_for_owner"}
+    decoder_imports = [
+        imported
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "mini_agent.application.persistence"
+        for imported in node.names
+        if imported.name == "decode_persistence_record_versioned"
+    ]
+    decoder_name_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "decode_persistence_record_versioned"
+    ]
+    decoder_attribute_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "decode_persistence_record_versioned"
+    ]
+    postgres_rel = postgres_path.relative_to(repository_root).as_posix()
+    if postgres_rel in versioned_decode_matches:
+        assert len(decoder_imports) == 1
+        assert decoder_imports[0].asname is None
+        assert decoder_name_references
+        assert not decoder_attribute_references
+        for reference in decoder_name_references:
+            call = parent_by_node[reference]
+            assert isinstance(call, ast.Call) and call.func is reference
+
+            enclosing_function: ast.AST | None = call
+            while enclosing_function is not None and not isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                enclosing_function = parent_by_node.get(enclosing_function)
+            assert isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+            assert (
+                enclosing_function.name == "load_exact_run_evidence_for_owner"
+            )
+
+            enclosing_class: ast.AST | None = enclosing_function
+            while enclosing_class is not None and not isinstance(
+                enclosing_class,
+                ast.ClassDef,
+            ):
+                enclosing_class = parent_by_node.get(enclosing_class)
+            assert isinstance(enclosing_class, ast.ClassDef)
+            assert enclosing_class.name == "PostgresRecordAdapter"
+    else:
+        assert not decoder_imports
+        assert not decoder_name_references
+        assert not decoder_attribute_references
 
     assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
     assert all(
