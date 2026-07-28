@@ -293,6 +293,8 @@ NextMove
 
 `RequestUnderstandingOutput.task_delta_candidates[]` 的 v2 结构 cardinality 是 `0..n`，同一输出内 `candidate_id` 唯一。每个输出都携带恰好一个实际 `contextualization`，其 `text`、`resolved_reference_candidates[]`、`uncertainties[]` 与 `source_message_refs[]` 必须是本次 Provider 实际 emitted、通过严格 Schema 和确定性规则校验后的 canonical projection，不能从 Accepted Delta、Task、最终回复或原始消息重建。当前 `E2E01-01/04` 成功轨迹继续收窄为恰好一个被接受的 `ADD_GOAL` Candidate；该成功轨迹约束不把 v2 的通用结构缩窄为 exactly one。
 
+第 10.1.1 节的 `P0-RU-V2-CUTOVER-MANIFEST` 是本切片 model-facing / durable-safe nested shape、candidate rejection、provenance responsibility 与 staged cutover 的唯一 exact encoding。上方未带 `V2` 后缀的名称只是语义角色展示，不是 Python alias。直接 source-model binding 必须使用 manifest 中的显式 `V2` type names，不得用 optional fields、union 或 alias 把当前 v1 shape 伪装成 v2。`ResolvedReferenceCandidateV2.source_quote` 与 `InputCandidate.source_quote` 在本切片 model output 中都必需；不存在无 quote 却生成 durable span/hash 的路径。
+
 本切片的 `CALL_TOOL` 只允许候选 `get_order`。这不是 RequestUnit Tool allowlist；它来自当前 RegistrySnapshot 中本切片实际注册的工具集合。
 
 本切片只接受当前消息中明确出现且可精确定位的订单号：
@@ -947,7 +949,7 @@ AcceptedTaskDelta
 
 `created_at` 与该聚合全部 `AcceptedTaskDelta.accepted_at` 必须来自 canonical closure 时的同一次可信 UTC sample；幂等 persistence retry / replay 返回原时间，不能刷新。outer / inner Provider schema、input/output version、禁止字段或基本引用结构整体 invalid 时，不创建 durable `RequestUnderstandingRecord`，也不以空 Candidate、全 `REJECT` 或占位版本伪装成功。记录禁止包含 raw Provider payload / SDK object、完整 Prompt / request body、原始 Token、隐藏思维链、exception / stack / diagnostic text、raw `source_quote`、`customer_id`、授权范围、Cookie、secret、完整 `CustomerContext`、Runtime private binding 或未经归属验证的私有资源。
 
-本 scoped owner 只接受 exact-v2 contract；普通 read / recovery 不做 alias、fallback、推断、migration 或 backfill：
+本 scoped owner 的 target active contract 只接受 exact v2；staged expand 只允许 manifest 明列的 exact-version、non-routable catalog entry，不把 v1 解释为 v2，也不改变普通 read / recovery 禁止 alias、fallback、推断、migration 或 backfill 的规则：
 
 <!-- P0-RU-V2-COMPATIBILITY:START -->
 current_logical_record_version: request_understanding_record.p0.v2
@@ -971,6 +973,217 @@ historical_runtime_status: DENIED_NOT_CURRENT
 <!-- P0-RU-V1-HISTORICAL-DENIED:END -->
 
 若任何历史 durable data 必须进入 Runtime readiness，必须先签发独立 migration Packet，明确唯一 source / target、数据 denominator、identity / time 与 closure 保留、不可推断数据的失败规则、原子切换、security / Eval 影响及 rollback；在 target exact decode 和批准 gate 通过前保持 `BLOCK_WITH_NEW_MIGRATION_PACKET`。
+
+下列 JSON 是本切片 RU v2 staged implementation 的唯一 machine-readable encoding manifest。字段数组顺序就是 canonical serialization / validation order；enum 与 stage 数组顺序也是合同的一部分。解释性 prose、Core、codec、Provider、Adapter 或测试不得维护另一份字段、reason、failure bucket、role 或 stage 列表。
+
+<!-- P0-RU-V2-CUTOVER-MANIFEST:START -->
+```json
+{
+  "manifest_version": "p0-ru-v2-cutover-r1",
+  "model_types": {
+    "ResolvedReferenceCandidateV2": {
+      "fields": [
+        "name",
+        "candidate_value",
+        "source_kind",
+        "source_ref",
+        "source_quote",
+        "confidence"
+      ],
+      "rules": [
+        "name=order_id",
+        "candidate-value=non-empty-string",
+        "source-kind=CURRENT_MESSAGE|RECENT_MESSAGE",
+        "source-quote=required:1..128-unicode-code-points",
+        "confidence=0..1",
+        "forbid-trusted-and-business-fields"
+      ]
+    },
+    "UncertaintyV2": {
+      "fields": [
+        "name",
+        "candidate_values",
+        "reason_code",
+        "source_message_refs"
+      ],
+      "rules": [
+        "name=order_id",
+        "reason=MISSING_REFERENCE|MULTIPLE_PLAUSIBLE_REFERENCES",
+        "missing-values=0",
+        "multiple-values=2..8-unique",
+        "source-message-refs=1..8-unique",
+        "preserve-emitted-order"
+      ]
+    },
+    "QueryContextualizationCandidateV2": {
+      "fields": [
+        "text",
+        "resolved_reference_candidates",
+        "uncertainties",
+        "source_message_refs"
+      ],
+      "rules": [
+        "text=non-empty-string",
+        "resolved=0..n",
+        "uncertainties=0..n",
+        "source-message-refs=1..8-unique-includes-current",
+        "resolved-source-ref-in-source-message-refs"
+      ]
+    }
+  },
+  "durable_types": {
+    "DurableResolvedReferenceCandidateV2": {
+      "fields": [
+        "name",
+        "candidate_value",
+        "source_kind",
+        "source_ref",
+        "source_span_start",
+        "source_span_end_exclusive",
+        "source_quote_sha256",
+        "confidence"
+      ],
+      "raw_source_quote": "FORBIDDEN"
+    },
+    "DurableInputCandidateV2": {
+      "fields": [
+        "name",
+        "candidate_value",
+        "semantic_role",
+        "authority",
+        "source_kind",
+        "source_ref",
+        "source_span_start",
+        "source_span_end_exclusive",
+        "source_quote_sha256",
+        "confidence"
+      ],
+      "raw_source_quote": "FORBIDDEN"
+    },
+    "direct_binding_types": [
+      "RequestUnderstandingOutputV2",
+      "CandidateValidationRecordV2",
+      "AcceptedTaskDeltaV2",
+      "RequestUnderstandingRecordV2"
+    ]
+  },
+  "candidate_rejection_reason_codes": [
+    "OPERATION_NOT_SUPPORTED",
+    "GOAL_PATCH_NOT_ACTIONABLE",
+    "REQUIRED_INPUT_MISSING",
+    "INPUT_VALUE_INVALID",
+    "REFERENCE_UNRESOLVED",
+    "REFERENCE_AMBIGUOUS",
+    "NEXT_MOVE_INCONSISTENT"
+  ],
+  "failure_partition": {
+    "aggregate_invalid_no_record": [
+      "MODEL_INPUT_SCHEMA_INVALID",
+      "MODEL_OUTPUT_SCHEMA_INVALID",
+      "MODEL_SCHEMA_VERSION_INVALID",
+      "TRUSTED_OR_PRIVATE_FIELD_PRESENT",
+      "SOURCE_PROVENANCE_INVALID"
+    ],
+    "candidate_reject": [
+      "OPERATION_NOT_SUPPORTED",
+      "GOAL_PATCH_NOT_ACTIONABLE",
+      "REQUIRED_INPUT_MISSING",
+      "INPUT_VALUE_INVALID",
+      "REFERENCE_UNRESOLVED",
+      "REFERENCE_AMBIGUOUS",
+      "NEXT_MOVE_INCONSISTENT"
+    ],
+    "atomic_failure_no_record": [
+      "TASK_STATE_CAS_CONFLICT",
+      "TASK_COMMIT_FAILED",
+      "DURABLE_CLOSURE_COMMIT_FAILED"
+    ]
+  },
+  "provenance_responsibilities": {
+    "WRITE_VALIDATOR": [
+      "owner-scoped-authoritative-message-read",
+      "exact-unique-quote-match",
+      "derive-span-and-sha256",
+      "discard-raw-quote"
+    ],
+    "PURE_CODEC": [
+      "exact-code-version-dispatch",
+      "strict-dto-validation",
+      "safe-projection-and-local-closure-only",
+      "zero-io"
+    ],
+    "OWNER_SCOPED_READER": [
+      "trusted-owner-message-read",
+      "span-bounds-check",
+      "exact-slice-sha256-recheck",
+      "fail-closed-before-consumption"
+    ]
+  },
+  "authority_states": [
+    "codec-decode-success",
+    "provenance-content-verified",
+    "owner-graph-complete",
+    "business-fact-evidence-or-authorization"
+  ],
+  "cutover": {
+    "stages": [
+      "CORE_EXPAND",
+      "CODEC_EXPAND",
+      "DEPENDENCY_EXPAND",
+      "ACTIVE_SWITCH",
+      "CONTRACT"
+    ],
+    "active_registry_code_count": 17,
+    "version_catalog_entry_count": 18,
+    "dual_version_record_codes": [
+      "request_understanding_record"
+    ],
+    "versioned_codec_apis": [
+      "encode_persistence_record_versioned",
+      "decode_persistence_record_versioned"
+    ],
+    "caller_must_supply": [
+      "record_code",
+      "schema_version"
+    ],
+    "forbidden_behaviors": [
+      "version-inference",
+      "alias",
+      "union-version-field",
+      "default-or-latest",
+      "try-other-version",
+      "read-time-rewrite",
+      "backfill-or-reconstruction",
+      "expand-path-active-routing"
+    ],
+    "legacy_data": {
+      "inferable": false,
+      "backfill": false,
+      "active_switch_requires_current_v1_isolation": true
+    },
+    "execution_owner_fields_forbidden": [
+      "packet_id",
+      "branch",
+      "worktree",
+      "writer",
+      "allowlist",
+      "denominator",
+      "integration_order"
+    ]
+  }
+}
+```
+<!-- P0-RU-V2-CUTOVER-MANIFEST:END -->
+
+`CandidateRejectionReasonCode` 就是 manifest 的 `candidate_rejection_reason_codes` 封闭集合。只有 outer / inner schema、exact input/output version、禁止字段、基本 reference 与 safe provenance 全部通过后，确定性 validator 才能对对应 emitted Candidate 写入其中一个 keyed `REJECT`。`aggregate_invalid_no_record` 中的失败统一形成 `INPUT_INVALID` 且不创建 `RequestUnderstandingRecord`；`atomic_failure_no_record` 中的失败不创建 partial record，并进入受控重裁决或恢复。三个 bucket 不能交叉，不能增加 caller-controlled text，也不能把整体或提交失败伪装成 candidate rejection。
+
+Provenance 责任严格分三段。`WRITE_VALIDATOR` 在 trusted owner scope 中加载 authoritative immutable Message，完成 exact unique quote match，生成 span / SHA-256 并立即丢弃 raw quote。`PURE_CODEC` 是 deterministic、zero-I/O 的结构闭包；固定 decode API 不增加 message resolver、Repository 或 trusted identity。`OWNER_SCOPED_READER` 是 owner-scoped strict reader：它在交付可消费记录前按可信 owner 重读 authoritative Message，校验 span bounds 并对 exact slice 重算 hash，任一失败都 fail closed。`codec-decode-success`、`provenance-content-verified`、`owner-graph-complete` 与 `business-fact-evidence-or-authorization` 互不替代。
+
+Cutover 只能按 manifest 的五个 stage 前进。`CORE_EXPAND` 只增加显式 v2 direct-binding types，当前 v1 active types不变；`CODEC_EXPAND` 只增加 immutable `P0_RECORD_SCHEMA_VERSION_CATALOG` 与两个 exact-version API，现有 active registry / API 不切换且新路径不可路由。Catalog 以 `(record_code, schema_version)` 为 exact key，17 个 active code 对应 18 个 version entry，只有 `request_understanding_record` 有两个 entry。`DEPENDENCY_EXPAND` 分别完成 physical schema、strict reader、Application Port、Provider / Eval 等 owner边界；只有全部 dependency gate 通过且 current v1 rows 已隔离，`ACTIVE_SWITCH` 才能发生。`CONTRACT` 逐 owner 关闭 v1，Core v1 surface 最后关闭。
+
+任何调用方都必须同时显式提供 `record_code` 与 `schema_version`；禁止 manifest 列出的 inference、alias、union、default/latest、try-other-version、read-time rewrite、backfill/reconstruction 和 expand-path active routing。缺少 contextualization、actual candidates、model versions 或 keyed Task effects 的历史数据不可推断或升级；存在未隔离的 current v1 row 时，active switch、contract 与 readiness 全部 fail closed。
+
+本 scoped owner 不写 Packet ID、branch、Worktree、writer、allowlist、denominator 或 integration order。另一个 single-writer execution-plan alignment Packet 必须把上述 stage 映射到精确执行合同；该 mapping reviewed merge 前不得执行任何 stage。Thin Slice Spec 的通过只授权该 alignment，不授权 Core、codec、physical schema、Runtime、Eval 或 readiness 实现。
 
 <!-- P0-PERSISTENCE-REGISTRY:START -->
 | item | `record_code` | `record_schema_version` | semantic owner | current source | logical identity | owner / required link metadata |
@@ -1223,7 +1436,7 @@ Logical child 规则固定为：
 
 Codec 不是授权器、Repository、Adapter、migration runner 或 recovery claimant。Owner-scoped lookup、跨记录 graph closure、transactionally consistent recovery decode / claim 与 readiness 继续服从 Memory 15.2，并在后续 Runtime / Infrastructure Task Packet 实现。普通 read / recovery 永不迁移；future logical version 必须先由 semantic owner 定义 source / target、不变量、安全、审计、失败原子性和 rollback。
 
-对本节新增的 Request Understanding v2 scoped contract，`01-07E` 独占 codec / registry encode-decode 消费，`01-07F` 独占 Core DTO / validator / reducer 消费；本文件不主张二者、Python DTO、Runtime、数据库、migration、Trace / Eval reader、Trajectory / E2E Result 或 P0 产品已经实现、验证或 ready。`01-07E` 与 `01-07F` 的 planning / dispatch 必须同时等待 `01-07D` 与 `01-07H` 各自取得独立 exact-head review、由 Integrator 串行集成，并记录一个同时包含两者 reviewed exact commits / owner blobs 的 common barrier。`01-07D` 或 `01-07H` 单独 merge、两个尚未串行集成的 branch heads、planning artifact 或 overlay 都不授权下游。
+对本节新增的 Request Understanding v2 scoped contract，Core DTO / validator / reducer 与 Application codec / registry encode-decode 必须由不同 owner 和不同 Task Packet 消费；本文件不分配 Packet ID、branch、Worktree、writer、allowlist、分母或集成顺序，也不主张Python DTO、codec、Runtime、数据库、migration、Trace / Eval reader、Trajectory / E2E Result或P0产品已经实现、验证或ready。只有single-writer execution-plan alignment把manifest五个stage映射为精确Task Packet并取得reviewed merge后，第一项实现才可planning/dispatch；旧的同base并行E/F授权、两个branch heads、planning artifact或overlay都不能绕过该barrier。
 
 Plan 01-04 的 exact owned files 只有：
 
@@ -1233,6 +1446,38 @@ Plan 01-04 的 exact owned files 只有：
 其他路径全部禁止，特别是 `src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`、`src/mini_agent/core/**`、`src/mini_agent/infrastructure/**`、`tests/component/core/**`、`tests/integration/**`、`alembic/**`、`pyproject.toml`、`uv.lock`、active docs 与 `.planning/**`。01-04 不新增 Alembic revision、不改 database metadata、不创建 table；physical mapping / migration 留给 01-06，complete graph / fenced claim 留给 01-05 / 01-06。
 
 01-04 tests 必须覆盖 registry exactly 17、code/source-model bijection、immutability、no runtime registration、17 项正向 JSON round-trip（含 UUID / datetime）、missing / unknown / mismatch、outer / inner tampering、wrong source model、strict field failure、identity / owner / relation / mirror mismatch、external relation missing / extra / duplicate / wrong cardinality、Accepted Delta / Tool Attempt local-closed、Task Transition graph-required 不误报、三类 child wrong-parent / wrong-identity / tampering、version substitution rejection、安全 error projection，以及 Toolset record / artifact version 双独立 gate。
+
+#### 10.1.4 Future RU v2 `CODEC_EXPAND` contract
+
+本节是 manifest `CODEC_EXPAND` stage 的 future target contract，不属于已完成的 Plan 01-04，不反向改变 01-04 的 fixed API、owned files、实现证据或完成状态。只有 single-writer execution-plan alignment reviewed merge并签发对应 Application owner Packet后，本节才授权实现；在此之前下列 symbol 在 `src/**` 与 `tests/**` 中都必须为 `NOT_FOUND`。
+
+- `P0_RECORD_SCHEMA_VERSION_CATALOG`：仅供 staged exact-version dispatch 的 immutable catalog，恰含 18 个 `(record_code, schema_version)` entry；17 个 record code 中只有 `request_understanding_record` 同时拥有两个显式 entry。它不是第二个 active registry，不允许 runtime registration、latest选择或try-other-version。
+- `encode_persistence_record_versioned` / `decode_persistence_record_versioned`：manifest唯一允许的future versioned codec API；必须要求caller显式给出exact code与version。
+
+`CODEC_EXPAND` 不修改现有 `P0_PERSISTENCE_REGISTRY` 或既有 codec API；expand entry不能被当作current。后续`ACTIVE_SWITCH`如何替换active mapping仍须由execution-plan alignment分配给明确Application owner Packet，本节不把该切换归入Plan 01-04。
+
+Future signatures 固定为：
+
+```python
+def encode_persistence_record_versioned(
+    record_code: P0RecordCode,
+    schema_version: str,
+    record: ContractModel,
+    *,
+    external_references: tuple[P0RecordReference, ...] = (),
+    logical_children: tuple[ContractModel, ...] = (),
+) -> P0PersistenceEnvelope: ...
+
+def decode_persistence_record_versioned(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    *,
+    expected_record_code: P0RecordCode,
+    expected_schema_version: str,
+    correlation_ref: UUID,
+) -> DecodedP0PersistenceRecord: ...
+```
+
+这两个入口在 `ACTIVE_SWITCH` 前只能由 scoped Component contract tests 与后续明确签发的 dependency expand consumers调用；Composition Root、Runtime active writer、physical persistence与readiness不得路由到它们。它们必须用exact pair查询catalog，不能回退到active registry，也不能从source model、payload或另一个版本轴推断。任何missing / unknown / mismatched code-version pair只产生既有bounded integrity category，不尝试另一个版本。
 
 第一切片共享记录与 Port 冻结还必须遵守：
 
