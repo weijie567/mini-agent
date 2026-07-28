@@ -111,7 +111,7 @@ Plans:
 | 01-07C / 01-07G | RU semantic / source-version rulings | `COMPLETE / EVIDENCE_INDEXED`：PR #50/#53串行merge形成`B_CG = 327b39d...` / tree `49ad0f3...`；1493 full（1 deselected）、双review、latest overlay与Graphify全量安全重建完成；PR #54又以one-file owner alignment关闭过期Project Direction状态，execution base不变；health warning已显式记录 |
 | 01-07D / 01-07H | RU exact mapping / Core-Order additive DTO | `COMPLETE / EVIDENCE_INDEXED`：feature PR #59/#60从`B_CG`执行、allowlist交集0、均获independent `0/0/0/0`；串行merge形成`B_DH = 4a7e802...` / tree `a5a6029...`，combined canonical full为1507 passed |
 | 01-07N / 01-07O | cutover remediation / unique execution map | `COMPLETE / EVIDENCE_INDEXED`：Plan/owner PR #62–#65 reviewed merge；N形成`a4b1edb...`，O形成`7332091...`；PR #66将owner计数校正为20/39 |
-| Status barriers | planning-status / Project Direction | `B_O_STATUS = 73696a1...`已形成并被F精确消费；F/E与I/P后的派生状态对齐均不创建第二道barrier、不推进lifecycle，也不阻塞已由exact implementation barrier解锁的下一组Packet |
+| Status barriers | planning-status / Project Direction | `B_O_STATUS = 73696a1...`已形成并被F精确消费；F/E与I/P后的派生状态对齐均不创建第二道implementation barrier、不推进lifecycle；当前I/P四步alignment在final closure前仍阻塞K/L签发 |
 | 01-07F | RU Core expand | `COMPLETE / EVIDENCE_INDEXED`：PR #70/#71；`B_F = 034cf57...`；41-definition protected-v1 gate与1575 full通过 |
 | 01-07E | persistence codec expand | `COMPLETE / EVIDENCE_INDEXED`：PR #72/#73/#74；`B_FE_EXPAND = 294ada3...`；60-definition oracle与1671 full通过；active routing未切换 |
 | 01-07I / 01-07P | Application Port / migration-chain dependency expand | `COMPLETE / EVIDENCE_INDEXED`：PR #80–#87；I/P分别完成Application与physical expand；serial merge形成`B_IP = bbe14fa...` / tree `65415ff...`；exact B_IP full为1767 passed |
