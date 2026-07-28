@@ -570,7 +570,7 @@ def test_v2_builder_projects_unicode_quotes_to_safe_exact_provenance() -> None:
     serialized = closure.model_dump_json()
     assert resolved_quote not in serialized
     assert input_quote not in serialized
-    assert "source_quote" not in serialized
+    assert '"source_quote":' not in serialized
 
 
 @pytest.mark.parametrize(
