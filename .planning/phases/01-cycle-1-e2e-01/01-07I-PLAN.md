@@ -153,14 +153,14 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
 
 模型必须对所供应 graph 至少证明：
 
-1. `run_record.conversation_id` 非空且精确等于 `conversation_record.conversation_id`；所有 Message / ConversationTaskLink 属于该 Conversation。
+1. `run_record.conversation_id` 非空且精确等于 `conversation_record.conversation_id`；所有 Message / ConversationTaskLink 属于该 Conversation。`message_records` 必须是 RU、InputBinding、Manifest 与 Trace 实际引用的source-message exact set，不得把同Conversation中无Run关系的消息或terminal ASSISTANT Message凭时间/内容猜入closure。
 2. 每个 identity family 唯一；所有 Trace 绑定 exact Run；不得出现 foreign Run、Conversation 或 owner。
 3. 可选 RU v2 record 的 `run_id` 等于 root Run、`message_ref` 命中本 closure Message；无 RU record 时 accepted child 必须为空。
 4. RU `accepted_delta_refs` 与 accepted children identity exact-set；child 的 message、candidate、Task 与 InputBinding refs全部闭合。
 5. `run_task_links` 的 Run 均为 root，Task refs 与 `task_records` exact-set；每个 Task owner 精确等于 Conversation owner，ConversationTaskLink / RequestUnit只引用 closure Task。
 6. 每个 Task 的 transitions 按 result version 形成完整、唯一、连续的 `2..task.state_version` history，status/time/Task/RequestUnit引用闭合；不能套用 restart `max_length=1`。
 7. 每个 ToolCall 的 Run/Task/RequestUnit/Manifest/Gate/InputBinding refs闭合；attempts 恰为唯一连续 `1..attempt_count` 并保持既有 lifecycle consistency。
-8. GateDecision、Observation、ContextManifest、ModelVisibleToolsetArtifact 与 Trace 中所有 populated top-level refs都在 closure 内解析；Observation source Run 必须是 root。
+8. InputBinding source/supersedes、GateDecision、Observation、ContextManifest、ModelVisibleToolsetArtifact 与 Trace 中所有 populated top-level refs都在 closure 内解析；Observation source Run 必须是 root。每个供应 family 也必须被root-reachable relation引用，不能用“同Conversation”替代Run关联。
 9. 任一 duplicate、dangling、missing、extra、cross-run、cross-owner、version/history fork 或局部关系冲突导致整体 validation failure；不返回 partial closure。
 
 Application validation只证明“给定 graph 内部闭合”。数据库是否还存在未供应 row、metadata/envelope/reference是否与 decoded source exact一致、RU v2 provenance是否经 authoritative Message重算，仍由 01-07K 在同一 snapshot/fence 中证明。
