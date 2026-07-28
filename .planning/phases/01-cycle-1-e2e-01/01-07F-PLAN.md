@@ -240,8 +240,9 @@ protected_v1_surface:
 - oracle blobs与`owned_files_at_base`中三个source blob相同
 - definition counts: request_understanding=15、task_state=13、request_processing=13，总计41
 - 对每个oracle symbol同时比较 `ast.dump(include_attributes=False)` 与 exact source segment SHA-256；candidate必须仍恰好一个同名module binding
-- 新增AST只允许append-only import、new-name alias/constant、undecorated class/function definition；检测Import/ImportFrom alias、Store/Delete/AugAssign/NamedExpr、`global`/`nonlocal`、protected attribute assignment、`setattr`/`delattr`、`globals`/`vars`/`exec`/`eval`与top-level call等重绑或间接mutation
-- gate内置import-alias、`del`、`globals()`、helper/global和`setattr` mutants；每个mutant必须被拒绝
+- 新增AST只允许append-only import、new-name alias/constant、undecorated class/function definition；任何tail binding不得覆盖baseline或同tail名称。检测Import/ImportFrom alias、Store/Delete/AugAssign/NamedExpr、`global`/`nonlocal`、protected attribute assignment、`setattr`/`delattr`、`globals`/`vars`/`exec`/`eval`与module-load call等重绑或间接mutation
+- module-load expression只允许origin可证明为`pydantic`且exact name为`Field`、`field_validator`、`model_validator`或`field_serializer`的bare call；禁止别名化hazardous callable和attribute-call
+- gate内置import-alias、`del`、`globals()`、helper/global、direct/aliased `setattr`和`object.__setattr__` mutants；每个mutant必须被拒绝
 - 新imports使用独立追加语句，新definitions追加在最后；不编辑已有definition source segment
 
 owned_files:
@@ -436,6 +437,68 @@ def root_name(node):
         node = node.value
     return node.id if isinstance(node, ast.Name) else None
 
+def node_bound_names(node):
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {node.name}
+    if isinstance(node, ast.Import):
+        return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        if node.module == "__future__":
+            return set()
+        return {alias.asname or alias.name for alias in node.names}
+    if isinstance(node, ast.Assign):
+        return {target.id for target in node.targets if isinstance(target, ast.Name)}
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return {node.target.id}
+    return set()
+
+def import_origins(nodes):
+    result = {}
+    for node in nodes:
+        if isinstance(node, ast.ImportFrom) and node.module != "__future__":
+            for alias in node.names:
+                result[alias.asname or alias.name] = (node.module, alias.name)
+    return result
+
+class ModuleLoadCallCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.calls = []
+
+    def visit_Call(self, node):
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def _visit_function_shell(self, node):
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if node.args.vararg is not None and node.args.vararg.annotation is not None:
+            self.visit(node.args.vararg.annotation)
+        if node.args.kwarg is not None and node.args.kwarg.annotation is not None:
+            self.visit(node.args.kwarg.annotation)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def visit_FunctionDef(self, node):
+        self._visit_function_shell(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._visit_function_shell(node)
+
+    def visit_Lambda(self, node):
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
 def assert_protected(path, old, new):
     old_tree, new_tree = ast.parse(old), ast.parse(new)
     old_bindings = protected_bindings(old_tree)
@@ -472,8 +535,19 @@ def assert_protected(path, old, new):
         ast.AsyncFunctionDef,
     )
     tail = new_tree.body[len(old_tree.body):]
+    baseline_names = set().union(
+        *(node_bound_names(node) for node in old_tree.body)
+    )
+    occupied_names = set(baseline_names)
     for node in tail:
         assert isinstance(node, allowed_tail), (path, type(node).__name__, "tail-node")
+        new_names = node_bound_names(node)
+        assert occupied_names.isdisjoint(new_names), (
+            path,
+            sorted(occupied_names.intersection(new_names)),
+            "module-name-rebind",
+        )
+        occupied_names.update(new_names)
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             assert node.name not in protected, (path, node.name, "definition-rebind")
             assert not node.decorator_list, (path, node.name, "top-level-decorator")
@@ -497,6 +571,35 @@ def assert_protected(path, old, new):
         elif isinstance(node, ast.AnnAssign):
             assert isinstance(node.target, ast.Name), (path, "non-name-annassign")
             assert node.target.id not in protected, (path, node.target.id, "annassign-rebind")
+
+    safe_pydantic_calls = {
+        "Field",
+        "field_validator",
+        "model_validator",
+        "field_serializer",
+    }
+    origins = import_origins((*old_tree.body, *tail))
+    safe_call_names = {
+        bound
+        for bound, origin in origins.items()
+        if origin[0] == "pydantic"
+        and origin[1] in safe_pydantic_calls
+        and bound == origin[1]
+    }
+    module_load_calls = ModuleLoadCallCollector()
+    for node in tail:
+        module_load_calls.visit(node)
+    for call in module_load_calls.calls:
+        assert isinstance(call.func, ast.Name), (
+            path,
+            ast.dump(call.func, include_attributes=False),
+            "module-load-attribute-call",
+        )
+        assert call.func.id in safe_call_names, (
+            path,
+            call.func.id,
+            "module-load-unsafe-call",
+        )
 
     hazardous_calls = {"globals", "vars", "exec", "eval", "setattr", "delattr"}
     for node in ast.walk(ast.Module(body=tail, type_ignores=[])):
@@ -543,6 +646,11 @@ for path in FILES:
         "helper-global": new
         + f"\ndef _mutate_protected():\n    global {protected_name}\n    {protected_name} = object\n",
         "setattr": new + f"\nsetattr({protected_name}, 'mutated', True)\n",
+        "aliased-setattr": new
+        + "\nfrom builtins import setattr as mutate\n"
+        + f"_mutation_result = mutate({protected_name}, 'mutated', True)\n",
+        "attribute-setattr": new
+        + f"\n_mutation_result = object.__setattr__({protected_name}, 'mutated', True)\n",
     }
     for mutant_name, mutant in mutants.items():
         try:
