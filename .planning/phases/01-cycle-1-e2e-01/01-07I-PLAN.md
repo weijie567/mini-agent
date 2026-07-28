@@ -154,7 +154,7 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
 模型必须对所供应 graph 至少证明：
 
 1. `run_record.conversation_id` 非空且精确等于 `conversation_record.conversation_id`；所有 Message / ConversationTaskLink 属于该 Conversation。`message_records` 必须是 RU、InputBinding、Manifest 与 Trace 实际引用的source-message exact set，不得把同Conversation中无Run关系的消息或terminal ASSISTANT Message凭时间/内容猜入closure。
-2. 每个 identity family 唯一；所有 Trace 绑定 exact Run；不得出现 foreign Run、Conversation 或 owner。
+2. 每个 identity family 唯一；所有 Trace 绑定 exact Run，且 nested `TraceEvent.case_id` 必须为 `None`；不得出现 foreign Run、Conversation、owner或Eval semantic identity。
 3. 可选 RU v2 record 的 `run_id` 等于 root Run、`message_ref` 命中本 closure Message；无 RU record 时 accepted child 必须为空。
 4. RU `accepted_delta_refs` 与 accepted children identity exact-set；child 的 message、candidate、Task 与 InputBinding refs全部闭合。
 5. `run_task_links` 的 Run 均为 root，Task refs 与 `task_records` exact-set；每个 Task owner 精确等于 Conversation owner，ConversationTaskLink / RequestUnit只引用 closure Task。
