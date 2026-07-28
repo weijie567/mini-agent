@@ -246,11 +246,21 @@ ModelProvider
 第一切片沿用 Intent owner 的语义，只收窄编码：
 
 ```text
-RequestUnderstandingOutput
+RequestUnderstandingInput
   schema_version: "e2e01-thin-v1"
+
+RequestUnderstandingOutput
+  schema_version: "e2e01-thin-v2"
   message_ref: UUID
+  contextualization: QueryContextualizationCandidate
   task_delta_candidates: list[TaskDeltaCandidate]
   next_move_candidate: NextMove
+
+QueryContextualizationCandidate
+  text: str
+  resolved_reference_candidates: list[ResolvedReferenceCandidate]
+  uncertainties: list[Uncertainty]
+  source_message_refs: list[UUID]
 
 TaskDeltaCandidate
   candidate_id: UUID
@@ -267,6 +277,9 @@ InputCandidate
   source_kind: "CURRENT_MESSAGE"
   source_ref: UUID
   source_quote: str
+    min_length: 1 Unicode code point
+    max_length: 128 Unicode code points
+    lifecycle: CURRENT_RUN_PROVENANCE_ONLY
   confidence: float
 
 NextMove
@@ -276,12 +289,19 @@ NextMove
   base_task_state_version: int | null
 ```
 
+这三个版本轴互不替代：`RequestUnderstandingInput.schema_version` 唯一 literal 是 `e2e01-thin-v1`，`RequestUnderstandingOutput.schema_version` 唯一 literal 是 `e2e01-thin-v2`，durable `RequestUnderstandingRecord.schema_version` 则是 `request_understanding_record.p0.v2`。它们都不能由另一个轴、Prompt 名称、当前代码默认值或 Task `state_version` 推断；input / output 均不接受 alias 或 fallback。
+
+`RequestUnderstandingOutput.task_delta_candidates[]` 的 v2 结构 cardinality 是 `0..n`，同一输出内 `candidate_id` 唯一。每个输出都携带恰好一个实际 `contextualization`，其 `text`、`resolved_reference_candidates[]`、`uncertainties[]` 与 `source_message_refs[]` 必须是本次 Provider 实际 emitted、通过严格 Schema 和确定性规则校验后的 canonical projection，不能从 Accepted Delta、Task、最终回复或原始消息重建。当前 `E2E01-01/04` 成功轨迹继续收窄为恰好一个被接受的 `ADD_GOAL` Candidate；该成功轨迹约束不把 v2 的通用结构缩窄为 exactly one。
+
 本切片的 `CALL_TOOL` 只允许候选 `get_order`。这不是 RequestUnit Tool allowlist；它来自当前 RegistrySnapshot 中本切片实际注册的工具集合。
 
 本切片只接受当前消息中明确出现且可精确定位的订单号：
 
 - `source_ref` 必须等于 `RequestUnderstandingOutput.message_ref`。
-- `source_quote` 必须能在受控消息原文中精确定位对应订单号；普通 Trace 只保存引用、范围或 hash，不复制原文。
+- 模型输出中的 `source_quote` 只在当前 Run 内作为 provenance-validation 的瞬时输入，长度必须为 `1..128` 个 Unicode code point；空值、超过上限或与 `source_ref` 对应整条 authoritative message 完全相等时都 fail closed。
+- Runtime 必须对 Conversation Store 中 `source_ref` 指向的不可变原文执行不做任何变换的 exact substring 校验。Runtime 枚举 raw `source_quote` 在 authoritative Python `str` 中的全部 Unicode code-point start offset，命中数必须恰好为一且精确覆盖候选来源；不得先 trim、case-fold、Unicode normalize 或模糊匹配。零次或多次命中、无法得到唯一 deterministic span，或 span 不能证明对应候选时都以 `INPUT_INVALID` 拒绝。
+- `source_span_start` 与 `source_span_end_exclusive` 由 trusted Runtime 在唯一命中后按 authoritative Python `str` 的 Unicode code-point offset 计算；模型 / Provider 不得输出或覆盖 span、hash。Runtime 随后计算 `sha256(source_quote.encode("utf-8")).hexdigest()`，形成小写 64-hex `source_quote_sha256`，再立即丢弃 raw `source_quote`。
+- durable `RequestUnderstandingRecord` 只保存 `source_ref + source_span_start + source_span_end_exclusive + source_quote_sha256` 的安全投影；raw `source_quote` 不得进入 durable record、普通或受限 Trace、Eval Result、日志、异常、diagnostic text 或第二份 original-message authority。读取 / replay 时只能用 `source_ref` 加载 authoritative message，验证 `0 <= start < end <= len(message)`，并对 `message[start:end]` 重算 hash 后精确比较；任一不一致都 fail closed。
 - Runtime 只允许去除首尾空白、将 ASCII 前缀 `o-` 规范化为 `O-`，随后必须满足 `^O-[0-9]{4,20}$`；不得使用编辑距离、语义近邻或补写数字。
 - 模型声明的 `authority` 仍由 Runtime 根据 `source_kind` 和实际消息重新判定；本切片出现 `MODEL_INFERENCE` 或其他来源时以 `INPUT_INVALID` 安全停止。
 
@@ -877,12 +897,87 @@ MINI_AGENT_DATABASE_URL=postgresql+psycopg://<user>:<password>@<host>:<port>/<da
 
 下面是本切片唯一的 canonical 最低逻辑持久化集合。每行 source model / artifact 的全部必填字段与 owner 校验仍然有效；本表只增加跨 Port 持久化所需的 code、version、identity 和 owner / link 投影，不建立第二套 payload DTO。
 
+本切片把 Request Understanding durable aggregate 唯一映射为以下 parent fields；字段名、版本轴和 authority 不存在替代表达：
+
+```text
+RequestUnderstandingRecord
+  request_understanding_record_id
+  run_id
+  message_ref
+  schema_version
+  model_input_schema_version
+  model_output_schema_version
+  contextualization
+  task_delta_candidates[]
+  candidate_validation[]
+  accepted_delta_refs[]
+  proposed_base_task_state_version?
+  validated_task_state_version?
+  next_move_candidate_ref?
+  created_at
+```
+
+模型输出的 raw quote 通过验证后只嵌入下列 safe provenance shape；它不是新的 top-level record 或 original-message authority：
+
+```text
+DurableSourceProvenanceProjection
+  source_ref: UUID
+  source_span_start: int                    # >= 0
+  source_span_end_exclusive: int            # > source_span_start
+  source_quote_sha256: str                  # ^[0-9a-f]{64}$
+```
+
+- `request_understanding_record_id` 是可信 Runtime 生成的一次逻辑 Request Understanding invocation identity；`run_id` 只关联 `agent_run_record`，`message_ref` 只关联 `message_record`，二者都不是本记录 identity，用户、模型和 Provider 都不能生成或覆盖 identity。
+- `schema_version` 是 logical mirror，唯一值为 `request_understanding_record.p0.v2`；`model_input_schema_version` 和 `model_output_schema_version` 分别直接保存本次实际通过 exact gate 的 `e2e01-thin-v1` 与 `e2e01-thin-v2`。三个 schema axes 与按 Task effect 保存的 concurrency version axis 独立，不能互相推断或替代。
+- `contextualization` 恰好一个，严格保存 `QueryContextualizationCandidate` 的 `text`、`resolved_reference_candidates[]`、`uncertainties[]` 与 `source_message_refs[]` actual validated safe projection。`task_delta_candidates[]` 按 Provider 实际 emitted 顺序保存全部 canonical Candidate 的安全投影；两者都不得从 Accepted Delta、Task、最终回复或当前业务状态重建。
+- 每个 provenance-bearing item 的 durable safe projection 必须保留原有受控候选字段，并把瞬时 raw `source_quote` 唯一替换为 `source_ref`、`source_span_start`、`source_span_end_exclusive` 与 `source_quote_sha256`。这四个字段由 trusted Runtime 在第 5.1 节的唯一 exact-match 校验后形成；span 使用 authoritative message 的 Unicode code-point offset，hash 是对应 exact slice 的 UTF-8 SHA-256 小写 hex。缺失、额外、caller-provided、越界、不连续、无法重算或 hash 不一致都使整个 durable aggregate fail closed。
+- `task_delta_candidates[]` 可以为零到多个且 `candidate_id` 唯一；`candidate_validation[]` 与 emitted `candidate_id` 是 exact set，每个 Candidate 恰好一个 final `ACCEPT` 或 `REJECT` decision。`ACCEPT` 无 `reason_code`，并绑定恰好一个 accepted child / Task effect；`REJECT` 必须有 keyed、bounded `reason_code`，且没有 accepted child 或 Task effect。零 Candidate、全部拒绝与部分接受都必须形成完整的 local closure。
+- `accepted_delta_refs[]` 唯一，并与 `AcceptedTaskDelta.accepted_delta_id` 及全部 `ACCEPT` children 精确同集；它是顺序无关的 closure set，不表示应用顺序。`proposed_base_task_state_version?`、`validated_task_state_version?` 与 `next_move_candidate_ref?` 只构成零或一个 NextMove 审计关联，不能替代 Accepted Delta 的 Task effect。
+
+`AcceptedTaskDelta` 是 `RequestUnderstandingRecord` 的 parent-local logical child，child code 仍为 `accepted_task_delta`。其现有 `accepted_delta_id`、`candidate_ref`、`message_ref`、`operation`、`goal_text`、`input_binding_refs[]` 与 `accepted_at` 之外，唯一内联下列 Task effect fields：
+
+```text
+AcceptedTaskDelta
+  task_id
+  base_task_state_version?
+  result_task_state_version
+```
+
+聚合内 `(accepted_delta_id, task_id)` 唯一，并绑定恰好一个实际 Task effect。新 Task 的 `base_task_state_version=null`、`result_task_state_version` 为真实提交的正整数初始版本；既有 Task 使用实际 CAS base/result。当前 E2E01 成功轨迹恰好一个 accepted `ADD_GOAL` child，base 为 `null`、result 为 `1`。父记录不得保存 `task_state_version_bindings[]`、global base/result 或无法逐项关联的 parallel Task-version arrays。
+
+`created_at` 与该聚合全部 `AcceptedTaskDelta.accepted_at` 必须来自 canonical closure 时的同一次可信 UTC sample；幂等 persistence retry / replay 返回原时间，不能刷新。outer / inner Provider schema、input/output version、禁止字段或基本引用结构整体 invalid 时，不创建 durable `RequestUnderstandingRecord`，也不以空 Candidate、全 `REJECT` 或占位版本伪装成功。记录禁止包含 raw Provider payload / SDK object、完整 Prompt / request body、原始 Token、隐藏思维链、exception / stack / diagnostic text、raw `source_quote`、`customer_id`、授权范围、Cookie、secret、完整 `CustomerContext`、Runtime private binding 或未经归属验证的私有资源。
+
+本 scoped owner 只接受 exact-v2 contract；普通 read / recovery 不做 alias、fallback、推断、migration 或 backfill：
+
+<!-- P0-RU-V2-COMPATIBILITY:START -->
+current_logical_record_version: request_understanding_record.p0.v2
+model_input_schema_version: e2e01-thin-v1
+model_output_schema_version: e2e01-thin-v2
+schema_aliases: NONE
+schema_fallback: FORBIDDEN
+automatic_v1_to_v2_inference: FORBIDDEN
+automatic_v1_to_v2_migration: FORBIDDEN
+automatic_v1_to_v2_backfill: FORBIDDEN
+global_task_state_version_binding: FORBIDDEN
+parallel_task_state_version_arrays: FORBIDDEN
+retained_v1_runtime_readiness: BLOCK_WITH_NEW_MIGRATION_PACKET
+<!-- P0-RU-V2-COMPATIBILITY:END -->
+
+下列 block 仅标识历史版本不是当前可读合同；该值不得在 block 外声明：
+
+<!-- P0-RU-V1-HISTORICAL-DENIED:START -->
+historical_logical_record_version: request_understanding_record.p0.v1
+historical_runtime_status: DENIED_NOT_CURRENT
+<!-- P0-RU-V1-HISTORICAL-DENIED:END -->
+
+若任何历史 durable data 必须进入 Runtime readiness，必须先签发独立 migration Packet，明确唯一 source / target、数据 denominator、identity / time 与 closure 保留、不可推断数据的失败规则、原子切换、security / Eval 影响及 rollback；在 target exact decode 和批准 gate 通过前保持 `BLOCK_WITH_NEW_MIGRATION_PACKET`。
+
 <!-- P0-PERSISTENCE-REGISTRY:START -->
 | item | `record_code` | `record_schema_version` | semantic owner | current source | logical identity | owner / required link metadata |
 |---|---|---|---|---|---|---|
 | `ConversationRecord` | `conversation_record` | `conversation_record.p0.v1` | Application | `ConversationRecord` | `conversation_id` | direct `owner_customer_id` |
 | `MessageRecord` | `message_record` | `message_record.p0.v1` | Application | `MessageRecord` | `message_id` | `conversation_id -> conversation_record` |
-| `RequestUnderstandingRecord` | `request_understanding_record` | `request_understanding_record.p0.v1` | Request Understanding | `RequestUnderstandingRecord` | `run_id` | `run_id -> agent_run_record`; `message_ref -> message_record` |
+| `RequestUnderstandingRecord` | `request_understanding_record` | `request_understanding_record.p0.v2` | Request Understanding | `RequestUnderstandingRecord` | `request_understanding_record_id` | `run_id -> agent_run_record; message_ref -> message_record` |
 | `TaskRecord` | `task_record` | `task_record.p0.v1` | Core Runtime / Task State | `TaskRecord` | `task_id` | direct `owner_customer_id`; `state_version` independent |
 | `RequestUnitRecord` | `request_unit_record` | `request_unit_record.p0.v1` | Core Runtime / Task State | `RequestUnitRecord` | `request_unit_id` | `task_id -> task_record`; closed refs; `state_version` independent |
 | `ConversationTaskLinkRecord` | `conversation_task_link_record` | `conversation_task_link_record.p0.v1` | Application | `ConversationTaskLinkRecord` | `(conversation_id, task_id, linked_at)` | Conversation / Task roots both required and decoded owners equal |
@@ -937,10 +1032,14 @@ MINI_AGENT_DATABASE_URL=postgresql+psycopg://<user>:<password>@<host>:<port>/<da
 |---|---|---|---|---|
 | `ConversationRecord` | `owner_customer_id` | `DIRECT_OWNER` | direct owner projection | exactly one |
 | `MessageRecord` | `conversation_id` | `TOP_LEVEL_P0_REFERENCE` | `conversation_id -> conversation_record` | exactly one |
-| `RequestUnderstandingRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one；同时是本记录 identity |
-| `RequestUnderstandingRecord` | `message_ref` | `TOP_LEVEL_P0_REFERENCE` | `message_ref -> message_record` | exactly one |
+| `RequestUnderstandingRecord` | `run_id` | `TOP_LEVEL_P0_REFERENCE` | `run_id -> agent_run_record` | exactly one；correlation only，不是本记录 identity |
+| `RequestUnderstandingRecord` | `message_ref` | `TOP_LEVEL_P0_REFERENCE` | `message_ref -> message_record` | exactly one；correlation only，不是本记录 identity |
+| `RequestUnderstandingRecord` | `contextualization.resolved_reference_candidates[].source_ref` | `TOP_LEVEL_P0_REFERENCE` | `contextualization_resolved_source_ref -> message_record` | zero or more；reference tuple unique |
+| `RequestUnderstandingRecord` | `contextualization.source_message_refs[]` | `TOP_LEVEL_P0_REFERENCE` | `contextualization_source_message_ref -> message_record` | one or more；unique；must include parent message_ref |
+| `RequestUnderstandingRecord` | `task_delta_candidates[].input_candidates[].source_ref` | `TOP_LEVEL_P0_REFERENCE` | `task_delta_input_source_ref -> message_record` | zero or more；reference tuple unique |
 | `RequestUnderstandingRecord` | `accepted_delta_refs[]` | `LOGICAL_CHILD_CORRELATION` | child code `accepted_task_delta` | 与 children identities 一一对应且顺序无关 |
-| `RequestUnderstandingRecord` | `candidate_validation[].candidate_ref`、`next_move_candidate_ref?` | `PAYLOAD_CORRELATION` | no top-level target | owner model cardinality |
+| `RequestUnderstandingRecord` | `candidate_validation[].candidate_ref` | `PARENT_LOCAL_CORRELATION` | parent `task_delta_candidates[].candidate_id` | 与 emitted candidate_id exact set；每个恰好一个 final decision |
+| `RequestUnderstandingRecord` | `next_move_candidate_ref?` | `PAYLOAD_CORRELATION` | no top-level target | zero or one |
 | `TaskRecord` | `owner_customer_id` | `DIRECT_OWNER` | direct owner projection | exactly one |
 | `TaskRecord` | `last_outcome_ref?` | `PAYLOAD_CORRELATION` | no single top-level target frozen | zero or one |
 | `RequestUnitRecord` | `task_id` | `TOP_LEVEL_P0_REFERENCE` | `task_id -> task_record` | exactly one |
@@ -1011,15 +1110,48 @@ Logical child 的内部跨记录字段继续服从下列封闭决策；不能仅
 | `AcceptedTaskDelta` | `candidate_ref` | `PARENT_LOCAL_CORRELATION` | parent `candidate_validation[].candidate_ref` | exactly one parent match，且 decision 必须为 `ACCEPT` |
 | `AcceptedTaskDelta` | `message_ref` | `PARENT_FIELD_EQUALITY` | parent `RequestUnderstandingRecord.message_ref` | exactly equal |
 | `AcceptedTaskDelta` | `input_binding_refs[]` | `CHILD_TOP_LEVEL_P0_REFERENCE` | `input_binding_ref -> input_binding_record` | one or more；unique |
+| `AcceptedTaskDelta` | `task_id` | `CHILD_TOP_LEVEL_P0_REFERENCE` | `accepted_delta_task_id -> task_record` | exactly one |
 | `TaskStateTransition` | `task_id` | `PARENT_FIELD_EQUALITY` | parent `TaskRecord.task_id` | exactly equal |
 | `TaskStateTransition` | `request_unit_id` | `CHILD_TOP_LEVEL_P0_REFERENCE` | `request_unit_id -> request_unit_record` | exactly one |
 | `TaskStateTransition` | `reason_ref` | `PAYLOAD_CORRELATION` | reason target kind not frozen | exactly one scalar |
 | `ToolAttemptRecord` | `tool_call_id` | `PARENT_FIELD_EQUALITY` | parent `ToolCallRecord.tool_call_id` | exactly equal |
 <!-- P0-PERSISTENCE-CHILD-PROJECTION:END -->
 
+Request Understanding parent / local-child 的完整闭包由下表封闭；它不创建额外 top-level record code：
+
+<!-- P0-PERSISTENCE-LOCAL-CLOSURE:START -->
+| scope | local field / relation | exact closure rule |
+|---|---|---|
+| `RequestUnderstandingRecord` | `contextualization` | exactly one；actual validated QueryContextualizationCandidate projection，never reconstructed |
+| `RequestUnderstandingRecord` | `task_delta_candidates[].candidate_id` | 0..n；candidate_id unique；actual emitted canonical candidates |
+| `RequestUnderstandingRecord` | `candidate_validation[].candidate_ref` | exactly same candidate_id set；exactly one final decision per candidate |
+| `CandidateValidationRecord` | `decision=ACCEPT` | exactly one AcceptedTaskDelta child by candidate_ref；reason_code absent |
+| `CandidateValidationRecord` | `decision=REJECT` | bounded reason_code required；no accepted child or Task effect |
+| `RequestUnderstandingRecord` | `accepted_delta_refs[]` | unique；exact same set as AcceptedTaskDelta.accepted_delta_id and ACCEPT children |
+| `AcceptedTaskDelta` | `candidate_ref` | exactly one emitted candidate with ACCEPT decision；one child per accepted candidate |
+| `AcceptedTaskDelta` | `(accepted_delta_id, task_id)` | unique pair；binds exactly one inline Task effect |
+| `AcceptedTaskDelta` | `base_task_state_version? + result_task_state_version` | new Task base null and result positive；existing Task uses exact CAS base/result；no global or parallel binding |
+| `RequestUnderstandingRecord` | `next_move_candidate_ref? + proposed_base_task_state_version? + validated_task_state_version?` | zero or one correlated NextMove audit；never substitutes AcceptedTaskDelta Task effect |
+| `RequestUnderstandingRecord` | `created_at + AcceptedTaskDelta.accepted_at` | one trusted UTC sample；idempotent replay never refreshes |
+<!-- P0-PERSISTENCE-LOCAL-CLOSURE:END -->
+
+上表 `AcceptedTaskDelta | base_task_state_version? + result_task_state_version` 行的 `exact CAS base/result` 进一步冻结为同一聚合内的 deterministic chain，而不是每个 child 各自局部合法即可：
+
+1. Runtime 必须逐字保留 `task_delta_candidates[]` 的 validated emitted sequence；canonical serialization 不按 UUID、decision、Task 或 child identity 重排。每个 accepted child 的 `candidate_ref` 唯一定位该 sequence 中的 Candidate；实际应用顺序是按 sequence 过滤 `decision=ACCEPT` 后得到的顺序。
+2. `accepted_delta_refs[]` 与 accepted child identity 继续是顺序无关的 exact closure set。读取者不得从该数组顺序或 logical-child storage order 推断应用顺序，也不得增加 `child_order`、`sequence_no` 或其他第二套 ordering field。
+3. 对每个 `task_id` 独立建立一条 chain；Candidate sequence 中不同 Task 可以交错，但同一 Task 的第一个 accepted child 的 `base_task_state_version` 必须精确等于 Reducer 首次应用前实际加载并校验的版本，新建 Task 时为 `null`。
+4. 同一 `task_id` 的每个后续 accepted child，其 `base_task_state_version` 必须精确等于该 Task 前一个 accepted child 的 `result_task_state_version`。`result_task_state_version` 只能由 Task owner 的 deterministic reducer 根据该 Operation 和当前状态产生，必须等于实际提交版本；调用方、模型、Provider、codec 或持久化 Adapter 不得预填、猜测或改写。
+5. 每一步 result 都必须满足 Task owner 的合法迁移并严格向前；duplicate base、从同一 base 形成 parallel fork、result / base rollback、跳过前一 result 的不连续 chain、将 accepted children 与 Candidate sequence 不同序应用，或 replay 时只重排 Candidate / child 都使整个 aggregate fail closed。CAS conflict 或任一步提交失败时不得保存部分 chain。
+
+Request Understanding v2 的 Component / codec negative regressions 必须至少证明：
+
+- 空、超过 `128` Unicode code point、整条消息或在 authoritative message 中非唯一的 raw `source_quote` 被拒绝，且 rejected raw value 不进入 durable record、Trace、Eval Result、日志或 diagnostics。
+- durable candidate / contextualization projection 出现 raw `source_quote`、缺少四字段安全投影、caller-provided span/hash、越界或空 span、`source_ref` 不匹配、slice hash 不匹配，或无法用 `source_ref + span + hash` 精确复验时整体拒绝。
+- 同一 Task 的 duplicate base、parallel fork、rollback、reordered replay 与任何不连续 base/result chain 均被拒绝；只置换顺序无关的 `accepted_delta_refs[]` set representation 可以保持同一 closure，但改变 `task_delta_candidates[]` sequence 必须形成 replay conflict。
+
 `ModelVisibleToolsetArtifact` 没有 record relation；其 hash 是本记录 identity。Reference tuple 必须按 `(relation, target_record_code, target_identity)` 形成唯一、确定性的排序；矩阵中标记 `unique` 的 source field 出现重复 ID、任一 cardinality 错误或调用方试图提供 source-derived / child-derived relation 时都整体拒绝。`CONDITIONAL_PAYLOAD_CORRELATION`、`PAYLOAD_CORRELATION` 与 `RESTRICTED_DIAGNOSTIC_CORRELATION` 保留在 strict owner-model validation 范围内，但不能被 01-04 返回为“已解析”“owner graph 已闭合”或“可恢复”。
 
-Top-level marker-bounded matrix 恰含 66 行、logical-child matrix 恰含 7 行 projection decision；01-04 的 Component tests 必须证明 registry spec、两张矩阵与所有可生成 `P0RecordReference` 的行精确对应，parent-local / parent-equality / payload correlation 行从不进入 reference tuple，`MUST_BE_EMPTY` 行拒绝非空值，且没有未声明 relation token。
+Registry、top-level、logical-child 与 local-closure marker-bounded matrix 分别恰含 17、70、8、11 行。可生成 `P0RecordReference` 的 projection rule 固定为 top-level 46 条与 child-derived 3 条，共 49 条；01-04 的 Component tests 必须证明 registry spec、三张 projection / closure matrix 与这些 reference-producing rows 精确对应，parent-local / parent-equality / payload correlation 行从不进入 reference tuple，`MUST_BE_EMPTY` 行拒绝非空值，且没有未声明 relation token。
 
 #### 10.1.3 Plan 01-04 logical codec / closed registry API
 
@@ -1083,13 +1215,15 @@ UUID / datetime 的合法 JSON 表示是字符串，因此 strict round-trip 必
 
 Logical child 规则固定为：
 
-- `AcceptedTaskDelta` 静态绑定 `RequestUnderstandingRecord`，child identity 是 `accepted_delta_id`。Parent 的 `accepted_delta_refs` 与 child identities 必须一一对应且顺序无关；每个 child 的 `message_ref` 必须等于 parent，`candidate_ref` 必须唯一命中 parent 中 decision 为 `ACCEPT` 的 Candidate，`input_binding_refs` 必须重算为 child-derived top-level refs；closure strategy 为 `LOCAL_CLOSED`。
+- `AcceptedTaskDelta` 静态绑定 `RequestUnderstandingRecord`，child identity 是 `accepted_delta_id`。Parent 的 `accepted_delta_refs` 与 child identities 必须一一对应且顺序无关；每个 child 的 `message_ref` 必须等于 parent，`candidate_ref` 必须唯一命中 parent 中 decision 为 `ACCEPT` 的 Candidate，`input_binding_refs` 与 `task_id` 必须重算为 child-derived top-level refs。`(accepted_delta_id, task_id)` 唯一，inline `base_task_state_version?` / `result_task_state_version` 必须证明该 child 的实际 Task effect；同一 Task 的多个 child 还必须按 persisted Candidate sequence 满足上一 child result 等于下一 child base 的 deterministic CAS chain；closure strategy 为 `LOCAL_CLOSED`。
 - `TaskStateTransition` 静态绑定 `TaskRecord`，child identity 是 `(task_id, request_unit_id, result_state_version)`。`task_id` 必须等于 parent identity，`request_unit_id` 必须重算为 child-derived top-level ref，`reason_ref` 只保留为 payload correlation；每条 transition 继续满足 owner model 的单步 `base + 1 = result`，同一 envelope 内 identity / result version 唯一并按 result version 排序。Task parent 没有 transition refs，codec 不能证明完整历史，因此 closure strategy 为 `GRAPH_REQUIRED`；完整 cardinality / contiguous history 留给 01-05 / 01-06 record-graph gate。
 - `ToolAttemptRecord` 静态绑定 `ToolCallRecord`，child identity 是 `(tool_call_id, attempt_no)`，且 `tool_call_id` 必须等于 parent identity。Parent `attempt_count=N` 时 children 必须恰为唯一连续的 `attempt_no=1..N`；`N=0` 时必须为空，closure strategy 为 `LOCAL_CLOSED`。每个 attempt 的 lifecycle 继续服从 Tool owner。
 
 任何 locally provable 的 missing、extra、duplicate、wrong-parent、wrong-identity 或 child payload validation failure 均整体拒绝；`GRAPH_REQUIRED` 不能被 codec 的局部成功升级为完整 owner graph 证明。
 
 Codec 不是授权器、Repository、Adapter、migration runner 或 recovery claimant。Owner-scoped lookup、跨记录 graph closure、transactionally consistent recovery decode / claim 与 readiness 继续服从 Memory 15.2，并在后续 Runtime / Infrastructure Task Packet 实现。普通 read / recovery 永不迁移；future logical version 必须先由 semantic owner 定义 source / target、不变量、安全、审计、失败原子性和 rollback。
+
+对本节新增的 Request Understanding v2 scoped contract，`01-07E` 独占 codec / registry encode-decode 消费，`01-07F` 独占 Core DTO / validator / reducer 消费；本文件不主张二者、Python DTO、Runtime、数据库、migration、Trace / Eval reader、Trajectory / E2E Result 或 P0 产品已经实现、验证或 ready。`01-07E` 与 `01-07F` 的 planning / dispatch 必须同时等待 `01-07D` 与 `01-07H` 各自取得独立 exact-head review、由 Integrator 串行集成，并记录一个同时包含两者 reviewed exact commits / owner blobs 的 common barrier。`01-07D` 或 `01-07H` 单独 merge、两个尚未串行集成的 branch heads、planning artifact 或 overlay 都不授权下游。
 
 Plan 01-04 的 exact owned files 只有：
 
