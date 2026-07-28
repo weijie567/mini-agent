@@ -459,7 +459,7 @@ git diff --check "${base_sha}...HEAD"
 test "$(git rev-list --count "${base_sha}..HEAD")" -ge 2
 test "$(git log --reverse --format=%s "${base_sha}..HEAD" | sed -n '1p')" = "test(01-07E): define request understanding v2 codec contract"
 test "$(git log --reverse --format=%s "${base_sha}..HEAD" | sed -n '2p')" = "feat(01-07E): add request understanding v2 codec expand"
-test "$(git log --reverse --format=%s "${base_sha}..HEAD" | sed -n '3,$p' | awk '!/^fix\\(01-07E\\): / {bad++} END {print bad+0}')" -eq 0
+test "$(git log --reverse --format=%s "${base_sha}..HEAD" | sed -n '3,$p' | awk '!/^fix\(01-07E\): / {bad++} END {print bad+0}')" -eq 0
 
 red_sha=$(git rev-list --reverse "${base_sha}..HEAD" | sed -n '1p')
 green_sha=$(git rev-list --reverse "${base_sha}..HEAD" | sed -n '2p')
