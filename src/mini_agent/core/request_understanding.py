@@ -206,3 +206,155 @@ class RequestUnderstandingOutput(ModelVisibleModel):
                 "new-goal thin-slice candidate must use a null base Task version"
             )
         return self
+
+
+from pydantic import StrictStr
+
+
+BoundedSourceQuoteV2 = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=128),
+]
+
+
+class ReferenceSourceKindV2(StrEnum):
+    CURRENT_MESSAGE = "CURRENT_MESSAGE"
+    RECENT_MESSAGE = "RECENT_MESSAGE"
+
+
+class UncertaintyReasonCodeV2(StrEnum):
+    MISSING_REFERENCE = "MISSING_REFERENCE"
+    MULTIPLE_PLAUSIBLE_REFERENCES = "MULTIPLE_PLAUSIBLE_REFERENCES"
+
+
+class ResolvedReferenceCandidateV2(ModelVisibleModel):
+    name: Literal["order_id"]
+    candidate_value: NonEmptyString
+    source_kind: ReferenceSourceKindV2
+    source_ref: UUID
+    source_quote: BoundedSourceQuoteV2
+    confidence: Confidence
+
+
+class UncertaintyV2(ModelVisibleModel):
+    name: Literal["order_id"]
+    candidate_values: tuple[NonEmptyString, ...]
+    reason_code: UncertaintyReasonCodeV2
+    source_message_refs: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=8),
+    ]
+
+    @field_validator("source_message_refs")
+    @classmethod
+    def source_message_refs_are_unique(
+        cls,
+        value: tuple[UUID, ...],
+    ) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("source_message_refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def candidate_cardinality_matches_reason(self) -> Self:
+        if self.reason_code is UncertaintyReasonCodeV2.MISSING_REFERENCE:
+            if self.candidate_values:
+                raise ValueError(
+                    "MISSING_REFERENCE cannot carry candidate values"
+                )
+        elif not 2 <= len(self.candidate_values) <= 8:
+            raise ValueError(
+                "MULTIPLE_PLAUSIBLE_REFERENCES requires 2..8 candidate values"
+            )
+        if len(self.candidate_values) != len(set(self.candidate_values)):
+            raise ValueError("uncertainty candidate values must be unique")
+        return self
+
+
+class QueryContextualizationCandidateV2(ModelVisibleModel):
+    text: NonEmptyString
+    resolved_reference_candidates: tuple[
+        ResolvedReferenceCandidateV2,
+        ...,
+    ]
+    uncertainties: tuple[UncertaintyV2, ...]
+    source_message_refs: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=8),
+    ]
+
+    @field_validator("source_message_refs")
+    @classmethod
+    def contextualization_source_refs_are_unique(
+        cls,
+        value: tuple[UUID, ...],
+    ) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("source_message_refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def child_references_are_in_context_scope(self) -> Self:
+        source_refs = set(self.source_message_refs)
+        if any(
+            candidate.source_ref not in source_refs
+            for candidate in self.resolved_reference_candidates
+        ):
+            raise ValueError(
+                "resolved reference source_ref must be in source_message_refs"
+            )
+        if any(
+            reference not in source_refs
+            for uncertainty in self.uncertainties
+            for reference in uncertainty.source_message_refs
+        ):
+            raise ValueError(
+                "uncertainty source refs must be in source_message_refs"
+            )
+        return self
+
+
+class RequestUnderstandingOutputV2(ModelVisibleModel):
+    schema_version: Literal["e2e01-thin-v2"]
+    message_ref: UUID
+    contextualization: QueryContextualizationCandidateV2
+    task_delta_candidates: tuple[TaskDeltaCandidate, ...]
+    next_move_candidate: NextMove
+
+    @model_validator(mode="after")
+    def v2_candidate_graph_is_locally_bound(self) -> Self:
+        candidate_ids = [
+            candidate.candidate_id for candidate in self.task_delta_candidates
+        ]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("TaskDeltaCandidate IDs must be unique")
+        if self.message_ref not in self.contextualization.source_message_refs:
+            raise ValueError(
+                "contextualization must include the current message"
+            )
+        for delta in self.task_delta_candidates:
+            for input_candidate in delta.input_candidates:
+                if len(input_candidate.source_quote) > 128:
+                    raise ValueError(
+                        "InputCandidate source_quote cannot exceed 128"
+                    )
+                if input_candidate.source_ref != self.message_ref:
+                    raise ValueError(
+                        "v2 InputCandidate must reference current message"
+                    )
+                if input_candidate.authority is not InputAuthority.USER_CLAIM:
+                    raise ValueError(
+                        "v2 InputCandidate must remain a USER_CLAIM"
+                    )
+                if (
+                    input_candidate.source_kind
+                    is not InputSourceKind.CURRENT_MESSAGE
+                ):
+                    raise ValueError(
+                        "v2 InputCandidate must use current message source"
+                    )
+        if self.next_move_candidate.base_task_state_version is not None:
+            raise ValueError(
+                "new-goal v2 candidate must use a null base Task version"
+            )
+        return self
