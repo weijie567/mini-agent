@@ -105,6 +105,7 @@ from mini_agent.core.tool_system import (
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolTimeoutPhase,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -4608,9 +4609,19 @@ def _request_understanding_exact_run_evidence(
     if not 0 <= accepted_count <= candidate_count <= 2:
         raise ValueError("test fixture supports 0..2 candidates")
     base = _minimal_exact_run_evidence()
+    stop_reason = (
+        StopReason.GOAL_COMPLETED
+        if accepted_count
+        else StopReason.INPUT_INVALID
+    )
+    user_outcome = (
+        AgentOutcome.COMPLETED
+        if accepted_count
+        else AgentOutcome.BLOCKED
+    )
     completed_run = _project_run(
         base.run_record,
-        stop_reason=StopReason.GOAL_COMPLETED,
+        stop_reason=stop_reason,
     )
     message = MessageRecord(
         schema_version="message_record.p0.v1",
@@ -4779,7 +4790,7 @@ def _request_understanding_exact_run_evidence(
             event_type=TraceEventType.RUN_STOPPED,
             run_id=completed_run.run_id,
             occurred_at=completed_run.completed_at,
-            user_outcome=AgentOutcome.COMPLETED,
+            user_outcome=user_outcome,
             stop_reason=completed_run.stop_reason,
         )
     )
@@ -5097,8 +5108,23 @@ def test_exact_run_evidence_accepts_two_task_transitions_and_rejects_gaps() -> N
         result_state_version=3,
         changed_at=UTC_NOW + timedelta(milliseconds=2),
     )
+    blocked_run = _project_run(
+        closure.run_record,
+        stop_reason=StopReason.GATE_REJECTED,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    blocked_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.GATE_REJECTED,
+        user_outcome=AgentOutcome.BLOCKED,
+    )
     stale = _rebuild_exact_run_evidence(
         closure,
+        run_record=blocked_run,
         task_records=(
             _rebuild(
                 task,
@@ -5121,6 +5147,10 @@ def test_exact_run_evidence_accepts_two_task_transitions_and_rejects_gaps() -> N
                 closure.run_task_links[0],
                 result_task_state_version=3,
             ),
+        ),
+        trace_events=tuple(
+            blocked_stopped if event is stopped else event
+            for event in closure.trace_events
         ),
     )
     assert len(stale.task_state_transitions) == 2
@@ -5866,4 +5896,558 @@ def test_exact_run_evidence_rejects_tool_lifecycle_that_conflicts_with_projectio
                 failed if event is succeeded else event
                 for event in closure.trace_events
             ),
+        )
+
+
+def _completed_row_exact_run_evidence(
+    *,
+    stop_reason: StopReason,
+    user_outcome: AgentOutcome,
+    task_statuses: tuple[TaskStatus, ...],
+) -> ExactRunEvidenceClosure:
+    if len(task_statuses) > 2:
+        raise ValueError("test fixture supports at most two Tasks")
+    closure = (
+        _request_understanding_exact_run_evidence(
+            candidate_count=len(task_statuses),
+            accepted_count=len(task_statuses),
+        )
+        if task_statuses
+        else _minimal_exact_run_evidence()
+    )
+    completed_run = _project_run(
+        closure.run_record,
+        status=AgentRunStatus.COMPLETED,
+        stop_reason=stop_reason,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    completed_stopped = _rebuild(
+        stopped,
+        occurred_at=completed_run.completed_at,
+        user_outcome=user_outcome,
+        stop_reason=stop_reason,
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        run_record=completed_run,
+        task_records=tuple(
+            _rebuild(task, status=status)
+            for task, status in zip(closure.task_records, task_statuses)
+        ),
+        task_state_transitions=tuple(
+            _rebuild(transition, to_status=status)
+            for transition, status in zip(
+                closure.task_state_transitions,
+                task_statuses,
+            )
+        ),
+        request_unit_records=tuple(
+            _rebuild(unit, status=status)
+            for unit, status in zip(
+                closure.request_unit_records,
+                task_statuses,
+            )
+        ),
+        trace_events=tuple(
+            completed_stopped if event is stopped else event
+            for event in closure.trace_events
+        ),
+    )
+
+
+_EXACT_EVIDENCE_COMPLETED_OWNER_ROWS = tuple(
+    sorted(
+        application_records_module._COMPLETED_FINALIZATION_ROWS,
+        key=lambda row: (
+            row[0].value,
+            row[1],
+            row[2].value,
+            row[3].value if row[3] is not None else "",
+        ),
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    _EXACT_EVIDENCE_COMPLETED_OWNER_ROWS,
+    ids=lambda row: "-".join(
+        (
+            row[0].value,
+            "task" if row[1] else "no-task",
+            row[2].value,
+            row[3].value if row[3] is not None else "none",
+        )
+    ),
+)
+def test_exact_run_evidence_accepts_all_completed_owner_rows(
+    row: tuple[
+        StopReason,
+        bool,
+        AgentOutcome,
+        TaskStatus | None,
+    ],
+) -> None:
+    stop_reason, has_task, user_outcome, task_status = row
+    assert len(_EXACT_EVIDENCE_COMPLETED_OWNER_ROWS) == 9
+    closure = _completed_row_exact_run_evidence(
+        stop_reason=stop_reason,
+        user_outcome=user_outcome,
+        task_statuses=(
+            (task_status,)
+            if has_task and task_status is not None
+            else ()
+        ),
+    )
+    assert closure.run_record.stop_reason is stop_reason
+
+
+def test_exact_run_evidence_accepts_same_status_multi_task_completed_row() -> None:
+    closure = _completed_row_exact_run_evidence(
+        stop_reason=StopReason.GOAL_COMPLETED,
+        user_outcome=AgentOutcome.COMPLETED,
+        task_statuses=(TaskStatus.COMPLETED, TaskStatus.COMPLETED),
+    )
+    assert tuple(task.status for task in closure.task_records) == (
+        TaskStatus.COMPLETED,
+        TaskStatus.COMPLETED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "user_outcome", "task_statuses"),
+    (
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (),
+            id="goal-without-task",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.BLOCKED,
+            (TaskStatus.BLOCKED,),
+            id="input-invalid-with-task",
+        ),
+        pytest.param(
+            StopReason.PROCESS_RESTART_DETECTED,
+            AgentOutcome.BLOCKED,
+            (),
+            id="process-restart-completed",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.ASK_USER,
+            (),
+            id="ask-user-outcome",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.NEED_HUMAN,
+            (),
+            id="need-human-outcome",
+        ),
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (TaskStatus.COMPLETED, TaskStatus.BLOCKED),
+            id="heterogeneous-tasks",
+        ),
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (TaskStatus.WAITING_USER,),
+            id="unknown-uniform-task-status",
+        ),
+    ),
+)
+def test_exact_run_evidence_rejects_unknown_completed_rows(
+    stop_reason: StopReason,
+    user_outcome: AgentOutcome,
+    task_statuses: tuple[TaskStatus, ...],
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="closed completed Run matrix",
+    ):
+        _completed_row_exact_run_evidence(
+            stop_reason=stop_reason,
+            user_outcome=user_outcome,
+            task_statuses=task_statuses,
+        )
+
+
+def test_exact_run_evidence_rejects_non_blocked_incomplete_outcome() -> None:
+    terminal = _minimal_exact_run_evidence()
+    incomplete = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.INCOMPLETE,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    stopped = next(
+        event
+        for event in terminal.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    invalid_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        user_outcome=AgentOutcome.ASK_USER,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="INCOMPLETE RunStopped",
+    ):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=incomplete,
+            trace_events=tuple(
+                invalid_stopped if event is stopped else event
+                for event in terminal.trace_events
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    ("message_ref", "context_manifest_id"),
+)
+def test_exact_run_evidence_rejects_run_stopped_payload_pollution(
+    extra_field: str,
+) -> None:
+    closure = _minimal_exact_run_evidence()
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    extra_value = (
+        closure.message_records[0].message_id
+        if extra_field == "message_ref"
+        else closure.context_manifests[0].context_manifest_id
+    )
+    polluted = _rebuild(stopped, **{extra_field: extra_value})
+    with pytest.raises(
+        ValidationError,
+        match="RunStopped Trace only allows its exact per-kind projection",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is stopped else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def _terminal_tool_exact_run_evidence(
+    *,
+    status: ToolCallStatus,
+    outcome: ToolResultOutcome,
+    interrupted_attempt: str = "finalized",
+) -> ExactRunEvidenceClosure:
+    closure = _tool_exact_run_evidence()
+    if status is ToolCallStatus.SUCCEEDED:
+        return closure
+
+    call = closure.tool_calls[0]
+    attempt = closure.tool_attempts[0]
+    if status is ToolCallStatus.FAILED:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            failure_code="ORDER_LOOKUP_FAILED",
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                outcome=outcome,
+                failure_code="ORDER_LOOKUP_FAILED",
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_FAILED
+    elif status is ToolCallStatus.TIMED_OUT:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            failure_code="TOOL_TIMEOUT",
+            timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                outcome=outcome,
+                failure_code="TOOL_TIMEOUT",
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_TIMED_OUT
+    elif status is ToolCallStatus.INTERRUPTED:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            attempt_count=(0 if interrupted_attempt == "absent" else 1),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+            result_ref=None,
+        )
+        if interrupted_attempt == "absent":
+            attempts = ()
+        elif interrupted_attempt == "unfinished":
+            attempts = (
+                _rebuild(
+                    attempt,
+                    finished_at=None,
+                    outcome=None,
+                ),
+            )
+        else:
+            attempts = (_rebuild(attempt, outcome=outcome),)
+        lifecycle_event_type = TraceEventType.TOOL_CALL_INTERRUPTED
+    else:
+        raise ValueError("test fixture requires a terminal ToolCall status")
+
+    lifecycle_event = _exact_evidence_trace(
+        event_type=lifecycle_event_type,
+        run_id=terminal_call.run_id,
+        occurred_at=terminal_call.finished_at,
+        task_id=terminal_call.task_id,
+        request_unit_id=terminal_call.request_unit_id,
+        context_manifest_id=terminal_call.context_manifest_id,
+        argument_binding_refs=terminal_call.argument_binding_refs,
+        tool_call_id=terminal_call.tool_call_id,
+        tool_call_terminal_status=status,
+    )
+    run_stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    retained_traces = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type not in _TOOL_LIFECYCLE_EVENT_TYPES
+        and event.event_type is not TraceEventType.OBSERVATION_RECORDED
+        and event is not run_stopped
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        request_unit_records=(
+            _rebuild(closure.request_unit_records[0], observation_refs=()),
+        ),
+        tool_calls=(terminal_call,),
+        tool_attempts=attempts,
+        observation_records=(),
+        trace_events=(
+            *retained_traces,
+            lifecycle_event,
+            run_stopped,
+        ),
+    )
+
+
+def _normalized_tool_result_trace(
+    closure: ExactRunEvidenceClosure,
+    *,
+    outcome: ToolResultOutcome,
+) -> TraceEvent:
+    call = closure.tool_calls[0]
+    return _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_RESULT_NORMALIZED,
+        run_id=call.run_id,
+        occurred_at=call.finished_at or call.started_at,
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        safe_tool_outcome=outcome,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "interrupted_attempt"),
+    (
+        (
+            ToolCallStatus.SUCCEEDED,
+            ToolResultOutcome.SUCCESS,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.FAILED,
+            ToolResultOutcome.BUSINESS_FAILURE,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.FAILED,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.TIMED_OUT,
+            ToolResultOutcome.TIMEOUT,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "absent",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "unfinished",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "finalized",
+        ),
+    ),
+)
+def test_exact_run_evidence_accepts_normalized_terminal_tool_outcomes(
+    status: ToolCallStatus,
+    outcome: ToolResultOutcome,
+    interrupted_attempt: str,
+) -> None:
+    closure = _terminal_tool_exact_run_evidence(
+        status=status,
+        outcome=outcome,
+        interrupted_attempt=interrupted_attempt,
+    )
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=outcome,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, normalized),
+    )
+    assert normalized.safe_tool_outcome is outcome
+    assert rebuilt.tool_calls[0].status is status
+
+
+def test_exact_run_evidence_rejects_safe_outcome_on_non_normalized_event() -> None:
+    closure = _tool_exact_run_evidence()
+    succeeded = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.TOOL_CALL_SUCCEEDED
+    )
+    polluted = _rebuild(
+        succeeded,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="safe_tool_outcome requires ToolResultNormalized",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is succeeded else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-safe-outcome",
+        "missing-tool-call",
+        "wrong-timestamp",
+        "wrong-status-outcome",
+    ),
+)
+def test_exact_run_evidence_rejects_malformed_normalized_tool_result(
+    mutation: str,
+) -> None:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    if mutation == "missing-safe-outcome":
+        invalid = _rebuild(normalized, safe_tool_outcome=None)
+    elif mutation == "missing-tool-call":
+        invalid = _rebuild(normalized, tool_call_id=None)
+    elif mutation == "wrong-timestamp":
+        invalid = _rebuild(
+            normalized,
+            occurred_at=call.finished_at + timedelta(microseconds=1),
+        )
+    else:
+        invalid = _rebuild(
+            normalized,
+            safe_tool_outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        )
+    with pytest.raises(ValidationError, match="ToolResultNormalized"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, invalid),
+        )
+
+
+def test_exact_run_evidence_rejects_duplicate_normalized_tool_result() -> None:
+    closure = _tool_exact_run_evidence()
+    first = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    second = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized must be unique per ToolCall",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, first, second),
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),
+)
+def test_exact_run_evidence_rejects_normalized_active_tool_call(
+    status: ToolCallStatus,
+) -> None:
+    closure = _active_tool_exact_run_evidence(status)
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized requires a terminal ToolCall",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, normalized),
+        )
+
+
+def test_exact_run_evidence_rejects_normalized_final_attempt_mismatch() -> None:
+    closure = _terminal_tool_exact_run_evidence(
+        status=ToolCallStatus.FAILED,
+        outcome=ToolResultOutcome.BUSINESS_FAILURE,
+    )
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized must match the final ToolAttempt",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, normalized),
         )

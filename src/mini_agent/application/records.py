@@ -3406,10 +3406,29 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             UUID,
             list[tuple[ToolCallStatus, TraceEvent]],
         ] = {call_id: [] for call_id in call_by_id}
+        normalized_tool_result_events_by_call: dict[UUID, TraceEvent] = {}
         for event in self.trace_events:
             if event.run_id != run.run_id or event.case_id is not None:
                 raise ValueError(
                     "TraceEvent must bind the root Run without Eval case identity"
+                )
+            if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+                if (
+                    event.safe_tool_outcome is None
+                    or event.tool_call_id is None
+                ):
+                    raise ValueError(
+                        "ToolResultNormalized requires safe_tool_outcome "
+                        "and tool_call_id"
+                    )
+                if event.tool_call_id in normalized_tool_result_events_by_call:
+                    raise ValueError(
+                        "ToolResultNormalized must be unique per ToolCall"
+                    )
+                normalized_tool_result_events_by_call[event.tool_call_id] = event
+            elif event.safe_tool_outcome is not None:
+                raise ValueError(
+                    "safe_tool_outcome requires ToolResultNormalized"
                 )
             if event.event_type is TraceEventType.RUN_STOPPED:
                 run_stopped_events.append(event)
@@ -3578,6 +3597,45 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     + 1
                 )
 
+        for call_id, normalized in normalized_tool_result_events_by_call.items():
+            call = call_by_id[call_id]
+            allowed_outcomes = _TERMINAL_TOOL_OUTCOMES.get(call.status)
+            if allowed_outcomes is None:
+                raise ValueError(
+                    "ToolResultNormalized requires a terminal ToolCall"
+                )
+            if (
+                normalized.occurred_at != call.finished_at
+                or normalized.safe_tool_outcome not in allowed_outcomes
+            ):
+                raise ValueError(
+                    "ToolResultNormalized must match terminal ToolCall "
+                    "status and timestamp"
+                )
+            attempts = attempts_by_call[call_id]
+            if call.status is ToolCallStatus.INTERRUPTED:
+                if call.attempt_count == 0:
+                    if attempts:
+                        raise ValueError(
+                            "ToolResultNormalized must match the final ToolAttempt"
+                        )
+                elif (
+                    not attempts
+                    or attempts[-1].outcome
+                    not in {None, ToolResultOutcome.INTERRUPTED}
+                ):
+                    raise ValueError(
+                        "ToolResultNormalized must match the final ToolAttempt"
+                    )
+            elif (
+                not attempts
+                or attempts[-1].outcome
+                is not normalized.safe_tool_outcome
+            ):
+                raise ValueError(
+                    "ToolResultNormalized must match the final ToolAttempt"
+                )
+
         active_run_statuses = {
             AgentRunStatus.CREATED,
             AgentRunStatus.RUNNING,
@@ -3596,12 +3654,53 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     "terminal RunStopped Trace must exist exactly once"
                 )
             run_stopped = run_stopped_events[0]
+            allowed_run_stopped_fields = _TERMINAL_TRACE_ALLOWED_FIELDS[
+                TraceEventType.RUN_STOPPED
+            ]
+            if any(
+                getattr(run_stopped, field_name) != field_info.default
+                for field_name, field_info in TraceEvent.model_fields.items()
+                if field_name not in allowed_run_stopped_fields
+            ):
+                raise ValueError(
+                    "RunStopped Trace only allows its exact per-kind projection"
+                )
             if (
                 run_stopped.stop_reason is not run.stop_reason
                 or run_stopped.occurred_at != run.completed_at
             ):
                 raise ValueError(
                     "terminal RunStopped Trace must match the Run projection"
+                )
+            if run.status is AgentRunStatus.COMPLETED:
+                task_statuses = {task.status for task in self.task_records}
+                task_status = (
+                    next(iter(task_statuses))
+                    if len(task_statuses) == 1
+                    else None
+                )
+                completed_row = (
+                    run.stop_reason,
+                    bool(self.task_records),
+                    run_stopped.user_outcome,
+                    task_status,
+                )
+                if (
+                    len(task_statuses) > 1
+                    or completed_row not in _COMPLETED_FINALIZATION_ROWS
+                ):
+                    raise ValueError(
+                        "RunStopped projection is outside the closed "
+                        "completed Run matrix"
+                    )
+            elif (
+                run.stop_reason
+                is not StopReason.PROCESS_RESTART_DETECTED
+                or run_stopped.user_outcome is not AgentOutcome.BLOCKED
+            ):
+                raise ValueError(
+                    "INCOMPLETE RunStopped requires "
+                    "PROCESS_RESTART_DETECTED and BLOCKED"
                 )
 
         terminal_tool_statuses = {
