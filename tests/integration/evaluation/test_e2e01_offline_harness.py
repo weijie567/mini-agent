@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
@@ -33,6 +34,7 @@ from mini_agent.application.records import (
     EvalGraderStatus,
     EvalResultRecord,
     EvalResultStatus,
+    ExactRunEvidenceClosure,
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
@@ -60,17 +62,28 @@ from mini_agent.core.order import (
 from mini_agent.core.presentation import PresentationInput, PresentationPurpose
 from mini_agent.core.request_understanding import (
     InputAuthority,
+    InputSourceKind,
+    ReferenceSourceKindV2,
     RequestUnderstandingInput,
+    TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     CandidateValidationRecord,
+    CandidateValidationRecordV2,
+    DurableInputCandidateV2,
+    DurableQueryContextualizationCandidateV2,
+    DurableResolvedReferenceCandidateV2,
+    DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
+    TaskStateTransition,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
@@ -109,6 +122,7 @@ from mini_agent.evaluation.graders import (
     grade_evidence,
     ordinary_trace_shape,
 )
+import mini_agent.evaluation.harness as harness_module
 from mini_agent.evaluation.harness import (
     EvalCaseExecutionInput,
     EvalCaseSutResult,
@@ -1503,6 +1517,471 @@ class SyntheticSut:
         )
 
 
+def _rebuild_exact_closure(
+    closure: ExactRunEvidenceClosure,
+    **updates: object,
+) -> ExactRunEvidenceClosure:
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in ExactRunEvidenceClosure.model_fields
+    }
+    values.update(updates)
+    return ExactRunEvidenceClosure(**values)
+
+
+def _exact_closure_from_synthetic_result(
+    result: EvalCaseSutResult,
+) -> ExactRunEvidenceClosure:
+    evidence = result.evidence
+    assert evidence.run_record is not None
+    assert evidence.request_understanding_output is not None
+    assert len(evidence.conversation_records) == 1
+    assert len(evidence.message_records) == 1
+    assert len(evidence.request_understanding_records) == 1
+    assert len(evidence.accepted_task_deltas) == 1
+    assert len(evidence.input_bindings) == 1
+    assert len(evidence.task_records) == 1
+    assert len(evidence.request_units) == 1
+    conversation = evidence.conversation_records[0]
+    message = evidence.message_records[0]
+    legacy_output = evidence.request_understanding_output
+    legacy_understanding = evidence.request_understanding_records[0]
+    legacy_child = evidence.accepted_task_deltas[0]
+    binding = evidence.input_bindings[0]
+    task = evidence.task_records[0]
+    unit = evidence.request_units[0]
+    proposed = legacy_output.task_delta_candidates[0]
+    candidate_input = proposed.input_candidates[0]
+    source_start = message.content.index(candidate_input.candidate_value)
+    source_end = source_start + len(candidate_input.candidate_value)
+    source_hash = hashlib.sha256(
+        message.content[source_start:source_end].encode("utf-8")
+    ).hexdigest()
+    durable_input = DurableInputCandidateV2(
+        name="order_id",
+        candidate_value=candidate_input.candidate_value,
+        semantic_role="TARGET_RESOURCE_IDENTIFIER",
+        authority=InputAuthority.USER_CLAIM,
+        source_kind=InputSourceKind.CURRENT_MESSAGE,
+        source_ref=message.message_id,
+        source_span_start=source_start,
+        source_span_end_exclusive=source_end,
+        source_quote_sha256=source_hash,
+        confidence=candidate_input.confidence,
+    )
+    durable_candidate = DurableTaskDeltaCandidateV2(
+        candidate_id=proposed.candidate_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch=proposed.goal_patch,
+        input_candidates=(durable_input,),
+        confidence=proposed.confidence,
+    )
+    understanding = RequestUnderstandingRecordV2(
+        request_understanding_record_id=_case_uuid(
+            str(result.execution_ref),
+            "request-understanding-v2",
+        ),
+        run_id=evidence.run_record.run_id,
+        message_ref=message.message_id,
+        schema_version="request_understanding_record.p0.v2",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-thin-v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text=message.content,
+            resolved_reference_candidates=(
+                DurableResolvedReferenceCandidateV2(
+                    name="order_id",
+                    candidate_value=candidate_input.candidate_value,
+                    source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                    source_ref=message.message_id,
+                    source_span_start=source_start,
+                    source_span_end_exclusive=source_end,
+                    source_quote_sha256=source_hash,
+                    confidence=candidate_input.confidence,
+                ),
+            ),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=(durable_candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=proposed.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(legacy_child.accepted_delta_id,),
+        proposed_base_task_state_version=(
+            legacy_understanding.proposed_base_task_state_version
+        ),
+        validated_task_state_version=(
+            legacy_understanding.validated_task_state_version
+        ),
+        next_move_candidate_ref=legacy_understanding.next_move_candidate_ref,
+        created_at=legacy_child.accepted_at,
+    )
+    child = AcceptedTaskDeltaV2(
+        accepted_delta_id=legacy_child.accepted_delta_id,
+        candidate_ref=legacy_child.candidate_ref,
+        message_ref=legacy_child.message_ref,
+        operation=legacy_child.operation,
+        goal_text=legacy_child.goal_text,
+        input_binding_refs=legacy_child.input_binding_refs,
+        accepted_at=legacy_child.accepted_at,
+        task_id=task.task_id,
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    transition_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.TASK_STATE_CHANGED
+    )
+    if task.state_version == 2:
+        transitions = (
+            TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.ACTIVE,
+                to_status=task.status,
+                base_state_version=1,
+                result_state_version=2,
+                reason_ref=transition_events[-1].trace_event_id,
+                changed_at=task.updated_at,
+            ),
+        )
+    else:
+        assert task.state_version == 3
+        transitions = (
+            TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.ACTIVE,
+                to_status=TaskStatus.WAITING_USER,
+                base_state_version=1,
+                result_state_version=2,
+                reason_ref=transition_events[-2].trace_event_id,
+                changed_at=task.created_at + timedelta(milliseconds=500),
+            ),
+            TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.WAITING_USER,
+                to_status=task.status,
+                base_state_version=2,
+                result_state_version=3,
+                reason_ref=transition_events[-1].trace_event_id,
+                changed_at=task.updated_at,
+            ),
+        )
+
+    trace_events = list(evidence.trace_events)
+    run_stopped_index = next(
+        index
+        for index, event in enumerate(trace_events)
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    trace_events[run_stopped_index] = trace_events[run_stopped_index].model_copy(
+        update={"occurred_at": evidence.run_record.completed_at}
+    )
+
+    tool_calls = evidence.tool_calls
+    tool_attempts = evidence.tool_attempts
+    observations = evidence.observations
+    if tool_calls:
+        assert len(tool_calls) == len(tool_attempts) == 1
+        call = tool_calls[0]
+        created_event = next(
+            event
+            for event in trace_events
+            if event.event_type is TraceEventType.TOOL_CALL_CREATED
+        )
+        terminal_type = {
+            ToolCallStatus.SUCCEEDED: TraceEventType.TOOL_CALL_SUCCEEDED,
+            ToolCallStatus.FAILED: TraceEventType.TOOL_CALL_FAILED,
+        }[call.status]
+        terminal_event = next(
+            event for event in trace_events if event.event_type is terminal_type
+        )
+        call = call.model_copy(
+            update={
+                "started_at": created_event.occurred_at,
+                "finished_at": terminal_event.occurred_at,
+            }
+        )
+        attempt = tool_attempts[0].model_copy(
+            update={
+                "started_at": call.started_at,
+                "finished_at": call.finished_at,
+            }
+        )
+        normalized_index = next(
+            index
+            for index, event in enumerate(trace_events)
+            if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED
+        )
+        trace_events[normalized_index] = trace_events[
+            normalized_index
+        ].model_copy(update={"occurred_at": call.finished_at})
+        tool_calls = (call,)
+        tool_attempts = (attempt,)
+
+    if observations:
+        observation_index = next(
+            index
+            for index, event in enumerate(trace_events)
+            if event.event_type is TraceEventType.OBSERVATION_RECORDED
+        )
+        observation = observations[0].model_copy(
+            update={
+                "observed_at": trace_events[observation_index].occurred_at,
+                "recorded_at": trace_events[observation_index].occurred_at,
+            }
+        )
+        observations = (observation,)
+
+    return ExactRunEvidenceClosure(
+        conversation_record=conversation,
+        run_record=evidence.run_record,
+        message_records=evidence.message_records,
+        request_understanding_record=understanding,
+        accepted_task_deltas=(child,),
+        input_binding_records=evidence.input_bindings,
+        task_records=evidence.task_records,
+        task_state_transitions=transitions,
+        request_unit_records=evidence.request_units,
+        conversation_task_links=evidence.conversation_task_links,
+        run_task_links=evidence.run_task_links,
+        gate_decisions=evidence.gate_decisions,
+        tool_calls=tool_calls,
+        tool_attempts=tool_attempts,
+        observation_records=observations,
+        context_manifests=evidence.context_manifests,
+        model_visible_toolset_artifacts=(
+            evidence.model_visible_toolset_artifacts
+        ),
+        trace_events=tuple(trace_events),
+    )
+
+
+def _exact_closure_for_script(
+    script_ref: str,
+    *,
+    execution_ref: UUID,
+) -> tuple[ExactRunEvidenceClosure, AgentRunResult]:
+    order_number = {
+        "script:e2e01-01:success": "O-1001",
+        "script:e2e01-04-b:nonexistent-order": "O-9999",
+        "script:fault-provider:unknown-tool-name": "O-1001",
+        "script:fault-runtime:state-advanced-before-gate": "O-1001",
+        "script:fault-presentation:invalid-schema": "O-1001",
+    }[script_ref]
+
+    async def execute() -> EvalCaseSutResult:
+        traces = InMemoryTraceCallbacks()
+        provider = ScriptedModelProvider(
+            ARTIFACTS.script_by_ref(script_ref),
+            script_execution_ref=_case_uuid(str(execution_ref), "script"),
+        )
+        result = await SyntheticSut(traces).execute_case(
+            execution_input=EvalCaseExecutionInput(
+                execution_ref=execution_ref,
+                messages=(
+                    {
+                        "role": "user",
+                        "content": f"订单 {order_number} 状态怎么样？",
+                    },
+                ),
+                trusted_context_fixture_ref="session:alice",
+            ),
+            scripted_provider=provider,
+            runtime_fault=provider.take_runtime_fault_directive(),
+        )
+        assert type(result) is EvalCaseSutResult
+        return result
+
+    result = asyncio.run(execute())
+    assert result.evidence.agent_result is not None
+    return (
+        _exact_closure_from_synthetic_result(result),
+        result.evidence.agent_result,
+    )
+
+
+def _minimal_input_invalid_closure() -> tuple[
+    ExactRunEvidenceClosure,
+    AgentRunResult,
+]:
+    execution_ref = EXECUTION_REF_4
+    run_id = _case_uuid(str(execution_ref), "run")
+    conversation_id = _case_uuid(str(execution_ref), "conversation")
+    message_id = _case_uuid(str(execution_ref), "message")
+    model_call_id = _case_uuid(str(execution_ref), "model-call")
+    context_id = _case_uuid(str(execution_ref), "context")
+    completed_at = NOW + timedelta(seconds=1)
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (get_order_tool_spec(),)
+        ),
+        provider_visible_tool_specs=(get_order_tool_spec(),),
+    )
+    manifest = ContextManifest(
+        context_manifest_id=context_id,
+        run_id=run_id,
+        model_call_id=model_call_id,
+        tool_registry_version="e2e01-thin-tools-v1",
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(message_id,),
+        redaction_policy_version="p0-redaction-v1",
+        token_counts=TokenCounts(),
+        assembled_at=NOW,
+    )
+    traces = (
+        TraceEvent(
+            trace_event_id=_case_uuid(str(execution_ref), "trace-message"),
+            event_type=TraceEventType.MESSAGE_ACCEPTED,
+            occurred_at=NOW,
+            run_id=run_id,
+            message_ref=message_id,
+        ),
+        TraceEvent(
+            trace_event_id=_case_uuid(str(execution_ref), "trace-context"),
+            event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
+            occurred_at=NOW + timedelta(milliseconds=1),
+            run_id=run_id,
+            model_call_id=model_call_id,
+            model_call_purpose="REQUEST_UNDERSTANDING",
+            context_manifest_id=context_id,
+            tool_registry_version=manifest.tool_registry_version,
+            model_visible_toolset_hash=manifest.model_visible_toolset_hash,
+        ),
+        TraceEvent(
+            trace_event_id=_case_uuid(str(execution_ref), "trace-stopped"),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=run_id,
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReason.INPUT_INVALID,
+        ),
+    )
+    closure = ExactRunEvidenceClosure(
+        conversation_record=ConversationRecord(
+            schema_version="conversation_record.p0.v1",
+            conversation_id=conversation_id,
+            owner_customer_id="customer-A",
+            created_at=NOW,
+        ),
+        run_record=AgentRunRecord(
+            run_id=run_id,
+            conversation_id=conversation_id,
+            status=AgentRunStatus.COMPLETED,
+            provider_lane="offline_gate",
+            started_at=NOW,
+            completed_at=completed_at,
+            stop_reason=StopReason.INPUT_INVALID,
+        ),
+        message_records=(
+            MessageRecord(
+                schema_version="message_record.p0.v1",
+                message_id=message_id,
+                conversation_id=conversation_id,
+                direction=MessageDirection.USER,
+                content="订单 O-1001 状态怎么样？",
+                received_at=NOW,
+            ),
+        ),
+        request_understanding_record=None,
+        accepted_task_deltas=(),
+        input_binding_records=(),
+        task_records=(),
+        task_state_transitions=(),
+        request_unit_records=(),
+        conversation_task_links=(),
+        run_task_links=(),
+        gate_decisions=(),
+        tool_calls=(),
+        tool_attempts=(),
+        observation_records=(),
+        context_manifests=(manifest,),
+        model_visible_toolset_artifacts=(artifact,),
+        trace_events=traces,
+    )
+    return (
+        closure,
+        AgentRunResult(
+            run_id=run_id,
+            outcome=AgentOutcome.BLOCKED,
+            message="当前无法安全处理该请求，请稍后重试。",
+        ),
+    )
+
+
+def _order_service_unavailable_closure() -> tuple[
+    ExactRunEvidenceClosure,
+    AgentRunResult,
+]:
+    closure, _result = _exact_closure_for_script(
+        "script:e2e01-04-b:nonexistent-order",
+        execution_ref=EXECUTION_REF_3,
+    )
+    task = closure.task_records[0].model_copy(
+        update={"status": TaskStatus.BLOCKED}
+    )
+    unit = closure.request_unit_records[0].model_copy(
+        update={"status": TaskStatus.BLOCKED}
+    )
+    transition = closure.task_state_transitions[0].model_copy(
+        update={"to_status": TaskStatus.BLOCKED}
+    )
+    call = closure.tool_calls[0].model_copy(
+        update={"failure_code": "ORDER_SERVICE_UNAVAILABLE"}
+    )
+    attempt = closure.tool_attempts[0].model_copy(
+        update={
+            "outcome": ToolResultOutcome.SYSTEM_FAILURE,
+            "failure_code": "ORDER_SERVICE_UNAVAILABLE",
+        }
+    )
+    run = closure.run_record.model_copy(
+        update={"stop_reason": StopReason.ORDER_SERVICE_UNAVAILABLE}
+    )
+    traces = tuple(
+        event.model_copy(
+            update={
+                "safe_tool_outcome": ToolResultOutcome.SYSTEM_FAILURE,
+            }
+        )
+        if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED
+        else event.model_copy(
+            update={
+                "user_outcome": AgentOutcome.BLOCKED,
+                "stop_reason": StopReason.ORDER_SERVICE_UNAVAILABLE,
+            }
+        )
+        if event.event_type is TraceEventType.RUN_STOPPED
+        else event
+        for event in closure.trace_events
+    )
+    unavailable = _rebuild_exact_closure(
+        closure,
+        run_record=run,
+        task_records=(task,),
+        task_state_transitions=(transition,),
+        request_unit_records=(unit,),
+        tool_calls=(call,),
+        tool_attempts=(attempt,),
+        trace_events=traces,
+    )
+    return (
+        unavailable,
+        AgentRunResult(
+            run_id=run.run_id,
+            outcome=AgentOutcome.BLOCKED,
+            message="订单服务暂时不可用，请稍后重试。",
+        ),
+    )
+
+
 class BoundaryProbeSut:
     def __init__(self) -> None:
         self.received_calls: list[dict[str, object]] = []
@@ -2554,6 +3033,230 @@ def test_execution_ref_result_correlation_has_zero_argument_nonce_seam() -> None
     observable_type = EvalCaseSutResult.model_fields["safe_observable"].annotation
     assert "case_id" not in evidence_type.model_fields
     assert "case_id" not in observable_type.model_fields
+
+
+def _map_exact_result(
+    *,
+    execution_ref: UUID,
+    closure: ExactRunEvidenceClosure,
+    agent_result: AgentRunResult,
+    http_status: int = 200,
+) -> EvalCaseSutResult:
+    mapper = getattr(
+        harness_module,
+        "map_exact_run_http_result_to_sut_result",
+    )
+    return mapper(
+        execution_ref=execution_ref,
+        http_status=http_status,
+        agent_result=agent_result,
+        closure=closure,
+    )
+
+
+def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
+    parameters = signature(
+        getattr(
+            harness_module,
+            "map_exact_run_http_result_to_sut_result",
+        )
+    ).parameters
+    assert tuple(parameters) == (
+        "execution_ref",
+        "http_status",
+        "agent_result",
+        "closure",
+    )
+    assert all(item.kind.name == "KEYWORD_ONLY" for item in parameters.values())
+    assert {
+        "case_id",
+        "expectations",
+        "script",
+        "provider",
+        "customer_id",
+        "persistence_envelope",
+        "grader_results",
+    }.isdisjoint(parameters)
+
+
+@pytest.mark.parametrize(
+    ("script_ref", "execution_ref", "expected_policy"),
+    [
+        (
+            "script:e2e01-01:success",
+            EXECUTION_REF_1,
+            "DETERMINISTIC_ORDER_SUMMARY_V1",
+        ),
+        (
+            "script:e2e01-04-b:nonexistent-order",
+            EXECUTION_REF_2,
+            "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        ),
+        (
+            "script:fault-provider:unknown-tool-name",
+            EXECUTION_REF_3,
+            "FIXED_SAFE_PROCESSING_ERROR",
+        ),
+        (
+            "script:fault-runtime:state-advanced-before-gate",
+            EXECUTION_REF_4,
+            "FIXED_SAFE_PROCESSING_ERROR",
+        ),
+        (
+            "script:fault-presentation:invalid-schema",
+            EXECUTION_REF_1,
+            "FIXED_SAFE_PROCESSING_ERROR",
+        ),
+    ],
+)
+def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
+    script_ref: str,
+    execution_ref: UUID,
+    expected_policy: str,
+) -> None:
+    closure, agent_result = _exact_closure_for_script(
+        script_ref,
+        execution_ref=execution_ref,
+    )
+    result = _map_exact_result(
+        execution_ref=execution_ref,
+        closure=closure,
+        agent_result=agent_result,
+    )
+
+    assert result.execution_ref == execution_ref
+    assert result.evidence.trace_ref == closure.run_record.run_id
+    assert result.evidence.run_record == closure.run_record
+    assert result.evidence.agent_result == agent_result
+    assert result.evidence.conversation_records == (
+        closure.conversation_record,
+    )
+    assert result.evidence.message_records == closure.message_records
+    assert result.evidence.request_understanding_output is None
+    assert result.evidence.request_understanding_records == ()
+    assert result.evidence.accepted_task_deltas == ()
+    assert result.evidence.request_understanding_records_v2 == (
+        closure.request_understanding_record,
+    )
+    assert (
+        result.evidence.accepted_task_deltas_v2
+        == closure.accepted_task_deltas
+    )
+    assert (
+        result.evidence.task_state_transitions
+        == closure.task_state_transitions
+    )
+    assert result.evidence.observation_persistence_envelopes == ()
+    assert result.evidence.trace_events == closure.trace_events
+    assert result.safe_observable.response_policy == expected_policy
+    assert result.safe_observable.user_outcome is agent_result.outcome
+    assert result.safe_observable.ordinary_trace_shape == ordinary_trace_shape(
+        closure.trace_events
+    )
+    assert result.safe_observable.model_calls == len(
+        closure.context_manifests
+    )
+
+
+def test_exact_run_mapper_projects_logical_observation_source_version_chain() -> None:
+    closure, agent_result = _exact_closure_for_script(
+        "script:e2e01-01:success",
+        execution_ref=EXECUTION_REF_1,
+    )
+    result = _map_exact_result(
+        execution_ref=EXECUTION_REF_1,
+        closure=closure,
+        agent_result=agent_result,
+    )
+
+    observation = result.evidence.observations[0]
+    call = result.evidence.tool_calls[0]
+    presentation_manifest = result.evidence.context_manifests[1]
+    assert result.evidence.observation_persistence_envelopes == ()
+    assert observation.source_tool == call.canonical_tool_name
+    assert presentation_manifest.observation_refs_and_versions == (
+        VersionedRecordRef(
+            record_ref=observation.observation_id,
+            version=observation.source_version,
+        ),
+    )
+
+
+def test_exact_run_mapper_has_fixed_unavailable_source_policy_without_case_artifact() -> None:
+    closure, agent_result = _order_service_unavailable_closure()
+    result = _map_exact_result(
+        execution_ref=EXECUTION_REF_3,
+        closure=closure,
+        agent_result=agent_result,
+    )
+
+    assert result.evidence.observed_outcome is AgentOutcome.BLOCKED
+    assert result.safe_observable.response_policy == (
+        "FIXED_ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert agent_result.message == "订单服务暂时不可用，请稍后重试。"
+    assert "case_id" not in type(result.evidence).model_fields
+
+
+def test_exact_run_mapper_projects_input_invalid_without_synthetic_runtime_records() -> None:
+    closure, agent_result = _minimal_input_invalid_closure()
+    result = _map_exact_result(
+        execution_ref=EXECUTION_REF_4,
+        closure=closure,
+        agent_result=agent_result,
+    )
+
+    assert result.evidence.run_record.stop_reason is StopReason.INPUT_INVALID
+    assert result.evidence.observed_outcome is AgentOutcome.BLOCKED
+    assert result.safe_observable.response_policy == "FIXED_SAFE_PROCESSING_ERROR"
+    assert result.evidence.request_understanding_records_v2 == ()
+    assert result.evidence.accepted_task_deltas_v2 == ()
+    assert result.evidence.task_records == ()
+    assert result.evidence.request_units == ()
+    assert result.evidence.gate_decisions == ()
+    assert result.evidence.tool_calls == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["http", "execution_ref", "run_id", "outcome", "fixed_message"],
+)
+def test_exact_run_mapper_rejects_identity_outcome_and_policy_mismatch_boundedly(
+    mutation: str,
+) -> None:
+    closure, agent_result = _minimal_input_invalid_closure()
+    execution_ref = EXECUTION_REF_4
+    http_status = 200
+    if mutation == "http":
+        http_status = 503
+    elif mutation == "execution_ref":
+        execution_ref = UUID(int=1)
+    elif mutation == "run_id":
+        agent_result = agent_result.model_copy(update={"run_id": UUID(int=2)})
+    elif mutation == "outcome":
+        agent_result = agent_result.model_copy(
+            update={"outcome": AgentOutcome.COMPLETED}
+        )
+    else:
+        agent_result = agent_result.model_copy(
+            update={"message": "raw-policy-secret"}
+        )
+
+    errors = []
+    for _ in range(2):
+        with pytest.raises(EvalHarnessCommandError) as caught:
+            _map_exact_result(
+                execution_ref=execution_ref,
+                http_status=http_status,
+                closure=closure,
+                agent_result=agent_result,
+            )
+        errors.append(caught.value)
+        assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert "raw-policy-secret" not in str(caught.value)
+    assert errors[0] is not errors[1]
 
 
 @pytest.mark.parametrize(

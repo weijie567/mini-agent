@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from collections import Counter
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from mini_agent.application.persistence import (
     P0PersistenceEnvelope,
@@ -47,19 +49,28 @@ from mini_agent.core.request_understanding import (
     InputSourceKind,
     NextMove,
     NextMoveKind,
+    ReferenceSourceKindV2,
     RequestUnderstandingOutput,
     TaskDeltaCandidate,
     TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     CandidateValidationRecord,
+    CandidateValidationRecordV2,
+    DurableInputCandidateV2,
+    DurableQueryContextualizationCandidateV2,
+    DurableResolvedReferenceCandidateV2,
+    DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
+    TaskStateTransition,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
@@ -1526,6 +1537,116 @@ def _evidence(**overrides: object) -> EvalEvidence:
     return EvalEvidence(**values)
 
 
+def _v2_evidence(**overrides: object) -> EvalEvidence:
+    legacy = _evidence()
+    message = legacy.message_records[0]
+    task = legacy.task_records[0]
+    request_unit = legacy.request_units[0]
+    binding = legacy.input_bindings[0]
+    source_start = message.content.index("O-1001")
+    source_end = source_start + len("O-1001")
+    source_hash = hashlib.sha256(
+        message.content[source_start:source_end].encode("utf-8")
+    ).hexdigest()
+    durable_input = DurableInputCandidateV2(
+        name="order_id",
+        candidate_value="O-1001",
+        semantic_role="TARGET_RESOURCE_IDENTIFIER",
+        authority=InputAuthority.USER_CLAIM,
+        source_kind=InputSourceKind.CURRENT_MESSAGE,
+        source_ref=message.message_id,
+        source_span_start=source_start,
+        source_span_end_exclusive=source_end,
+        source_quote_sha256=source_hash,
+        confidence=1.0,
+    )
+    durable_candidate = DurableTaskDeltaCandidateV2(
+        candidate_id=CANDIDATE_ID,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查询指定订单状态",
+        input_candidates=(durable_input,),
+        confidence=1.0,
+    )
+    understanding = RequestUnderstandingRecordV2(
+        request_understanding_record_id=UUID(
+            "00000000-0000-4000-8000-000000000518"
+        ),
+        run_id=RUN_ID,
+        message_ref=message.message_id,
+        schema_version="request_understanding_record.p0.v2",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-thin-v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text=message.content,
+            resolved_reference_candidates=(
+                DurableResolvedReferenceCandidateV2(
+                    name="order_id",
+                    candidate_value="O-1001",
+                    source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                    source_ref=message.message_id,
+                    source_span_start=source_start,
+                    source_span_end_exclusive=source_end,
+                    source_quote_sha256=source_hash,
+                    confidence=1.0,
+                ),
+            ),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=(durable_candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=CANDIDATE_ID,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(ACCEPTED_DELTA_ID,),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        next_move_candidate_ref=NEXT_MOVE_REF,
+        created_at=NOW,
+    )
+    accepted = AcceptedTaskDeltaV2(
+        accepted_delta_id=ACCEPTED_DELTA_ID,
+        candidate_ref=CANDIDATE_ID,
+        message_ref=message.message_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text=durable_candidate.goal_patch,
+        input_binding_refs=(binding.binding_id,),
+        accepted_at=NOW,
+        task_id=task.task_id,
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    transition = TaskStateTransition(
+        task_id=task.task_id,
+        request_unit_id=request_unit.request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=TaskStatus.COMPLETED,
+        base_state_version=1,
+        result_state_version=2,
+        reason_ref=OBSERVATION_ID,
+        changed_at=task.updated_at,
+    )
+    values = {
+        field_name: getattr(legacy, field_name)
+        for field_name in EvalEvidence.model_fields
+    }
+    values.update(
+        {
+            "request_understanding_output": None,
+            "request_understanding_records": (),
+            "accepted_task_deltas": (),
+            "observation_persistence_envelopes": (),
+            "request_understanding_records_v2": (understanding,),
+            "accepted_task_deltas_v2": (accepted,),
+            "task_state_transitions": (transition,),
+        }
+    )
+    values.update(overrides)
+    return EvalEvidence(**values)
+
+
 def _minimal_self_attested_evidence() -> EvalEvidence:
     events = (
         _trace(TraceEventType.RUN_STARTED, offset=1),
@@ -2317,6 +2438,155 @@ def test_registry_membership_is_exactly_the_13_artifact_names() -> None:
     assert tuple(registry) == GRADER_NAMES
     assert len(registry) == 13
     assert all(registry[name].name == name for name in GRADER_NAMES)
+
+
+def test_v1_and_v2_request_understanding_evidence_are_explicitly_mutually_exclusive() -> None:
+    v2 = _v2_evidence()
+    assert v2.request_understanding_output is None
+    assert v2.request_understanding_records == ()
+    assert v2.accepted_task_deltas == ()
+    assert len(v2.request_understanding_records_v2) == 1
+    assert len(v2.accepted_task_deltas_v2) == 1
+    assert len(v2.task_state_transitions) == 1
+    assert v2.observation_persistence_envelopes == ()
+
+    legacy = _evidence()
+    with pytest.raises(ValidationError):
+        _v2_evidence(
+            request_understanding_output=legacy.request_understanding_output,
+        )
+    with pytest.raises(ValidationError):
+        _v2_evidence(
+            request_understanding_records=legacy.request_understanding_records,
+        )
+    with pytest.raises(ValidationError):
+        _v2_evidence(
+            accepted_task_deltas=legacy.accepted_task_deltas,
+        )
+    with pytest.raises(ValidationError):
+        _v2_evidence(
+            observation_persistence_envelopes=(
+                legacy.observation_persistence_envelopes
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _v2_evidence(request_understanding_records_v2=())
+    with pytest.raises(ValidationError):
+        _v2_evidence(accepted_task_deltas_v2=())
+
+
+@pytest.mark.parametrize("grader_name", GRADER_NAMES)
+def test_every_registered_grader_passes_durable_v2_evidence(
+    grader_name: str,
+) -> None:
+    result = grader_registry()[grader_name].grade(
+        _v2_evidence(),
+        _expectations(),
+    )
+    assert result == EvalGraderResult(
+        grader_name=grader_name,
+        status=EvalGraderStatus.PASS,
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["source_hash", "source_span", "observation_version", "observation_ref"],
+)
+def test_v2_logical_evidence_rejects_directed_provenance_tamper(
+    tamper: str,
+) -> None:
+    evidence = _v2_evidence()
+    updates: dict[str, object] = {}
+    if tamper in {"source_hash", "source_span"}:
+        understanding = evidence.request_understanding_records_v2[0]
+        candidate = understanding.task_delta_candidates[0]
+        source = candidate.input_candidates[0]
+        source_update = (
+            {"source_quote_sha256": "0" * 64}
+            if tamper == "source_hash"
+            else {
+                "source_span_start": source.source_span_start + 1,
+                "source_span_end_exclusive": source.source_span_end_exclusive + 1,
+            }
+        )
+        changed_source = source.model_copy(update=source_update)
+        changed_candidate = candidate.model_copy(
+            update={"input_candidates": (changed_source,)}
+        )
+        updates["request_understanding_records_v2"] = (
+            understanding.model_copy(
+                update={"task_delta_candidates": (changed_candidate,)}
+            ),
+        )
+    elif tamper == "observation_version":
+        manifest = evidence.context_manifests[1]
+        updates["context_manifests"] = (
+            evidence.context_manifests[0],
+            manifest.model_copy(
+                update={
+                    "observation_refs_and_versions": (
+                        VersionedRecordRef(
+                            record_ref=OBSERVATION_ID,
+                            version="order-v7-tampered",
+                        ),
+                    )
+                }
+            ),
+        )
+    else:
+        request_unit = evidence.request_units[0].model_copy(
+            update={"observation_refs": (UUID(int=940),)}
+        )
+        updates["request_units"] = (request_unit,)
+
+    tampered = _v2_evidence(**updates)
+    for grader_name in (
+        "RequestUnderstandingGrader",
+        "ObservationGrader",
+        "PersistenceGrader",
+        "TraceCompletenessGrader",
+    ):
+        result = grader_registry()[grader_name].grade(
+            tampered,
+            _expectations(),
+        )
+        if tamper.startswith("source_") and grader_name == "ObservationGrader":
+            continue
+        if tamper.startswith("observation_") and grader_name == (
+            "RequestUnderstandingGrader"
+        ):
+            continue
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
+def test_v2_complete_task_transition_history_is_required_without_restart_cap() -> None:
+    evidence = _v2_evidence()
+    first = evidence.task_state_transitions[0].model_copy(
+        update={"to_status": TaskStatus.WAITING_USER}
+    )
+    extra = TaskStateTransition(
+        task_id=TASK_ID,
+        request_unit_id=REQUEST_UNIT_ID,
+        from_status=TaskStatus.WAITING_USER,
+        to_status=TaskStatus.COMPLETED,
+        base_state_version=2,
+        result_state_version=3,
+        reason_ref=UUID(int=941),
+        changed_at=NOW + timedelta(seconds=2),
+    )
+    for transitions in (
+        (),
+        (first, extra),
+    ):
+        tampered = _v2_evidence(task_state_transitions=transitions)
+        for grader_name in ("PersistenceGrader", "TraceCompletenessGrader"):
+            result = grader_registry()[grader_name].grade(
+                tampered,
+                _expectations(),
+            )
+            assert result.status is EvalGraderStatus.FAIL
 
 
 def test_boolean_self_attestation_cannot_replace_typed_evidence() -> None:
