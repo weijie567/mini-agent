@@ -131,6 +131,13 @@ _CODE_VERSION_PAIRS = tuple(
 
 五个pre-existing top-level class/function definitions `_sql_values`、`Base`、`P0RecordModel`、`P0RecordReferenceModel`、`MockOrderModel` 的source segment与AST保持不变。允许delta仅为Application import和`_CODE_VERSION_PAIRS` assignment；其他module constants不得改写。
 
+protected-model oracle必须从exact B_FE blob机械比较candidate AST：
+
+- 5个class/function source segment、AST与single binding exact；
+- 唯一approved `ImportFrom mini_agent.application.persistence` delta是`P0_PERSISTENCE_REGISTRY → P0_RECORD_SCHEMA_VERSION_CATALOG`，`P0RecordCode`保留；
+- 唯一approved assignment delta是`_CODE_VERSION_PAIRS`；`_RECORD_CODES`、`_CODE_VERSION_CHECK`及所有其他pre-existing top-level nodes exact；
+- 禁止新增runtime call、dynamic import、rebind、monkeypatch或改写`P0RecordModel` constraint structure。
+
 ## 3. Alembic revision
 
 新增唯一文件：
@@ -152,7 +159,8 @@ depends_on = None
 
 历史migration必须self-contained：
 
-- 在文件内literal定义17-pair v1 set与18-pair expanded set；不得import`mini_agent.*`、current catalog/model/codec。
+- 在文件内用direct tuple-of-two-string-tuples literal定义17-pair v1 set与18-pair expanded set；不得用comprehension、enum、runtime lookup或dynamic construction。
+- import allowlist恰为标准库typing/collections typing support、`sqlalchemy`与`alembic.op`；不得import`mini_agent.*`、current catalog/model/codec。owned integration test必须用AST机械解析migration source，比较literal exact set、import origin和禁止node/call，而不是只依赖DB行为。
 - condition builder只接受文件内常量，生成fully parenthesized exact OR expression。
 - `upgrade()`在Alembic transaction中drop同名旧check，再create同名expanded check；PostgreSQL transactional DDL保证失败整体回滚。
 - 不新增/删除/重命名table、column、index、FK、unique/check（除同名code/version body）、sequence或extension。
@@ -162,7 +170,7 @@ depends_on = None
 
 `downgrade()`必须：
 
-1. 在migration transaction内对`p0_records`取得阻止并发writer改变检查结果的table lock。
+1. 在migration transaction内、执行`EXISTS`前，对`p0_records`取得exact `SHARE ROW EXCLUSIVE` table lock；该mode必须与普通`INSERT` / `UPDATE`的`ROW EXCLUSIVE`冲突并持续到transaction结束。
 2. 运行只返回boolean的bounded `SELECT EXISTS`，predicate恰为RU code + v2 version；不读取payload、logical identity、owner、row count或PII。
 3. 存在RU-v2 row时，在任何constraint DDL前抛固定无caller-controlled值的bounded error；不得删除、改写、隔离、自动转换或fallback。
 4. 无RU-v2 row时原子drop expanded check并恢复原17-pair同名check。
@@ -173,6 +181,11 @@ depends_on = None
 - RU-v2 row byte/identity不变；
 - expanded 18-pair constraint仍有效，另一个exact v2 physical probe仍可插入；
 - exception/日志不包含row identity、payload、owner、count或SQL parameter值。
+
+lock门禁必须有两层机械证据：
+
+- AST/source-order test证明`downgrade()`中的exact `LOCK TABLE p0_records IN SHARE ROW EXCLUSIVE MODE`在`SELECT EXISTS`与任何constraint DDL之前，且没有更弱、conditional或dynamic lock路径。
+- disposable namespace并发test由connection A取得同一approved lock并保持transaction；connection B设置bounded `lock_timeout`后分别尝试`INSERT`与`UPDATE`，两者都必须因table lock超时且零写入；A结束后合法写入恢复。该test与v2-row failed-downgrade atomicity共同证明mode和migration ordering。
 
 真实环境若已有v2 row，rollback必须停止并签发owner-approved reverse data migration或使用经验证备份恢复；本Packet禁止silent delete。
 
@@ -280,7 +293,7 @@ handoff_format: branch、exact feature base/Plan/head/commits/tree、owned/prote
 <task type="auto" tdd="true">
   <name>Task 1: RED — freeze exact 18-pair schema and fail-closed migration cycle</name>
   <files>tests/integration/test_database_migrations.py</files>
-  <action>只改owned integration test。冻结head=0003、17 code/18 pair/only-RU-dual、metadata/DB parity、已有v1 row无损0002→0003、全部18 pair accept、non-RU-v2/RU-v3/unknown-code reject、无v2 row的0003→0002→0003 cycle、v2 row存在时downgrade fail-closed与atomicity、head idempotence和除constraint body外零schema delta。Direct insert显式命名为physical probe，不调用codec。只使用disposable db-test namespace；取得真实RED并提交。</action>
+  <action>只改owned integration test。冻结head=0003、17 code/18 pair/only-RU-dual、metadata/DB parity、已有v1 row无损0002→0003、全部18 pair accept、non-RU-v2/RU-v3/unknown-code reject、无v2 row的0003→0002→0003 cycle、v2 row存在时downgrade fail-closed与atomicity、head idempotence和除constraint body外零schema delta。增加migration AST gate：exact literal pair tuples、approved imports、no `mini_agent.*`/dynamic catalog、LOCK→EXISTS→DDL顺序；增加approved `SHARE ROW EXCLUSIVE` mode阻断并发INSERT/UPDATE的bounded lock-timeout test。Direct insert显式命名为physical probe，不调用codec。只使用disposable db-test namespace；取得真实RED并提交。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_database_migrations.py -x -q</automated>
     RED必须非零且只指向缺少0003/18-pair/downgrade合同；models、既有migration/env保持base blob。
@@ -356,6 +369,92 @@ Migration tests必须机械证明：
 - 所有18 valid pair接受，unsupported cross-pair拒绝；
 - table/column/index/FK/unique/check-name set与0002相同，只有`ck_p0_records_code_version_closed` body改变；
 - 无v2 row downgrade/upgrade可逆；有v2 row downgrade失败后revision/row/expanded constraint原子保留。
+- 0003 source AST只含approved imports与direct literal 17/18 pair sets，无任何`mini_agent.*`、runtime catalog/model/codec或dynamic pair construction。
+- downgrade exact `SHARE ROW EXCLUSIVE` lock严格早于`EXISTS`/DDL；approved mode在真实disposable PostgreSQL transaction中同时阻断INSERT/UPDATE直到lock transaction结束。
+
+Protected models delta必须运行以下独立Git-object oracle；它不是production test：
+
+```bash
+uv run python - 294ada386ec160ec2a48fc8883b5a38f1880e4ba <<'PY'
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+base = sys.argv[1]
+file_name = "src/mini_agent/infrastructure/persistence/models.py"
+old = subprocess.run(
+    ["git", "show", f"{base}:{file_name}"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+new = Path(file_name).read_text()
+old_tree = ast.parse(old)
+new_tree = ast.parse(new)
+
+def is_runtime_import(node):
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.module == "mini_agent.application.persistence"
+    )
+
+def assigned_name(node):
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    ):
+        return node.targets[0].id
+    return None
+
+def protected_body(tree):
+    return [
+        node
+        for node in tree.body
+        if not is_runtime_import(node)
+        and assigned_name(node) != "_CODE_VERSION_PAIRS"
+    ]
+
+assert ast.dump(
+    ast.Module(body=protected_body(old_tree), type_ignores=[]),
+    include_attributes=False,
+) == ast.dump(
+    ast.Module(body=protected_body(new_tree), type_ignores=[]),
+    include_attributes=False,
+)
+
+old_import = [node for node in old_tree.body if is_runtime_import(node)]
+new_import = [node for node in new_tree.body if is_runtime_import(node)]
+assert len(old_import) == len(new_import) == 1
+assert {(item.name, item.asname) for item in old_import[0].names} == {
+    ("P0_PERSISTENCE_REGISTRY", None),
+    ("P0RecordCode", None),
+}
+assert {(item.name, item.asname) for item in new_import[0].names} == {
+    ("P0_RECORD_SCHEMA_VERSION_CATALOG", None),
+    ("P0RecordCode", None),
+}
+
+new_pair_nodes = [
+    node
+    for node in new_tree.body
+    if assigned_name(node) == "_CODE_VERSION_PAIRS"
+]
+assert len(new_pair_nodes) == 1
+expected_pair_node = ast.parse(
+    "_CODE_VERSION_PAIRS = tuple(sorted("
+    "(code.value, schema_version) "
+    "for code, schema_version in P0_RECORD_SCHEMA_VERSION_CATALOG"
+    "))"
+).body[0]
+assert ast.dump(
+    new_pair_nodes[0],
+    include_attributes=False,
+) == ast.dump(expected_pair_node, include_attributes=False)
+print("protected_models_delta=PASS")
+PY
+```
 
 Integrator在I reviewed merge后，先于P exact-head review运行共享canonical gate：
 
@@ -384,7 +483,7 @@ git diff --name-only \
 
 1. RED/GREEN提交、scope与migration evidence可复现。
 2. PostgreSQL/metadata恰为17 code / 18 exact pairs，只有RU dual；其他schema零delta。
-3. upgrade保留v1 data；downgrade遇v2 data原子fail closed且无PII诊断。
+3. migration source self-contained且models delta受oracle约束；approved lock真实阻断并发write。upgrade保留v1 data；downgrade遇v2 data原子fail closed且无PII诊断。
 4. 三文件allowlist外零改动；active registry/codec/Adapter/Runtime/Eval均未切换。
 5. I/P独立实现、串行review/merge；P latest-overlay final PASS后才形成B_IP。
 
