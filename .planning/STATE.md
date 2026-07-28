@@ -6,8 +6,8 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "07H"
 status: "in_progress"
-last_updated: "2026-07-28T05:31:17+08:00"
-last_activity: "2026-07-28 — 01-07D/01-07H Plans reviewed and merged via PR #56/#57; both feature bases remain B_CG 327b39d; feature dispatch next"
+last_updated: "2026-07-28T12:43:26+08:00"
+last_activity: "2026-07-28 — 01-07D/01-07H feature PR #59/#60 reviewed and serially merged; B_DH 4a7e802 established; E/F planning next"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -36,29 +36,28 @@ Current Phase Name: Cycle 1｜第一最薄 E2E-01
 Current Plan: 07H
 Total Phases: 6
 Total Plans in Phase: 8
-Status: 01-07D and 01-07H planned / feature dispatch next
+Status: 01-07D and 01-07H feature complete / 01-07E and 01-07F planning next
 Last Activity: 2026-07-28
-Last Activity Description: 01-07D / 01-07H Plan PR #56/#57均以final `0/0/0/0` review签发并merge；planning merge只提供provenance，feature execution base继续固定为`B_CG = 327b39d...`
+Last Activity Description: 01-07D / 01-07H feature PR #59/#60均以final `0/0/0/0` review串行merge，形成共同feature barrier `B_DH = 4a7e802...` / tree `a5a6029...`，combined canonical gate为1507 passed
 Progress: 0%
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 7 of 8（numbered Plan evidence为7/8；01-04E/F/G/H、01-05R、01-06R、01-07、01-07A、01-07B、01-07C与01-07G均已evidence-indexed；01-07D/01-07H已签发Plan但feature未开始；其余等待各自前置exact integration SHA）
-Status: `ACTIVE / 01-07D_01-07H_PLANNED / FEATURE_DISPATCH_NEXT`
-Last activity: 2026-07-28 — D Plan PR #56与H Plan PR #57完成final `0/0/0/0` review并依次squash merge；目标Packet完成证据仍为16/29、正式签发20个Plan、canonical Case / Requirement lifecycle仍为0/8
+Plan: 7 of 8（numbered Plan evidence为7/8；当前20个正式Plan、18份Summary；01-07D/01-07H feature已evidence-indexed；其余等待各自前置exact integration SHA）
+Status: `ACTIVE / 01-07D_01-07H_FEATURE_COMPLETE / 01-07E_01-07F_PLANNING_NEXT`
+Last activity: 2026-07-28 — D feature PR #59与H feature PR #60完成independent `0/0/0/0` review并依次squash merge；共同barrier `B_DH = 4a7e802...`通过canonical五步门禁；目标Packet完成证据为18/29、正式签发20个Plan、canonical Case / Requirement lifecycle仍为0/8
 Progress: `░░░░░░░░░░` 0%
 
 ## Next Safe Action
 
-1. 记录official D Plan merge/blob `5d72cb70bf5dc97ae2f74ab1697a61e77a23b725` / `e63b844301f8d74da80bc8a1d01bbf3eea689de8`与H Plan merge/blob `e6c8cbaf782ac64e0fced492b9b552f246d0e940` / `52ffe6652284d75b8f2546d50439762b63dfdfa0`，但保持feature execution base为`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`；机械证明D/H feature allowlist交集为0。
-2. 从固定`B_CG`建立D/H独立feature Worktree / branch；D只写`docs/implementation/e2e01-thin-slice-implementation-spec.md`，H只写`src/mini_agent/core/order.py`与三份owned Component tests。两个writer可并行，当前尚无D/H feature branch、commit、PR或Summary。
-3. D/H各自完成Plan定义的检查、exact-head review与latest-integration overlay后，由Integrator串行merge并形成同时包含两者reviewed feature的共同exact barrier；单边merge、两个branch head或planning merge均不解锁下游。
-4. D/H feature共同barrier后，分别签发ownership不重叠的01-07E persistence codec与01-07F RU Core；完成双review、overlay与串行merge后才进入01-07I。
-5. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
-6. 01-07J还必须在Observation前把缺失/损坏source version的FOUND fail closed；随后从新exact SHA并行签发01-07K Infra reader/version producer与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
-7. 01-07K/L共同barrier后签发01-07M Core source-version contract closure并收紧FOUND validator；01-07M reviewed merge后才签发01-08，01-08 reviewed merge后签发01-08A，缺凭据只能形成`NOT_RUN / SKIPPED`。
-8. 全部实现与真实证据完成后才执行受控code review/fix、validation、Eval review、安全审计、UAT与integration-to-main release PR。
+1. 本 single-writer状态PR reviewed merge后，执行 01-07D 文档 semantic refresh与01-07H代码 `graphify update .`，保留历史health warnings并机械确认stale marker、missing endpoint与self-loop；Graphify gate通过前不声称图已fresh。
+2. 以唯一共同feature barrier `B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131` / tree `a5a60292ccdf116aba4dacaaea366576e183c532`为execution input，分别签发ownership不重叠的01-07E persistence codec与01-07F RU Core；Plan必须明确base、allowlist、验证与rollback，不能直接写实现。
+3. 01-07E/F完成各自exact-head review、latest-integration overlay与Integrator串行merge后才进入01-07I；任何单边branch head或未审内容都不构成新barrier。
+4. 01-07E/F/H reviewed merge后签发01-07I Application exact-Run Evidence Port / ModelProvider failure contract，由Port owner冻结fresh parameterless、raw-free RU candidate-invalid signal；其后01-07J Runtime只消费已冻结合同并把该signal映射为`COMPLETED / INPUT_INVALID`。
+5. 01-07J还必须在Observation前把缺失/损坏source version的FOUND fail closed；随后从新exact SHA并行签发01-07K Infra reader/version producer与01-07L Eval mapper / Eval-owned Scripted-Qwen consumers并串行合并。
+6. 01-07K/L共同barrier后签发01-07M Core source-version contract closure并收紧FOUND validator；01-07M reviewed merge后才签发01-08，01-08 reviewed merge后签发01-08A，缺凭据只能形成`NOT_RUN / SKIPPED`。
+7. 全部实现与真实证据完成后才执行受控code review/fix、validation、Eval review、安全审计、UAT与integration-to-main release PR。
 
 ## Decisions
 
@@ -77,10 +76,11 @@ Progress: `░░░░░░░░░░` 0%
 - 01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；exact six files、双review、latest-integration overlay、1493-test post-merge full与Graphify gate均通过。当时Task Packet口径为14/28；PR #48 review新增01-07M后、C/G feature完成前的口径为14/29，lifecycle仍为0/8。
 - 01-07G owner PR #50先merge为`bfc63c9...`；01-07C首个feature PR #51因`run_id`模型回显与durable contextualization重建语义得到`0/1/1` finding后关闭并保留，r1 Plan PR #52与owner PR #53从同一固定base重新执行且未改写旧ref。最终共同barrier为`B_CG = 327b39da45cdcf564609a5385d52c4264da2c669` / tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。
 - C/G post-merge exact head通过`1493 passed, 1 deselected, 12 warnings`。Graphify增量候选触发shrink guard后改用全量安全重建，结果为`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`；diagnostic公开记录`699` dangling endpoint、`687` directed与`713` undirected collapse candidate，`missing endpoint = 0`、`self-loop = 0`，不得简写成health error 0。
-- C/G完成后Task Packet证据口径为`16/29`；01-07D / 01-07H随后分别通过独立single-target Plan PR #56/#57签发，使正式签发Plan成为20个，但Task Packet完成证据仍为`16/29`，numbered Plan evidence仍为`7/8`，canonical lifecycle与Requirements checkbox仍为`0/8`。两份feature都只从同一`B_CG`执行。
+- C/G完成后Task Packet证据口径为`16/29`；01-07D / 01-07H随后通过独立single-target Plan PR #56/#57签发，并从同一`B_CG`执行。feature PR #59/#60 reviewed串行merge后口径更新为`18/29`，正式签发Plan仍为20个，Summary为18份，numbered Plan evidence仍为`7/8`，canonical lifecycle与Requirements checkbox仍为`0/8`。
 - RU闭环必须保持四轴ownership：01-07C仅RU semantic ruling，01-07D仅Thin Slice exact mapping且禁止v1 alias / migration / backfill / fallback，01-07E仅Application persistence codec，01-07F仅RU Core implementation；不得在一个Packet同时裁决version并实现自己的codec。
 - Observation version闭环采用显式green migration：01-07G只裁决P0语义；01-07H additive-expand Core DTO；01-07J在Observation前对缺/坏version fail closed且不得猜fallback；01-07K由Infra producer生成；01-07M最后收紧Core FOUND validator。任何中间Packet都不得越过owner或以失败full suite换取一次性强制。
-- D只拥有Thin Slice implementation spec；H只拥有Core/Order source与`test_memory_trace_presentation_contract.py`、`test_read_tool_executor.py`、`test_agent_run_service.py`，机械allowlist交集为0。H保持additive与legacy `FOUND + None`；D/H任何单边feature merge都不解锁01-07E/F。
+- D只拥有Thin Slice implementation spec；H只拥有Core/Order source与`test_memory_trace_presentation_contract.py`、`test_read_tool_executor.py`、`test_agent_run_service.py`，机械allowlist交集为0。两者已从同一`B_CG`执行并串行形成`B_DH = 4a7e802...`；H保持additive与legacy `FOUND + None`，authority/enforcement仍留给J/K/M。
+- D feature PR #59 merge `5f793fd...`冻结RU v2 exact mapping、safe quote projection与deterministic CAS chain；H feature PR #60 merge `4a7e802...`完成strict optional DTO与六个synthetic stub迁移。D/H feature与latest overlay均获independent `CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`，combined canonical full为`1507 passed, 1 deselected, 12 warnings`。
 - Eval evidence闭环由01-07I Application定义expectation-free exact-Run closure DTO/Port，01-07K Infra实现一致snapshot，01-07L Eval映射真实HTTP+closure；01-08只装配，不能定义Port、Reader或补造RU output/版本/Trace/evidence。
 - Thin Slice §10.3已经拥有Provider failure语义：Request Understanding output Pydantic/source/authority/InputBinding/trusted-field拒绝必须是`INPUT_INVALID`，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍是`PROVIDER_PROTOCOL_ERROR`。01-07I只定义bounded signal/Port contract，01-07J只做Runtime mapping，01-07L按01-07 Eval ownership适配Scripted与Qwen并清除raw cause/context；不得由01-07B、01-07F、01-07K或01-08越权修补。
 - Qwen Responses Provider Adapter属于01-07 exact ownership；默认离线W4不依赖Qwen。01-08A是01-08之后的独立Eval-owner credentialed runner Packet；缺凭据必须保持`NOT_RUN / SKIPPED`，只有01-08A的实际配置运行证据才能形成真实Qwen执行声明。
@@ -120,9 +120,11 @@ Progress: `░░░░░░░░░░` 0%
 - `CONFIRMED / 01-07C_01-07G_COMMON_BARRIER`: C/G从同一base `3f0753f7...`执行并经PR #50/#53串行merge形成`B_CG = 327b39d...` / tree `49ad0f3...`；post-merge full与Graphify全量安全重建完成，health warning已显式记录。
 - `CONFIRMED / 01-07D_PLANNED`: [PR #56](https://github.com/weijie567/mini-agent/pull/56) reviewed transport `7098670bd90f2e2fc2fef654b4f4064f919790d0`以final `CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`签发D Plan，squash merge `5d72cb70bf5dc97ae2f74ab1697a61e77a23b725` / tree `a2aaccc3881038003eb61ab9ef7ace27c116520a`，Plan blob `e63b844301f8d74da80bc8a1d01bbf3eea689de8`；latest overlay full为`1493 passed, 1 deselected, 12 warnings in 87.91s`。
 - `CONFIRMED / 01-07H_PLANNED`: [PR #57](https://github.com/weijie567/mini-agent/pull/57) reviewed non-force latest-integration transport `3016969b2863349e7673515fdd88971df56d55c3`以final `CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`签发H Plan，squash merge `e6c8cbaf782ac64e0fced492b9b552f246d0e940` / tree `8c0132f444cd079f50c1b4222f6f4bd9703c1e50`，Plan blob `52ffe6652284d75b8f2546d50439762b63dfdfa0`；latest overlay full为`1493 passed, 1 deselected, 12 warnings in 86.92s`。
-- `OPEN / 01-07D_01-07H_FEATURE_DISPATCH`: 从固定`B_CG`创建D/H feature Worktree / branch；Plan merge SHA不替换base。当前没有D/H Summary、feature branch、commit或PR；01-07E/F只在两个feature均reviewed merge并形成共同exact barrier后解锁。
-- `OPEN / GRAPHIFY_POST_STATUS_MERGE`: 最近一次Graphify完成点为`676980e7244fcb1af670b66abdde205fe17cb65a`，早于PR #56/#57；Integrator须在本状态对齐merge后执行semantic refresh或明确记录`NOT_RUN`并做source scan，本提交不声称图已覆盖D/H Plan或本次状态变化。
-- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge并完成01-07M Core contract closure后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。当前目标Packet完成16/29、正式签发20个Plan。
+- `CONFIRMED / 01-07D_COMPLETE`: [01-07D Summary](phases/01-cycle-1-e2e-01/01-07D-SUMMARY.md)索引feature [PR #59](https://github.com/weijie567/mini-agent/pull/59)、head `bb97bd4...`、one-file exact scope、parser/mutation gates、independent `0/0/0/0`与merge `5f793fd...`；mapping contract已合并，Application codec与RU Core仍未实现。
+- `CONFIRMED / 01-07H_COMPLETE`: [01-07H Summary](phases/01-cycle-1-e2e-01/01-07H-SUMMARY.md)索引RED `93705ce...`、GREEN `3c5345e...`、feature [PR #60](https://github.com/weijie567/mini-agent/pull/60)、four-file exact scope、80 focused / 3 PostgreSQL / 1507 full与independent `0/0/0/0`；H只是additive representation。
+- `CONFIRMED / 01-07D_01-07H_COMMON_FEATURE_BARRIER`: PR #59/#60从同一`B_CG`执行并串行squash merge形成`B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131` / tree `a5a60292ccdf116aba4dacaaea366576e183c532`；D/H reviewed blobs同时存在，canonical五步门禁与`1507 passed, 1 deselected, 12 warnings`通过。01-07E/F planning prerequisite已满足，但两者尚未签发或实现。
+- `OPEN / GRAPHIFY_POST_STATUS_MERGE`: 当前Graphify `built_at_commit = b656103f38cb7bcbd92650f052c7b33d92b0a8a1`，早于feature PR #59/#60及本状态内容；Integrator须在本状态对齐merge后执行H code update与D/状态文档semantic refresh，保留历史health warnings。本提交不提前声称图已fresh。
+- `OPEN / 01-08_01-08A_ISSUANCE`: 只有01-07K/01-07L reviewed merge并完成01-07M Core contract closure后才签发Composition Root Packet；只有01-08 reviewed merge后才签发credentialed Qwen runner。当前目标Packet完成18/29、正式签发20个Plan。
 - `OPEN`: 后续第 2–6 阶段尚无 scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -132,5 +134,5 @@ GSD 状态、Summary、Review 或 UAT 文档不能单独证明实现完成。完
 ## Session
 
 Last Date: 2026-07-28
-Stopped At: 01-07D / 01-07H独立Plan已通过PR #56/#57 reviewed merge并保持共同feature base`327b39d...`；下一步从该base创建两个feature Worktree / branch，D/H均reviewed merge形成共同barrier前01-07E/F持续blocked
+Stopped At: 01-07D / 01-07H feature已通过PR #59/#60 reviewed串行merge并形成共同barrier`B_DH = 4a7e802...`；状态PR merge与Graphify post-merge gate后，从该exact barrier分别签发01-07E/F
 Resume File: [../docs/implementation/e2e01-thin-slice-multi-agent-plan.md](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)
