@@ -6,9 +6,11 @@ from uuid import UUID
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
+    ExactRunEvidencePort,
     EvalResultPort,
     GetOrderPort,
     ModelProvider,
+    ModelProviderV2,
     RestartRecoveryPort,
     RuntimeRecordPort,
     SessionAuthPort,
@@ -25,6 +27,7 @@ from mini_agent.application.records import (
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
+    ExactRunEvidenceClosure,
     FinalizeRunCommand,
     FinalizeToolCallCommand,
     InsertOnlyWriteResult,
@@ -32,12 +35,19 @@ from mini_agent.application.records import (
     ObservationWriteResult,
     PositiveAttempt,
     ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
     RecoveryWriteResult,
     RestartRecoveryClosure,
     SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
+)
+from mini_agent.core.presentation import PresentationInput, PresentationPlan
+from mini_agent.core.request_understanding import (
+    RequestUnderstandingInput,
+    RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 
 
@@ -501,3 +511,116 @@ def test_core_and_application_source_have_no_framework_or_adapter_imports() -> N
     )
     for forbidden_import in forbidden_imports:
         assert forbidden_import not in source
+
+
+def test_model_provider_v2_is_additive_and_has_exact_failure_partition() -> None:
+    provider = CandidateOnlyProvider()
+
+    assert isinstance(provider, ModelProviderV2)
+    _assert_signature(
+        ModelProviderV2.propose_next_move,
+        parameters=("request",),
+        type_hints={
+            "request": RequestUnderstandingInput,
+            "return": RequestUnderstandingOutputV2,
+        },
+    )
+    _assert_signature(
+        ModelProviderV2.plan_presentation,
+        parameters=("request",),
+        type_hints={
+            "request": PresentationInput,
+            "return": PresentationPlan,
+        },
+    )
+    assert (
+        get_type_hints(ModelProvider.propose_next_move, include_extras=True)["return"]
+        is RequestUnderstandingOutput
+    )
+
+    normalized_doc = " ".join((ModelProviderV2.__doc__ or "").split())
+    for required_term in (
+        "correctly framed Request Understanding target function",
+        "RequestUnderstandingOutputV2",
+        "shape",
+        "version",
+        "source",
+        "authority",
+        "InputBinding",
+        "trusted",
+        "private",
+        "RequestUnderstandingCandidateInvalidError",
+        "transport",
+        "HTTP",
+        "JSON",
+        "framing",
+        "zero",
+        "multiple",
+        "wrong-name",
+        "ProviderProtocolError",
+        "PresentationPlan",
+        "fresh",
+        "raw diagnostic",
+        "__cause__",
+        "__context__",
+    ):
+        assert required_term in normalized_doc
+    assert inspect.signature(RequestUnderstandingCandidateInvalidError).parameters == {}
+
+
+def test_exact_run_evidence_port_is_owner_scoped_snapshot_only_boundary() -> None:
+    assert ExactRunEvidencePort._is_protocol
+    _assert_signature(
+        ExactRunEvidencePort.load_exact_run_evidence_for_owner,
+        parameters=("owner_scope", "run_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "run_id": UUID,
+            "return": ExactRunEvidenceClosure | None,
+        },
+    )
+    signature = inspect.signature(
+        ExactRunEvidencePort.load_exact_run_evidence_for_owner
+    )
+    assert all(
+        signature.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        for name in ("owner_scope", "run_id")
+    )
+
+    normalized_doc = " ".join((ExactRunEvidencePort.__doc__ or "").split())
+    for required_term in (
+        "None only",
+        "absent",
+        "unauthorized",
+        "ownership-unverified",
+        "P0PersistenceIntegrityError",
+        "transactionally consistent snapshot",
+        "exact fence",
+        "strict-decode",
+        "database closed set",
+        "partial",
+        "skip-corrupt",
+        "session",
+        "does not authorize",
+        "does not write",
+        "does not claim recovery",
+        "does not construct Case",
+        "expectation",
+        "HTTP",
+        "Eval Result",
+    ):
+        assert required_term in normalized_doc
+
+    annotations = get_type_hints(
+        ExactRunEvidencePort.load_exact_run_evidence_for_owner,
+        include_extras=True,
+    )
+    for forbidden_type in ("customer_id", "case_id", "EvalEvidence"):
+        assert forbidden_type not in annotations
+    for forbidden_method in (
+        "save",
+        "write",
+        "claim_recovery",
+        "build_eval_result",
+    ):
+        assert not hasattr(ExactRunEvidencePort, forbidden_method)
