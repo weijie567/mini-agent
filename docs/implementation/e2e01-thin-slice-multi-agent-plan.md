@@ -732,7 +732,9 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
                 "tests/component/model/test_qwen_responses_adapter.py",
                 "tests/integration/evaluation/test_e2e01_offline_harness.py"
               ],
-              "active_routing": false
+              "active_routing": false,
+              "acceptance_scope": "provider-signal-and-case-free-mapper-only",
+              "real_runtime_input_invalid_owner": "01-07J"
             }
           ]
         },
@@ -791,7 +793,14 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
                 "tests/component/application/test_agent_run_service.py",
                 "tests/component/application/test_read_tool_executor.py"
               ],
-              "active_routing": true
+              "active_routing": true,
+              "acceptance_requires": [
+                "real-agent-run-service-plus-reviewed-01-07l-scripted-provider",
+                "invalid-request-understanding-schema-to-completed-input-invalid",
+                "trusted-field-override-to-completed-input-invalid",
+                "provider-protocol-error-remains-provider-protocol-error",
+                "no-task-request-unit-gate-decision-tool-call-or-raw-diagnostic"
+              ]
             }
           ]
         }
@@ -987,9 +996,9 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 
 - 01-07I以Application Port declaration owner身份同时冻结exact-Run Evidence Port和fresh parameterless、raw-diagnostic-free的Request Understanding candidate-invalid signal；`ModelProvider`合同明确只有Request Understanding output的Pydantic/trusted-field拒绝使用该signal，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍使用fresh `ProviderProtocolError`。建议精确owner files为`src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`及现有records/ports contract tests；它不得实现Runtime catch或Adapter。
 - 01-07H只做additive expand：增加optional且present时strict-pattern的`GetOrderResult.source_version`，non-FOUND继续禁止；它不得在01-07K producer前拒绝legacy `FOUND + None`，也不得声称final matrix已完成。相关FOUND test stubs可在其精确allowlist内前置迁移为显式合法test token，但test token不构成authority。
-- 01-07J除既有`INPUT_INVALID`职责外，在任何Observation/Manifest前把缺失、空、坏格式或不可用source version的FOUND映射为bounded SYSTEM_FAILURE；不得fallback、重算、retry或创建半成品Evidence。只在Runtime的`propose_next_move`边界消费01-07I signal并形成`COMPLETED / INPUT_INVALID`，不得直接catch raw `pydantic.ValidationError`、`ValueError`或`Exception`，不得记录raw diagnostics，也不得创建Task / RequestUnit / GateDecision / ToolCall；`ProviderProtocolError`仍映射`PROVIDER_PROTOCOL_ERROR`。建议精确owner files为`src/mini_agent/application/agent_run_service.py`、read execution consumer及其Component tests。
+- 01-07J除既有`INPUT_INVALID`职责外，在任何Observation/Manifest前把缺失、空、坏格式或不可用source version的FOUND映射为bounded SYSTEM_FAILURE；不得fallback、重算、retry或创建半成品Evidence。只在Runtime的`propose_next_move`边界消费01-07I signal并形成`COMPLETED / INPUT_INVALID`，不得直接catch raw `pydantic.ValidationError`、`ValueError`或`Exception`，不得记录raw diagnostics，也不得创建Task / RequestUnit / GateDecision / ToolCall；`ProviderProtocolError`仍映射`PROVIDER_PROTOCOL_ERROR`。J必须使用实际`AgentRunService + reviewed 01-07L Scripted Provider`分别运行`invalid-request-understanding-schema`与`trusted-field-override`，证明两者形成`COMPLETED / INPUT_INVALID`且没有Task / RequestUnit / GateDecision / ToolCall或raw diagnostic；同时以真实Runtime回归证明protocol fault仍形成`PROVIDER_PROTOCOL_ERROR`。建议精确owner files为`src/mini_agent/application/agent_run_service.py`、read execution consumer及其Component tests。
 - 01-07K在同一次owner-scoped PostgreSQL读取与strict safe-projection校验后生成并返回deterministic source version；不得二次查询、扩大predicate、把test/fixture/schema version当authority或放松01-07J fail-closed gate。
-- 01-07L在HTTP/closure mapper之外消费01-07I signal：Scripted Provider与Qwen Adapter都只把Request Understanding output Pydantic拒绝映射为该signal，Presentation校验与transport/HTTP/JSON/zero-or-multiple/wrong-name继续映射`ProviderProtocolError`，并清除raw exception cause/context。它必须覆盖`invalid-request-understanding-schema`和`trusted-field-override`的真实Runtime `INPUT_INVALID`结果及协议分支不漂移；其Qwen ownership沿用01-07 Plan §Task Packet Scope明确的“sole Infra path is Eval-owned Qwen ModelProvider Adapter”，不推广为通用Infrastructure/model ownership。建议消费files包括两个Provider实现、对应Component tests与必要的offline Harness test。01-07K继续只拥有strict reader/order physical adapter。
+- 01-07L在HTTP/closure mapper之外消费01-07I signal：Scripted Provider与Qwen Adapter都只把Request Understanding output Pydantic拒绝映射为该signal，Presentation校验与transport/HTTP/JSON/zero-or-multiple/wrong-name继续映射`ProviderProtocolError`，并清除raw exception cause/context。L必须在Provider Component层分别证明`invalid-request-understanding-schema`与`trusted-field-override`产生fresh 01-07I signal，并证明协议分支不漂移；Harness只可验证case-free mapper和actual-evidence contract，不得catch该signal、合成Run或把mapper fixture声称为真实Runtime `INPUT_INVALID`证据。最终两个named scripts穿过真实Runtime后形成`COMPLETED / INPUT_INVALID`的验收唯一归01-07J。其Qwen ownership沿用01-07 Plan §Task Packet Scope明确的“sole Infra path is Eval-owned Qwen ModelProvider Adapter”，不推广为通用Infrastructure/model ownership。建议消费files包括两个Provider实现、对应Component tests与必要的offline Harness test。01-07K继续只拥有strict reader/order physical adapter。
 - 01-07M只在01-07K/01-07L共同barrier后由Core owner收紧`GetOrderResult.FOUND` validator为non-empty exact-pattern source version必填，保留non-FOUND prohibition并运行full suite；不得修改Infra/Runtime或把persisted historical `OrderObservation.source_version?`全局升级为required。01-07M reviewed merge前01-08保持blocked。
 - I/J/L的STRIDE gate同时防止Tampering/Spoofing（Adapter不得用错误类型自行改写canonical stop classification）与Information Disclosure（signal必须fresh、parameterless，`str`/`repr`/`args`不含raw value，`__cause__`/`__context__`为`None`，Run/Trace/response不保留原始Pydantic/Provider诊断）；每个consumer test都必须分别断言分类和清除边界。
 - 后续green migration、failure taxonomy、physical persistence、active switch与v1 contract closure跨越不同ownership boundary，必须逐Packet形成Plan、独立通过focused/full gate、exact-head review与串行merge。原目标29增加01-07N/O/P/Q/S/T/U/V/W/X后固定为39；01-07R默认inactive，只有owner裁决要求physical v1 representation retirement、先修订上述execution map时才激活并把目标变为40。任何其他新增依赖也必须先修订唯一map与分母，不得只改prose。
