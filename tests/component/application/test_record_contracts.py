@@ -5464,3 +5464,101 @@ def test_exact_run_evidence_uses_conversation_link_composite_identity() -> None:
                 _rebuild(historical, link_reason="REOPENED"),
             ),
         )
+
+
+def test_exact_run_evidence_run_task_link_lifecycle_is_symmetric() -> None:
+    terminal = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    assert (
+        terminal.run_task_links[0].result_task_state_version
+        == terminal.task_records[0].state_version
+    )
+
+    active_run = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.RUNNING,
+        completed_at=None,
+        stop_reason=None,
+    )
+    active_traces = tuple(
+        event
+        for event in terminal.trace_events
+        if event.event_type is not TraceEventType.RUN_STOPPED
+    )
+    active_link = _rebuild(
+        terminal.run_task_links[0],
+        result_task_state_version=None,
+    )
+    active = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=active_run,
+        run_task_links=(active_link,),
+        trace_events=active_traces,
+    )
+    assert active.run_task_links[0].result_task_state_version is None
+
+    with pytest.raises(ValidationError, match="active RunTaskLink"):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=active_run,
+            trace_events=active_traces,
+        )
+
+
+def test_exact_run_evidence_current_unit_matches_latest_same_task_delta() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first_child, second_child = closure.accepted_task_deltas
+    first_task, second_task = closure.task_records
+    first_unit, second_unit = closure.request_unit_records
+    latest_child = _rebuild(
+        second_child,
+        task_id=first_task.task_id,
+        base_task_state_version=1,
+        result_task_state_version=2,
+    )
+    current_unit = _rebuild(
+        first_unit,
+        goal_text=latest_child.goal_text,
+        input_binding_refs=latest_child.input_binding_refs,
+    )
+    second_task_state_trace_removed = False
+    traces: list[TraceEvent] = []
+    for event in closure.trace_events:
+        if (
+            event.event_type is TraceEventType.TASK_STATE_CHANGED
+            and event.task_id == first_task.task_id
+            and not second_task_state_trace_removed
+        ):
+            second_task_state_trace_removed = True
+            continue
+        updates: dict[str, object] = {}
+        if event.task_id == second_task.task_id:
+            updates["task_id"] = first_task.task_id
+        if event.request_unit_id == second_unit.request_unit_id:
+            updates["request_unit_id"] = first_unit.request_unit_id
+        traces.append(_rebuild(event, **updates) if updates else event)
+
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        accepted_task_deltas=(first_child, latest_child),
+        task_records=(first_task,),
+        task_state_transitions=(closure.task_state_transitions[0],),
+        request_unit_records=(current_unit,),
+        conversation_task_links=(closure.conversation_task_links[0],),
+        run_task_links=(closure.run_task_links[0],),
+        trace_events=tuple(traces),
+    )
+    assert tuple(
+        child.result_task_state_version
+        for child in rebuilt.accepted_task_deltas
+    ) == (1, 2)
+    assert rebuilt.request_unit_records[0].goal_text == latest_child.goal_text
+    assert (
+        rebuilt.request_unit_records[0].input_binding_refs
+        == latest_child.input_binding_refs
+    )

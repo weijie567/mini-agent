@@ -2972,11 +2972,12 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 raise ValueError(
                     "RunTaskLink result version must match its Task projection"
                 )
-            if (
-                run.status
-                not in {AgentRunStatus.CREATED, AgentRunStatus.RUNNING}
-                and link.result_task_state_version is None
-            ):
+            if run.status in {AgentRunStatus.CREATED, AgentRunStatus.RUNNING}:
+                if link.result_task_state_version is not None:
+                    raise ValueError(
+                        "active RunTaskLink cannot carry a result Task version"
+                    )
+            elif link.result_task_state_version is None:
                 raise ValueError(
                     "terminal RunTaskLink requires the exact Task result version"
                 )
@@ -3040,15 +3041,15 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             raise ValueError("RequestUnit set must match the exact Task set")
         for task_id, task_children in ordered_children_by_task.items():
             unit = unit_by_task[task_id]
-            if any(
-                child.goal_text != unit.goal_text
-                or set(child.input_binding_refs)
+            latest_child = task_children[-1]
+            if (
+                latest_child.goal_text != unit.goal_text
+                or set(latest_child.input_binding_refs)
                 != set(unit.input_binding_refs)
-                or child.message_ref not in unit.goal_source_refs
-                for child in task_children
+                or latest_child.message_ref not in unit.goal_source_refs
             ):
                 raise ValueError(
-                    "accepted child and RequestUnit causality must match exactly"
+                    "latest accepted child and RequestUnit causality must match exactly"
                 )
 
         transitions_by_task: dict[UUID, list[TaskStateTransition]] = {
