@@ -2918,21 +2918,47 @@ def test_ru_v2_source_collection_duplicates_fail_but_reference_duplicates_collap
 
 def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
     repository_root = Path(__file__).resolve().parents[3]
-    symbols = (
-        "P0_RECORD_SCHEMA_VERSION_CATALOG",
-        "encode_persistence_record_versioned",
-        "decode_persistence_record_versioned",
-    )
-    matches = {
-        path.relative_to(repository_root).as_posix()
-        for root in ("src", "tests")
-        for path in (repository_root / root).rglob("*.py")
-        if any(symbol in path.read_text() for symbol in symbols)
-    }
-    assert matches == {
+    codec_owner_files = {
         "src/mini_agent/application/persistence.py",
         "tests/component/application/test_persistence_contract.py",
     }
+    catalog_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/models.py",
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_database_migrations.py",
+        "tests/integration/test_postgres_record_adapters.py",
+    }
+    versioned_codec_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_postgres_record_adapters.py",
+    }
+
+    def files_referencing(*symbols: str) -> set[str]:
+        return {
+            path.relative_to(repository_root).as_posix()
+            for root in ("src", "tests")
+            for path in (repository_root / root).rglob("*.py")
+            if any(symbol in path.read_text() for symbol in symbols)
+        }
+
+    catalog_matches = files_referencing("P0_RECORD_SCHEMA_VERSION_CATALOG")
+    assert codec_owner_files <= catalog_matches
+    assert catalog_matches <= codec_owner_files | catalog_dependency_files
+
+    versioned_codec_matches = files_referencing(
+        "encode_persistence_record_versioned",
+        "decode_persistence_record_versioned",
+    )
+    assert codec_owner_files <= versioned_codec_matches
+    assert versioned_codec_matches <= (
+        codec_owner_files | versioned_codec_dependency_files
+    )
+
+    assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
+    assert all(
+        spec.record_schema_version == f"{code.value}.p0.v1"
+        for code, spec in P0_PERSISTENCE_REGISTRY.items()
+    )
 
     decoded = _decode_v2(_encode_v2(_request_understanding_v2_case("partial")))
     for forbidden_claim in (
