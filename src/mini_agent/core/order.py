@@ -12,6 +12,13 @@ from .common import ModelVisibleModel, RuntimePrivateModel, require_utc
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 OrderId = Annotated[str, Field(pattern=r"^O-[0-9]{4,20}$")]
+GetOrderSourceVersion = Annotated[
+    str,
+    Field(
+        strict=True,
+        pattern=r"^mock-order-source-version\.p0\.v1:sha256:[0-9a-f]{64}$",
+    ),
+]
 
 
 class OrderStatus(StrEnum):
@@ -65,6 +72,7 @@ class GetOrderOutcome(StrEnum):
 class GetOrderResult(RuntimePrivateModel):
     outcome: GetOrderOutcome
     order_summary: OrderSummaryProjection | None = None
+    source_version: GetOrderSourceVersion | None = None
     failure_code: NonEmptyString | None = None
 
     @model_validator(mode="after")
@@ -77,6 +85,8 @@ class GetOrderResult(RuntimePrivateModel):
         else:
             if self.order_summary is not None:
                 raise ValueError("non-FOUND result cannot carry order_summary")
+            if self.source_version is not None:
+                raise ValueError("non-FOUND result cannot carry source_version")
             if (
                 self.outcome is GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
                 and self.failure_code is not None

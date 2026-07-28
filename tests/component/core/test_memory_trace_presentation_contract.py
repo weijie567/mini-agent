@@ -35,6 +35,10 @@ from mini_agent.core.trace import (
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+VALID_SOURCE_VERSION = (
+    "mock-order-source-version.p0.v1:sha256:"
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 
 def _summary() -> OrderSummaryProjection:
@@ -90,6 +94,7 @@ def test_order_projection_forbids_private_and_unapproved_fields() -> None:
 def test_not_found_result_cannot_disclose_payload_or_failure_difference() -> None:
     safe_result = GetOrderResult(outcome=GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE)
     assert safe_result.order_summary is None
+    assert safe_result.source_version is None
     assert safe_result.failure_code is None
 
     with pytest.raises(ValidationError, match="cannot carry order_summary"):
@@ -102,6 +107,69 @@ def test_not_found_result_cannot_disclose_payload_or_failure_difference() -> Non
         GetOrderResult(
             outcome=GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
             failure_code="NOT_OWNED",
+        )
+
+
+def test_found_result_accepts_optional_strict_source_version_exactly() -> None:
+    legacy_result = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+    )
+    versioned_result = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=VALID_SOURCE_VERSION,
+    )
+
+    assert legacy_result.source_version is None
+    assert versioned_result.source_version == VALID_SOURCE_VERSION
+
+
+@pytest.mark.parametrize(
+    "invalid_source_version",
+    [
+        "",
+        "order-source-version.p0.v1:sha256:" + "b" * 64,
+        "mock-order-source-version.p0.v2:sha256:" + "b" * 64,
+        "mock-order-source-version.p0.v1:sha256:" + "b" * 63,
+        "mock-order-source-version.p0.v1:sha256:" + "b" * 65,
+        "mock-order-source-version.p0.v1:sha256:" + "B" * 64,
+        " " + VALID_SOURCE_VERSION,
+        VALID_SOURCE_VERSION + " ",
+        VALID_SOURCE_VERSION + "\n",
+        VALID_SOURCE_VERSION.encode(),
+    ],
+)
+def test_found_result_rejects_malformed_or_coercible_source_version(
+    invalid_source_version: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        GetOrderResult(
+            outcome=GetOrderOutcome.FOUND,
+            order_summary=_summary(),
+            source_version=invalid_source_version,
+        )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_code"),
+    [
+        (GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE, None),
+        (GetOrderOutcome.SYSTEM_FAILURE, "ORDER_STORE_UNAVAILABLE"),
+    ],
+)
+def test_non_found_result_cannot_carry_source_version(
+    outcome: GetOrderOutcome,
+    failure_code: str | None,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="non-FOUND result cannot carry source_version",
+    ):
+        GetOrderResult(
+            outcome=outcome,
+            source_version=VALID_SOURCE_VERSION,
+            failure_code=failure_code,
         )
 
 

@@ -36,6 +36,7 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import TraceEvent, TraceEventType
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 class RuntimeSpy:
@@ -235,6 +236,7 @@ def test_found_read_is_durably_fenced_once_then_observed() -> None:
             result=GetOrderResult(
                 outcome=GetOrderOutcome.FOUND,
                 order_summary=_summary(),
+                source_version=SYNTHETIC_SOURCE_VERSION,
             )
         )
     )
@@ -278,6 +280,7 @@ def test_every_non_applied_dispatch_fence_performs_zero_read(
             result=GetOrderResult(
                 outcome=GetOrderOutcome.FOUND,
                 order_summary=_summary(),
+                source_version=SYNTHETIC_SOURCE_VERSION,
             ),
             runtime=runtime,
         )
@@ -296,6 +299,7 @@ def test_insert_conflict_performs_zero_fence_and_zero_read() -> None:
         GetOrderResult(
             outcome=GetOrderOutcome.FOUND,
             order_summary=_summary(),
+            source_version=SYNTHETIC_SOURCE_VERSION,
         ),
         runtime.events,
     )
@@ -375,6 +379,7 @@ def test_finalize_conflict_never_writes_an_observation() -> None:
                 result=GetOrderResult(
                     outcome=GetOrderOutcome.FOUND,
                     order_summary=_summary(),
+                    source_version=SYNTHETIC_SOURCE_VERSION,
                 ),
                 runtime=runtime,
             ),
@@ -482,6 +487,7 @@ def test_cancel_during_terminal_finalization_closes_interrupted_once() -> None:
             GetOrderResult(
                 outcome=GetOrderOutcome.FOUND,
                 order_summary=_summary(),
+                source_version=SYNTHETIC_SOURCE_VERSION,
             ),
             runtime.events,
         )
