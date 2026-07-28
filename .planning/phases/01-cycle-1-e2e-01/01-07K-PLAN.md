@@ -49,7 +49,7 @@ must_haves:
 
 Purpose: 为后续真实Eval SUT提供expectation-free、owner-scoped、single-snapshot exact-Run logical closure，并关闭`GetOrderResult.FOUND` producer仍返回`source_version=None`的迁移缺口。
 
-Output: 一个只改两份Integration test的RED commit和一个只改两份Infrastructure source的GREEN commit；不创建Summary，不修改共享State或canonical owner。
+Output: 一个只改两份Integration test的RED commit、一个只改record adapter的reader GREEN commit和一个只改order adapter的producer GREEN commit；不创建Summary，不修改共享State或canonical owner。
 </objective>
 
 <execution_context>
@@ -124,19 +124,46 @@ reader对每一候选row都显式提供`record_code + record_schema_version`调�
 
 现有`P0PersistenceIntegrityCategory`足以表达失败；本Packet不得修改Application enum。version/code/metadata、owner、link、cardinality与child失败分别落在现有最窄类别，不能把所有错误折叠为database system error或safe absence。
 
-## 4. Relation-driven exact database closed set
+## 4. Relation-driven bounded discovery and exact database closed set
 
-root decode后，从其exact Conversation、`RunTaskLink`、Task、RequestUnit、Manifest、Gate、ToolCall、Observation、Trace与approved reference关系构建candidate identity set。查询必须同时满足：
+K在Infrastructure module内冻结以下**reader safety cap**；这些数值只限制P0 exact-Run审计读取，不把开放的Core多意图/cardinality语义改写成产品上限：
 
-1. 只使用root Run、其Conversation、闭合Task IDs及已解析reference keys；“同Conversation”本身不能把无Run关系的Message、Task或历史row收入closure。
-2. Message集合恰为RU v2 contextualization/input provenance、InputBinding/RequestUnit、Manifest和Trace实际引用的source-message set；不得按时间、内容或最新消息猜测，terminal ASSISTANT Message除非被approved relation实际引用否则不进入closure。
-3. RU v2 top-level最多一条；其accepted refs与decoded children exact-set。没有RU时children必须为空；存在同Run RU-v1或额外RU row必须被closed-set probe发现并fail closed，不能静默忽略。
-4. `RunTaskLink.task_id`与Task exact-set；ConversationTaskLink、RequestUnit、InputBinding、Task transition history、Gate、ToolCall/attempt、Observation、Manifest、Toolset artifact和Trace都按`ExactRunEvidenceClosure`现行关系/cardinality验证。
-5. Task transitions与Tool attempts来自各自decoded logical children，必须完整连续；任何额外top-level伪影、missing child、history fork/gap或另一个Run的child引用都fail closed。
-6. 对所有可由本root selector命中的private physical rows做exact anti-extra检查；供应给closure的每一row必须root-reachable，数据库中每个root-reachable row也必须被供应。
-7. Eval Result/Failure、Case、expectation、script/provider capture、HTTP response和raw envelope不进入logical closure。
+| physical / logical family | exact cap | query / overflow rule |
+|---|---:|---|
+| `agent_run_record` root、`conversation_record` root | 各1 | `LIMIT 2`；第二行即`LINK_CARDINALITY_MISMATCH` |
+| `request_understanding_record` | 1 | `LIMIT 2`；同Run v1/v2或第二条均整体失败 |
+| `context_manifest_record`、`model_visible_toolset_artifact` | 各2 | 对应Thin Slice `model_calls <= 2`，每family `LIMIT 3` |
+| `gate_decision_record`、`tool_call_record`、`observation_record` | 各1 | 对应Thin Slice `tool_calls/get_order_attempts <= 1`，每family `LIMIT 2` |
+| `message_record`、`task_record`、`request_unit_record`、`conversation_task_link_record`、`run_task_link_record`、`input_binding_record`、`trace_event_record` | 各64 | Infrastructure safety cap；每family `LIMIT 65` |
+| 每个top-level source的normalized references | 64 | `ORDER BY ordinal, relation, target... LIMIT 65` |
+| `accepted_task_delta`、`task_state_transition` logical children | 每family总计64且每parent 64 | decode前先检查raw child count `<=64`；随后strict child closure |
+| `tool_attempt_record` logical children | 总计1 | 对应P0无retry / `get_order_attempts <= 1`；`attempt_count`与child exact |
 
-所有family使用stable deterministic order后构造现有`ExactRunEvidenceClosure`；DTO再次拒绝duplicate/dangling/extra/cross-owner graph。任何失败都整体丢弃，不返回partial closure。
+任何cap达到`N+1`都在decode/materialize前抛fresh bounded `P0PersistenceIntegrityError(LINK_CARDINALITY_MISMATCH, correlation_ref)`；不得truncate、分页后拼接、提高cap、retry或用全owner/全Conversation无界扫描。未来需要超过这些reader caps时必须先修订K owner/Plan，不能由executor私设数值。
+
+candidate discovery在同一snapshot内按以下固定顺序执行，并对每个selector分别应用上表的`N+1` overflow probe；同一family从多个selector所得identity先去重，再次要求union size不超过该family cap：
+
+1. **Trusted root selector**：只用`record_code=agent_run_record + exact run_id + scope_owner_customer_id`取得唯一Run；strict decode后取得exact Conversation identity。
+2. **Reverse-reference selector**：从root Run identity开始，只沿Thin Slice reference matrix中“source属于本Run descendant、target属于已发现Run/Task/RequestUnit/ToolCall anchor”的registered relation反向找source identity；不得泛化为对Conversation、Message或Toolset dependency的全部incoming traversal，以免把其他Run历史带入。每个新source再按exact `(record_code, logical_identity, scope_owner_customer_id)`取row。
+3. **Physical-projection selector**：按family查询`run_id=root run`；对已发现Task/RequestUnit再查询exact `task_id IN (...)` / `request_unit_id IN (...)`；Conversation只取root指定identity，Message只可由approved outgoing source refs发现，不能用`conversation_id`批量猜测。selector结果与reverse-reference union，不相互替代。
+4. **Forward-reference selector**：对每个已选source读取normalized outgoing references，按exact code/identity/owner取dependency row；只接受canonical matrix中的top-level reference，payload/local correlation不伪装成top-level。
+5. 以visited `(record_code, logical_identity)`集合迭代2–4至fixed point；family cap和每source reference cap使总frontier有确定上界。Eval Result/Failure source、catalog外code/relation或跨owner endpoint一律整体失败，不扩展closure。
+
+union完成后才strict decode并验证：
+
+- root Run、Conversation、RU、`RunTaskLink`、Task、RequestUnit、InputBinding、ConversationTaskLink、Gate、ToolCall/attempt、Observation、Manifest、Toolset artifact、Trace及logical child exact closure；
+- Message集合恰为RU v2 contextualization/input provenance、InputBinding/RequestUnit、Manifest和Trace实际引用的source-message set；terminal ASSISTANT Message没有approved ref就不进入；
+- physical code/version/identity/owner/run/task/request-unit projection、normalized references与decoded envelope逐项一致；
+- 同snapshot重跑三个selector并要求其identity union、每个source reference tuple与decoded expected set byte-for-byte相等；任何missing、extra、duplicate、reordered或新frontier都是integrity failure。
+
+anti-extra RED必须分别证明两个独立发现通道不能被单点篡改绕过：
+
+- 正确`run_id/task_id/request_unit_id` projection但删除或改向root reference的额外row，仍被physical-projection selector发现并拒绝；
+- null/wrong physical projection但保留指向root anchor的合法registered reference，仍被reverse-reference selector发现并拒绝；
+- expected row由reference发现但其physical projection坏，或由projection发现但normalized reference缺失，均在parity gate失败；
+- 对上表每个cap class参数化插入第`N+1`项，并增加“一个通道规避、另一个通道命中”的evasive-extra回归。
+
+同时篡改全部root anchor projection与全部registered reference、因而不再声明属于该Run的孤立row不属于本exact-Run closure；K不得为寻找这类全局孤儿而扫描整个owner namespace。所有family按stable deterministic order构造现有`ExactRunEvidenceClosure`；任何失败整体丢弃，不返回partial closure。
 
 ## 5. RU-v2 authoritative Message provenance replay
 
@@ -242,8 +269,9 @@ protected_surface:
 commit_contract:
 
 1. RED `test(01-07K): define strict postgres evidence readers`：只改两份owned Integration test；两个source blob仍等于B_IP。focused command必须因reader缺失和legacy `FOUND + None` contract失败，不得因migration、fixture、syntax或环境失败。
-2. GREEN `feat(01-07K): add strict postgres evidence readers`：只改两份owned source；不重写RED。
-3. 首个review candidate相对B_IP恰为上述两个commit；final history为这两个固定RED/GREEN加零到多笔append-only `fix(01-07K): ...`。Finding修复不得amend/rebase/force-push已审历史，且每笔fix仍只能修改四文件allowlist。
+2. Reader GREEN `feat(01-07K): add strict postgres evidence reader`：只改`src/mini_agent/infrastructure/persistence/postgres.py`；不重写RED。
+3. Producer GREEN `feat(01-07K): add postgres order source version`：只改`src/mini_agent/infrastructure/order/postgres.py`；不重写RED或Reader GREEN。
+4. 首个review candidate相对B_IP恰为上述三个commit；final history为这三个固定RED/two-GREEN加零到多笔append-only `fix(01-07K): ...`。Finding修复不得amend/rebase/force-push已审历史，且每笔fix仍只能修改四文件allowlist。
 
 contract_changes: `YES / ADDITIVE INFRASTRUCTURE DEPENDENCY` — 实现既有ExactRunEvidencePort并使唯一get_order producer返回authoritative token；不改Port/DTO/schema/codec active routing。
 security_impact: `YES` — trusted-owner prefilter、single snapshot、exact version/provenance/closed set、foreign/absent不可区分、corruption fail-closed、raw diagnostic disposal和single-read token authority。
@@ -252,7 +280,7 @@ new_dependencies: `NONE`
 graphify_disposition: `DISABLED_BY_USER / NOT_RUN / NOT_A_GATE`
 rollback: 合并前关闭PR；合并后普通revert PR逆序撤销01-07K feature/fix commits，并重新阻塞01-07M及全部active-switch/contract/01-08下游。不得reset、force-push、删除/改写row、backfill、fallback或发明schema/data migration rollback。
 
-handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个base/head blobs、RED/GREEN输出、single-snapshot race与fixed-vector结果、protected-method oracle、focused/database/full gate、changed files/commit containment、cross-file scan、contract/security/Eval nonclaims、exact-head/latest-overlay review、风险与merge SHA。
+handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个base/head blobs、RED/two-GREEN输出、single-snapshot race与fixed-vector结果、protected-method oracle、focused/database/full gate、changed files/commit containment、cross-file scan、contract/security/Eval nonclaims、exact-head/latest-overlay review、风险与merge SHA。
 </packet_contract>
 
 <threat_model>
@@ -273,7 +301,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个ba
 <task type="auto" tdd="true">
   <name>Task 1: RED — freeze exact-Run PostgreSQL reader and source-version producer</name>
   <files>tests/integration/test_postgres_record_adapters.py, tests/integration/test_postgres_get_order.py</files>
-  <action>只改两份Integration test。为record adapter建立RU-v2 exact closure seeds，覆盖minimal INPUT_INVALID no-Task、success/foreign/not-found/gateway/stale-state/presentation等代表性graph；断言owner root不可区分、one Session/REPEATABLE READ、explicit v2 decode、v1/wrong-version拒绝、physical metadata/reference exact parity、Message span/hash replay、missing/extra/duplicate/cross-owner/run/history/reference负例、并发snapshot无hybrid和bounded raw-free error。为get_order增加A/B固定向量、content change与A→B→A、同一SELECT/owner predicate、missing/foreign无token、corruption system failure与forbidden-version-source断言。不要修改shared fixture/bootstrap或使用skip/xfail。</action>
+  <action>只改两份Integration test。为record adapter建立RU-v2 exact closure seeds，覆盖minimal INPUT_INVALID no-Task、success/foreign/not-found/gateway/stale-state/presentation等代表性graph；断言owner root不可区分、one Session/REPEATABLE READ、explicit v2 decode、v1/wrong-version拒绝、physical metadata/reference exact parity、Message span/hash replay、missing/extra/duplicate/cross-owner/run/history/reference负例、并发snapshot无hybrid和bounded raw-free error。按Section 4对每个cap class参数化`N+1` overflow，并覆盖projection-only、reverse-reference-only、missing-projection与missing-reference四类evasive extra。为get_order增加A/B固定向量、content change与A→B→A、同一SELECT/owner predicate、missing/foreign无token、corruption system failure与forbidden-version-source断言。不要修改shared fixture/bootstrap或使用skip/xfail。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_get_order.py -q</automated>
     RED必须非零且仅因01-07K reader/method behavior与legacy producer尚未实现；两个source blob仍等于B_IP。
@@ -284,7 +312,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个ba
 <task type="auto" tdd="true">
   <name>Task 2: GREEN — implement one-snapshot strict closure read</name>
   <files>src/mini_agent/infrastructure/persistence/postgres.py</files>
-  <action>只新增reader所需private imports/constants/helpers和`load_exact_run_evidence_for_owner`，复用现有physical models、versioned codec与bounded error。一个REPEATABLE READ/READ ONLY transaction内完成owner root、candidate rows、normalized references、strict decode、RU-v2 provenance和closed-set校验，最后构造existing ExactRunEvidenceClosure。不得修改58个既有method、调用多个公开Port、自行重建v2、返回raw envelope或写数据库。</action>
+  <action>只新增reader所需private imports/constants/helpers和`load_exact_run_evidence_for_owner`，复用现有physical models、versioned codec与bounded error。一个REPEATABLE READ/READ ONLY transaction内按Section 4固定caps与root→reverse-reference→physical-projection→forward-reference selector执行bounded union、strict decode、RU-v2 provenance、parity与closed-set校验，最后构造existing ExactRunEvidenceClosure。不得修改58个既有method、调用多个公开Port、自行重建v2、返回raw envelope或写数据库。focused转绿后只提交本文件，subject exact为`feat(01-07K): add strict postgres evidence reader`。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_record_adapters.py -q</automated>
     reader正负矩阵、concurrency snapshot、bounded error与session cleanup全部通过。
@@ -295,7 +323,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个ba
 <task type="auto" tdd="true">
   <name>Task 3: GREEN — generate authoritative get_order source version from the same read</name>
   <files>src/mini_agent/infrastructure/order/postgres.py</files>
-  <action>在现有`get_order` strict projection/order-id检查后按Thin Slice exact canonical payload/JSON/SHA-256算法生成token并随FOUND返回。保留一条owner-scopedSELECT和所有not-found/system-failure外部行为；不得增加column/query、读取fixture/schema metadata、泄露token或修改Core validator。</action>
+  <action>在现有`get_order` strict projection/order-id检查后按Thin Slice exact canonical payload/JSON/SHA-256算法生成token并随FOUND返回。保留一条owner-scopedSELECT和所有not-found/system-failure外部行为；不得增加column/query、读取fixture/schema metadata、泄露token或修改Core validator。focused转绿后只提交本文件，subject exact为`feat(01-07K): add postgres order source version`。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_get_order.py -q</automated>
     两个owner fixed vector、content sensitivity、A→B→A、one-query和negative matrix全部通过。
@@ -311,8 +339,30 @@ Feature Worktree必须从仓库根目录运行：
 
 ```bash
 base_sha=bbe14fadc0cd2e14ad35e19177b079fcab685dfc
+base_tree=65415ff5846892f257e95d8b8bd34f50752980a2
+expected_branch=codex/e2e01-01-strict-readers
+expected_worktree_id=e2e01-01-strict-readers
+expected_remote=https://github.com/weijie567/mini-agent.git
+current_root="$(git rev-parse --show-toplevel)"
+
+test "$(git remote get-url origin)" = "$expected_remote"
+test "$(git branch --show-current)" = "$expected_branch"
+test "$(basename "$current_root")" = "$expected_worktree_id"
+test "$(git worktree list --porcelain | awk -v root="$current_root" '
+  $1 == "worktree" { current = $2 }
+  $1 == "branch" && current == root { print $2 }
+')" = "refs/heads/$expected_branch"
 test "$(git rev-parse HEAD^0)" = "$base_sha" # first edit前
 test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+test "$(git rev-parse "$base_sha^{tree}")" = "$base_tree"
+test "$(git rev-parse "$base_sha:src/mini_agent/infrastructure/persistence/postgres.py")" = \
+  62bf768242ba141479182121200f6d041a54e5ba
+test "$(git rev-parse "$base_sha:src/mini_agent/infrastructure/order/postgres.py")" = \
+  e1909e06bac2e64b8349154f66c2b777164f1847
+test "$(git rev-parse "$base_sha:tests/integration/test_postgres_record_adapters.py")" = \
+  aa760d7c5fabf0ebf0b749f43de5a33729658334
+test "$(git rev-parse "$base_sha:tests/integration/test_postgres_get_order.py")" = \
+  df6bef3de4c4925f4ccbc2cdf6bc071beb2a0b42
 test -z "$(git status --short --untracked-files=all)"
 
 uv sync --all-groups
@@ -324,26 +374,29 @@ uv run pytest tests/integration/test_postgres_record_adapters.py tests/integrati
 uv run pytest
 
 git diff --check "$base_sha...HEAD"
-test "$(git rev-list --count "$base_sha..HEAD")" -ge 2
+test "$(git rev-list --count "$base_sha..HEAD")" -ge 3
 test "$(git rev-list --merges --count "$base_sha..HEAD")" -eq 0
 red_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '1p')"
-green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '2p')"
+reader_green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '2p')"
+producer_green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '3p')"
 test "$(git show -s --format=%s "$red_sha")" = \
   "test(01-07K): define strict postgres evidence readers"
-test "$(git show -s --format=%s "$green_sha")" = \
-  "feat(01-07K): add strict postgres evidence readers"
+test "$(git show -s --format=%s "$reader_green_sha")" = \
+  "feat(01-07K): add strict postgres evidence reader"
+test "$(git show -s --format=%s "$producer_green_sha")" = \
+  "feat(01-07K): add postgres order source version"
 test "$(git diff-tree --no-commit-id --name-only -r "$red_sha" | LC_ALL=C sort)" = \
   "$(printf '%s\n' \
     tests/integration/test_postgres_get_order.py \
     tests/integration/test_postgres_record_adapters.py)"
-test "$(git diff-tree --no-commit-id --name-only -r "$green_sha" | LC_ALL=C sort)" = \
-  "$(printf '%s\n' \
-    src/mini_agent/infrastructure/order/postgres.py \
-    src/mini_agent/infrastructure/persistence/postgres.py)"
+test "$(git diff-tree --no-commit-id --name-only -r "$reader_green_sha")" = \
+  src/mini_agent/infrastructure/persistence/postgres.py
+test "$(git diff-tree --no-commit-id --name-only -r "$producer_green_sha")" = \
+  src/mini_agent/infrastructure/order/postgres.py
 test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
-  sed '1,2d' |
+  sed '1,3d' |
   rg -v '^fix\(01-07K\): .+$' || true)"
-for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,2d'); do
+for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,3d'); do
   test -z "$(git diff-tree --no-commit-id --name-only -r "$fix_sha" |
     rg -v '^(src/mini_agent/infrastructure/(order/postgres|persistence/postgres)\.py|tests/integration/test_postgres_(get_order|record_adapters)\.py)$' ||
     true)"
@@ -356,7 +409,164 @@ test "$(git diff --name-only "$base_sha...HEAD" | LC_ALL=C sort)" = "$(printf '%
 test -z "$(git status --short --untracked-files=all)"
 ```
 
-Protected-method oracle从`git show "$base_sha:$file"`解析AST/source，证明：
+Protected-method oracle必须作为同一门禁实际运行：
+
+```bash
+base_sha=bbe14fadc0cd2e14ad35e19177b079fcab685dfc
+uv run python - "$base_sha" <<'PY'
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+import subprocess
+import sys
+
+BASE = sys.argv[1]
+TARGETS = (
+    (
+        "src/mini_agent/infrastructure/persistence/postgres.py",
+        "PostgresRecordAdapter",
+        frozenset(),
+        frozenset({"load_exact_run_evidence_for_owner"}),
+        58,
+    ),
+    (
+        "src/mini_agent/infrastructure/order/postgres.py",
+        "PostgresGetOrderAdapter",
+        frozenset({"get_order"}),
+        frozenset(),
+        3,
+    ),
+)
+FORBIDDEN_CALLS = frozenset({"__import__", "eval", "exec", "globals", "setattr"})
+
+
+def base_source(path: str) -> str:
+    return subprocess.check_output(
+        ["git", "show", f"{BASE}:{path}"],
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def unique_class(tree: ast.Module, name: str) -> ast.ClassDef:
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == name
+    ]
+    assert len(matches) == 1, (name, len(matches))
+    return matches[0]
+
+
+def methods(node: ast.ClassDef) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    result: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            assert child.name not in result, child.name
+            result[child.name] = child
+    return result
+
+
+def exact_segment(source: str, node: ast.AST) -> str:
+    start = node.lineno
+    decorators = getattr(node, "decorator_list", ())
+    if decorators:
+        start = min(start, *(item.lineno for item in decorators))
+    lines = source.splitlines(keepends=True)
+    return "".join(lines[start - 1 : node.end_lineno])
+
+
+def assert_exact_node(
+    base_text: str,
+    head_text: str,
+    base_node: ast.AST,
+    head_node: ast.AST,
+) -> None:
+    assert exact_segment(head_text, head_node) == exact_segment(base_text, base_node)
+    assert ast.dump(head_node, include_attributes=False) == ast.dump(
+        base_node,
+        include_attributes=False,
+    )
+
+
+def top_level_defs(tree: ast.Module) -> dict[str, ast.AST]:
+    result: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assert node.name not in result, node.name
+            result[node.name] = node
+    return result
+
+
+def forbidden_call_counts(tree: ast.Module) -> dict[str, int]:
+    return {
+        name: sum(
+            1
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == name
+        )
+        for name in FORBIDDEN_CALLS
+    }
+
+
+def imported_modules(tree: ast.Module) -> set[str]:
+    modules: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+    return modules
+
+
+for path, class_name, mutable_methods, additive_methods, expected_count in TARGETS:
+    before = base_source(path)
+    after = Path(path).read_text(encoding="utf-8")
+    before_tree = ast.parse(before)
+    after_tree = ast.parse(after)
+    before_class = unique_class(before_tree, class_name)
+    after_class = unique_class(after_tree, class_name)
+    before_methods = methods(before_class)
+    after_methods = methods(after_class)
+    assert len(before_methods) == expected_count
+    assert set(after_methods) == set(before_methods) | set(additive_methods)
+    for name, before_method in before_methods.items():
+        if name not in mutable_methods:
+            assert_exact_node(before, after, before_method, after_methods[name])
+    before_non_methods = [
+        ast.dump(node, include_attributes=False)
+        for node in before_class.body
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    after_non_methods = [
+        ast.dump(node, include_attributes=False)
+        for node in after_class.body
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    assert after_non_methods == before_non_methods
+
+    before_defs = top_level_defs(before_tree)
+    after_defs = top_level_defs(after_tree)
+    for name, before_node in before_defs.items():
+        if name != class_name:
+            assert name in after_defs
+            assert_exact_node(before, after, before_node, after_defs[name])
+    assert all(
+        name.startswith("_")
+        for name in set(after_defs) - set(before_defs)
+    )
+    assert forbidden_call_counts(after_tree) == forbidden_call_counts(before_tree)
+    new_imports = imported_modules(after_tree) - imported_modules(before_tree)
+    assert not any(name == "importlib" or name.startswith("importlib.") for name in new_imports)
+
+print("01-07K protected surface: PASS (58 + 2 exact)")
+PY
+```
+
+该oracle证明：
 
 - `PostgresRecordAdapter`全部58个pre-existing methods仍各有唯一同名binding且source segment/AST exact；
 - `PostgresGetOrderAdapter.__init__`与`seed_mock_order` exact；只有`get_order`是approved existing-method delta；
@@ -376,8 +586,8 @@ scan只报告后续L/M/Q/J/01-08消费者与owner alignment；本Packet不得越
 
 <success_criteria>
 
-1. RED/GREEN提交顺序、四文件scope与失败/通过输出可复现。
-2. ExactRunEvidencePort实现满足owner-root不可区分、single snapshot、exact version/decode/provenance/reference/closed-set及整体fail-closed合同。
+1. RED/reader GREEN/producer GREEN提交顺序、四文件scope与失败/通过输出可复现；review fix只可append并逐commit受allowlist约束。
+2. ExactRunEvidencePort实现满足owner-root不可区分、single snapshot、fixed per-family caps、双通道selector、exact version/decode/provenance/reference/closed-set及整体fail-closed合同。
 3. `get_order`对两个固定向量和content semantics精确，SQL仍恰为同一次owner-scoped read。
 4. 58 + 2个protected methods保持exact；allowlist外零改动，无active routing或lifecycle推进。
 5. feature与latest-overlay均通过完整门禁和独立review；只有K/L都reviewed串行merge后才形成`B_DEPENDENCY`。
