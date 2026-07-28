@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
+from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
-from sqlalchemy import inspect, text
+from alembic.script import ScriptDirectory
+from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 
+from mini_agent.application.persistence import (
+    P0_PERSISTENCE_REGISTRY,
+    P0_RECORD_SCHEMA_VERSION_CATALOG,
+)
+from mini_agent.infrastructure.persistence import models as persistence_models
 from mini_agent.infrastructure.persistence.database import (
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_LOCAL_TEST_DATABASE_URL,
@@ -37,6 +47,359 @@ _LIBPQ_ROUTING_ENVIRONMENT_CASES = [
     ("PGLOADBALANCEHOSTS", "random"),
     ("PGOPTIONS", "-csearch_path=public"),
 ]
+
+_MIGRATION_REVISION = "20260728_0003"
+_PREVIOUS_MIGRATION_REVISION = "20260727_0002"
+_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic/versions/20260728_0003_request_understanding_v2_expand.py"
+)
+_DOWNGRADE_BLOCKED_MESSAGE = (
+    "cannot downgrade request understanding v2 physical schema while "
+    "v2 records exist"
+)
+_V1_CODE_VERSION_PAIRS = (
+    ("agent_run_record", "agent_run_record.p0.v1"),
+    ("context_manifest_record", "context_manifest_record.p0.v1"),
+    ("conversation_record", "conversation_record.p0.v1"),
+    ("conversation_task_link_record", "conversation_task_link_record.p0.v1"),
+    (
+        "eval_execution_failure_record",
+        "eval_execution_failure_record.p0.v1",
+    ),
+    ("eval_result_record", "eval_result_record.p0.v1"),
+    ("gate_decision_record", "gate_decision_record.p0.v1"),
+    ("input_binding_record", "input_binding_record.p0.v1"),
+    ("message_record", "message_record.p0.v1"),
+    (
+        "model_visible_toolset_artifact",
+        "model_visible_toolset_artifact.p0.v1",
+    ),
+    ("observation_record", "observation_record.p0.v1"),
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v1",
+    ),
+    ("request_unit_record", "request_unit_record.p0.v1"),
+    ("run_task_link_record", "run_task_link_record.p0.v1"),
+    ("task_record", "task_record.p0.v1"),
+    ("tool_call_record", "tool_call_record.p0.v1"),
+    ("trace_event_record", "trace_event_record.p0.v1"),
+)
+_EXPANDED_CODE_VERSION_PAIRS = (
+    *_V1_CODE_VERSION_PAIRS,
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v2",
+    ),
+)
+
+
+def _module_literal(tree: ast.Module, name: str) -> object:
+    matches = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        )
+        or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        )
+    ]
+    assert len(matches) == 1
+    match = matches[0]
+    value = match.value
+    assert value is not None
+    return ast.literal_eval(value)
+
+
+def _literal_pair_tuple(tree: ast.Module, name: str) -> tuple[tuple[str, str], ...]:
+    matches = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        )
+    ]
+    assert len(matches) == 1
+    value = matches[0].value
+    assert isinstance(value, ast.Tuple)
+    assert all(
+        isinstance(pair, ast.Tuple)
+        and len(pair.elts) == 2
+        and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            for item in pair.elts
+        )
+        for pair in value.elts
+    )
+    literal = ast.literal_eval(value)
+    assert isinstance(literal, tuple)
+    return literal
+
+
+def _physical_probe_values(
+    record_code: str,
+    record_schema_version: str,
+    *,
+    record_id: UUID | None = None,
+    marker: str = "physical-constraint-probe",
+) -> dict[str, object]:
+    probe_id = record_id or uuid4()
+    return {
+        "record_id": probe_id,
+        "record_code": record_code,
+        "record_schema_version": record_schema_version,
+        "logical_identity": [["physical_probe_id", str(probe_id)]],
+        "envelope": {"physical_probe": marker},
+    }
+
+
+def _insert_physical_probe(
+    connection,
+    record_code: str,
+    record_schema_version: str,
+    *,
+    record_id: UUID | None = None,
+    marker: str = "physical-constraint-probe",
+) -> UUID:
+    values = _physical_probe_values(
+        record_code,
+        record_schema_version,
+        record_id=record_id,
+        marker=marker,
+    )
+    connection.execute(P0RecordModel.__table__.insert().values(**values))
+    stored_id = values["record_id"]
+    assert isinstance(stored_id, UUID)
+    return stored_id
+
+
+def _record_row(engine: Engine, record_id: UUID) -> dict[str, object]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(P0RecordModel.__table__).where(
+                P0RecordModel.record_id == record_id
+            )
+        ).mappings().one()
+        return dict(row)
+
+
+def _migration_revision(engine: Engine) -> str:
+    with engine.connect() as connection:
+        revision = connection.scalar(
+            text("SELECT version_num FROM alembic_version")
+        )
+    assert isinstance(revision, str)
+    return revision
+
+
+def _schema_structure(engine: Engine) -> tuple[object, ...]:
+    inspector = inspect(engine)
+    tables = tuple(sorted(inspector.get_table_names()))
+    table_details: list[tuple[object, ...]] = []
+    for table_name in tables:
+        columns = tuple(
+            sorted(
+                (
+                    column["name"],
+                    str(column["type"]),
+                    bool(column["nullable"]),
+                    str(column.get("default")),
+                )
+                for column in inspector.get_columns(table_name)
+            )
+        )
+        checks = tuple(
+            sorted(
+                item["name"]
+                for item in inspector.get_check_constraints(table_name)
+            )
+        )
+        indexes = tuple(
+            sorted(
+                (
+                    item["name"],
+                    tuple(item["column_names"]),
+                    bool(item["unique"]),
+                )
+                for item in inspector.get_indexes(table_name)
+                if not item.get("duplicates_constraint")
+            )
+        )
+        uniques = tuple(
+            sorted(
+                (
+                    item["name"],
+                    tuple(item["column_names"]),
+                )
+                for item in inspector.get_unique_constraints(table_name)
+            )
+        )
+        foreign_keys = tuple(
+            sorted(
+                (
+                    item["name"],
+                    tuple(item["constrained_columns"]),
+                    item["referred_table"],
+                    tuple(item["referred_columns"]),
+                    tuple(sorted(item["options"].items())),
+                )
+                for item in inspector.get_foreign_keys(table_name)
+            )
+        )
+        primary_key = tuple(
+            inspector.get_pk_constraint(table_name)["constrained_columns"]
+        )
+        table_details.append(
+            (
+                table_name,
+                columns,
+                checks,
+                indexes,
+                uniques,
+                foreign_keys,
+                primary_key,
+            )
+        )
+    return tables, tuple(table_details)
+
+
+def _record_check_definitions(engine: Engine) -> dict[str, str]:
+    return {
+        item["name"]: item["sqltext"]
+        for item in inspect(engine).get_check_constraints("p0_records")
+    }
+
+
+def _assert_lock_timeout(
+    engine: Engine,
+    statement,
+    *,
+    parameters: dict[str, object] | None = None,
+) -> None:
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            with pytest.raises(OperationalError) as captured:
+                connection.execute(statement, parameters or {})
+            assert getattr(captured.value.orig, "sqlstate", None) == "55P03"
+        finally:
+            transaction.rollback()
+
+
+def test_request_understanding_v2_expand_migration_source_is_self_contained() -> None:
+    assert _MIGRATION_PATH.is_file()
+    source = _MIGRATION_PATH.read_text()
+    tree = ast.parse(source)
+
+    imports: set[tuple[str, tuple[tuple[str, str | None], ...]]] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imports.add(
+                (
+                    "",
+                    tuple((item.name, item.asname) for item in node.names),
+                )
+            )
+        elif isinstance(node, ast.ImportFrom):
+            imports.add(
+                (
+                    node.module or "",
+                    tuple((item.name, item.asname) for item in node.names),
+                )
+            )
+    assert imports == {
+        ("__future__", (("annotations", None),)),
+        ("collections.abc", (("Sequence", None),)),
+        ("", (("sqlalchemy", "sa"),)),
+        ("alembic", (("op", None),)),
+    }
+    assert "mini_agent" not in source
+    assert not any(
+        isinstance(
+            node,
+            (
+                ast.ListComp,
+                ast.SetComp,
+                ast.DictComp,
+                ast.GeneratorExp,
+            ),
+        )
+        for node in ast.walk(tree)
+    )
+
+    assert _module_literal(tree, "revision") == _MIGRATION_REVISION
+    assert (
+        _module_literal(tree, "down_revision")
+        == _PREVIOUS_MIGRATION_REVISION
+    )
+    assert _module_literal(tree, "branch_labels") is None
+    assert _module_literal(tree, "depends_on") is None
+    assert _literal_pair_tuple(tree, "_V1_CODE_VERSION_PAIRS") == (
+        _V1_CODE_VERSION_PAIRS
+    )
+    assert _literal_pair_tuple(tree, "_EXPANDED_CODE_VERSION_PAIRS") == (
+        _EXPANDED_CODE_VERSION_PAIRS
+    )
+
+    op_calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "op"
+        )
+    }
+    assert op_calls == {
+        "create_check_constraint",
+        "drop_constraint",
+        "get_bind",
+    }
+
+    downgrade_matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "downgrade"
+    ]
+    assert len(downgrade_matches) == 1
+    downgrade_source = ast.get_source_segment(source, downgrade_matches[0])
+    assert downgrade_source is not None
+    lock_index = downgrade_source.index(
+        "LOCK TABLE p0_records IN SHARE ROW EXCLUSIVE MODE"
+    )
+    exists_index = downgrade_source.index("SELECT EXISTS")
+    ddl_index = downgrade_source.index("_replace_code_version_constraint")
+    assert lock_index < exists_index < ddl_index
+    assert _DOWNGRADE_BLOCKED_MESSAGE in source
+    assert "SELECT COUNT" not in source.upper()
+    assert "UPDATE p0_records" not in source
+    assert "DELETE FROM p0_records" not in source
+
+
+def test_request_understanding_v2_expand_is_single_linear_alembic_head() -> None:
+    script = ScriptDirectory.from_config(
+        alembic_config(
+            DEFAULT_LOCAL_TEST_DATABASE_URL,
+            testing=True,
+        )
+    )
+
+    assert tuple(script.get_heads()) == (_MIGRATION_REVISION,)
+    revision = script.get_revision(_MIGRATION_REVISION)
+    assert revision is not None
+    assert revision.down_revision == _PREVIOUS_MIGRATION_REVISION
 
 
 def _extension_schema(database_url: str) -> str | None:
@@ -213,9 +576,36 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("20260727_0002")
+            ) == (_MIGRATION_REVISION)
     finally:
         engine.dispose()
+
+
+def test_sqlalchemy_metadata_has_exact_expanded_physical_pair_set() -> None:
+    assert len(persistence_models._RECORD_CODES) == 17
+    assert set(persistence_models._RECORD_CODES) == {
+        code for code, _ in _V1_CODE_VERSION_PAIRS
+    }
+    assert persistence_models._CODE_VERSION_PAIRS == tuple(
+        sorted(_EXPANDED_CODE_VERSION_PAIRS)
+    )
+
+    catalog_pairs = tuple(
+        sorted(
+            (code.value, schema_version)
+            for code, schema_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+        )
+    )
+    assert catalog_pairs == tuple(sorted(_EXPANDED_CODE_VERSION_PAIRS))
+
+    active_pairs = tuple(
+        sorted(
+            (code.value, spec.record_schema_version)
+            for code, spec in P0_PERSISTENCE_REGISTRY.items()
+        )
+    )
+    assert active_pairs == _V1_CODE_VERSION_PAIRS
+    assert len(P0_PERSISTENCE_REGISTRY) == 17
 
 
 def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
@@ -339,6 +729,259 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
         engine.dispose()
 
 
+def test_expanded_physical_constraint_accepts_only_exact_catalog_pairs(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("expanded-pair-matrix")
+    engine = namespace.build_engine()
+    try:
+        with engine.begin() as connection:
+            for record_code, schema_version in _EXPANDED_CODE_VERSION_PAIRS:
+                _insert_physical_probe(
+                    connection,
+                    record_code,
+                    schema_version,
+                )
+
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM p0_records")) == 18
+
+        unsupported_pairs = (
+            (
+                "conversation_record",
+                "request_understanding_record.p0.v2",
+            ),
+            (
+                "request_understanding_record",
+                "request_understanding_record.p0.v3",
+            ),
+            (
+                "request_understanding_record",
+                "request_understanding_record.p0.v2 ",
+            ),
+            ("unknown_record", "unknown_record.p0.v1"),
+        )
+        for record_code, schema_version in unsupported_pairs:
+            with pytest.raises(IntegrityError):
+                with engine.begin() as connection:
+                    _insert_physical_probe(
+                        connection,
+                        record_code,
+                        schema_version,
+                    )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_existing_v1_physical_row_is_unchanged_by_expand_upgrade(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("expand-preserves-v1")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    record_id = uuid4()
+    try:
+        command.downgrade(config, _PREVIOUS_MIGRATION_REVISION)
+        assert _migration_revision(engine) == _PREVIOUS_MIGRATION_REVISION
+
+        with engine.begin() as connection:
+            _insert_physical_probe(
+                connection,
+                "request_understanding_record",
+                "request_understanding_record.p0.v1",
+                record_id=record_id,
+                marker="preserved-v1-physical-row",
+            )
+        before = _record_row(engine, record_id)
+
+        command.upgrade(config, _MIGRATION_REVISION)
+
+        assert _migration_revision(engine) == _MIGRATION_REVISION
+        assert _record_row(engine, record_id) == before
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_expand_downgrade_upgrade_without_v2_rows_changes_only_check_body(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("expand-cycle-no-v2")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        expanded_structure = _schema_structure(engine)
+        expanded_checks = _record_check_definitions(engine)
+        assert _migration_revision(engine) == _MIGRATION_REVISION
+
+        command.downgrade(config, _PREVIOUS_MIGRATION_REVISION)
+
+        v1_structure = _schema_structure(engine)
+        v1_checks = _record_check_definitions(engine)
+        assert _migration_revision(engine) == _PREVIOUS_MIGRATION_REVISION
+        assert v1_structure == expanded_structure
+        assert set(v1_checks) == set(expanded_checks)
+        assert (
+            v1_checks["ck_p0_records_code_version_closed"]
+            != expanded_checks["ck_p0_records_code_version_closed"]
+        )
+        assert {
+            name: definition
+            for name, definition in v1_checks.items()
+            if name != "ck_p0_records_code_version_closed"
+        } == {
+            name: definition
+            for name, definition in expanded_checks.items()
+            if name != "ck_p0_records_code_version_closed"
+        }
+
+        command.upgrade(config, _MIGRATION_REVISION)
+
+        assert _migration_revision(engine) == _MIGRATION_REVISION
+        assert _schema_structure(engine) == expanded_structure
+        assert _record_check_definitions(engine) == expanded_checks
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_expand_downgrade_with_v2_row_fails_closed_and_atomically(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("expand-downgrade-v2")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    record_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            _insert_physical_probe(
+                connection,
+                "request_understanding_record",
+                "request_understanding_record.p0.v2",
+                record_id=record_id,
+                marker="must-not-appear-in-downgrade-error",
+            )
+        before = _record_row(engine, record_id)
+
+        with pytest.raises(RuntimeError) as captured:
+            command.downgrade(config, _PREVIOUS_MIGRATION_REVISION)
+
+        assert str(captured.value) == _DOWNGRADE_BLOCKED_MESSAGE
+        assert "must-not-appear-in-downgrade-error" not in str(captured.value)
+        assert str(record_id) not in str(captured.value)
+        assert _migration_revision(engine) == _MIGRATION_REVISION
+        assert _record_row(engine, record_id) == before
+
+        with engine.begin() as connection:
+            second_v2_id = _insert_physical_probe(
+                connection,
+                "request_understanding_record",
+                "request_understanding_record.p0.v2",
+                marker="expanded-constraint-remains",
+            )
+        assert _record_row(engine, second_v2_id)["record_schema_version"] == (
+            "request_understanding_record.p0.v2"
+        )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                _insert_physical_probe(
+                    connection,
+                    "conversation_record",
+                    "request_understanding_record.p0.v2",
+                )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_share_row_exclusive_lock_blocks_insert_and_update(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("expand-lock-contract")
+    engine = namespace.build_engine()
+    existing_id = uuid4()
+    recovery_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            _insert_physical_probe(
+                connection,
+                "conversation_record",
+                "conversation_record.p0.v1",
+                record_id=existing_id,
+                marker="lock-existing-row",
+            )
+
+        lock_connection = engine.connect()
+        lock_transaction = lock_connection.begin()
+        try:
+            lock_connection.execute(
+                text(
+                    "LOCK TABLE p0_records "
+                    "IN SHARE ROW EXCLUSIVE MODE"
+                )
+            )
+            _assert_lock_timeout(
+                engine,
+                P0RecordModel.__table__.insert().values(
+                    **_physical_probe_values(
+                        "request_understanding_record",
+                        "request_understanding_record.p0.v2",
+                        record_id=recovery_id,
+                        marker="blocked-insert",
+                    )
+                ),
+            )
+            _assert_lock_timeout(
+                engine,
+                P0RecordModel.__table__.update()
+                .where(P0RecordModel.record_id == existing_id)
+                .values(lifecycle_status="BLOCKED_UPDATE"),
+            )
+
+            with engine.connect() as observer:
+                assert (
+                    observer.scalar(text("SELECT count(*) FROM p0_records"))
+                    == 1
+                )
+                assert observer.scalar(
+                    select(P0RecordModel.lifecycle_status).where(
+                        P0RecordModel.record_id == existing_id
+                    )
+                ) is None
+        finally:
+            lock_transaction.rollback()
+            lock_connection.close()
+
+        with engine.begin() as connection:
+            _insert_physical_probe(
+                connection,
+                "request_understanding_record",
+                "request_understanding_record.p0.v2",
+                record_id=recovery_id,
+                marker="write-recovers-after-lock",
+            )
+        assert _record_row(engine, recovery_id)["envelope"] == {
+            "physical_probe": "write-recovers-after-lock"
+        }
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
 def test_disposable_namespace_upgrade_downgrade_upgrade(
     postgres_namespace_factory,
 ) -> None:
@@ -369,7 +1012,7 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
         with engine.connect() as connection:
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == "20260727_0002"
+            ) == _MIGRATION_REVISION
     finally:
         engine.dispose()
         postgres_namespace_factory.drop(namespace)
