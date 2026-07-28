@@ -2493,7 +2493,7 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         (
             v2_envelope,
             "request_understanding_record.p0.v1",
-            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
         ),
         (
             v2_envelope,
@@ -2969,3 +2969,104 @@ def test_codec_expand_preserves_all_legacy_projection_counts() -> None:
         if rule.classification.value in reference_classes
     )
     assert (len(top), len(child), len(references)) == (66, 7, 45)
+
+
+@pytest.mark.parametrize("selected_version", ("v1", "v2"))
+@pytest.mark.parametrize("input_kind", ("mapping", "str", "bytes"))
+@pytest.mark.parametrize(
+    "unsafe_outer_version",
+    (
+        ["RAW-VERSION-Token-VERY-SECRET"],
+        {"raw": "RAW-VERSION-Token-VERY-SECRET"},
+    ),
+    ids=("list", "mapping"),
+)
+def test_versioned_decode_bounds_non_string_outer_version_before_membership(
+    selected_version: str,
+    input_kind: str,
+    unsafe_outer_version: object,
+) -> None:
+    marker = "RAW-VERSION-Token-VERY-SECRET"
+    if selected_version == "v1":
+        case = _case(P0RecordCode.MESSAGE_RECORD)
+        envelope = encode_persistence_record(case.code, case.record)
+        expected_record_code = case.code
+        expected_schema_version = "message_record.p0.v1"
+    else:
+        envelope = _encode_v2(_request_understanding_v2_case("partial"))
+        expected_record_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        expected_schema_version = RU_V2_SCHEMA_VERSION
+
+    raw = json.loads(envelope.model_dump_json())
+    raw["record_schema_version"] = unsafe_outer_version
+    inputs: dict[str, object] = {
+        "mapping": raw,
+        "str": json.dumps(raw),
+        "bytes": json.dumps(raw).encode("utf-8"),
+    }
+    with pytest.raises(P0PersistenceIntegrityError) as raised:
+        persistence_module.decode_persistence_record_versioned(
+            inputs[input_kind],
+            expected_record_code=expected_record_code,
+            expected_schema_version=expected_schema_version,
+            correlation_ref=_uuid(299),
+        )
+    assert (
+        raised.value.category
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+    )
+    projection = " ".join(
+        (str(raised.value), repr(raised.value), repr(raised.value.args))
+    )
+    assert marker not in projection
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize("case", _record_cases(), ids=lambda case: case.code.value)
+def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
+    case: RecordCase,
+) -> None:
+    envelope = encode_persistence_record(
+        case.code,
+        case.record,
+        external_references=case.external_references,
+        logical_children=case.logical_children,
+    )
+    other_active_version = next(
+        spec.record_schema_version
+        for code, spec in P0_PERSISTENCE_REGISTRY.items()
+        if code is not case.code
+    )
+    mutations: list[dict[str, object]] = []
+    missing = json.loads(envelope.model_dump_json())
+    missing.pop("record_schema_version")
+    mutations.append(missing)
+    for outer_version in (
+        other_active_version,
+        RU_V2_SCHEMA_VERSION,
+        "unknown-future-record.p0.v99",
+    ):
+        raw = json.loads(envelope.model_dump_json())
+        raw["record_schema_version"] = outer_version
+        mutations.append(raw)
+
+    for raw in mutations:
+        with pytest.raises(P0PersistenceIntegrityError) as legacy_raised:
+            decode_persistence_record(
+                raw,
+                expected_record_code=case.code,
+                correlation_ref=_uuid(299),
+            )
+        with pytest.raises(P0PersistenceIntegrityError) as versioned_raised:
+            persistence_module.decode_persistence_record_versioned(
+                raw,
+                expected_record_code=case.code,
+                expected_schema_version=(
+                    P0_PERSISTENCE_REGISTRY[
+                        case.code
+                    ].record_schema_version
+                ),
+                correlation_ref=_uuid(299),
+            )
+        assert versioned_raised.value.category is legacy_raised.value.category

@@ -2776,6 +2776,7 @@ def _classify_outer_versioned(
     raw_json: str | bytes,
     expected_record_code: P0RecordCode,
     expected_schema_version: str,
+    selected_spec: P0RecordSchemaSpec,
 ) -> dict[str, Any]:
     category: P0PersistenceIntegrityCategory | None = None
     parsed: object = None
@@ -2811,11 +2812,21 @@ def _classify_outer_versioned(
             P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION
         )
     raw_version = parsed["record_schema_version"]
+    if type(raw_version) is not str:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+        )
     if raw_version != expected_schema_version:
-        known_versions = {
-            known_version
-            for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
-        }
+        if selected_spec is P0_PERSISTENCE_REGISTRY[expected_record_code]:
+            known_versions = {
+                P0_PERSISTENCE_REGISTRY[code].record_schema_version
+                for code in P0RecordCode
+            }
+        else:
+            known_versions = {
+                known_version
+                for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+            }
         category = (
             P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
             if raw_version in known_versions
@@ -2840,6 +2851,7 @@ def _decode_request_understanding_v2(
         raw_json,
         expected_record_code,
         expected_schema_version,
+        _REQUEST_UNDERSTANDING_V2_SPEC,
     )
     inner_data = outer_data.get("payload")
     if (
@@ -2985,6 +2997,7 @@ def decode_persistence_record_versioned(
                 raw_json,
                 expected_record_code,
                 expected_schema_version,
+                selected,
             )
             result = _decode(raw_json, expected_record_code)
     except _IntegritySignal as signal:
