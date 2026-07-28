@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PostgreSQLUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from mini_agent.application.persistence import (
-    P0_PERSISTENCE_REGISTRY,
+    P0_RECORD_SCHEMA_VERSION_CATALOG,
     P0RecordCode,
 )
 
@@ -31,8 +31,10 @@ def _sql_values(values: tuple[str, ...]) -> str:
 
 _RECORD_CODES = tuple(code.value for code in P0RecordCode)
 _CODE_VERSION_PAIRS = tuple(
-    (code.value, spec.record_schema_version)
-    for code, spec in P0_PERSISTENCE_REGISTRY.items()
+    sorted(
+        (code.value, schema_version)
+        for code, schema_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+    )
 )
 _CODE_VERSION_CHECK = " OR ".join(
     f"(record_code = '{code}' AND record_schema_version = '{version}')"
