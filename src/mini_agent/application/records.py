@@ -2519,6 +2519,18 @@ _EXACT_EVIDENCE_TUPLE_TYPES: dict[str, type[BaseModel]] = {
     "trace_events": TraceEvent,
 }
 
+_EXACT_EVIDENCE_TOOL_LIFECYCLE_STATUS: dict[
+    TraceEventType,
+    ToolCallStatus,
+] = {
+    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+    TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
+}
+
 
 def _exact_evidence_unique(
     identities: tuple[object, ...],
@@ -3389,11 +3401,18 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 )
 
         observation_source_edge_counts: dict[UUID, int] = {}
+        run_stopped_events: list[TraceEvent] = []
+        tool_lifecycle_events_by_call: dict[
+            UUID,
+            list[tuple[ToolCallStatus, TraceEvent]],
+        ] = {call_id: [] for call_id in call_by_id}
         for event in self.trace_events:
             if event.run_id != run.run_id or event.case_id is not None:
                 raise ValueError(
                     "TraceEvent must bind the root Run without Eval case identity"
                 )
+            if event.event_type is TraceEventType.RUN_STOPPED:
+                run_stopped_events.append(event)
             if event.message_ref is not None:
                 referenced_message_ids.add(event.message_ref)
             if event.accepted_delta_ref is not None:
@@ -3481,6 +3500,13 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 call = call_by_id.get(event.tool_call_id)
                 if call is None:
                     raise ValueError("Trace ToolCall ref must resolve in closure")
+                lifecycle_status = _EXACT_EVIDENCE_TOOL_LIFECYCLE_STATUS.get(
+                    event.event_type
+                )
+                if lifecycle_status is not None:
+                    tool_lifecycle_events_by_call[event.tool_call_id].append(
+                        (lifecycle_status, event)
+                    )
                 if event.task_id is not None and event.task_id != call.task_id:
                     raise ValueError("Trace Task must match its ToolCall")
                 if (
@@ -3550,6 +3576,103 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                         0,
                     )
                     + 1
+                )
+
+        active_run_statuses = {
+            AgentRunStatus.CREATED,
+            AgentRunStatus.RUNNING,
+        }
+        if run.status in active_run_statuses:
+            if run_stopped_events:
+                raise ValueError("active Run cannot have RunStopped Trace")
+        elif len(run_stopped_events) != 1:
+            raise ValueError(
+                "terminal RunStopped Trace must exist exactly once"
+            )
+        else:
+            run_stopped = run_stopped_events[0]
+            if (
+                run_stopped.stop_reason is not run.stop_reason
+                or run_stopped.occurred_at != run.completed_at
+            ):
+                raise ValueError(
+                    "terminal RunStopped Trace must match the Run projection"
+                )
+
+        terminal_tool_statuses = {
+            ToolCallStatus.SUCCEEDED,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.TIMED_OUT,
+            ToolCallStatus.INTERRUPTED,
+        }
+        tool_lifecycle_phase = {
+            ToolCallStatus.CREATED: 0,
+            ToolCallStatus.RUNNING: 1,
+            ToolCallStatus.SUCCEEDED: 2,
+            ToolCallStatus.FAILED: 2,
+            ToolCallStatus.TIMED_OUT: 2,
+            ToolCallStatus.INTERRUPTED: 2,
+        }
+        for call_id, call in call_by_id.items():
+            lifecycle_events = tool_lifecycle_events_by_call[call_id]
+            if not lifecycle_events:
+                raise ValueError(
+                    "ToolCall lifecycle must include its current projection"
+                )
+            ordered_lifecycle = sorted(
+                lifecycle_events,
+                key=lambda item: (
+                    item[1].occurred_at,
+                    tool_lifecycle_phase[item[0]],
+                    item[1].trace_event_id.hex,
+                ),
+            )
+            ordered_statuses = tuple(
+                status for status, _event in ordered_lifecycle
+            )
+            if (
+                len(ordered_statuses) != len(set(ordered_statuses))
+                or any(
+                    tool_lifecycle_phase[current]
+                    >= tool_lifecycle_phase[following]
+                    for current, following in zip(
+                        ordered_statuses,
+                        ordered_statuses[1:],
+                    )
+                )
+                or any(
+                    event.occurred_at < call.started_at
+                    for _status, event in ordered_lifecycle
+                )
+            ):
+                raise ValueError(
+                    "ToolCall lifecycle timestamps and status order must agree"
+                )
+            terminal_lifecycle = tuple(
+                (status, event)
+                for status, event in ordered_lifecycle
+                if status in terminal_tool_statuses
+            )
+            latest_status, latest_event = ordered_lifecycle[-1]
+            if call.status in terminal_tool_statuses:
+                if (
+                    len(terminal_lifecycle) != 1
+                    or latest_status is not call.status
+                    or latest_event.occurred_at != call.finished_at
+                    or any(
+                        event.occurred_at > call.finished_at
+                        for _status, event in ordered_lifecycle
+                    )
+                ):
+                    raise ValueError(
+                        "ToolCall lifecycle must match its terminal projection"
+                    )
+            elif (
+                terminal_lifecycle
+                or latest_status is not call.status
+            ):
+                raise ValueError(
+                    "ToolCall lifecycle must match its active projection"
                 )
 
         if set(observation_source_edge_counts) != set(observation_by_id) or any(

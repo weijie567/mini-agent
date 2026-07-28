@@ -5562,3 +5562,224 @@ def test_exact_run_evidence_current_unit_matches_latest_same_task_delta() -> Non
         rebuilt.request_unit_records[0].input_binding_refs
         == latest_child.input_binding_refs
     )
+
+
+_TOOL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
+    }
+)
+
+
+def _active_tool_exact_run_evidence(
+    status: ToolCallStatus,
+) -> ExactRunEvidenceClosure:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    attempt = closure.tool_attempts[0]
+    traces = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type not in _TOOL_LIFECYCLE_EVENT_TYPES
+        and event.event_type is not TraceEventType.OBSERVATION_RECORDED
+    )
+    if status is ToolCallStatus.CREATED:
+        projected_call = _project_tool_call(
+            call,
+            attempt_count=0,
+            status=status,
+            finished_at=None,
+            result_ref=None,
+        )
+        attempts: tuple[ToolAttemptRecord, ...] = ()
+        lifecycle_event_type = TraceEventType.TOOL_CALL_CREATED
+    else:
+        projected_call = _project_tool_call(
+            call,
+            status=status,
+            finished_at=None,
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                finished_at=None,
+                outcome=None,
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_STARTED
+    lifecycle_event = _exact_evidence_trace(
+        event_type=lifecycle_event_type,
+        run_id=closure.run_record.run_id,
+        occurred_at=projected_call.started_at,
+        task_id=projected_call.task_id,
+        request_unit_id=projected_call.request_unit_id,
+        tool_call_id=projected_call.tool_call_id,
+        tool_call_terminal_status=status,
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        request_unit_records=(
+            _rebuild(closure.request_unit_records[0], observation_refs=()),
+        ),
+        tool_calls=(projected_call,),
+        tool_attempts=attempts,
+        observation_records=(),
+        trace_events=(*traces, lifecycle_event),
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    (AgentRunStatus.CREATED, AgentRunStatus.RUNNING),
+)
+def test_exact_run_evidence_accepts_active_run_without_stopped_trace(
+    status: AgentRunStatus,
+) -> None:
+    terminal = _minimal_exact_run_evidence()
+    active = _project_run(
+        terminal.run_record,
+        status=status,
+        completed_at=None,
+        stop_reason=None,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=active,
+        trace_events=tuple(
+            event
+            for event in terminal.trace_events
+            if event.event_type is not TraceEventType.RUN_STOPPED
+        ),
+    )
+    assert rebuilt.run_record.status is status
+
+
+def test_exact_run_evidence_rejects_stopped_trace_for_active_run() -> None:
+    terminal = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    active = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.RUNNING,
+        completed_at=None,
+        stop_reason=None,
+    )
+    with pytest.raises(ValidationError, match="active Run cannot have RunStopped"):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=active,
+            run_task_links=(
+                _rebuild(
+                    terminal.run_task_links[0],
+                    result_task_state_version=None,
+                ),
+            ),
+        )
+
+
+def test_exact_run_evidence_closes_terminal_run_stopped_projection() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    assert stopped.stop_reason is closure.run_record.stop_reason
+    assert stopped.occurred_at == closure.run_record.completed_at
+
+    wrong_reason = _rebuild(stopped, stop_reason=StopReason.INPUT_INVALID)
+    late = _rebuild(
+        stopped,
+        occurred_at=closure.run_record.completed_at + timedelta(seconds=1),
+    )
+    duplicate = _rebuild(stopped, trace_event_id=uuid4())
+    without_stopped = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type is not TraceEventType.RUN_STOPPED
+    )
+    for traces in (
+        tuple(
+            wrong_reason if event is stopped else event
+            for event in closure.trace_events
+        ),
+        tuple(
+            late if event is stopped else event
+            for event in closure.trace_events
+        ),
+        without_stopped,
+        (*closure.trace_events, duplicate),
+    ):
+        with pytest.raises(ValidationError, match="terminal RunStopped"):
+            _rebuild_exact_run_evidence(closure, trace_events=traces)
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),
+)
+def test_exact_run_evidence_accepts_current_active_tool_lifecycle(
+    status: ToolCallStatus,
+) -> None:
+    closure = _active_tool_exact_run_evidence(status)
+    assert closure.tool_calls[0].status is status
+
+
+def test_exact_run_evidence_accepts_sparse_and_order_independent_tool_lifecycle() -> None:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    created = _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_CALL_CREATED,
+        run_id=call.run_id,
+        occurred_at=call.started_at,
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        tool_call_terminal_status=ToolCallStatus.CREATED,
+    )
+    started = _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_CALL_STARTED,
+        run_id=call.run_id,
+        occurred_at=call.started_at + timedelta(microseconds=1),
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        tool_call_terminal_status=ToolCallStatus.RUNNING,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, started, created),
+    )
+    assert rebuilt.tool_calls[0].status is ToolCallStatus.SUCCEEDED
+
+
+def test_exact_run_evidence_rejects_tool_lifecycle_that_conflicts_with_projection() -> None:
+    closure = _tool_exact_run_evidence()
+    succeeded = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.TOOL_CALL_SUCCEEDED
+    )
+    failed = _rebuild(
+        succeeded,
+        event_type=TraceEventType.TOOL_CALL_FAILED,
+        tool_call_terminal_status=ToolCallStatus.FAILED,
+    )
+    with pytest.raises(ValidationError, match="ToolCall lifecycle"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                failed if event is succeeded else event
+                for event in closure.trace_events
+            ),
+        )
