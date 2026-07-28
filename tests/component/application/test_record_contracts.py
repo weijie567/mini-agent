@@ -5724,6 +5724,90 @@ def test_exact_run_evidence_closes_terminal_run_stopped_projection() -> None:
             _rebuild_exact_run_evidence(closure, trace_events=traces)
 
 
+def test_exact_run_evidence_accepts_incomplete_run_with_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    incomplete = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.INCOMPLETE,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    stopped = next(
+        event
+        for event in terminal.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    incomplete_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=incomplete,
+        trace_events=tuple(
+            incomplete_stopped if event is stopped else event
+            for event in terminal.trace_events
+        ),
+    )
+    assert rebuilt.run_record.status is AgentRunStatus.INCOMPLETE
+    assert incomplete_stopped.occurred_at == rebuilt.run_record.completed_at
+
+
+def test_exact_run_evidence_accepts_failed_run_without_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=None,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=failed,
+        trace_events=tuple(
+            event
+            for event in terminal.trace_events
+            if event.event_type is not TraceEventType.RUN_STOPPED
+        ),
+    )
+    assert rebuilt.run_record.status is AgentRunStatus.FAILED
+    assert rebuilt.run_record.stop_reason is None
+
+
+def test_exact_run_evidence_rejects_failed_run_with_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=None,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="FAILED Run cannot have RunStopped",
+    ):
+        _rebuild_exact_run_evidence(terminal, run_record=failed)
+
+
+def test_exact_run_evidence_rejects_failed_run_with_stop_reason() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=StopReason.INPUT_INVALID,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="FAILED Run must not carry stop_reason",
+    ):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=failed,
+            trace_events=tuple(
+                event
+                for event in terminal.trace_events
+                if event.event_type is not TraceEventType.RUN_STOPPED
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     "status",
     (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),

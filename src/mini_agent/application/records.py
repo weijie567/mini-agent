@@ -3585,11 +3585,16 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         if run.status in active_run_statuses:
             if run_stopped_events:
                 raise ValueError("active Run cannot have RunStopped Trace")
-        elif len(run_stopped_events) != 1:
-            raise ValueError(
-                "terminal RunStopped Trace must exist exactly once"
-            )
+        elif run.status is AgentRunStatus.FAILED:
+            if run.stop_reason is not None:
+                raise ValueError("FAILED Run must not carry stop_reason")
+            if run_stopped_events:
+                raise ValueError("FAILED Run cannot have RunStopped Trace")
         else:
+            if len(run_stopped_events) != 1:
+                raise ValueError(
+                    "terminal RunStopped Trace must exist exactly once"
+                )
             run_stopped = run_stopped_events[0]
             if (
                 run_stopped.stop_reason is not run.stop_reason
