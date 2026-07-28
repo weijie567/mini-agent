@@ -9,14 +9,19 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import ValidationError
 
-from mini_agent.application.records import ProviderProtocolError
+from mini_agent.application.records import (
+    ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
+)
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     InputAuthority,
     InputSourceKind,
     NextMoveKind,
+    ReferenceSourceKindV2,
     RequestUnderstandingInput,
     RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
     TaskDeltaOperation,
 )
 from mini_agent.evaluation.artifacts import (
@@ -446,3 +451,149 @@ class ScriptedModelProvider:
         step = self._steps[self._cursor]
         self._cursor += 1
         return step
+
+
+def _v2_fresh_candidate_invalid_error(
+) -> RequestUnderstandingCandidateInvalidError:
+    error = RequestUnderstandingCandidateInvalidError()
+    error.__cause__ = None
+    error.__context__ = None
+    return error
+
+
+def _v2_project_scripted_request(
+    *,
+    provider: ScriptedModelProvider,
+    request: RequestUnderstandingInput,
+    step: _RequestStep,
+) -> RequestUnderstandingOutputV2:
+    behavior = step.behavior
+    message_order_number = "O-1001"
+    next_move_order_number = message_order_number
+    requested_tool_name = "get_order"
+    attempted_customer_id: str | None = None
+    if type(step) is _OrderLookupStep:
+        message_order_number = step.message_order_number
+        next_move_order_number = step.next_move_order_number
+    elif type(step) is _SourceAuthorityMismatchStep:
+        message_order_number = step.message_order_number
+        next_move_order_number = message_order_number
+    elif type(step) is _TrustedFieldOverrideStep:
+        message_order_number = step.message_order_number
+        next_move_order_number = message_order_number
+        attempted_customer_id = step.attempted_customer_id
+    elif type(step) is _UnknownToolStep:
+        message_order_number = step.message_order_number
+        next_move_order_number = message_order_number
+        requested_tool_name = step.requested_tool_name
+    elif type(step) is not _InvalidRequestSchemaStep:
+        raise _fresh_protocol_error()
+
+    authority: InputAuthority = InputAuthority.USER_CLAIM
+    arguments: dict[str, object] = {
+        "order_id": next_move_order_number,
+    }
+    candidate_id = uuid5(
+        NAMESPACE_URL,
+        (
+            "script-execution:"
+            f"{provider.script_execution_ref}:{request.message_ref}"
+        ),
+    )
+    task_delta_candidates: tuple[dict[str, object], ...] = (
+        {
+            "candidate_id": candidate_id,
+            "operation": TaskDeltaOperation.ADD_GOAL,
+            "goal_patch": "查询指定订单状态",
+            "input_candidates": (
+                {
+                    "name": "order_id",
+                    "candidate_value": message_order_number,
+                    "semantic_role": "TARGET_RESOURCE_IDENTIFIER",
+                    "authority": authority,
+                    "source_kind": InputSourceKind.CURRENT_MESSAGE,
+                    "source_ref": request.message_ref,
+                    "source_quote": message_order_number,
+                    "confidence": 1.0,
+                },
+            ),
+            "confidence": 1.0,
+        },
+    )
+    schema_version = "e2e01-thin-v2"
+    if behavior == "INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA":
+        schema_version = "e2e01-thin-v1"
+        task_delta_candidates = ()
+    elif behavior == "INJECT_SOURCE_AUTHORITY_MISMATCH":
+        task_delta_candidates[0]["input_candidates"][0][  # type: ignore[index]
+            "authority"
+        ] = InputAuthority.MODEL_INFERENCE
+    elif behavior == "INJECT_TRUSTED_FIELD_OVERRIDE":
+        assert attempted_customer_id is not None
+        arguments["customer_id"] = attempted_customer_id
+    elif behavior not in {
+        "VALID_ORDER_LOOKUP",
+        "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
+        "INJECT_UNKNOWN_TOOL_NAME",
+    }:
+        raise _fresh_protocol_error()
+
+    raw_arguments: dict[str, object] | None = {
+        "schema_version": schema_version,
+        "message_ref": request.message_ref,
+        "contextualization": {
+            "text": request.original_query,
+            "resolved_reference_candidates": (
+                {
+                    "name": "order_id",
+                    "candidate_value": message_order_number,
+                    "source_kind": ReferenceSourceKindV2.CURRENT_MESSAGE,
+                    "source_ref": request.message_ref,
+                    "source_quote": message_order_number,
+                    "confidence": 1.0,
+                },
+            ),
+            "uncertainties": (),
+            "source_message_refs": (request.message_ref,),
+        },
+        "task_delta_candidates": task_delta_candidates,
+        "next_move_candidate": {
+            "kind": NextMoveKind.CALL_TOOL,
+            "requested_tool_name": requested_tool_name,
+            "arguments": arguments,
+            "base_task_state_version": None,
+        },
+    }
+    output: RequestUnderstandingOutputV2 | None = None
+    failed = False
+    try:
+        output = RequestUnderstandingOutputV2.model_validate(
+            raw_arguments,
+            strict=True,
+        )
+    except ValidationError:
+        failed = True
+    raw_arguments = None
+    if failed or output is None:
+        raise _v2_fresh_candidate_invalid_error()
+    return output
+
+
+class ScriptedModelProviderV2(ScriptedModelProvider):
+    async def propose_next_move(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> RequestUnderstandingOutputV2:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        step = self._consume_request_step()
+        if step.behavior in {
+            "INJECT_ZERO_TARGET_FUNCTION_CALLS",
+            "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS",
+        }:
+            raise _fresh_protocol_error()
+        return _v2_project_scripted_request(
+            provider=self,
+            request=request,
+            step=step,
+        )
