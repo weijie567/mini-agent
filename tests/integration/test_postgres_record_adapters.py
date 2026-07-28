@@ -4,22 +4,36 @@ import asyncio
 import json
 import sys
 import threading
+from collections.abc import Callable
+from datetime import datetime
+from enum import Enum
+from hashlib import sha256
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import event, select, update
+from pydantic_core import to_jsonable_python
+from sqlalchemy import delete, event, select, update
 from sqlalchemy.exc import IntegrityError
 
 from mini_agent.application.persistence import (
+    P0PersistenceEnvelope,
     P0PersistenceIntegrityCategory,
     P0PersistenceIntegrityError,
     P0RecordCode,
+    P0RecordReference,
     decode_persistence_record,
+    decode_persistence_record_versioned,
     encode_persistence_record,
+    encode_persistence_record_versioned,
 )
-from mini_agent.application.records import TrustedOwnerScope
+from mini_agent.application.records import (
+    ExactRunEvidenceClosure,
+    TrustedOwnerScope,
+)
 from mini_agent.core.identity import CustomerContext
+from mini_agent.core.request_understanding import ReferenceSourceKindV2
+from mini_agent.core.task_state import DurableResolvedReferenceCandidateV2
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
@@ -32,6 +46,13 @@ _COMPONENT_APPLICATION_TESTS = (
 )
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_persistence_contract import _record_cases  # noqa: E402
+from test_record_contracts import (  # noqa: E402
+    _minimal_exact_run_evidence,
+    _rebuild_exact_run_evidence,
+    _rejected_gate_exact_run_evidence,
+    _request_understanding_exact_run_evidence,
+    _tool_exact_run_evidence,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -82,6 +103,431 @@ def _assert_bounded_integrity_error(
 async def _seed_all_records(adapter: PostgresRecordAdapter) -> None:
     with adapter.session_factory.begin() as session:
         adapter._persist_envelopes(session, _encoded_record_set())
+
+
+_EXACT_VERSION_BY_CODE = {
+    P0RecordCode.CONVERSATION_RECORD: "conversation_record.p0.v1",
+    P0RecordCode.MESSAGE_RECORD: "message_record.p0.v1",
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+        "request_understanding_record.p0.v2"
+    ),
+    P0RecordCode.TASK_RECORD: "task_record.p0.v1",
+    P0RecordCode.REQUEST_UNIT_RECORD: "request_unit_record.p0.v1",
+    P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+        "conversation_task_link_record.p0.v1"
+    ),
+    P0RecordCode.RUN_TASK_LINK_RECORD: "run_task_link_record.p0.v1",
+    P0RecordCode.INPUT_BINDING_RECORD: "input_binding_record.p0.v1",
+    P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT: (
+        "model_visible_toolset_artifact.p0.v1"
+    ),
+    P0RecordCode.AGENT_RUN_RECORD: "agent_run_record.p0.v1",
+    P0RecordCode.GATE_DECISION_RECORD: "gate_decision_record.p0.v1",
+    P0RecordCode.TOOL_CALL_RECORD: "tool_call_record.p0.v1",
+    P0RecordCode.OBSERVATION_RECORD: "observation_record.p0.v1",
+    P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
+    P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v1",
+}
+_EXACT_PRIVATE_CODES = frozenset(
+    code
+    for code in _EXACT_VERSION_BY_CODE
+    if code is not P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
+)
+
+
+def _reference(
+    relation: str,
+    target_code: P0RecordCode,
+    field_name: str,
+    value: object,
+) -> P0RecordReference:
+    return P0RecordReference(
+        relation=relation,
+        target_record_code=target_code,
+        target_logical_identity=(
+            (
+                field_name,
+                to_jsonable_python(value, serialize_unknown=True),
+            ),
+        ),
+    )
+
+
+def _closure_envelopes(
+    closure: ExactRunEvidenceClosure,
+) -> tuple[P0PersistenceEnvelope, ...]:
+    records: list[
+        tuple[
+            P0RecordCode,
+            object,
+            tuple[P0RecordReference, ...],
+            tuple[object, ...],
+        ]
+    ] = [
+        (
+            P0RecordCode.CONVERSATION_RECORD,
+            closure.conversation_record,
+            (),
+            (),
+        ),
+        (
+            P0RecordCode.AGENT_RUN_RECORD,
+            closure.run_record,
+            (),
+            (),
+        ),
+    ]
+    records.extend(
+        (P0RecordCode.MESSAGE_RECORD, record, (), ())
+        for record in closure.message_records
+    )
+    if closure.request_understanding_record is not None:
+        records.append(
+            (
+                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                closure.request_understanding_record,
+                (),
+                closure.accepted_task_deltas,
+            )
+        )
+    unit_by_binding = {
+        binding_ref: unit
+        for unit in closure.request_unit_records
+        for binding_ref in unit.input_binding_refs
+    }
+    records.extend(
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            binding,
+            (
+                _reference(
+                    "request_unit_id",
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    "request_unit_id",
+                    unit_by_binding[binding.binding_id].request_unit_id,
+                ),
+            ),
+            (),
+        )
+        for binding in closure.input_binding_records
+    )
+    transitions_by_task = {
+        task.task_id: tuple(
+            transition
+            for transition in closure.task_state_transitions
+            if transition.task_id == task.task_id
+        )
+        for task in closure.task_records
+    }
+    records.extend(
+        (
+            P0RecordCode.TASK_RECORD,
+            task,
+            (),
+            transitions_by_task[task.task_id],
+        )
+        for task in closure.task_records
+    )
+    for code, family in (
+        (P0RecordCode.REQUEST_UNIT_RECORD, closure.request_unit_records),
+        (
+            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            closure.conversation_task_links,
+        ),
+        (P0RecordCode.RUN_TASK_LINK_RECORD, closure.run_task_links),
+        (P0RecordCode.GATE_DECISION_RECORD, closure.gate_decisions),
+    ):
+        records.extend((code, record, (), ()) for record in family)
+    attempts_by_call = {
+        call.tool_call_id: tuple(
+            attempt
+            for attempt in closure.tool_attempts
+            if attempt.tool_call_id == call.tool_call_id
+        )
+        for call in closure.tool_calls
+    }
+    records.extend(
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            call,
+            (),
+            attempts_by_call[call.tool_call_id],
+        )
+        for call in closure.tool_calls
+    )
+    call_by_result = {
+        call.result_ref: call
+        for call in closure.tool_calls
+        if call.result_ref is not None
+    }
+    records.extend(
+        (
+            P0RecordCode.OBSERVATION_RECORD,
+            observation,
+            (
+                _reference(
+                    "source_tool_call_id",
+                    P0RecordCode.TOOL_CALL_RECORD,
+                    "tool_call_id",
+                    call_by_result[observation.observation_id].tool_call_id,
+                ),
+                _reference(
+                    "source_run_id",
+                    P0RecordCode.AGENT_RUN_RECORD,
+                    "run_id",
+                    call_by_result[observation.observation_id].run_id,
+                ),
+                _reference(
+                    "source_task_id",
+                    P0RecordCode.TASK_RECORD,
+                    "task_id",
+                    call_by_result[observation.observation_id].task_id,
+                ),
+                _reference(
+                    "source_request_unit_id",
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    "request_unit_id",
+                    call_by_result[observation.observation_id].request_unit_id,
+                ),
+            ),
+            (),
+        )
+        for observation in closure.observation_records
+    )
+    for code, family in (
+        (P0RecordCode.CONTEXT_MANIFEST_RECORD, closure.context_manifests),
+        (
+            P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT,
+            closure.model_visible_toolset_artifacts,
+        ),
+        (P0RecordCode.TRACE_EVENT_RECORD, closure.trace_events),
+    ):
+        records.extend((code, record, (), ()) for record in family)
+    return tuple(
+        encode_persistence_record_versioned(
+            code,
+            _EXACT_VERSION_BY_CODE[code],
+            record,
+            external_references=external_references,
+            logical_children=logical_children,
+        )
+        for code, record, external_references, logical_children in records
+    )
+
+
+def _physical_row(
+    envelope: P0PersistenceEnvelope,
+    *,
+    owner_customer_id: str,
+) -> P0RecordModel:
+    code = envelope.record_code
+    version = _EXACT_VERSION_BY_CODE[code]
+    decoded = decode_persistence_record_versioned(
+        envelope,
+        expected_record_code=code,
+        expected_schema_version=version,
+        correlation_ref=uuid4(),
+    )
+    record = decoded.source_record
+
+    def uuid_projection(field_name: str) -> UUID | None:
+        value = getattr(record, field_name, None)
+        return value if type(value) is UUID else None
+
+    status = getattr(record, "status", None)
+    lifecycle_status = status.value if isinstance(status, Enum) else None
+    state_version = getattr(record, "state_version", None)
+    attempt_count = getattr(record, "attempt_count", None)
+    started_at = getattr(record, "started_at", None)
+    return P0RecordModel(
+        record_id=uuid4(),
+        record_code=code.value,
+        record_schema_version=version,
+        logical_identity=to_jsonable_python(
+            envelope.logical_identity,
+            serialize_unknown=True,
+        ),
+        direct_owner_customer_id=envelope.direct_owner_customer_id,
+        scope_owner_customer_id=(
+            owner_customer_id if code in _EXACT_PRIVATE_CODES else None
+        ),
+        conversation_id=uuid_projection("conversation_id"),
+        run_id=uuid_projection("run_id"),
+        task_id=uuid_projection("task_id"),
+        request_unit_id=uuid_projection("request_unit_id"),
+        lifecycle_status=lifecycle_status,
+        state_version=state_version if type(state_version) is int else None,
+        attempt_count=attempt_count if type(attempt_count) is int else None,
+        recovery_sort_at=(
+            started_at
+            if code is P0RecordCode.AGENT_RUN_RECORD
+            and isinstance(started_at, datetime)
+            else None
+        ),
+        envelope=envelope.model_dump(mode="json"),
+    )
+
+
+def _physical_reference_models(
+    envelope: P0PersistenceEnvelope,
+) -> tuple[P0RecordReferenceModel, ...]:
+    source_identity = to_jsonable_python(
+        envelope.logical_identity,
+        serialize_unknown=True,
+    )
+    return tuple(
+        P0RecordReferenceModel(
+            reference_id=uuid4(),
+            source_record_code=envelope.record_code.value,
+            source_logical_identity=source_identity,
+            ordinal=ordinal,
+            relation=reference.relation,
+            target_record_code=reference.target_record_code.value,
+            target_logical_identity=to_jsonable_python(
+                reference.target_logical_identity,
+                serialize_unknown=True,
+            ),
+        )
+        for ordinal, reference in enumerate(envelope.record_references)
+    )
+
+
+async def _seed_exact_closure(
+    adapter: PostgresRecordAdapter,
+    closure: ExactRunEvidenceClosure,
+) -> None:
+    envelopes = _closure_envelopes(closure)
+    with adapter.session_factory.begin() as session:
+        session.add_all(
+            _physical_row(
+                envelope,
+                owner_customer_id=closure.conversation_record.owner_customer_id,
+            )
+            for envelope in envelopes
+        )
+        session.flush()
+        session.add_all(
+            reference
+            for envelope in envelopes
+            for reference in _physical_reference_models(envelope)
+        )
+
+
+def _row_for_code(
+    session,
+    code: P0RecordCode,
+) -> P0RecordModel:
+    row = session.scalar(
+        select(P0RecordModel).where(P0RecordModel.record_code == code.value)
+    )
+    assert row is not None
+    return row
+
+
+def _json_set(values: tuple[object, ...]) -> set[str]:
+    return {
+        json.dumps(
+            value.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for value in values
+    }
+
+
+def _provenance_exact_run_evidence() -> ExactRunEvidenceClosure:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    record = closure.request_understanding_record
+    assert record is not None
+    message = closure.message_records[0]
+    order_id = "O-1001"
+    start = message.content.index(order_id)
+    end = start + len(order_id)
+    resolved = DurableResolvedReferenceCandidateV2(
+        name="order_id",
+        candidate_value=order_id,
+        source_kind=ReferenceSourceKindV2.RECENT_MESSAGE,
+        source_ref=message.message_id,
+        source_span_start=start,
+        source_span_end_exclusive=end,
+        source_quote_sha256=sha256(
+            message.content[start:end].encode("utf-8")
+        ).hexdigest(),
+        confidence=0.99,
+    )
+    contextualization = record.contextualization.model_copy(
+        update={"resolved_reference_candidates": (resolved,)}
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        request_understanding_record=record.model_copy(
+            update={"contextualization": contextualization}
+        ),
+    )
+
+
+def _clone_row(
+    row: P0RecordModel,
+    *,
+    logical_identity: list[list[object]] | None = None,
+) -> P0RecordModel:
+    return P0RecordModel(
+        record_id=uuid4(),
+        record_code=row.record_code,
+        record_schema_version=row.record_schema_version,
+        logical_identity=(
+            logical_identity
+            if logical_identity is not None
+            else [["synthetic_id", str(uuid4())]]
+        ),
+        direct_owner_customer_id=row.direct_owner_customer_id,
+        scope_owner_customer_id=row.scope_owner_customer_id,
+        conversation_id=row.conversation_id,
+        run_id=row.run_id,
+        task_id=row.task_id,
+        request_unit_id=row.request_unit_id,
+        lifecycle_status=row.lifecycle_status,
+        state_version=row.state_version,
+        attempt_count=row.attempt_count,
+        recovery_sort_at=row.recovery_sort_at,
+        envelope=json.loads(json.dumps(row.envelope)),
+    )
+
+
+def _clone_references(
+    session,
+    *,
+    source: P0RecordModel,
+    clone: P0RecordModel,
+) -> None:
+    references = tuple(
+        session.scalars(
+            select(P0RecordReferenceModel)
+            .where(
+                P0RecordReferenceModel.source_record_code
+                == source.record_code,
+                P0RecordReferenceModel.source_logical_identity
+                == source.logical_identity,
+            )
+            .order_by(P0RecordReferenceModel.ordinal)
+        )
+    )
+    session.add_all(
+        P0RecordReferenceModel(
+            reference_id=uuid4(),
+            source_record_code=clone.record_code,
+            source_logical_identity=clone.logical_identity,
+            ordinal=reference.ordinal,
+            relation=reference.relation,
+            target_record_code=reference.target_record_code,
+            target_logical_identity=reference.target_logical_identity,
+        )
+        for reference in references
+    )
 
 
 async def test_all_17_records_and_five_external_references_round_trip_exactly(
@@ -464,5 +910,691 @@ async def test_reference_ordinal_database_constraint_rejects_negative_tamper(
                     )
                     .values(ordinal=-1)
                 )
+    finally:
+        engine.dispose()
+
+
+def _assert_same_exact_closure(
+    actual: ExactRunEvidenceClosure,
+    expected: ExactRunEvidenceClosure,
+) -> None:
+    assert actual.conversation_record == expected.conversation_record
+    assert actual.run_record == expected.run_record
+    assert (
+        actual.request_understanding_record
+        == expected.request_understanding_record
+    )
+    for field_name in (
+        "message_records",
+        "accepted_task_deltas",
+        "input_binding_records",
+        "task_records",
+        "task_state_transitions",
+        "request_unit_records",
+        "conversation_task_links",
+        "run_task_links",
+        "gate_decisions",
+        "tool_calls",
+        "tool_attempts",
+        "observation_records",
+        "context_manifests",
+        "model_visible_toolset_artifacts",
+        "trace_events",
+    ):
+        assert _json_set(getattr(actual, field_name)) == _json_set(
+            getattr(expected, field_name)
+        ), field_name
+
+
+@pytest.mark.parametrize(
+    "closure_factory",
+    (
+        _minimal_exact_run_evidence,
+        lambda: _request_understanding_exact_run_evidence(
+            candidate_count=2,
+            accepted_count=1,
+        ),
+        _provenance_exact_run_evidence,
+        _tool_exact_run_evidence,
+        _rejected_gate_exact_run_evidence,
+    ),
+    ids=(
+        "input-invalid-no-task",
+        "ru-v2-partial-accept",
+        "ru-v2-contextualization-provenance",
+        "get-order-success",
+        "gateway-rejected-no-tool",
+    ),
+)
+async def test_exact_run_reader_returns_representative_closed_graphs(
+    eval_postgres_namespace,
+    closure_factory: Callable[[], ExactRunEvidenceClosure],
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = closure_factory()
+    try:
+        await _seed_exact_closure(adapter, closure)
+
+        loaded = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(
+                closure.conversation_record.owner_customer_id
+            ),
+            run_id=closure.run_record.run_id,
+        )
+
+        assert loaded is not None
+        _assert_same_exact_closure(loaded, closure)
+    finally:
+        engine.dispose()
+
+
+async def test_exact_run_reader_prefilters_trusted_owner_before_any_graph_payload(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture_select(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(" ".join(statement.lower().split()))
+
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _tool_exact_run_evidence()
+    try:
+        await _seed_exact_closure(adapter, closure)
+        statements.clear()
+
+        foreign = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope("customer-B"),
+            run_id=closure.run_record.run_id,
+        )
+        absent = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope("customer-B"),
+            run_id=uuid4(),
+        )
+
+        assert foreign is None
+        assert absent is None
+        assert len(statements) == 2
+        assert all("p0_record_references" not in statement for statement in statements)
+        assert all("p0_records.record_code =" in statement for statement in statements)
+        assert all("p0_records.run_id =" in statement for statement in statements)
+        assert all(
+            "p0_records.scope_owner_customer_id =" in statement
+            for statement in statements
+        )
+        assert all("limit" in statement for statement in statements)
+    finally:
+        engine.dispose()
+
+
+async def test_exact_run_reader_requires_exact_trusted_inputs(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    owner = _owner_scope()
+    try:
+        with pytest.raises(TypeError):
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=owner.model_dump(),  # type: ignore[arg-type]
+                run_id=uuid4(),
+            )
+        with pytest.raises(TypeError):
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=owner,
+                run_id=str(uuid4()),  # type: ignore[arg-type]
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "tamper_kind",
+    (
+        "ru-v1-physical-version",
+        "foreign-scope-child",
+        "missing-run-projection",
+        "missing-run-reference",
+        "invalid-run-reference-relation",
+    ),
+)
+async def test_exact_run_reader_fails_closed_on_version_owner_projection_and_reference_drift(
+    eval_postgres_namespace,
+    tamper_kind: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    raw_secret = "Cookie=reader-secret customer-A O-1001"
+    try:
+        await _seed_exact_closure(adapter, closure)
+        with adapter.session_factory.begin() as session:
+            if tamper_kind == "ru-v1-physical-version":
+                row = _row_for_code(
+                    session,
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                )
+                row.record_schema_version = (
+                    "request_understanding_record.p0.v1"
+                )
+            else:
+                trace = session.scalar(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.TRACE_EVENT_RECORD.value
+                    )
+                    .order_by(P0RecordModel.record_id)
+                )
+                assert trace is not None
+                run_reference = session.scalar(
+                    select(P0RecordReferenceModel).where(
+                        P0RecordReferenceModel.source_record_code
+                        == trace.record_code,
+                        P0RecordReferenceModel.source_logical_identity
+                        == trace.logical_identity,
+                        P0RecordReferenceModel.relation == "run_id",
+                    )
+                )
+                assert run_reference is not None
+                if tamper_kind == "foreign-scope-child":
+                    trace.scope_owner_customer_id = "customer-B"
+                elif tamper_kind == "missing-run-projection":
+                    trace.run_id = None
+                elif tamper_kind == "missing-run-reference":
+                    session.delete(run_reference)
+                else:
+                    run_reference.relation = raw_secret
+
+        with pytest.raises(P0PersistenceIntegrityError) as captured:
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=closure.run_record.run_id,
+            )
+        _assert_bounded_integrity_error(
+            captured.value,
+            category=captured.value.category,
+            forbidden_values=(
+                raw_secret,
+                "Cookie",
+                "customer-A",
+                "O-1001",
+                "SELECT",
+            ),
+        )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("candidate_family", "tamper_kind"),
+    (
+        ("contextualization", "span-out-of-range"),
+        ("contextualization", "quote-hash"),
+        ("task-input", "span-out-of-range"),
+        ("task-input", "quote-hash"),
+    ),
+)
+async def test_exact_run_reader_replays_ru_v2_message_provenance_exactly(
+    eval_postgres_namespace,
+    candidate_family: str,
+    tamper_kind: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _provenance_exact_run_evidence()
+    try:
+        await _seed_exact_closure(adapter, closure)
+        with adapter.session_factory.begin() as session:
+            row = _row_for_code(
+                session,
+                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            )
+            envelope = json.loads(json.dumps(row.envelope))
+            if candidate_family == "contextualization":
+                candidate = envelope["payload"]["data"]["contextualization"][
+                    "resolved_reference_candidates"
+                ][0]
+            else:
+                candidate = envelope["payload"]["data"][
+                    "task_delta_candidates"
+                ][0]["input_candidates"][0]
+            if tamper_kind == "span-out-of-range":
+                candidate["source_span_end_exclusive"] = 10_000
+            else:
+                candidate["source_quote_sha256"] = sha256(
+                    b"forged quote"
+                ).hexdigest()
+            row.envelope = envelope
+
+        with pytest.raises(P0PersistenceIntegrityError) as captured:
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=closure.run_record.run_id,
+            )
+        _assert_bounded_integrity_error(
+            captured.value,
+            category=captured.value.category,
+            forbidden_values=(
+                closure.message_records[0].content,
+                "O-1001",
+                "task_delta_candidates",
+            ),
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_rejected_gate_is_found_by_manifest_and_binding_reverse_edges(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _rejected_gate_exact_run_evidence()
+    try:
+        await _seed_exact_closure(adapter, closure)
+
+        loaded = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(),
+            run_id=closure.run_record.run_id,
+        )
+        assert loaded is not None
+        assert loaded.gate_decisions == closure.gate_decisions
+        assert loaded.tool_calls == ()
+
+        with adapter.session_factory.begin() as session:
+            result = session.execute(
+                delete(P0RecordReferenceModel).where(
+                    P0RecordReferenceModel.source_record_code
+                    == P0RecordCode.GATE_DECISION_RECORD.value,
+                    P0RecordReferenceModel.relation == "context_manifest_id",
+                )
+            )
+            assert result.rowcount == 1
+
+        with pytest.raises(P0PersistenceIntegrityError):
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=closure.run_record.run_id,
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("cap_kind", "closure_factory"),
+    (
+        ("run-root-2", _minimal_exact_run_evidence),
+        (
+            "request-understanding-2",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        ("context-manifest-3", _minimal_exact_run_evidence),
+        ("toolset-artifact-3", _minimal_exact_run_evidence),
+        ("gate-decision-2", _rejected_gate_exact_run_evidence),
+        ("tool-call-2", _tool_exact_run_evidence),
+        ("observation-2", _tool_exact_run_evidence),
+        ("trace-event-65", _minimal_exact_run_evidence),
+        ("normalized-reference-65", _minimal_exact_run_evidence),
+        (
+            "accepted-task-delta-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "task-transition-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        ("tool-attempt-2", _tool_exact_run_evidence),
+    ),
+)
+async def test_exact_run_reader_enforces_every_frozen_cap_class_before_materialization(
+    eval_postgres_namespace,
+    cap_kind: str,
+    closure_factory: Callable[[], ExactRunEvidenceClosure],
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = closure_factory()
+    try:
+        await _seed_exact_closure(adapter, closure)
+        with adapter.session_factory.begin() as session:
+            if cap_kind == "run-root-2":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.AGENT_RUN_RECORD,
+                )
+                session.add(_clone_row(source))
+            elif cap_kind == "request-understanding-2":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                )
+                session.add(_clone_row(source))
+            elif cap_kind == "context-manifest-3":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.CONTEXT_MANIFEST_RECORD,
+                )
+                session.add_all((_clone_row(source), _clone_row(source)))
+            elif cap_kind == "toolset-artifact-3":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT,
+                )
+                first = _clone_row(source)
+                second = _clone_row(source)
+                session.add_all((first, second))
+                session.flush()
+                manifest = _row_for_code(
+                    session,
+                    P0RecordCode.CONTEXT_MANIFEST_RECORD,
+                )
+                current_count = session.scalar(
+                    select(P0RecordReferenceModel.ordinal)
+                    .where(
+                        P0RecordReferenceModel.source_record_code
+                        == manifest.record_code,
+                        P0RecordReferenceModel.source_logical_identity
+                        == manifest.logical_identity,
+                    )
+                    .order_by(P0RecordReferenceModel.ordinal.desc())
+                    .limit(1)
+                )
+                assert current_count is not None
+                session.add_all(
+                    P0RecordReferenceModel(
+                        reference_id=uuid4(),
+                        source_record_code=manifest.record_code,
+                        source_logical_identity=manifest.logical_identity,
+                        ordinal=current_count + offset,
+                        relation="model_visible_toolset_hash",
+                        target_record_code=source.record_code,
+                        target_logical_identity=target.logical_identity,
+                    )
+                    for offset, target in enumerate(
+                        (first, second),
+                        start=1,
+                    )
+                )
+            elif cap_kind in {
+                "gate-decision-2",
+                "tool-call-2",
+                "observation-2",
+            }:
+                code = {
+                    "gate-decision-2": P0RecordCode.GATE_DECISION_RECORD,
+                    "tool-call-2": P0RecordCode.TOOL_CALL_RECORD,
+                    "observation-2": P0RecordCode.OBSERVATION_RECORD,
+                }[cap_kind]
+                source = _row_for_code(session, code)
+                clone = _clone_row(source)
+                session.add(clone)
+                session.flush()
+                _clone_references(
+                    session,
+                    source=source,
+                    clone=clone,
+                )
+            elif cap_kind == "trace-event-65":
+                pass
+            elif cap_kind == "normalized-reference-65":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.AGENT_RUN_RECORD,
+                )
+                target = _row_for_code(
+                    session,
+                    P0RecordCode.CONVERSATION_RECORD,
+                )
+                highest = session.scalar(
+                    select(P0RecordReferenceModel.ordinal)
+                    .where(
+                        P0RecordReferenceModel.source_record_code
+                        == source.record_code,
+                        P0RecordReferenceModel.source_logical_identity
+                        == source.logical_identity,
+                    )
+                    .order_by(P0RecordReferenceModel.ordinal.desc())
+                    .limit(1)
+                )
+                assert highest == 0
+                session.add_all(
+                    P0RecordReferenceModel(
+                        reference_id=uuid4(),
+                        source_record_code=source.record_code,
+                        source_logical_identity=source.logical_identity,
+                        ordinal=index,
+                        relation=f"synthetic_relation_{index}",
+                        target_record_code=target.record_code,
+                        target_logical_identity=target.logical_identity,
+                    )
+                    for index in range(1, 65)
+                )
+            else:
+                code = {
+                    "accepted-task-delta-65": (
+                        P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                    ),
+                    "task-transition-65": P0RecordCode.TASK_RECORD,
+                    "tool-attempt-2": P0RecordCode.TOOL_CALL_RECORD,
+                }[cap_kind]
+                source = _row_for_code(session, code)
+                envelope = json.loads(json.dumps(source.envelope))
+                children = envelope["payload"]["logical_children"]
+                assert children
+                target_count = (
+                    2 if cap_kind == "tool-attempt-2" else 65
+                )
+                envelope["payload"]["logical_children"] = [
+                    json.loads(json.dumps(children[0]))
+                    for _ in range(target_count)
+                ]
+                source.envelope = envelope
+
+            if cap_kind == "trace-event-65":
+                rows = tuple(
+                    session.scalars(
+                        select(P0RecordModel).where(
+                            P0RecordModel.record_code
+                            == P0RecordCode.TRACE_EVENT_RECORD.value
+                        )
+                    )
+                )
+                assert len(rows) == 3
+                source = rows[0]
+                session.add_all(_clone_row(source) for _ in range(62))
+
+        with pytest.raises(P0PersistenceIntegrityError) as captured:
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=closure.run_record.run_id,
+            )
+        assert (
+            captured.value.category
+            is P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+        )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "evasive_kind",
+    (
+        "projection-only-extra",
+        "reverse-reference-only-extra",
+        "cross-run-history-extra",
+    ),
+)
+async def test_exact_run_reader_two_discovery_channels_reject_evasive_extras(
+    eval_postgres_namespace,
+    evasive_kind: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _minimal_exact_run_evidence()
+    try:
+        await _seed_exact_closure(adapter, closure)
+        with adapter.session_factory.begin() as session:
+            source = _row_for_code(
+                session,
+                P0RecordCode.TRACE_EVENT_RECORD,
+            )
+            clone = _clone_row(source)
+            if evasive_kind != "projection-only-extra":
+                clone.run_id = (
+                    None
+                    if evasive_kind == "reverse-reference-only-extra"
+                    else uuid4()
+                )
+            session.add(clone)
+            session.flush()
+            if evasive_kind != "projection-only-extra":
+                run_reference = session.scalar(
+                    select(P0RecordReferenceModel).where(
+                        P0RecordReferenceModel.source_record_code
+                        == source.record_code,
+                        P0RecordReferenceModel.source_logical_identity
+                        == source.logical_identity,
+                        P0RecordReferenceModel.relation == "run_id",
+                    )
+                )
+                assert run_reference is not None
+                session.add(
+                    P0RecordReferenceModel(
+                        reference_id=uuid4(),
+                        source_record_code=clone.record_code,
+                        source_logical_identity=clone.logical_identity,
+                        ordinal=0,
+                        relation=run_reference.relation,
+                        target_record_code=run_reference.target_record_code,
+                        target_logical_identity=(
+                            run_reference.target_logical_identity
+                        ),
+                    )
+                )
+
+        with pytest.raises(P0PersistenceIntegrityError):
+            await adapter.load_exact_run_evidence_for_owner(
+                owner_scope=_owner_scope(),
+                run_id=closure.run_record.run_id,
+            )
+    finally:
+        engine.dispose()
+
+
+async def test_exact_run_reader_uses_one_repeatable_read_read_only_snapshot(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    seed_adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _minimal_exact_run_evidence()
+    statements: list[str] = []
+    factory_calls = 0
+    updated = False
+    try:
+        await _seed_exact_closure(seed_adapter, closure)
+        message_envelope = next(
+            envelope
+            for envelope in _closure_envelopes(closure)
+            if envelope.record_code is P0RecordCode.MESSAGE_RECORD
+        )
+        next_envelope = json.loads(message_envelope.model_dump_json())
+        next_envelope["payload"]["data"]["content"] = (
+            f"{closure.message_records[0].content} after-snapshot"
+        )
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def update_after_root_snapshot(
+            _connection,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            nonlocal updated
+            normalized = " ".join(statement.lower().split())
+            statements.append(normalized)
+            if (
+                not updated
+                and normalized.startswith("select")
+                and "from p0_records" in normalized
+                and "p0_records.run_id =" in normalized
+                and "p0_records.scope_owner_customer_id =" in normalized
+            ):
+                updated = True
+                with engine.begin() as connection:
+                    result = connection.execute(
+                        update(P0RecordModel)
+                        .where(
+                            P0RecordModel.record_code
+                            == P0RecordCode.MESSAGE_RECORD.value,
+                            P0RecordModel.logical_identity
+                            == to_jsonable_python(
+                                message_envelope.logical_identity,
+                                serialize_unknown=True,
+                            ),
+                        )
+                        .values(envelope=next_envelope)
+                    )
+                    assert result.rowcount == 1
+
+        real_factory = build_session_factory(engine)
+
+        def counting_factory():
+            nonlocal factory_calls
+            factory_calls += 1
+            return real_factory()
+
+        adapter = PostgresRecordAdapter(counting_factory)
+        loaded = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(),
+            run_id=closure.run_record.run_id,
+        )
+
+        assert updated
+        assert factory_calls == 1
+        assert loaded is not None
+        assert loaded.message_records[0].content == (
+            closure.message_records[0].content
+        )
+        assert sum(
+            statement.startswith(
+                "set transaction isolation level repeatable read, read only"
+            )
+            for statement in statements
+        ) == 1
+
+        event.remove(engine, "after_cursor_execute", update_after_root_snapshot)
+        next_loaded = await seed_adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(),
+            run_id=closure.run_record.run_id,
+        )
+        assert next_loaded is not None
+        assert next_loaded.message_records[0].content.endswith(
+            "after-snapshot"
+        )
     finally:
         engine.dispose()
