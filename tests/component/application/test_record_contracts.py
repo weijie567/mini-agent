@@ -6451,3 +6451,205 @@ def test_exact_run_evidence_rejects_normalized_final_attempt_mismatch() -> None:
             closure,
             trace_events=(*closure.trace_events, normalized),
         )
+
+
+def _gate_decision_trace(
+    closure: ExactRunEvidenceClosure,
+    gate: GateDecision,
+    **updates: object,
+) -> TraceEvent:
+    values: dict[str, object] = {
+        "event_type": TraceEventType.GATE_DECISION_RECORDED,
+        "run_id": closure.run_record.run_id,
+        "occurred_at": gate.decided_at,
+        "model_call_id": gate.model_call_id,
+        "context_manifest_id": gate.context_manifest_id,
+        "requested_tool_name": gate.requested_provider_tool_name,
+        "validated_task_state_version": gate.validated_task_state_version,
+        "argument_binding_refs": gate.argument_binding_refs,
+        "gate_decision": gate.decision,
+        "gate_reason_code": gate.reason_code,
+    }
+    values.update(updates)
+    return _exact_evidence_trace(**values)
+
+
+def _rejected_gate_exact_run_evidence() -> ExactRunEvidenceClosure:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    manifest = closure.context_manifests[0]
+    gate = GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name=None,
+        snapshot_match=True,
+        registration_valid=False,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(
+            closure.input_binding_records[0].binding_id,
+        ),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.REJECT,
+        reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+        decided_at=UTC_NOW + timedelta(microseconds=100),
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        gate_decisions=(gate,),
+    )
+
+
+@pytest.mark.parametrize(
+    "closure_factory",
+    (_tool_exact_run_evidence, _rejected_gate_exact_run_evidence),
+)
+def test_exact_run_evidence_accepts_owner_backed_gate_trace(
+    closure_factory: Callable[[], ExactRunEvidenceClosure],
+) -> None:
+    closure = closure_factory()
+    gate = closure.gate_decisions[0]
+    gate_event = _gate_decision_trace(closure, gate)
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, gate_event),
+    )
+    assert gate_event.gate_decision is gate.decision
+    assert len(rebuilt.gate_decisions) == 1
+
+
+def test_exact_run_evidence_accepts_sparse_gate_trace() -> None:
+    for closure in (
+        _tool_exact_run_evidence(),
+        _rejected_gate_exact_run_evidence(),
+    ):
+        rebuilt = _rebuild_exact_run_evidence(closure)
+        assert not any(
+            event.event_type is TraceEventType.GATE_DECISION_RECORDED
+            for event in rebuilt.trace_events
+        )
+
+
+def test_exact_run_evidence_rejects_gate_trace_decision_forgery() -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_gate_trace_projection_forgery() -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        requested_tool_name="forged_tool",
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_excess_gate_trace_projection() -> None:
+    closure = _tool_exact_run_evidence()
+    gate = closure.gate_decisions[0]
+    first = _gate_decision_trace(closure, gate)
+    second = _gate_decision_trace(closure, gate)
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, first, second),
+        )
+
+
+def test_exact_run_evidence_rejects_gate_fields_on_other_event_kinds() -> None:
+    closure = _minimal_exact_run_evidence()
+    accepted = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+    )
+    polluted = _rebuild(
+        accepted,
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="Gate fields require GateDecisionRecorded",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is accepted else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_rejects_terminal_fields_on_other_event_kinds() -> None:
+    closure = _minimal_exact_run_evidence()
+    accepted = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+    )
+    polluted = _rebuild(
+        accepted,
+        user_outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.INPUT_INVALID,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="terminal fields require RunStopped",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is accepted else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_preserves_other_payload_correlations() -> None:
+    closure = _minimal_exact_run_evidence()
+    correlation_event = _exact_evidence_trace(
+        event_type=TraceEventType.PRESENTATION_PLAN_PROPOSED,
+        run_id=closure.run_record.run_id,
+        model_call_id=closure.context_manifests[0].model_call_id,
+        presentation_plan_ref=uuid4(),
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, correlation_event),
+    )
+    assert correlation_event in rebuilt.trace_events

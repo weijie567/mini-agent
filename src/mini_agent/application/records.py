@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
@@ -3412,6 +3413,26 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 raise ValueError(
                     "TraceEvent must bind the root Run without Eval case identity"
                 )
+            if (
+                event.event_type is not TraceEventType.GATE_DECISION_RECORDED
+                and (
+                    event.gate_decision is not None
+                    or event.gate_reason_code is not None
+                )
+            ):
+                raise ValueError(
+                    "Gate fields require GateDecisionRecorded"
+                )
+            if (
+                event.event_type is not TraceEventType.RUN_STOPPED
+                and (
+                    event.user_outcome is not None
+                    or event.stop_reason is not None
+                )
+            ):
+                raise ValueError(
+                    "terminal fields require RunStopped"
+                )
             if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
                 if (
                     event.safe_tool_outcome is None
@@ -3596,6 +3617,36 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     )
                     + 1
                 )
+
+        gate_trace_projection_counts = Counter(
+            (
+                event.model_call_id,
+                event.context_manifest_id,
+                event.requested_tool_name,
+                event.validated_task_state_version,
+                event.argument_binding_refs,
+                event.gate_decision,
+                event.gate_reason_code,
+            )
+            for event in self.trace_events
+            if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+        )
+        gate_owner_projection_counts = Counter(
+            (
+                gate.model_call_id,
+                gate.context_manifest_id,
+                gate.requested_provider_tool_name,
+                gate.validated_task_state_version,
+                gate.argument_binding_refs,
+                gate.decision,
+                gate.reason_code,
+            )
+            for gate in self.gate_decisions
+        )
+        if not gate_trace_projection_counts <= gate_owner_projection_counts:
+            raise ValueError(
+                "GateDecisionRecorded must match an owner GateDecision projection"
+            )
 
         for call_id, normalized in normalized_tool_result_events_by_call.items():
             call = call_by_id[call_id]
