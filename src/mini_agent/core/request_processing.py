@@ -336,3 +336,575 @@ def revalidate_next_move(
         proposed_base_task_state_version=candidate.base_task_state_version,
         validated_task_state_version=current_task.state_version,
     )
+
+
+from datetime import datetime
+from hashlib import sha256
+
+from pydantic import ValidationError
+
+from .common import require_utc
+from .request_understanding import (
+    InputCandidate,
+    QueryContextualizationCandidateV2,
+    ReferenceSourceKindV2,
+    RequestUnderstandingInput,
+    RequestUnderstandingOutputV2,
+    ResolvedReferenceCandidateV2,
+    TaskDeltaCandidate,
+)
+from .task_state import (
+    AcceptedTaskDeltaV2,
+    CandidateValidationRecordV2,
+    DurableInputCandidateV2,
+    DurableQueryContextualizationCandidateV2,
+    DurableResolvedReferenceCandidateV2,
+    DurableTaskDeltaCandidateV2,
+    RequestUnderstandingAggregateFailureCodeV2,
+    RequestUnderstandingAtomicFailureCodeV2,
+    RequestUnderstandingRecordV2,
+)
+
+
+class RequestUnderstandingV2Error(ValueError):
+    """Bounded v2 validation failure containing only a stable reason code."""
+
+    __slots__ = ("reason_code",)
+
+    reason_code: (
+        RequestUnderstandingAggregateFailureCodeV2
+        | RequestUnderstandingAtomicFailureCodeV2
+    )
+
+    def __init__(
+        self,
+        reason_code: (
+            RequestUnderstandingAggregateFailureCodeV2
+            | RequestUnderstandingAtomicFailureCodeV2
+        ),
+    ) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code.value)
+
+
+class RequestUnderstandingClosureV2(RuntimePrivateModel):
+    record: RequestUnderstandingRecordV2
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...]
+
+
+def _fail_request_understanding_v2(
+    reason_code: (
+        RequestUnderstandingAggregateFailureCodeV2
+        | RequestUnderstandingAtomicFailureCodeV2
+    ),
+) -> None:
+    raise RequestUnderstandingV2Error(reason_code)
+
+
+def _canonical_request_input_v2(
+    value: object,
+) -> RequestUnderstandingInput:
+    if type(value) is not RequestUnderstandingInput:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
+    request_input = value
+    if "schema_version" not in request_input.model_fields_set:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
+    if request_input.schema_version != "e2e01-thin-v1":
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
+        )
+    try:
+        rebuilt = RequestUnderstandingInput.model_validate(
+            request_input.model_dump(mode="python", round_trip=True)
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
+    if rebuilt != request_input:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
+    return request_input
+
+
+def _canonical_request_output_v2(
+    value: object,
+) -> RequestUnderstandingOutputV2:
+    if type(value) is not RequestUnderstandingOutputV2:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    output = value
+    if output.schema_version != "e2e01-thin-v2":
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
+        )
+    try:
+        payload = output.model_dump(mode="python", round_trip=True)
+    except (TypeError, ValueError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    if find_trusted_argument_field(payload) is not None:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+        )
+    try:
+        rebuilt = RequestUnderstandingOutputV2.model_validate(payload)
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    if rebuilt != output:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    return output
+
+
+def _canonical_candidate_validation_v2(
+    values: object,
+) -> tuple[CandidateValidationRecordV2, ...]:
+    if type(values) is not tuple:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    rebuilt_values: list[CandidateValidationRecordV2] = []
+    for value in values:
+        if type(value) is not CandidateValidationRecordV2:
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        try:
+            rebuilt = CandidateValidationRecordV2.model_validate(
+                value.model_dump(mode="python", round_trip=True)
+            )
+        except (TypeError, ValueError, ValidationError):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        if rebuilt != value:
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        rebuilt_values.append(value)
+    return tuple(rebuilt_values)
+
+
+def _canonical_accepted_task_deltas_v2(
+    values: object,
+) -> tuple[AcceptedTaskDeltaV2, ...]:
+    if type(values) is not tuple:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    rebuilt_values: list[AcceptedTaskDeltaV2] = []
+    for value in values:
+        if type(value) is not AcceptedTaskDeltaV2:
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        try:
+            rebuilt = AcceptedTaskDeltaV2.model_validate(
+                value.model_dump(mode="python", round_trip=True)
+            )
+        except (TypeError, ValueError, ValidationError):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        if rebuilt != value:
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        rebuilt_values.append(value)
+    return tuple(rebuilt_values)
+
+
+def _authoritative_message_v2(
+    authoritative_messages: Mapping[UUID, str],
+    source_ref: UUID,
+) -> str:
+    try:
+        message = authoritative_messages[source_ref]
+    except (KeyError, TypeError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if type(message) is not str or not message:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    return message
+
+
+def _exact_source_span_v2(
+    *,
+    authoritative_message: str,
+    source_quote: str,
+    candidate_value: str,
+) -> tuple[int, int, str]:
+    if type(source_quote) is not str or not source_quote:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if source_quote == authoritative_message:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    occurrences: list[int] = []
+    search_from = 0
+    while True:
+        position = authoritative_message.find(source_quote, search_from)
+        if position < 0:
+            break
+        occurrences.append(position)
+        if len(occurrences) > 1:
+            break
+        search_from = position + 1
+    if len(occurrences) != 1:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    try:
+        normalized_candidate = _normalize_order_id(candidate_value)
+    except RequestProcessingError:
+        if (
+            type(candidate_value) is not str
+            or not candidate_value
+            or candidate_value not in source_quote
+        ):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+            )
+    else:
+        if not _source_quote_contains_exact_order_id(
+            source_quote,
+            normalized_candidate,
+        ):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+            )
+    start = occurrences[0]
+    end = start + len(source_quote)
+    exact_slice = authoritative_message[start:end]
+    return start, end, sha256(exact_slice.encode("utf-8")).hexdigest()
+
+
+def _project_resolved_reference_v2(
+    candidate: ResolvedReferenceCandidateV2,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableResolvedReferenceCandidateV2:
+    message = _authoritative_message_v2(
+        authoritative_messages,
+        candidate.source_ref,
+    )
+    start, end, quote_hash = _exact_source_span_v2(
+        authoritative_message=message,
+        source_quote=candidate.source_quote,
+        candidate_value=candidate.candidate_value,
+    )
+    try:
+        return DurableResolvedReferenceCandidateV2(
+            name=candidate.name,
+            candidate_value=candidate.candidate_value,
+            source_kind=candidate.source_kind,
+            source_ref=candidate.source_ref,
+            source_span_start=start,
+            source_span_end_exclusive=end,
+            source_quote_sha256=quote_hash,
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+
+
+def _project_input_candidate_v2(
+    candidate: InputCandidate,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableInputCandidateV2:
+    message = _authoritative_message_v2(
+        authoritative_messages,
+        candidate.source_ref,
+    )
+    start, end, quote_hash = _exact_source_span_v2(
+        authoritative_message=message,
+        source_quote=candidate.source_quote,
+        candidate_value=candidate.candidate_value,
+    )
+    try:
+        return DurableInputCandidateV2(
+            name=candidate.name,
+            candidate_value=candidate.candidate_value,
+            semantic_role=candidate.semantic_role,
+            authority=candidate.authority,
+            source_kind=candidate.source_kind,
+            source_ref=candidate.source_ref,
+            source_span_start=start,
+            source_span_end_exclusive=end,
+            source_quote_sha256=quote_hash,
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+
+
+def _project_contextualization_v2(
+    contextualization: QueryContextualizationCandidateV2,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableQueryContextualizationCandidateV2:
+    for source_ref in contextualization.source_message_refs:
+        _authoritative_message_v2(authoritative_messages, source_ref)
+    projected_references = tuple(
+        _project_resolved_reference_v2(
+            candidate,
+            authoritative_messages,
+        )
+        for candidate in contextualization.resolved_reference_candidates
+    )
+    try:
+        return DurableQueryContextualizationCandidateV2(
+            text=contextualization.text,
+            resolved_reference_candidates=projected_references,
+            uncertainties=contextualization.uncertainties,
+            source_message_refs=contextualization.source_message_refs,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+
+
+def _project_task_delta_v2(
+    candidate: TaskDeltaCandidate,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableTaskDeltaCandidateV2:
+    projected_inputs = tuple(
+        _project_input_candidate_v2(
+            input_candidate,
+            authoritative_messages,
+        )
+        for input_candidate in candidate.input_candidates
+    )
+    try:
+        return DurableTaskDeltaCandidateV2(
+            candidate_id=candidate.candidate_id,
+            operation=candidate.operation,
+            goal_patch=candidate.goal_patch,
+            input_candidates=projected_inputs,
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+
+
+def _validate_durable_closure_v2(
+    *,
+    output: RequestUnderstandingOutputV2,
+    candidate_validation: tuple[CandidateValidationRecordV2, ...],
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...],
+    now: datetime,
+) -> None:
+    emitted_ids = [
+        candidate.candidate_id for candidate in output.task_delta_candidates
+    ]
+    validation_refs = [
+        validation.candidate_ref for validation in candidate_validation
+    ]
+    if (
+        len(validation_refs) != len(set(validation_refs))
+        or set(validation_refs) != set(emitted_ids)
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    accepted_candidate_refs = {
+        validation.candidate_ref
+        for validation in candidate_validation
+        if validation.decision is CandidateValidationDecision.ACCEPT
+    }
+    child_candidate_refs = [
+        child.candidate_ref for child in accepted_task_deltas
+    ]
+    accepted_delta_ids = [
+        child.accepted_delta_id for child in accepted_task_deltas
+    ]
+    child_pairs = [
+        (child.accepted_delta_id, child.task_id)
+        for child in accepted_task_deltas
+    ]
+    if (
+        len(child_candidate_refs) != len(set(child_candidate_refs))
+        or set(child_candidate_refs) != accepted_candidate_refs
+        or len(accepted_delta_ids) != len(set(accepted_delta_ids))
+        or len(child_pairs) != len(set(child_pairs))
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    emitted_by_id = {
+        candidate.candidate_id: candidate
+        for candidate in output.task_delta_candidates
+    }
+    child_by_candidate = {
+        child.candidate_ref: child for child in accepted_task_deltas
+    }
+    for child in accepted_task_deltas:
+        emitted = emitted_by_id.get(child.candidate_ref)
+        if (
+            emitted is None
+            or child.message_ref != output.message_ref
+            or child.accepted_at != now
+            or child.operation is not emitted.operation
+            or len(child.input_binding_refs)
+            != len(set(child.input_binding_refs))
+        ):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+    last_version_by_task: dict[UUID, int] = {}
+    for candidate in output.task_delta_candidates:
+        child = child_by_candidate.get(candidate.candidate_id)
+        if child is None:
+            continue
+        previous_version = last_version_by_task.get(child.task_id)
+        if previous_version is None:
+            if child.base_task_state_version is not None:
+                _fail_request_understanding_v2(
+                    RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+                )
+        elif (
+            child.base_task_state_version != previous_version
+            or child.result_task_state_version != previous_version + 1
+        ):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        last_version_by_task[child.task_id] = child.result_task_state_version
+
+
+def build_request_understanding_closure_v2(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    request_understanding_record_id: UUID,
+    candidate_validation: tuple[CandidateValidationRecordV2, ...],
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...],
+    proposed_base_task_state_version: PositiveStateVersion | None,
+    validated_task_state_version: PositiveStateVersion | None,
+    next_move_candidate_ref: UUID | None,
+    now: datetime,
+) -> RequestUnderstandingClosureV2:
+    """Build one complete, quote-free v2 durable closure or fail bounded."""
+
+    canonical_input = _canonical_request_input_v2(request_input)
+    canonical_output = _canonical_request_output_v2(output)
+    canonical_validation = _canonical_candidate_validation_v2(
+        candidate_validation
+    )
+    canonical_children = _canonical_accepted_task_deltas_v2(
+        accepted_task_deltas
+    )
+    if not isinstance(authoritative_messages, Mapping):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if (
+        type(request_understanding_record_id) is not UUID
+        or (
+            next_move_candidate_ref is not None
+            and type(next_move_candidate_ref) is not UUID
+        )
+        or type(now) is not datetime
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    try:
+        require_utc(now, field_name="now")
+    except (TypeError, ValueError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    if canonical_input.message_ref != canonical_output.message_ref:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    current_message = _authoritative_message_v2(
+        authoritative_messages,
+        canonical_input.message_ref,
+    )
+    if current_message != canonical_input.original_query:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if (
+        proposed_base_task_state_version
+        != canonical_output.next_move_candidate.base_task_state_version
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    if next_move_candidate_ref is None and (
+        proposed_base_task_state_version is not None
+        or validated_task_state_version is not None
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    projected_contextualization = _project_contextualization_v2(
+        canonical_output.contextualization,
+        authoritative_messages,
+    )
+    projected_candidates = tuple(
+        _project_task_delta_v2(
+            candidate,
+            authoritative_messages,
+        )
+        for candidate in canonical_output.task_delta_candidates
+    )
+    _validate_durable_closure_v2(
+        output=canonical_output,
+        candidate_validation=canonical_validation,
+        accepted_task_deltas=canonical_children,
+        now=now,
+    )
+    try:
+        record = RequestUnderstandingRecordV2(
+            request_understanding_record_id=request_understanding_record_id,
+            run_id=canonical_input.run_id,
+            message_ref=canonical_output.message_ref,
+            schema_version="request_understanding_record.p0.v2",
+            model_input_schema_version=canonical_input.schema_version,
+            model_output_schema_version=canonical_output.schema_version,
+            contextualization=projected_contextualization,
+            task_delta_candidates=projected_candidates,
+            candidate_validation=canonical_validation,
+            accepted_delta_refs=tuple(
+                child.accepted_delta_id for child in canonical_children
+            ),
+            proposed_base_task_state_version=proposed_base_task_state_version,
+            validated_task_state_version=validated_task_state_version,
+            next_move_candidate_ref=next_move_candidate_ref,
+            created_at=now,
+        )
+        return RequestUnderstandingClosureV2(
+            record=record,
+            accepted_task_deltas=canonical_children,
+        )
+    except (TypeError, ValueError, ValidationError):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
