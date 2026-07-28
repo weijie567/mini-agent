@@ -1999,3 +1999,1014 @@ def decode_persistence_record(
             correlation_ref,
         )
     return result
+
+
+# 01-07E CODEC_EXPAND is intentionally appended after the complete legacy
+# module.  The imports and definitions below form an additive, non-routable
+# exact-version surface; the active registry and legacy entry points above
+# remain unchanged.
+from pydantic import BaseModel as _P0V2BaseModel
+
+from mini_agent.core.task_state import (
+    AcceptedTaskDeltaV2 as _AcceptedTaskDeltaV2,
+    RequestUnderstandingRecordV2 as _RequestUnderstandingRecordV2,
+)
+
+
+def _request_understanding_v2_resolved_source_refs(
+    data: Mapping[str, Any],
+) -> tuple[JsonScalar, ...]:
+    return tuple(
+        candidate["source_ref"]
+        for candidate in data["contextualization"][
+            "resolved_reference_candidates"
+        ]
+    )
+
+
+def _request_understanding_v2_context_source_refs(
+    data: Mapping[str, Any],
+) -> tuple[JsonScalar, ...]:
+    return tuple(data["contextualization"]["source_message_refs"])
+
+
+def _request_understanding_v2_input_source_refs(
+    data: Mapping[str, Any],
+) -> tuple[JsonScalar, ...]:
+    return tuple(
+        input_candidate["source_ref"]
+        for candidate in data["task_delta_candidates"]
+        for input_candidate in candidate["input_candidates"]
+    )
+
+
+_REQUEST_UNDERSTANDING_V2_PROJECTIONS = tuple(
+    (
+        _decision(
+            "run_id",
+            _D.TOP_LEVEL_P0_REFERENCE,
+            relation="run_id",
+            target_record_code=_R.AGENT_RUN_RECORD,
+            value_projector=_one("run_id"),
+            minimum=1,
+            maximum=1,
+        ),
+        _decision(
+            "message_ref",
+            _D.TOP_LEVEL_P0_REFERENCE,
+            relation="message_ref",
+            target_record_code=_R.MESSAGE_RECORD,
+            value_projector=_one("message_ref"),
+            minimum=1,
+            maximum=1,
+        ),
+        _decision(
+            "contextualization.resolved_reference_candidates[].source_ref",
+            _D.TOP_LEVEL_P0_REFERENCE,
+            relation="contextualization_resolved_source_ref",
+            target_record_code=_R.MESSAGE_RECORD,
+            value_projector=_request_understanding_v2_resolved_source_refs,
+        ),
+        _decision(
+            "contextualization.source_message_refs[]",
+            _D.TOP_LEVEL_P0_REFERENCE,
+            relation="contextualization_source_message_ref",
+            target_record_code=_R.MESSAGE_RECORD,
+            value_projector=_request_understanding_v2_context_source_refs,
+            minimum=1,
+            unique=True,
+        ),
+        _decision(
+            "task_delta_candidates[].input_candidates[].source_ref",
+            _D.TOP_LEVEL_P0_REFERENCE,
+            relation="task_delta_input_source_ref",
+            target_record_code=_R.MESSAGE_RECORD,
+            value_projector=_request_understanding_v2_input_source_refs,
+        ),
+        _decision(
+            "accepted_delta_refs[]",
+            _D.LOGICAL_CHILD_CORRELATION,
+            value_projector=_many("accepted_delta_refs"),
+            unique=True,
+        ),
+        _decision(
+            "candidate_validation[].candidate_ref",
+            _D.PARENT_LOCAL_CORRELATION,
+            value_projector=_nested_many(
+                "candidate_validation",
+                "candidate_ref",
+            ),
+            unique=True,
+        ),
+        _decision(
+            "next_move_candidate_ref?",
+            _D.PAYLOAD_CORRELATION,
+            value_projector=_optional("next_move_candidate_ref"),
+            maximum=1,
+        ),
+    )
+)
+
+_ACCEPTED_TASK_DELTA_V2_PROJECTIONS = tuple(
+    (
+        _decision(
+            "candidate_ref",
+            _D.PARENT_LOCAL_CORRELATION,
+            value_projector=_one("candidate_ref"),
+            minimum=1,
+            maximum=1,
+        ),
+        _decision(
+            "message_ref",
+            _D.PARENT_FIELD_EQUALITY,
+            value_projector=_one("message_ref"),
+            minimum=1,
+            maximum=1,
+        ),
+        _decision(
+            "input_binding_refs[]",
+            _D.CHILD_TOP_LEVEL_P0_REFERENCE,
+            relation="input_binding_ref",
+            target_record_code=_R.INPUT_BINDING_RECORD,
+            value_projector=_many("input_binding_refs"),
+            minimum=1,
+            unique=True,
+        ),
+        _decision(
+            "task_id",
+            _D.CHILD_TOP_LEVEL_P0_REFERENCE,
+            relation="accepted_delta_task_id",
+            target_record_code=_R.TASK_RECORD,
+            value_projector=_one("task_id"),
+            minimum=1,
+            maximum=1,
+        ),
+    )
+)
+
+_REQUEST_UNDERSTANDING_V2_SPEC = P0RecordSchemaSpec(
+    record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+    record_schema_version="request_understanding_record.p0.v2",
+    source_model=_RequestUnderstandingRecordV2,
+    identity_fields=("request_understanding_record_id",),
+    projection_decisions=_REQUEST_UNDERSTANDING_V2_PROJECTIONS,
+    version_mirror_field="schema_version",
+    allowed_child_codes=(P0LogicalChildCode.ACCEPTED_TASK_DELTA,),
+)
+
+_ACCEPTED_TASK_DELTA_V2_SPEC = _P0LogicalChildSchemaSpec(
+    child_code=P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+    source_model=_AcceptedTaskDeltaV2,
+    parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+    identity_fields=("accepted_delta_id",),
+    closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
+    projection_decisions=_ACCEPTED_TASK_DELTA_V2_PROJECTIONS,
+)
+
+_REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
+    tuple[P0RecordCode, str, P0LogicalChildCode],
+    _P0LogicalChildSchemaSpec,
+] = MappingProxyType(
+    {
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v2",
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        ): _ACCEPTED_TASK_DELTA_V2_SPEC,
+    }
+)
+
+P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
+    tuple[P0RecordCode, str],
+    P0RecordSchemaSpec,
+] = MappingProxyType(
+    {
+        **{
+            (
+                code,
+                P0_PERSISTENCE_REGISTRY[code].record_schema_version,
+            ): P0_PERSISTENCE_REGISTRY[code]
+            for code in P0RecordCode
+        },
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v2",
+        ): _REQUEST_UNDERSTANDING_V2_SPEC,
+    }
+)
+
+
+def _versioned_pair_spec(
+    record_code: P0RecordCode,
+    schema_version: str,
+) -> P0RecordSchemaSpec:
+    if type(record_code) is not P0RecordCode:
+        _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+    if type(schema_version) is not str:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+        )
+    selected = P0_RECORD_SCHEMA_VERSION_CATALOG.get(
+        (record_code, schema_version)
+    )
+    if selected is not None:
+        return selected
+    known_versions = {
+        known_version
+        for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+    }
+    category = (
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+        if schema_version in known_versions
+        else P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+    )
+    _raise_signal(category)
+
+
+def _versioned_runtime_values_match_exactly(
+    left: Any,
+    right: Any,
+) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, _P0V2BaseModel):
+        try:
+            declared_fields = set(type(left).model_fields)
+            left_state_keys = set(left.__dict__)
+            right_state_keys = set(right.__dict__)
+            left_fields_set = set(left.model_fields_set)
+            right_fields_set = set(right.model_fields_set)
+        except (AttributeError, TypeError):
+            return False
+        if (
+            left_state_keys != right_state_keys
+            or not left_state_keys.issubset(declared_fields)
+            or not left_fields_set.issubset(declared_fields)
+            or not right_fields_set.issubset(declared_fields)
+        ):
+            return False
+        try:
+            left_extra = left.__pydantic_extra__
+            right_extra = right.__pydantic_extra__
+            left_private = left.__pydantic_private__
+            right_private = right.__pydantic_private__
+        except (AttributeError, TypeError):
+            return False
+        if not _versioned_runtime_values_match_exactly(
+            left_extra,
+            right_extra,
+        ):
+            return False
+        if not _versioned_runtime_values_match_exactly(
+            left_private,
+            right_private,
+        ):
+            return False
+        return all(
+            field_name in left.__dict__
+            and field_name in right.__dict__
+            and _versioned_runtime_values_match_exactly(
+                left.__dict__[field_name],
+                right.__dict__[field_name],
+            )
+            for field_name in type(left).model_fields
+        )
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _versioned_runtime_values_match_exactly(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, Mapping):
+        return (
+            tuple(left) == tuple(right)
+            and all(
+                _versioned_runtime_values_match_exactly(left[key], right[key])
+                for key in left
+            )
+        )
+    return left == right
+
+
+def _versioned_undeclared_model_state_keys(
+    value: Any,
+    *,
+    active_ids: set[int] | None = None,
+) -> frozenset[str]:
+    visited = active_ids if active_ids is not None else set()
+    value_id = id(value)
+    if value_id in visited:
+        return frozenset()
+    if isinstance(value, (_P0V2BaseModel, tuple, list, Mapping)):
+        visited.add(value_id)
+    try:
+        if isinstance(value, _P0V2BaseModel):
+            declared_fields = set(type(value).model_fields)
+            actual_keys = set(value.__dict__)
+            try:
+                fields_set = set(value.model_fields_set)
+            except (AttributeError, TypeError):
+                fields_set = {"invalid_model_fields_set"}
+            try:
+                extra = value.__pydantic_extra__
+                private = value.__pydantic_private__
+            except (AttributeError, TypeError):
+                return frozenset({"invalid_pydantic_runtime_state"})
+            if isinstance(extra, Mapping):
+                actual_keys.update(str(key) for key in extra)
+            if isinstance(private, Mapping):
+                actual_keys.update(str(key) for key in private)
+            undeclared = actual_keys.difference(declared_fields)
+            undeclared.update(
+                str(key)
+                for key in fields_set
+                if key not in declared_fields
+            )
+            for field_name in declared_fields:
+                if field_name in value.__dict__:
+                    undeclared.update(
+                        _versioned_undeclared_model_state_keys(
+                            value.__dict__[field_name],
+                            active_ids=visited,
+                        )
+                    )
+            return frozenset(undeclared)
+        if isinstance(value, Mapping):
+            result: set[str] = set()
+            for nested in value.values():
+                result.update(
+                    _versioned_undeclared_model_state_keys(
+                        nested,
+                        active_ids=visited,
+                    )
+                )
+            return frozenset(result)
+        if isinstance(value, (tuple, list)):
+            result = set()
+            for nested in value:
+                result.update(
+                    _versioned_undeclared_model_state_keys(
+                        nested,
+                        active_ids=visited,
+                    )
+                )
+            return frozenset(result)
+        return frozenset()
+    finally:
+        visited.discard(value_id)
+
+
+def _strict_versioned_model(
+    value: object,
+    source_model: type[ContractModel],
+    *,
+    failure_category: P0PersistenceIntegrityCategory,
+) -> ContractModel:
+    if type(value) is not source_model:
+        _raise_signal(failure_category)
+    canonical_input = value
+    if _versioned_undeclared_model_state_keys(canonical_input):
+        _raise_signal(failure_category)
+
+    category: P0PersistenceIntegrityCategory | None = None
+    raw_json: str | None = None
+    rebuilt: ContractModel | None = None
+    try:
+        raw_json = canonical_input.model_dump_json(warnings="error")
+        rebuilt = source_model.model_validate_json(
+            raw_json,
+            strict=True,
+        )
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+        RecursionError,
+        PydanticSerializationError,
+    ):
+        category = failure_category
+    if category is not None:
+        _raise_signal(category)
+    if raw_json is None or rebuilt is None:
+        _raise_signal(failure_category)
+    if not _versioned_runtime_values_match_exactly(canonical_input, rebuilt):
+        _raise_signal(failure_category)
+    return rebuilt
+
+
+def _strict_request_understanding_v2(
+    record: object,
+) -> ContractModel:
+    if type(record) is not _RequestUnderstandingRecordV2:
+        _raise_signal(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+    if not hasattr(record, "schema_version"):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if record.schema_version != _REQUEST_UNDERSTANDING_V2_SPEC.record_schema_version:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+        )
+    return _strict_versioned_model(
+        record,
+        _RequestUnderstandingRecordV2,
+        failure_category=(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+        ),
+    )
+
+
+def _strict_selected_versioned_record(
+    spec: P0RecordSchemaSpec,
+    record: object,
+) -> ContractModel:
+    if type(record) is not spec.source_model:
+        _raise_signal(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+    if spec.version_mirror_field is not None:
+        if spec.version_mirror_field not in record.__dict__:
+            _raise_signal(
+                P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+            )
+        if (
+            record.__dict__[spec.version_mirror_field]
+            != spec.record_schema_version
+        ):
+            _raise_signal(
+                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            )
+    if spec.specialized_version_validator is not None:
+        specialized_version_matches: bool | None = None
+        try:
+            specialized_version_matches = spec.specialized_version_validator(
+                record
+            )
+        except (AttributeError, TypeError, ValueError):
+            _raise_signal(
+                P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+            )
+        if specialized_version_matches is not True:
+            _raise_signal(
+                P0PersistenceIntegrityCategory.SPECIALIZED_VERSION_MISMATCH
+            )
+    return _strict_versioned_model(
+        record,
+        spec.source_model,
+        failure_category=(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+        ),
+    )
+
+
+def _strict_selected_versioned_children(
+    spec: P0RecordSchemaSpec,
+    logical_children: object,
+) -> tuple[ContractModel, ...]:
+    if type(logical_children) is not tuple:
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    canonical: list[ContractModel] = []
+    for child in logical_children:
+        child_spec = next(
+            (
+                P0_LOGICAL_CHILD_SPECS[child_code]
+                for child_code in spec.allowed_child_codes
+                if type(child)
+                is P0_LOGICAL_CHILD_SPECS[child_code].source_model
+            ),
+            None,
+        )
+        if child_spec is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        canonical.append(
+            _strict_versioned_model(
+                child,
+                child_spec.source_model,
+                failure_category=(
+                    P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                ),
+            )
+        )
+    return tuple(canonical)
+
+
+def _versioned_top_level_projection(
+    spec: P0RecordSchemaSpec,
+    record: ContractModel,
+) -> tuple[str | None, tuple[P0RecordReference, ...]]:
+    data = record.model_dump(mode="json", warnings="error")
+    direct_owner: str | None = None
+    references: list[P0RecordReference] = []
+    for rule in spec.projection_decisions:
+        values = _projected_values(rule, data)
+        if rule.classification is _D.DIRECT_OWNER:
+            if len(values) != 1 or not isinstance(values[0], str):
+                _raise_signal(
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                )
+            direct_owner = values[0]
+        elif rule.classification is _D.TOP_LEVEL_P0_REFERENCE:
+            references.extend(
+                _reference_for_value(rule, value) for value in values
+            )
+        elif rule.classification is _D.P0_FIRST_SLICE_MUST_BE_EMPTY:
+            if values:
+                _raise_signal(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
+    return (
+        direct_owner,
+        _normalize_references(
+            tuple(references),
+            collapse_duplicates=True,
+        ),
+    )
+
+
+def _request_understanding_v2_child_payloads(
+    parent_record: ContractModel,
+    parent_identity: LogicalIdentity,
+    logical_children: tuple[ContractModel, ...],
+) -> tuple[
+    tuple[P0LogicalChildPayload, ...],
+    tuple[P0RecordReference, ...],
+    tuple[ContractModel, ...],
+]:
+    if type(logical_children) is not tuple:
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    child_spec = _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG[
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            _REQUEST_UNDERSTANDING_V2_SPEC.record_schema_version,
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        )
+    ]
+    parent = parent_record
+    validated_children: list[ContractModel] = []
+    for child in logical_children:
+        validated_children.append(
+            _strict_versioned_model(
+                child,
+                _AcceptedTaskDeltaV2,
+                failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+            )
+        )
+
+    candidate_order = tuple(
+        candidate.candidate_id for candidate in parent.task_delta_candidates
+    )
+    if len(candidate_order) != len(set(candidate_order)):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    candidate_by_id = {
+        candidate.candidate_id: candidate
+        for candidate in parent.task_delta_candidates
+    }
+    decisions_by_id = {
+        decision.candidate_ref: decision
+        for decision in parent.candidate_validation
+    }
+    if (
+        len(decisions_by_id) != len(parent.candidate_validation)
+        or set(decisions_by_id) != set(candidate_by_id)
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+    accepted_candidate_ids = {
+        candidate_id
+        for candidate_id, decision in decisions_by_id.items()
+        if decision.decision is CandidateValidationDecision.ACCEPT
+    }
+    rejected_candidate_ids = set(candidate_by_id).difference(
+        accepted_candidate_ids
+    )
+    child_candidate_ids = tuple(
+        child.candidate_ref for child in validated_children
+    )
+    child_ids = tuple(
+        child.accepted_delta_id for child in validated_children
+    )
+    child_pairs = tuple(
+        (child.accepted_delta_id, child.task_id)
+        for child in validated_children
+    )
+    if (
+        len(child_candidate_ids) != len(set(child_candidate_ids))
+        or set(child_candidate_ids) != accepted_candidate_ids
+        or set(child_candidate_ids).intersection(rejected_candidate_ids)
+        or len(child_ids) != len(set(child_ids))
+        or len(child_pairs) != len(set(child_pairs))
+        or len(parent.accepted_delta_refs)
+        != len(set(parent.accepted_delta_refs))
+        or set(parent.accepted_delta_refs) != set(child_ids)
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+    child_by_candidate = {
+        child.candidate_ref: child for child in validated_children
+    }
+    previous_result_by_task: dict[UUID, int] = {}
+    for candidate_id in candidate_order:
+        if candidate_id not in accepted_candidate_ids:
+            continue
+        candidate = candidate_by_id[candidate_id]
+        child = child_by_candidate[candidate_id]
+        if (
+            child.operation is not candidate.operation
+            or child.goal_text != candidate.goal_patch
+            or child.message_ref != parent.message_ref
+            or child.accepted_at != parent.created_at
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+        previous_result = previous_result_by_task.get(child.task_id)
+        base_version = child.base_task_state_version
+        result_version = child.result_task_state_version
+        if previous_result is None:
+            if base_version is not None and result_version != base_version + 1:
+                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        elif (
+            base_version != previous_result
+            or result_version != base_version + 1
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        previous_result_by_task[child.task_id] = result_version
+
+    validated_children.sort(
+        key=lambda child: str(child.accepted_delta_id)
+    )
+    payloads: list[P0LogicalChildPayload] = []
+    child_references: list[P0RecordReference] = []
+    for child in validated_children:
+        child_data = child.model_dump(mode="json", warnings="error")
+        for rule in child_spec.projection_decisions:
+            values = _projected_values(rule, child_data)
+            if rule.classification is _D.CHILD_TOP_LEVEL_P0_REFERENCE:
+                child_references.extend(
+                    _reference_for_value(rule, value) for value in values
+                )
+        payloads.append(
+            P0LogicalChildPayload(
+                child_code=child_spec.child_code,
+                parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                parent_logical_identity=parent_identity,
+                logical_identity=_logical_identity(
+                    child,
+                    child_spec.identity_fields,
+                ),
+                data=child_data,
+            )
+        )
+    return (
+        tuple(payloads),
+        _normalize_references(
+            tuple(child_references),
+            collapse_duplicates=True,
+        ),
+        tuple(validated_children),
+    )
+
+
+def _build_request_understanding_v2_envelope(
+    record: object,
+    *,
+    external_references: tuple[P0RecordReference, ...],
+    logical_children: tuple[ContractModel, ...],
+) -> P0PersistenceEnvelope:
+    if type(external_references) is not tuple:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    validated = _strict_request_understanding_v2(record)
+    identity = _logical_identity(
+        validated,
+        _REQUEST_UNDERSTANDING_V2_SPEC.identity_fields,
+    )
+    owner, source_references = _versioned_top_level_projection(
+        _REQUEST_UNDERSTANDING_V2_SPEC,
+        validated,
+    )
+    external = _validate_external_references(
+        _REQUEST_UNDERSTANDING_V2_SPEC,
+        external_references,
+    )
+    children, child_references, _ = (
+        _request_understanding_v2_child_payloads(
+            validated,
+            identity,
+            logical_children,
+        )
+    )
+    references = _normalize_references(
+        (*source_references, *external, *child_references),
+        collapse_duplicates=True,
+    )
+    return P0PersistenceEnvelope(
+        record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        record_schema_version=(
+            _REQUEST_UNDERSTANDING_V2_SPEC.record_schema_version
+        ),
+        logical_identity=identity,
+        direct_owner_customer_id=owner,
+        record_references=references,
+        payload=P0VersionedPayload(
+            record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            record_schema_version=(
+                _REQUEST_UNDERSTANDING_V2_SPEC.record_schema_version
+            ),
+            data=validated.model_dump(mode="json", warnings="error"),
+            logical_children=children,
+        ),
+    )
+
+
+def encode_persistence_record_versioned(
+    record_code: P0RecordCode,
+    schema_version: str,
+    record: ContractModel,
+    *,
+    external_references: tuple[P0RecordReference, ...] = (),
+    logical_children: tuple[ContractModel, ...] = (),
+) -> P0PersistenceEnvelope:
+    category: P0PersistenceIntegrityCategory | None = None
+    result: P0PersistenceEnvelope | None = None
+    try:
+        selected = _versioned_pair_spec(record_code, schema_version)
+        if type(external_references) is not tuple:
+            _raise_signal(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        if any(
+            type(reference) is not P0RecordReference
+            or _versioned_undeclared_model_state_keys(reference)
+            for reference in external_references
+        ):
+            _raise_signal(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        if selected is _REQUEST_UNDERSTANDING_V2_SPEC:
+            result = _build_request_understanding_v2_envelope(
+                record,
+                external_references=external_references,
+                logical_children=logical_children,
+            )
+        else:
+            validated_record = _strict_selected_versioned_record(
+                selected,
+                record,
+            )
+            validated_children = _strict_selected_versioned_children(
+                selected,
+                logical_children,
+            )
+            result = _build_envelope(
+                record_code,
+                validated_record,
+                external_references=external_references,
+                logical_children=validated_children,
+            )
+    except _IntegritySignal as signal:
+        category = signal.category
+    if category is not None:
+        raise _public_error(category, uuid4())
+    if result is None:
+        raise _public_error(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+            uuid4(),
+        )
+    return result
+
+
+def _classify_outer_versioned(
+    raw_json: str | bytes,
+    expected_record_code: P0RecordCode,
+    expected_schema_version: str,
+    selected_spec: P0RecordSchemaSpec,
+) -> dict[str, Any]:
+    category: P0PersistenceIntegrityCategory | None = None
+    parsed: object = None
+    try:
+        parsed = json.loads(raw_json)
+    except (
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ):
+        category = P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+    if category is not None:
+        _raise_signal(category)
+    if not isinstance(parsed, dict):
+        _raise_signal(P0PersistenceIntegrityCategory.MISSING_RECORD_CODE)
+
+    if "record_code" not in parsed:
+        _raise_signal(P0PersistenceIntegrityCategory.MISSING_RECORD_CODE)
+    raw_code = parsed["record_code"]
+    try:
+        code = P0RecordCode(raw_code)
+    except (TypeError, ValueError):
+        code = None
+    if code is None:
+        _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+    if code is not expected_record_code:
+        _raise_signal(P0PersistenceIntegrityCategory.RECORD_CODE_MISMATCH)
+
+    if "record_schema_version" not in parsed:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION
+        )
+    raw_version = parsed["record_schema_version"]
+    if type(raw_version) is not str:
+        _raise_signal(
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+        )
+    if raw_version != expected_schema_version:
+        if selected_spec is P0_PERSISTENCE_REGISTRY[expected_record_code]:
+            known_versions = {
+                P0_PERSISTENCE_REGISTRY[code].record_schema_version
+                for code in P0RecordCode
+            }
+        else:
+            known_versions = {
+                known_version
+                for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+            }
+        category = (
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            if raw_version in known_versions
+            else P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+        )
+        _raise_signal(category)
+    return parsed
+
+
+def _decode_request_understanding_v2(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    expected_record_code: P0RecordCode,
+    expected_schema_version: str,
+) -> DecodedP0PersistenceRecord:
+    if (
+        isinstance(envelope, P0PersistenceEnvelope)
+        and _versioned_undeclared_model_state_keys(envelope)
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    raw_json = _json_input(envelope)
+    outer_data = _classify_outer_versioned(
+        raw_json,
+        expected_record_code,
+        expected_schema_version,
+        _REQUEST_UNDERSTANDING_V2_SPEC,
+    )
+    inner_data = outer_data.get("payload")
+    if (
+        not isinstance(inner_data, dict)
+        or inner_data.get("record_code") != expected_record_code.value
+        or inner_data.get("record_schema_version")
+        != expected_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    category: P0PersistenceIntegrityCategory | None = None
+    validated_envelope: P0PersistenceEnvelope | None = None
+    try:
+        validated_envelope = P0PersistenceEnvelope.model_validate_json(
+            raw_json,
+            strict=True,
+        )
+    except ValidationError as error:
+        category = _envelope_validation_category(error)
+    except (TypeError, ValueError, RecursionError):
+        category = P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+    if category is not None:
+        _raise_signal(category)
+    if validated_envelope is None:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        validated_envelope.payload.record_code is not expected_record_code
+        or validated_envelope.payload.record_schema_version
+        != expected_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    source_json = _json_mapping_text(
+        validated_envelope.payload.data,
+        failure_category=(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+        ),
+    )
+    source_record: ContractModel | None = None
+    category = None
+    try:
+        source_record = _RequestUnderstandingRecordV2.model_validate_json(
+            source_json,
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        category = P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+    if category is not None:
+        _raise_signal(category)
+    if source_record is None:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+
+    children: list[ContractModel] = []
+    for child_payload in validated_envelope.payload.logical_children:
+        if (
+            child_payload.child_code
+            is not P0LogicalChildCode.ACCEPTED_TASK_DELTA
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_json = _json_mapping_text(
+            child_payload.data,
+            failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+        )
+        child: ContractModel | None = None
+        category = None
+        try:
+            child = _AcceptedTaskDeltaV2.model_validate_json(
+                child_json,
+                strict=True,
+            )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            category = P0PersistenceIntegrityCategory.CHILD_MISMATCH
+        if category is not None:
+            _raise_signal(category)
+        if child is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        children.append(child)
+
+    expected = _build_request_understanding_v2_envelope(
+        source_record,
+        external_references=(),
+        logical_children=tuple(children),
+    )
+    if expected.logical_identity != validated_envelope.logical_identity:
+        _raise_signal(P0PersistenceIntegrityCategory.IDENTITY_MISMATCH)
+    if (
+        expected.direct_owner_customer_id
+        != validated_envelope.direct_owner_customer_id
+    ):
+        _raise_signal(
+            P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+        )
+    if expected.record_references != validated_envelope.record_references:
+        _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+    if expected.payload.data != validated_envelope.payload.data:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        expected.payload.logical_children
+        != validated_envelope.payload.logical_children
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    return DecodedP0PersistenceRecord(
+        record_code=expected_record_code,
+        record_schema_version=expected_schema_version,
+        source_record=source_record,
+        logical_children=tuple(children),
+    )
+
+
+def decode_persistence_record_versioned(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    *,
+    expected_record_code: P0RecordCode,
+    expected_schema_version: str,
+    correlation_ref: UUID,
+) -> DecodedP0PersistenceRecord:
+    if type(correlation_ref) is not UUID:
+        raise TypeError("correlation_ref must be UUID")
+
+    category: P0PersistenceIntegrityCategory | None = None
+    result: DecodedP0PersistenceRecord | None = None
+    try:
+        selected = _versioned_pair_spec(
+            expected_record_code,
+            expected_schema_version,
+        )
+        if (
+            isinstance(envelope, P0PersistenceEnvelope)
+            and _versioned_undeclared_model_state_keys(envelope)
+        ):
+            _raise_signal(
+                P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+            )
+        if selected is _REQUEST_UNDERSTANDING_V2_SPEC:
+            result = _decode_request_understanding_v2(
+                envelope,
+                expected_record_code,
+                expected_schema_version,
+            )
+        else:
+            raw_json = _json_input(envelope)
+            _classify_outer_versioned(
+                raw_json,
+                expected_record_code,
+                expected_schema_version,
+                selected,
+            )
+            result = _decode(raw_json, expected_record_code)
+    except _IntegritySignal as signal:
+        category = signal.category
+    if category is not None:
+        raise _public_error(category, correlation_ref)
+    if result is None:
+        raise _public_error(
+            P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+            correlation_ref,
+        )
+    return result
