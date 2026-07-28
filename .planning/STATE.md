@@ -6,8 +6,8 @@ current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
 current_plan: "07E"
 status: "in_progress"
-last_updated: "2026-07-28T21:03:56+08:00"
-last_activity: "2026-07-28 — 01-07F/E reviewed serial merge formed exact non-routable B_FE_EXPAND; I/P unblocked"
+last_updated: "2026-07-28T21:52:49+08:00"
+last_activity: "2026-07-28 — F/E cross-file owner/status alignment completed through PR #78; B_FE_EXPAND unchanged; I/P ready"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -38,7 +38,7 @@ Total Phases: 6
 Total Plans in Phase: 8
 Status: 01-07F and 01-07E complete / B_FE_EXPAND confirmed / 01-07I+01-07P ready
 Last Activity: 2026-07-28
-Last Activity Description: 01-07F PR #71形成`B_F = 034cf57...`；01-07E PR #74形成`B_FE_EXPAND = 294ada3...` / tree `97b0928...`
+Last Activity Description: 01-07F/E实现仍以`B_FE_EXPAND = 294ada3...` / tree `97b0928...`为共同barrier；PR #75–#78已完成派生状态、Project Direction、README与execution owner对齐
 Progress: 0%
 
 ## Current Position
@@ -46,7 +46,7 @@ Progress: 0%
 Phase: 1 of 6（第一最薄 E2E-01）
 Plan: 7 of 8（numbered Plan evidence为7/8；正式签发24个Plan、22份Summary；reviewed feature完成证据为22/39）
 Status: `ACTIVE / 01-07F_01-07E_COMPLETE / B_FE_EXPAND_CONFIRMED`
-Last activity: 2026-07-28 — 01-07F Plan/feature PR #70/#71形成`B_F`；01-07E Plan/correction/feature PR #72/#73/#74经feature与latest-overlay双review后形成共同`B_FE_EXPAND`
+Last activity: 2026-07-28 — PR #75–#78已完成F/E evidence-only cross-file alignment；共同barrier仍为`B_FE_EXPAND`
 Progress: `░░░░░░░░░░` 0%
 
 Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些派生计数不表示Case、Phase、真实纵向链或产品完成。
@@ -54,7 +54,7 @@ Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些�
 ## Next Safe Action
 
 1. `B_FE_EXPAND = 294ada386ec160ec2a48fc8883b5a38f1880e4ba`本身已解锁01-07I / 01-07P；可从同一exact SHA分别签发Application Port与migration-chain dependency expand，互斥writer独立执行后由Integrator串行形成`B_IP`。
-2. 本次F/E后派生状态对齐不创建第二道barrier、不改变execution map，也不阻塞I/P规划或实现。
+2. F/E后派生状态、Project Direction、README与execution owner对齐已经完成；这些evidence-only PR不创建第二道barrier、不改变execution map，也不阻塞I/P规划或实现。
 3. 后续严格服从execution owner中的唯一顺序：`{I,P} → {K,L} → M → Q → J → {S,U} → X → T → W → V`。
 4. `B_RU_V2_CONTRACT`形成后才可签发01-08；01-08 reviewed merge后才可签发01-08A，缺凭据只能记录`NOT_RUN / SKIPPED`。
 5. 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
@@ -84,7 +84,7 @@ Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些�
 - `CONFIRMED / 01-07E_COMPLETE`: Plan/correction/feature PR #72/#73/#74 reviewed merge `294ada3...`；[Summary](phases/01-cycle-1-e2e-01/01-07E-SUMMARY.md)索引精确证据。
 - `CONFIRMED / B_FE_EXPAND`: exact SHA `294ada386ec160ec2a48fc8883b5a38f1880e4ba`、tree `97b0928100edae965004338d52ce87dff7325fd1`；feature与latest-integration overlay review均`0/0/0`，full suite `1671 passed, 1 deselected, 12 warnings`。
 - `READY / 01-07I_01-07P`: 两个dependency-expand Packet可从exact `B_FE_EXPAND`启动；本状态PR不是其前置barrier。
-- `OPEN / CROSS_FILE_ALIGNMENT_OUTSIDE_ALLOWLIST`: `PROJECT_DIRECTION.md`与`README.md`仍保留F/E执行前快照，必须由各自独立single-writer evidence-only alignment更新；它们不创建第二道barrier，也不阻塞I/P。
+- `CONFIRMED / CROSS_FILE_ALIGNMENT_COMPLETE`: planning-status PR #75 merge `b1deb0a...`、Project Direction PR #76 merge `879cb10...`、README PR #77 merge `0472f03...`与execution owner PR #78 merge `7cf4aef...`已依次完成evidence-only对齐；它们未改变`B_FE_EXPAND`、未创建第二道barrier，也不阻塞I/P。
 - `OPEN / 01-08_01-08A_ISSUANCE`: 等待唯一execution map完整形成`B_RU_V2_CONTRACT`；当前reviewed feature完成证据为`22/39`。
 - `OPEN`: 后续第2–6阶段尚无scoped implementation owner；不得生成实现细节。
 
