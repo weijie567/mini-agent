@@ -2992,12 +2992,26 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
         if isinstance(node, ast.Attribute)
         and node.attr == "decode_persistence_record_versioned"
     ]
+    exact_reader_method_name = "load_exact_run_evidence_for_owner"
+    exact_reader_method_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Name)
+            and node.id == exact_reader_method_name
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr == exact_reader_method_name
+        )
+    ]
     postgres_rel = postgres_path.relative_to(repository_root).as_posix()
     if postgres_rel in versioned_decode_matches:
         assert len(decoder_imports) == 1
         assert decoder_imports[0].asname is None
         assert decoder_name_references
         assert not decoder_attribute_references
+        assert not exact_reader_method_references
         for reference in decoder_name_references:
             call = parent_by_node[reference]
             assert isinstance(call, ast.Call) and call.func is reference
@@ -3012,9 +3026,7 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             )
-            assert (
-                enclosing_function.name == "load_exact_run_evidence_for_owner"
-            )
+            assert enclosing_function.name == exact_reader_method_name
 
             enclosing_class: ast.AST | None = enclosing_function
             while enclosing_class is not None and not isinstance(
