@@ -1,6 +1,8 @@
 import pickle
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from typing import get_type_hints
 from uuid import UUID, uuid4
 
 import pytest
@@ -33,6 +35,7 @@ from mini_agent.application.records import (
     EvalResultStatus,
     EvalUsageSummary,
     EvalVersionManifest,
+    ExactRunEvidenceClosure,
     FinalizeRunCommand,
     FinalizeToolCallCommand,
     InterruptToolCallForRecoveryCommand,
@@ -41,6 +44,7 @@ from mini_agent.application.records import (
     MessageRecord,
     ObservationWriteResult,
     ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
@@ -54,33 +58,56 @@ from mini_agent.application.records import (
 )
 from mini_agent.core.common import ContractVisibility
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import ObservationVisibility, OrderObservation
+from mini_agent.core.memory import (
+    ContextManifest,
+    ObservationVisibility,
+    OrderObservation,
+    TaskStateRefAndVersion,
+    TokenCounts,
+    VersionedRecordRef,
+)
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
 )
-from mini_agent.core.request_understanding import InputAuthority, TaskDeltaOperation
+from mini_agent.core.request_understanding import (
+    InputAuthority,
+    InputSourceKind,
+    TaskDeltaOperation,
+)
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
+    CandidateRejectionReasonCode,
     CandidateValidationDecision,
     CandidateValidationRecord,
+    CandidateValidationRecordV2,
+    DurableInputCandidateV2,
+    DurableQueryContextualizationCandidateV2,
+    DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
+    GateDecision,
     GateDecisionValue,
     GateReasonCode,
+    ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolTimeoutPhase,
+    compute_model_visible_toolset_hash,
+    get_order_tool_spec,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -4411,4 +4438,2375 @@ def test_eval_projection_rejects_duplicate_grader_and_failure_codes() -> None:
                 CriticalFailureCode.CF_01,
                 CriticalFailureCode.CF_01,
             ),
+        )
+
+
+_EXACT_EVIDENCE_FIELD_NAMES = (
+    "conversation_record",
+    "run_record",
+    "message_records",
+    "request_understanding_record",
+    "accepted_task_deltas",
+    "input_binding_records",
+    "task_records",
+    "task_state_transitions",
+    "request_unit_records",
+    "conversation_task_links",
+    "run_task_links",
+    "gate_decisions",
+    "tool_calls",
+    "tool_attempts",
+    "observation_records",
+    "context_manifests",
+    "model_visible_toolset_artifacts",
+    "trace_events",
+)
+
+
+def _exact_evidence_artifact() -> ModelVisibleToolsetArtifact:
+    tool_spec = get_order_tool_spec()
+    return ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=compute_model_visible_toolset_hash((tool_spec,)),
+        provider_visible_tool_specs=(tool_spec,),
+    )
+
+
+def _exact_evidence_trace(
+    *,
+    event_type: TraceEventType,
+    run_id: UUID,
+    occurred_at: datetime = UTC_NOW,
+    **updates: object,
+) -> TraceEvent:
+    values: dict[str, object] = {
+        "trace_event_id": uuid4(),
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "run_id": run_id,
+    }
+    values.update(updates)
+    return TraceEvent(**values)
+
+
+def _minimal_exact_run_evidence() -> ExactRunEvidenceClosure:
+    conversation = _conversation(
+        schema_version="conversation_record.p0.v1",
+    )
+    message = _message(
+        schema_version="message_record.p0.v1",
+        conversation_id=conversation.conversation_id,
+    )
+    run = _run(
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatus.COMPLETED,
+        completed_at=UTC_NOW + timedelta(milliseconds=10),
+        stop_reason=StopReason.INPUT_INVALID,
+    )
+    artifact = _exact_evidence_artifact()
+    model_call_id = uuid4()
+    manifest = ContextManifest(
+        context_manifest_id=uuid4(),
+        run_id=run.run_id,
+        model_call_id=model_call_id,
+        tool_registry_version="e2e01-thin-tools-v1",
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(message.message_id,),
+        redaction_policy_version="e2e01-thin-redaction-v1",
+        token_counts=TokenCounts(input_tokens=4, output_tokens=0),
+        assembled_at=UTC_NOW,
+    )
+    traces = (
+        _exact_evidence_trace(
+            event_type=TraceEventType.MESSAGE_ACCEPTED,
+            run_id=run.run_id,
+            message_ref=message.message_id,
+        ),
+        _exact_evidence_trace(
+            event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
+            run_id=run.run_id,
+            model_call_id=model_call_id,
+            context_manifest_id=manifest.context_manifest_id,
+            model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        ),
+        _exact_evidence_trace(
+            event_type=TraceEventType.RUN_STOPPED,
+            run_id=run.run_id,
+            occurred_at=run.completed_at,
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=run.stop_reason,
+        ),
+    )
+    return ExactRunEvidenceClosure(
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(message,),
+        request_understanding_record=None,
+        accepted_task_deltas=(),
+        input_binding_records=(),
+        task_records=(),
+        task_state_transitions=(),
+        request_unit_records=(),
+        conversation_task_links=(),
+        run_task_links=(),
+        gate_decisions=(),
+        tool_calls=(),
+        tool_attempts=(),
+        observation_records=(),
+        context_manifests=(manifest,),
+        model_visible_toolset_artifacts=(artifact,),
+        trace_events=traces,
+    )
+
+
+def _rebuild_exact_run_evidence(
+    closure: ExactRunEvidenceClosure,
+    **updates: object,
+) -> ExactRunEvidenceClosure:
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in ExactRunEvidenceClosure.model_fields
+    }
+    values.update(updates)
+    return ExactRunEvidenceClosure(**values)
+
+
+def _durable_evidence_candidate(
+    *,
+    candidate_id: UUID,
+    message: MessageRecord,
+    order_id: str,
+) -> DurableTaskDeltaCandidateV2:
+    start = message.content.index(order_id)
+    end = start + len(order_id)
+    quote_hash = sha256(message.content[start:end].encode("utf-8")).hexdigest()
+    return DurableTaskDeltaCandidateV2(
+        candidate_id=candidate_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch=f"查询订单 {order_id}",
+        input_candidates=(
+            DurableInputCandidateV2(
+                name="order_id",
+                candidate_value=order_id,
+                semantic_role="TARGET_RESOURCE_IDENTIFIER",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message.message_id,
+                source_span_start=start,
+                source_span_end_exclusive=end,
+                source_quote_sha256=quote_hash,
+                confidence=0.99,
+            ),
+        ),
+        confidence=0.98,
+    )
+
+
+def _request_understanding_exact_run_evidence(
+    *,
+    candidate_count: int,
+    accepted_count: int,
+) -> ExactRunEvidenceClosure:
+    if not 0 <= accepted_count <= candidate_count <= 2:
+        raise ValueError("test fixture supports 0..2 candidates")
+    base = _minimal_exact_run_evidence()
+    stop_reason = (
+        StopReason.GOAL_COMPLETED
+        if accepted_count
+        else StopReason.INPUT_INVALID
+    )
+    user_outcome = (
+        AgentOutcome.COMPLETED
+        if accepted_count
+        else AgentOutcome.BLOCKED
+    )
+    completed_run = _project_run(
+        base.run_record,
+        stop_reason=stop_reason,
+    )
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=base.message_records[0].message_id,
+        conversation_id=base.conversation_record.conversation_id,
+        direction=MessageDirection.USER,
+        content="查订单 O-1001 和 O-1002",
+        received_at=UTC_NOW,
+    )
+    candidate_ids = tuple(uuid4() for _ in range(candidate_count))
+    candidates = tuple(
+        _durable_evidence_candidate(
+            candidate_id=candidate_id,
+            message=message,
+            order_id=f"O-{1001 + index}",
+        )
+        for index, candidate_id in enumerate(candidate_ids)
+    )
+    decisions = tuple(
+        CandidateValidationRecordV2(
+            candidate_ref=candidate_id,
+            decision=(
+                CandidateValidationDecision.ACCEPT
+                if index < accepted_count
+                else CandidateValidationDecision.REJECT
+            ),
+            reason_code=(
+                None
+                if index < accepted_count
+                else CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+            ),
+        )
+        for index, candidate_id in enumerate(candidate_ids)
+    )
+
+    children: list[AcceptedTaskDeltaV2] = []
+    bindings: list[InputBinding] = []
+    tasks: list[TaskRecord] = []
+    units: list[RequestUnitRecord] = []
+    transitions: list[TaskStateTransition] = []
+    conversation_links: list[ConversationTaskLinkRecord] = []
+    run_links: list[RunTaskLinkRecord] = []
+    traces = [
+        _exact_evidence_trace(
+            event_type=TraceEventType.MESSAGE_ACCEPTED,
+            run_id=completed_run.run_id,
+            message_ref=message.message_id,
+        ),
+        _exact_evidence_trace(
+            event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
+            run_id=completed_run.run_id,
+            model_call_id=base.context_manifests[0].model_call_id,
+            context_manifest_id=base.context_manifests[0].context_manifest_id,
+            model_visible_toolset_hash=(
+                base.model_visible_toolset_artifacts[0].model_visible_toolset_hash
+            ),
+        ),
+    ]
+    for index, candidate in enumerate(candidates[:accepted_count]):
+        binding = _input_binding(
+            normalized_value=f"O-{1001 + index}",
+            source_refs=(message.message_id,),
+        )
+        task = _task(
+            status=TaskStatus.COMPLETED,
+            state_version=2,
+            updated_at=UTC_NOW + timedelta(milliseconds=1),
+        )
+        unit = _request_unit(
+            task_id=task.task_id,
+            goal_text=candidate.goal_patch,
+            goal_source_refs=(message.message_id,),
+            input_binding_refs=(binding.binding_id,),
+            status=TaskStatus.COMPLETED,
+            state_version=2,
+            updated_at=UTC_NOW + timedelta(milliseconds=1),
+        )
+        child = AcceptedTaskDeltaV2(
+            accepted_delta_id=uuid4(),
+            candidate_ref=candidate.candidate_id,
+            message_ref=message.message_id,
+            operation=candidate.operation,
+            goal_text=candidate.goal_patch,
+            input_binding_refs=(binding.binding_id,),
+            accepted_at=UTC_NOW,
+            task_id=task.task_id,
+            base_task_state_version=None,
+            result_task_state_version=1,
+        )
+        transition = _task_transition(
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            from_status=TaskStatus.ACTIVE,
+            to_status=TaskStatus.COMPLETED,
+            changed_at=UTC_NOW + timedelta(milliseconds=1),
+        )
+        children.append(child)
+        bindings.append(binding)
+        tasks.append(task)
+        units.append(unit)
+        transitions.append(transition)
+        conversation_links.append(
+            _conversation_task_link(
+                schema_version="conversation_task_link_record.p0.v1",
+                conversation_id=base.conversation_record.conversation_id,
+                task_id=task.task_id,
+            )
+        )
+        run_links.append(
+            _run_task_link(
+                schema_version="run_task_link_record.p0.v1",
+                run_id=base.run_record.run_id,
+                task_id=task.task_id,
+                base_task_state_version=None,
+                result_task_state_version=2,
+            )
+        )
+        traces.extend(
+            (
+                _exact_evidence_trace(
+                    event_type=TraceEventType.TASK_DELTA_ACCEPTED,
+                    run_id=completed_run.run_id,
+                    message_ref=message.message_id,
+                    accepted_delta_ref=child.accepted_delta_id,
+                    task_id=task.task_id,
+                ),
+                _exact_evidence_trace(
+                    event_type=TraceEventType.INPUT_BINDING_RECORDED,
+                    run_id=completed_run.run_id,
+                    task_id=task.task_id,
+                    request_unit_id=unit.request_unit_id,
+                    input_binding_ref=binding.binding_id,
+                ),
+                _exact_evidence_trace(
+                    event_type=TraceEventType.TASK_STATE_CHANGED,
+                    run_id=completed_run.run_id,
+                    occurred_at=transition.changed_at,
+                    task_id=task.task_id,
+                    request_unit_id=unit.request_unit_id,
+                ),
+            )
+        )
+    record = RequestUnderstandingRecordV2(
+        request_understanding_record_id=uuid4(),
+        run_id=completed_run.run_id,
+        message_ref=message.message_id,
+        schema_version="request_understanding_record.p0.v2",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-thin-v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text="查询当前消息中的订单",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=candidates,
+        candidate_validation=decisions,
+        accepted_delta_refs=tuple(child.accepted_delta_id for child in children),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=None,
+        next_move_candidate_ref=None,
+        created_at=UTC_NOW,
+    )
+    traces.append(
+        _exact_evidence_trace(
+            event_type=TraceEventType.RUN_STOPPED,
+            run_id=completed_run.run_id,
+            occurred_at=completed_run.completed_at,
+            user_outcome=user_outcome,
+            stop_reason=completed_run.stop_reason,
+        )
+    )
+    return _rebuild_exact_run_evidence(
+        base,
+        run_record=completed_run,
+        message_records=(message,),
+        request_understanding_record=record,
+        accepted_task_deltas=tuple(children),
+        input_binding_records=tuple(bindings),
+        task_records=tuple(tasks),
+        task_state_transitions=tuple(transitions),
+        request_unit_records=tuple(units),
+        conversation_task_links=tuple(conversation_links),
+        run_task_links=tuple(run_links),
+        trace_events=tuple(traces),
+    )
+
+
+def _tool_exact_run_evidence() -> ExactRunEvidenceClosure:
+    base = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    binding = base.input_binding_records[0]
+    task = base.task_records[0]
+    unit = base.request_unit_records[0]
+    manifest = base.context_manifests[0]
+    gate = GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name="get_order",
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(binding.binding_id,),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        decided_at=UTC_NOW + timedelta(microseconds=100),
+    )
+    observation = _observation(
+        observed_at=UTC_NOW + timedelta(microseconds=300),
+        recorded_at=UTC_NOW + timedelta(microseconds=300),
+    )
+    tool_call = ToolCallRecord(
+        tool_call_id=uuid4(),
+        run_id=base.run_record.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        gate_decision_id=gate.gate_decision_id,
+        canonical_tool_name="get_order",
+        tool_registry_version=manifest.tool_registry_version,
+        validated_task_state_version=1,
+        argument_binding_refs=(binding.binding_id,),
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        status=ToolCallStatus.SUCCEEDED,
+        started_at=UTC_NOW + timedelta(microseconds=200),
+        finished_at=UTC_NOW + timedelta(microseconds=300),
+        result_ref=observation.observation_id,
+    )
+    attempt = ToolAttemptRecord(
+        tool_call_id=tool_call.tool_call_id,
+        attempt_no=1,
+        started_at=tool_call.started_at,
+        finished_at=tool_call.finished_at,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    updated_unit = _rebuild(
+        unit,
+        observation_refs=(observation.observation_id,),
+    )
+    traces = (
+        *base.trace_events[:-1],
+        _exact_evidence_trace(
+            event_type=TraceEventType.TOOL_CALL_SUCCEEDED,
+            run_id=base.run_record.run_id,
+            occurred_at=tool_call.finished_at,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            context_manifest_id=manifest.context_manifest_id,
+            argument_binding_refs=(binding.binding_id,),
+            tool_call_id=tool_call.tool_call_id,
+            tool_call_terminal_status=ToolCallStatus.SUCCEEDED,
+        ),
+        _exact_evidence_trace(
+            event_type=TraceEventType.OBSERVATION_RECORDED,
+            run_id=base.run_record.run_id,
+            occurred_at=observation.recorded_at,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            tool_call_id=tool_call.tool_call_id,
+            observation_ref=observation.observation_id,
+        ),
+        base.trace_events[-1],
+    )
+    return _rebuild_exact_run_evidence(
+        base,
+        request_unit_records=(updated_unit,),
+        gate_decisions=(gate,),
+        tool_calls=(tool_call,),
+        tool_attempts=(attempt,),
+        observation_records=(observation,),
+        trace_events=traces,
+    )
+
+
+def test_request_understanding_candidate_invalid_error_is_bounded_and_distinct() -> None:
+    first = RequestUnderstandingCandidateInvalidError()
+    second = RequestUnderstandingCandidateInvalidError()
+
+    assert first is not second
+    assert first.args == ("REQUEST_UNDERSTANDING_CANDIDATE_INVALID",)
+    assert not isinstance(first, ProviderProtocolError)
+    assert not isinstance(first, ValueError)
+    with pytest.raises(TypeError):
+        RequestUnderstandingCandidateInvalidError("raw Pydantic secret")
+
+    def translate_after_discarding_raw_exception() -> None:
+        translated: RequestUnderstandingCandidateInvalidError | None = None
+        try:
+            raise ValidationError.from_exception_data(
+                "RawProvider",
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("Token VERY_SECRET",),
+                        "input": "customer-A",
+                        "ctx": {"error": ValueError("Prompt private")},
+                    }
+                ],
+            )
+        except ValidationError:
+            translated = RequestUnderstandingCandidateInvalidError()
+        raise translated
+
+    with pytest.raises(RequestUnderstandingCandidateInvalidError) as raised:
+        translate_after_discarding_raw_exception()
+    translated = raised.value
+    assert translated.__cause__ is None
+    assert translated.__context__ is None
+    projection = " ".join((str(translated), repr(translated), repr(translated.args)))
+    for secret in ("VERY_SECRET", "customer-A", "Prompt private"):
+        assert secret not in projection
+
+
+def test_exact_run_evidence_closure_has_exact_required_private_surface() -> None:
+    expected_types = {
+        "conversation_record": ConversationRecord,
+        "run_record": AgentRunRecord,
+        "message_records": tuple[MessageRecord, ...],
+        "request_understanding_record": RequestUnderstandingRecordV2 | None,
+        "accepted_task_deltas": tuple[AcceptedTaskDeltaV2, ...],
+        "input_binding_records": tuple[InputBinding, ...],
+        "task_records": tuple[TaskRecord, ...],
+        "task_state_transitions": tuple[TaskStateTransition, ...],
+        "request_unit_records": tuple[RequestUnitRecord, ...],
+        "conversation_task_links": tuple[ConversationTaskLinkRecord, ...],
+        "run_task_links": tuple[RunTaskLinkRecord, ...],
+        "gate_decisions": tuple[GateDecision, ...],
+        "tool_calls": tuple[ToolCallRecord, ...],
+        "tool_attempts": tuple[ToolAttemptRecord, ...],
+        "observation_records": tuple[OrderObservation, ...],
+        "context_manifests": tuple[ContextManifest, ...],
+        "model_visible_toolset_artifacts": tuple[ModelVisibleToolsetArtifact, ...],
+        "trace_events": tuple[TraceEvent, ...],
+    }
+    assert tuple(ExactRunEvidenceClosure.model_fields) == _EXACT_EVIDENCE_FIELD_NAMES
+    resolved_types = get_type_hints(ExactRunEvidenceClosure, include_extras=True)
+    assert {
+        field_name: resolved_types[field_name]
+        for field_name in _EXACT_EVIDENCE_FIELD_NAMES
+    } == expected_types
+    assert all(
+        field.is_required()
+        for field in ExactRunEvidenceClosure.model_fields.values()
+    )
+    assert ExactRunEvidenceClosure.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
+    for forbidden in (
+        "case_id",
+        "customer_id",
+        "eval_evidence",
+        "agent_run_result",
+        "persistence_envelope",
+        "closure_fence",
+    ):
+        assert forbidden not in ExactRunEvidenceClosure.model_fields
+
+    closure = _minimal_exact_run_evidence()
+    with pytest.raises(ValidationError, match="frozen"):
+        closure.run_record = closure.run_record
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in ExactRunEvidenceClosure.model_fields
+    }
+    values.pop("tool_calls")
+    with pytest.raises(ValidationError, match="tool_calls"):
+        ExactRunEvidenceClosure(**values)
+    with pytest.raises(ValidationError, match="extra"):
+        ExactRunEvidenceClosure(
+            **{
+                field_name: getattr(closure, field_name)
+                for field_name in ExactRunEvidenceClosure.model_fields
+            },
+            case_id="E2E01-01",
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "accepted_count"),
+    ((0, 0), (2, 0), (2, 1), (2, 2)),
+)
+def test_exact_run_evidence_accepts_closed_ru_v2_candidate_shapes(
+    candidate_count: int,
+    accepted_count: int,
+) -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=candidate_count,
+        accepted_count=accepted_count,
+    )
+    assert len(closure.request_understanding_record.task_delta_candidates) == (
+        candidate_count
+    )
+    assert len(closure.accepted_task_deltas) == accepted_count
+    assert len(closure.task_records) == accepted_count
+
+
+def test_exact_run_evidence_rejects_missing_extra_foreign_or_eval_graph_rows() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=1,
+    )
+    child = closure.accepted_task_deltas[0]
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(closure, accepted_task_deltas=())
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            accepted_task_deltas=(child, child),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            run_task_links=(
+                _rebuild(closure.run_task_links[0], run_id=uuid4()),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            task_records=(
+                _rebuild(
+                    closure.task_records[0],
+                    owner_customer_id="customer-B",
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            message_records=(
+                *closure.message_records,
+                _message(
+                    conversation_id=closure.conversation_record.conversation_id,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(
+                *closure.trace_events,
+                _exact_evidence_trace(
+                    event_type=TraceEventType.RUN_STARTED,
+                    run_id=closure.run_record.run_id,
+                    case_id="E2E01-01",
+                ),
+            ),
+        )
+
+
+def test_exact_run_evidence_accepts_two_task_transitions_and_rejects_gaps() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    first = _task_transition(
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=TaskStatus.WAITING_USER,
+        base_state_version=1,
+        result_state_version=2,
+        changed_at=UTC_NOW + timedelta(milliseconds=1),
+    )
+    second = _task_transition(
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        from_status=TaskStatus.WAITING_USER,
+        to_status=TaskStatus.BLOCKED,
+        base_state_version=2,
+        result_state_version=3,
+        changed_at=UTC_NOW + timedelta(milliseconds=2),
+    )
+    blocked_run = _project_run(
+        closure.run_record,
+        stop_reason=StopReason.GATE_REJECTED,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    blocked_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.GATE_REJECTED,
+        user_outcome=AgentOutcome.BLOCKED,
+    )
+    stale = _rebuild_exact_run_evidence(
+        closure,
+        run_record=blocked_run,
+        task_records=(
+            _rebuild(
+                task,
+                status=TaskStatus.BLOCKED,
+                state_version=3,
+                updated_at=second.changed_at,
+            ),
+        ),
+        task_state_transitions=(first, second),
+        request_unit_records=(
+            _rebuild(
+                unit,
+                status=TaskStatus.BLOCKED,
+                state_version=3,
+                updated_at=second.changed_at,
+            ),
+        ),
+        run_task_links=(
+            _rebuild(
+                closure.run_task_links[0],
+                result_task_state_version=3,
+            ),
+        ),
+        trace_events=tuple(
+            blocked_stopped if event is stopped else event
+            for event in closure.trace_events
+        ),
+    )
+    assert len(stale.task_state_transitions) == 2
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(stale, task_state_transitions=(first,))
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            stale,
+            task_state_transitions=(first, _rebuild(second, base_state_version=3)),
+        )
+
+
+def test_exact_run_evidence_closes_tool_attempts_and_top_level_references() -> None:
+    closure = _tool_exact_run_evidence()
+    assert len(closure.tool_calls) == len(closure.tool_attempts) == 1
+    assert len(closure.observation_records) == 1
+
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(closure, tool_attempts=())
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            gate_decisions=(
+                _rebuild(
+                    closure.gate_decisions[0],
+                    context_manifest_id=uuid4(),
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(
+                *closure.trace_events,
+                _exact_evidence_trace(
+                    event_type=TraceEventType.RUN_STARTED,
+                    run_id=closure.run_record.run_id,
+                    message_ref=uuid4(),
+                ),
+            ),
+        )
+
+
+def test_exact_run_evidence_does_not_treat_payload_correlations_as_records() -> None:
+    closure = _minimal_exact_run_evidence()
+    correlation_event = _exact_evidence_trace(
+        event_type=TraceEventType.PRESENTATION_PLAN_PROPOSED,
+        run_id=closure.run_record.run_id,
+        model_call_id=uuid4(),
+        presentation_plan_ref=uuid4(),
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, correlation_event),
+    )
+    assert rebuilt.trace_events[-1].presentation_plan_ref is not None
+
+
+@pytest.mark.parametrize("family_name", ("task", "tool_attempt"))
+def test_exact_run_evidence_rejects_large_persisted_scalars_without_range_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    family_name: str,
+) -> None:
+    closure = (
+        _request_understanding_exact_run_evidence(
+            candidate_count=1,
+            accepted_count=1,
+        )
+        if family_name == "task"
+        else _tool_exact_run_evidence()
+    )
+    updates: dict[str, object]
+    expected_message: str
+    if family_name == "task":
+        task = closure.task_records[0]
+        unit = closure.request_unit_records[0]
+        updates = {
+            "task_records": (
+                _rebuild(task, state_version=100_000),
+            ),
+            "request_unit_records": (
+                _rebuild(unit, state_version=100_000),
+            ),
+            "run_task_links": (
+                _rebuild(
+                    closure.run_task_links[0],
+                    result_task_state_version=100_000,
+                ),
+            ),
+        }
+        expected_message = "complete and contiguous"
+    else:
+        updates = {
+            "tool_calls": (
+                _rebuild(closure.tool_calls[0], attempt_count=100_000),
+            ),
+        }
+        expected_message = "exact contiguous attempt"
+
+    def fail_if_materialized(*_args: object) -> None:
+        raise AssertionError(
+            "persisted scalar must not drive range materialization"
+        )
+
+    monkeypatch.setattr(
+        application_records_module,
+        "range",
+        fail_if_materialized,
+        raising=False,
+    )
+    with pytest.raises(ValidationError, match=expected_message):
+        _rebuild_exact_run_evidence(closure, **updates)
+
+
+def test_exact_run_evidence_binds_accepted_versions_to_task_and_run_link() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    child = closure.accepted_task_deltas[0]
+
+    with pytest.raises(ValidationError, match="current Task history"):
+        _rebuild_exact_run_evidence(
+            closure,
+            accepted_task_deltas=(
+                _rebuild(
+                    child,
+                    base_task_state_version=2,
+                    result_task_state_version=3,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunTaskLink base"):
+        _rebuild_exact_run_evidence(
+            closure,
+            accepted_task_deltas=(
+                _rebuild(
+                    child,
+                    base_task_state_version=1,
+                    result_task_state_version=2,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="terminal RunTaskLink"):
+        _rebuild_exact_run_evidence(
+            closure,
+            run_task_links=(
+                _rebuild(
+                    closure.run_task_links[0],
+                    result_task_state_version=None,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("swapped_field", ("input_binding_refs", "goal_text"))
+def test_exact_run_evidence_binds_each_accepted_child_to_its_request_unit(
+    swapped_field: str,
+) -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first, second = closure.request_unit_records
+    if swapped_field == "input_binding_refs":
+        first_updates = {"input_binding_refs": second.input_binding_refs}
+        second_updates = {"input_binding_refs": first.input_binding_refs}
+    else:
+        first_updates = {"goal_text": second.goal_text}
+        second_updates = {"goal_text": first.goal_text}
+
+    with pytest.raises(ValidationError, match="RequestUnit causality"):
+        _rebuild_exact_run_evidence(
+            closure,
+            request_unit_records=(
+                _rebuild(first, **first_updates),
+                _rebuild(second, **second_updates),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("state_version", "assembled_at"),
+    (
+        (999, UTC_NOW),
+        (2, UTC_NOW),
+    ),
+)
+def test_exact_run_evidence_rejects_impossible_manifest_task_versions(
+    state_version: int,
+    assembled_at: datetime,
+) -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    task = closure.task_records[0]
+    manifest = closure.context_manifests[0]
+    invalid_manifest = _rebuild(
+        manifest,
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=state_version,
+        ),
+        assembled_at=assembled_at,
+    )
+    with pytest.raises(ValidationError, match="Manifest Task version"):
+        _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(invalid_manifest,),
+        )
+
+
+def test_exact_run_evidence_binds_manifest_observation_version_exactly() -> None:
+    closure = _tool_exact_run_evidence()
+    observation = closure.observation_records[0]
+    manifest = closure.context_manifests[0]
+    invalid_manifest = _rebuild(
+        manifest,
+        observation_refs_and_versions=(
+            VersionedRecordRef(
+                record_ref=observation.observation_id,
+                version="WRONG",
+            ),
+        ),
+    )
+    with pytest.raises(ValidationError, match="Observation version"):
+        _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(invalid_manifest,),
+        )
+
+
+def test_exact_run_evidence_requires_each_observation_source_edge() -> None:
+    closure = _tool_exact_run_evidence()
+    traces_without_source = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type is not TraceEventType.OBSERVATION_RECORDED
+    )
+    with pytest.raises(ValidationError, match="Observation source edge"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=traces_without_source,
+        )
+
+
+def test_exact_run_evidence_cross_checks_accepted_trace_task() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first_child, second_child = closure.accepted_task_deltas
+    traces = tuple(
+        (
+            _rebuild(event, task_id=second_child.task_id)
+            if event.accepted_delta_ref == first_child.accepted_delta_id
+            else event
+        )
+        for event in closure.trace_events
+    )
+    with pytest.raises(ValidationError, match="accepted child"):
+        _rebuild_exact_run_evidence(closure, trace_events=traces)
+
+
+def test_exact_run_evidence_cross_checks_trace_manifest_correlations() -> None:
+    closure = _minimal_exact_run_evidence()
+    context_event = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    )
+    with pytest.raises(ValidationError, match="Trace Manifest correlations"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                (
+                    _rebuild(context_event, model_call_id=uuid4())
+                    if event is context_event
+                    else event
+                )
+                for event in closure.trace_events
+            ),
+        )
+
+    second_spec = _rebuild(get_order_tool_spec(), name="get_order_alternate")
+    second_artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (second_spec,)
+        ),
+        provider_visible_tool_specs=(second_spec,),
+    )
+    with pytest.raises(ValidationError, match="Trace Manifest correlations"):
+        _rebuild_exact_run_evidence(
+            closure,
+            model_visible_toolset_artifacts=(
+                *closure.model_visible_toolset_artifacts,
+                second_artifact,
+            ),
+            trace_events=tuple(
+                (
+                    _rebuild(
+                        context_event,
+                        model_visible_toolset_hash=(
+                            second_artifact.model_visible_toolset_hash
+                        ),
+                    )
+                    if event is context_event
+                    else event
+                )
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_uses_conversation_link_composite_identity() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    original = closure.conversation_task_links[0]
+    historical = _rebuild(
+        original,
+        ended_at=original.linked_at + timedelta(microseconds=1),
+    )
+    active = _rebuild(
+        original,
+        linked_at=original.linked_at + timedelta(microseconds=2),
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        conversation_task_links=(historical, active),
+    )
+    assert len(rebuilt.conversation_task_links) == 2
+
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        _rebuild_exact_run_evidence(
+            closure,
+            conversation_task_links=(
+                historical,
+                _rebuild(historical, link_reason="REOPENED"),
+            ),
+        )
+
+
+def test_exact_run_evidence_run_task_link_lifecycle_is_symmetric() -> None:
+    terminal = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    assert (
+        terminal.run_task_links[0].result_task_state_version
+        == terminal.task_records[0].state_version
+    )
+
+    active_run = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.RUNNING,
+        completed_at=None,
+        stop_reason=None,
+    )
+    active_traces = tuple(
+        event
+        for event in terminal.trace_events
+        if event.event_type is not TraceEventType.RUN_STOPPED
+    )
+    active_link = _rebuild(
+        terminal.run_task_links[0],
+        result_task_state_version=None,
+    )
+    active = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=active_run,
+        run_task_links=(active_link,),
+        trace_events=active_traces,
+    )
+    assert active.run_task_links[0].result_task_state_version is None
+
+    with pytest.raises(ValidationError, match="active RunTaskLink"):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=active_run,
+            trace_events=active_traces,
+        )
+
+
+def test_exact_run_evidence_current_unit_matches_latest_same_task_delta() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first_child, second_child = closure.accepted_task_deltas
+    first_task, second_task = closure.task_records
+    first_unit, second_unit = closure.request_unit_records
+    latest_child = _rebuild(
+        second_child,
+        task_id=first_task.task_id,
+        base_task_state_version=1,
+        result_task_state_version=2,
+    )
+    current_unit = _rebuild(
+        first_unit,
+        goal_text=latest_child.goal_text,
+        input_binding_refs=latest_child.input_binding_refs,
+    )
+    second_task_state_trace_removed = False
+    traces: list[TraceEvent] = []
+    for event in closure.trace_events:
+        if (
+            event.event_type is TraceEventType.TASK_STATE_CHANGED
+            and event.task_id == first_task.task_id
+            and not second_task_state_trace_removed
+        ):
+            second_task_state_trace_removed = True
+            continue
+        updates: dict[str, object] = {}
+        if event.task_id == second_task.task_id:
+            updates["task_id"] = first_task.task_id
+        if event.request_unit_id == second_unit.request_unit_id:
+            updates["request_unit_id"] = first_unit.request_unit_id
+        traces.append(_rebuild(event, **updates) if updates else event)
+
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        accepted_task_deltas=(first_child, latest_child),
+        task_records=(first_task,),
+        task_state_transitions=(closure.task_state_transitions[0],),
+        request_unit_records=(current_unit,),
+        conversation_task_links=(closure.conversation_task_links[0],),
+        run_task_links=(closure.run_task_links[0],),
+        trace_events=tuple(traces),
+    )
+    assert tuple(
+        child.result_task_state_version
+        for child in rebuilt.accepted_task_deltas
+    ) == (1, 2)
+    assert rebuilt.request_unit_records[0].goal_text == latest_child.goal_text
+    assert (
+        rebuilt.request_unit_records[0].input_binding_refs
+        == latest_child.input_binding_refs
+    )
+
+
+_TOOL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        TraceEventType.TOOL_CALL_CREATED,
+        TraceEventType.TOOL_CALL_STARTED,
+        TraceEventType.TOOL_CALL_SUCCEEDED,
+        TraceEventType.TOOL_CALL_FAILED,
+        TraceEventType.TOOL_CALL_TIMED_OUT,
+        TraceEventType.TOOL_CALL_INTERRUPTED,
+    }
+)
+
+
+def _active_tool_exact_run_evidence(
+    status: ToolCallStatus,
+) -> ExactRunEvidenceClosure:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    attempt = closure.tool_attempts[0]
+    traces = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type not in _TOOL_LIFECYCLE_EVENT_TYPES
+        and event.event_type is not TraceEventType.OBSERVATION_RECORDED
+    )
+    if status is ToolCallStatus.CREATED:
+        projected_call = _project_tool_call(
+            call,
+            attempt_count=0,
+            status=status,
+            finished_at=None,
+            result_ref=None,
+        )
+        attempts: tuple[ToolAttemptRecord, ...] = ()
+        lifecycle_event_type = TraceEventType.TOOL_CALL_CREATED
+    else:
+        projected_call = _project_tool_call(
+            call,
+            status=status,
+            finished_at=None,
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                finished_at=None,
+                outcome=None,
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_STARTED
+    lifecycle_event = _exact_evidence_trace(
+        event_type=lifecycle_event_type,
+        run_id=closure.run_record.run_id,
+        occurred_at=projected_call.started_at,
+        task_id=projected_call.task_id,
+        request_unit_id=projected_call.request_unit_id,
+        tool_call_id=projected_call.tool_call_id,
+        tool_call_terminal_status=status,
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        request_unit_records=(
+            _rebuild(closure.request_unit_records[0], observation_refs=()),
+        ),
+        tool_calls=(projected_call,),
+        tool_attempts=attempts,
+        observation_records=(),
+        trace_events=(*traces, lifecycle_event),
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    (AgentRunStatus.CREATED, AgentRunStatus.RUNNING),
+)
+def test_exact_run_evidence_accepts_active_run_without_stopped_trace(
+    status: AgentRunStatus,
+) -> None:
+    terminal = _minimal_exact_run_evidence()
+    active = _project_run(
+        terminal.run_record,
+        status=status,
+        completed_at=None,
+        stop_reason=None,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=active,
+        trace_events=tuple(
+            event
+            for event in terminal.trace_events
+            if event.event_type is not TraceEventType.RUN_STOPPED
+        ),
+    )
+    assert rebuilt.run_record.status is status
+
+
+def test_exact_run_evidence_rejects_stopped_trace_for_active_run() -> None:
+    terminal = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    active = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.RUNNING,
+        completed_at=None,
+        stop_reason=None,
+    )
+    with pytest.raises(ValidationError, match="active Run cannot have RunStopped"):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=active,
+            run_task_links=(
+                _rebuild(
+                    terminal.run_task_links[0],
+                    result_task_state_version=None,
+                ),
+            ),
+        )
+
+
+def test_exact_run_evidence_closes_terminal_run_stopped_projection() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    assert stopped.stop_reason is closure.run_record.stop_reason
+    assert stopped.occurred_at == closure.run_record.completed_at
+
+    wrong_reason = _rebuild(stopped, stop_reason=StopReason.INPUT_INVALID)
+    late = _rebuild(
+        stopped,
+        occurred_at=closure.run_record.completed_at + timedelta(seconds=1),
+    )
+    duplicate = _rebuild(stopped, trace_event_id=uuid4())
+    without_stopped = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type is not TraceEventType.RUN_STOPPED
+    )
+    for traces in (
+        tuple(
+            wrong_reason if event is stopped else event
+            for event in closure.trace_events
+        ),
+        tuple(
+            late if event is stopped else event
+            for event in closure.trace_events
+        ),
+        without_stopped,
+        (*closure.trace_events, duplicate),
+    ):
+        with pytest.raises(ValidationError, match="terminal RunStopped"):
+            _rebuild_exact_run_evidence(closure, trace_events=traces)
+
+
+def test_exact_run_evidence_accepts_incomplete_run_with_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    incomplete = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.INCOMPLETE,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    stopped = next(
+        event
+        for event in terminal.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    incomplete_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=incomplete,
+        trace_events=tuple(
+            incomplete_stopped if event is stopped else event
+            for event in terminal.trace_events
+        ),
+    )
+    assert rebuilt.run_record.status is AgentRunStatus.INCOMPLETE
+    assert incomplete_stopped.occurred_at == rebuilt.run_record.completed_at
+
+
+def test_exact_run_evidence_accepts_failed_run_without_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=None,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        terminal,
+        run_record=failed,
+        trace_events=tuple(
+            event
+            for event in terminal.trace_events
+            if event.event_type is not TraceEventType.RUN_STOPPED
+        ),
+    )
+    assert rebuilt.run_record.status is AgentRunStatus.FAILED
+    assert rebuilt.run_record.stop_reason is None
+
+
+def test_exact_run_evidence_rejects_failed_run_with_stopped_trace() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=None,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="FAILED Run cannot have RunStopped",
+    ):
+        _rebuild_exact_run_evidence(terminal, run_record=failed)
+
+
+def test_exact_run_evidence_rejects_failed_run_with_stop_reason() -> None:
+    terminal = _minimal_exact_run_evidence()
+    failed = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.FAILED,
+        stop_reason=StopReason.INPUT_INVALID,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="FAILED Run must not carry stop_reason",
+    ):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=failed,
+            trace_events=tuple(
+                event
+                for event in terminal.trace_events
+                if event.event_type is not TraceEventType.RUN_STOPPED
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),
+)
+def test_exact_run_evidence_accepts_current_active_tool_lifecycle(
+    status: ToolCallStatus,
+) -> None:
+    closure = _active_tool_exact_run_evidence(status)
+    assert closure.tool_calls[0].status is status
+
+
+def test_exact_run_evidence_accepts_sparse_and_order_independent_tool_lifecycle() -> None:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    created = _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_CALL_CREATED,
+        run_id=call.run_id,
+        occurred_at=call.started_at,
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        tool_call_terminal_status=ToolCallStatus.CREATED,
+    )
+    started = _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_CALL_STARTED,
+        run_id=call.run_id,
+        occurred_at=call.started_at + timedelta(microseconds=1),
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        tool_call_terminal_status=ToolCallStatus.RUNNING,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, started, created),
+    )
+    assert rebuilt.tool_calls[0].status is ToolCallStatus.SUCCEEDED
+
+
+def test_exact_run_evidence_rejects_tool_lifecycle_that_conflicts_with_projection() -> None:
+    closure = _tool_exact_run_evidence()
+    succeeded = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.TOOL_CALL_SUCCEEDED
+    )
+    failed = _rebuild(
+        succeeded,
+        event_type=TraceEventType.TOOL_CALL_FAILED,
+        tool_call_terminal_status=ToolCallStatus.FAILED,
+    )
+    with pytest.raises(ValidationError, match="ToolCall lifecycle"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                failed if event is succeeded else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def _completed_row_exact_run_evidence(
+    *,
+    stop_reason: StopReason,
+    user_outcome: AgentOutcome,
+    task_statuses: tuple[TaskStatus, ...],
+) -> ExactRunEvidenceClosure:
+    if len(task_statuses) > 2:
+        raise ValueError("test fixture supports at most two Tasks")
+    closure = (
+        _request_understanding_exact_run_evidence(
+            candidate_count=len(task_statuses),
+            accepted_count=len(task_statuses),
+        )
+        if task_statuses
+        else _minimal_exact_run_evidence()
+    )
+    completed_run = _project_run(
+        closure.run_record,
+        status=AgentRunStatus.COMPLETED,
+        stop_reason=stop_reason,
+    )
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    completed_stopped = _rebuild(
+        stopped,
+        occurred_at=completed_run.completed_at,
+        user_outcome=user_outcome,
+        stop_reason=stop_reason,
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        run_record=completed_run,
+        task_records=tuple(
+            _rebuild(task, status=status)
+            for task, status in zip(closure.task_records, task_statuses)
+        ),
+        task_state_transitions=tuple(
+            _rebuild(transition, to_status=status)
+            for transition, status in zip(
+                closure.task_state_transitions,
+                task_statuses,
+            )
+        ),
+        request_unit_records=tuple(
+            _rebuild(unit, status=status)
+            for unit, status in zip(
+                closure.request_unit_records,
+                task_statuses,
+            )
+        ),
+        trace_events=tuple(
+            completed_stopped if event is stopped else event
+            for event in closure.trace_events
+        ),
+    )
+
+
+_EXACT_EVIDENCE_COMPLETED_OWNER_ROWS = tuple(
+    sorted(
+        application_records_module._COMPLETED_FINALIZATION_ROWS,
+        key=lambda row: (
+            row[0].value,
+            row[1],
+            row[2].value,
+            row[3].value if row[3] is not None else "",
+        ),
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    _EXACT_EVIDENCE_COMPLETED_OWNER_ROWS,
+    ids=lambda row: "-".join(
+        (
+            row[0].value,
+            "task" if row[1] else "no-task",
+            row[2].value,
+            row[3].value if row[3] is not None else "none",
+        )
+    ),
+)
+def test_exact_run_evidence_accepts_all_completed_owner_rows(
+    row: tuple[
+        StopReason,
+        bool,
+        AgentOutcome,
+        TaskStatus | None,
+    ],
+) -> None:
+    stop_reason, has_task, user_outcome, task_status = row
+    assert len(_EXACT_EVIDENCE_COMPLETED_OWNER_ROWS) == 9
+    closure = _completed_row_exact_run_evidence(
+        stop_reason=stop_reason,
+        user_outcome=user_outcome,
+        task_statuses=(
+            (task_status,)
+            if has_task and task_status is not None
+            else ()
+        ),
+    )
+    assert closure.run_record.stop_reason is stop_reason
+
+
+def test_exact_run_evidence_accepts_same_status_multi_task_completed_row() -> None:
+    closure = _completed_row_exact_run_evidence(
+        stop_reason=StopReason.GOAL_COMPLETED,
+        user_outcome=AgentOutcome.COMPLETED,
+        task_statuses=(TaskStatus.COMPLETED, TaskStatus.COMPLETED),
+    )
+    assert tuple(task.status for task in closure.task_records) == (
+        TaskStatus.COMPLETED,
+        TaskStatus.COMPLETED,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "user_outcome", "task_statuses"),
+    (
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (),
+            id="goal-without-task",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.BLOCKED,
+            (TaskStatus.BLOCKED,),
+            id="input-invalid-with-task",
+        ),
+        pytest.param(
+            StopReason.PROCESS_RESTART_DETECTED,
+            AgentOutcome.BLOCKED,
+            (),
+            id="process-restart-completed",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.ASK_USER,
+            (),
+            id="ask-user-outcome",
+        ),
+        pytest.param(
+            StopReason.INPUT_INVALID,
+            AgentOutcome.NEED_HUMAN,
+            (),
+            id="need-human-outcome",
+        ),
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (TaskStatus.COMPLETED, TaskStatus.BLOCKED),
+            id="heterogeneous-tasks",
+        ),
+        pytest.param(
+            StopReason.GOAL_COMPLETED,
+            AgentOutcome.COMPLETED,
+            (TaskStatus.WAITING_USER,),
+            id="unknown-uniform-task-status",
+        ),
+    ),
+)
+def test_exact_run_evidence_rejects_unknown_completed_rows(
+    stop_reason: StopReason,
+    user_outcome: AgentOutcome,
+    task_statuses: tuple[TaskStatus, ...],
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="closed completed Run matrix",
+    ):
+        _completed_row_exact_run_evidence(
+            stop_reason=stop_reason,
+            user_outcome=user_outcome,
+            task_statuses=task_statuses,
+        )
+
+
+def test_exact_run_evidence_rejects_non_blocked_incomplete_outcome() -> None:
+    terminal = _minimal_exact_run_evidence()
+    incomplete = _project_run(
+        terminal.run_record,
+        status=AgentRunStatus.INCOMPLETE,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+    )
+    stopped = next(
+        event
+        for event in terminal.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    invalid_stopped = _rebuild(
+        stopped,
+        stop_reason=StopReason.PROCESS_RESTART_DETECTED,
+        user_outcome=AgentOutcome.ASK_USER,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="INCOMPLETE RunStopped",
+    ):
+        _rebuild_exact_run_evidence(
+            terminal,
+            run_record=incomplete,
+            trace_events=tuple(
+                invalid_stopped if event is stopped else event
+                for event in terminal.trace_events
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    ("message_ref", "context_manifest_id"),
+)
+def test_exact_run_evidence_rejects_run_stopped_payload_pollution(
+    extra_field: str,
+) -> None:
+    closure = _minimal_exact_run_evidence()
+    stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    extra_value = (
+        closure.message_records[0].message_id
+        if extra_field == "message_ref"
+        else closure.context_manifests[0].context_manifest_id
+    )
+    polluted = _rebuild(stopped, **{extra_field: extra_value})
+    with pytest.raises(
+        ValidationError,
+        match="RunStopped Trace only allows its exact per-kind projection",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is stopped else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def _terminal_tool_exact_run_evidence(
+    *,
+    status: ToolCallStatus,
+    outcome: ToolResultOutcome,
+    interrupted_attempt: str = "finalized",
+) -> ExactRunEvidenceClosure:
+    closure = _tool_exact_run_evidence()
+    if status is ToolCallStatus.SUCCEEDED:
+        return closure
+
+    call = closure.tool_calls[0]
+    attempt = closure.tool_attempts[0]
+    if status is ToolCallStatus.FAILED:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            failure_code="ORDER_LOOKUP_FAILED",
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                outcome=outcome,
+                failure_code="ORDER_LOOKUP_FAILED",
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_FAILED
+    elif status is ToolCallStatus.TIMED_OUT:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            failure_code="TOOL_TIMEOUT",
+            timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
+            result_ref=None,
+        )
+        attempts = (
+            _rebuild(
+                attempt,
+                outcome=outcome,
+                failure_code="TOOL_TIMEOUT",
+            ),
+        )
+        lifecycle_event_type = TraceEventType.TOOL_CALL_TIMED_OUT
+    elif status is ToolCallStatus.INTERRUPTED:
+        terminal_call = _project_tool_call(
+            call,
+            status=status,
+            attempt_count=(0 if interrupted_attempt == "absent" else 1),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+            result_ref=None,
+        )
+        if interrupted_attempt == "absent":
+            attempts = ()
+        elif interrupted_attempt == "unfinished":
+            attempts = (
+                _rebuild(
+                    attempt,
+                    finished_at=None,
+                    outcome=None,
+                ),
+            )
+        else:
+            attempts = (_rebuild(attempt, outcome=outcome),)
+        lifecycle_event_type = TraceEventType.TOOL_CALL_INTERRUPTED
+    else:
+        raise ValueError("test fixture requires a terminal ToolCall status")
+
+    lifecycle_event = _exact_evidence_trace(
+        event_type=lifecycle_event_type,
+        run_id=terminal_call.run_id,
+        occurred_at=terminal_call.finished_at,
+        task_id=terminal_call.task_id,
+        request_unit_id=terminal_call.request_unit_id,
+        context_manifest_id=terminal_call.context_manifest_id,
+        argument_binding_refs=terminal_call.argument_binding_refs,
+        tool_call_id=terminal_call.tool_call_id,
+        tool_call_terminal_status=status,
+    )
+    run_stopped = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    retained_traces = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type not in _TOOL_LIFECYCLE_EVENT_TYPES
+        and event.event_type is not TraceEventType.OBSERVATION_RECORDED
+        and event is not run_stopped
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        request_unit_records=(
+            _rebuild(closure.request_unit_records[0], observation_refs=()),
+        ),
+        tool_calls=(terminal_call,),
+        tool_attempts=attempts,
+        observation_records=(),
+        trace_events=(
+            *retained_traces,
+            lifecycle_event,
+            run_stopped,
+        ),
+    )
+
+
+def _normalized_tool_result_trace(
+    closure: ExactRunEvidenceClosure,
+    *,
+    outcome: ToolResultOutcome,
+) -> TraceEvent:
+    call = closure.tool_calls[0]
+    return _exact_evidence_trace(
+        event_type=TraceEventType.TOOL_RESULT_NORMALIZED,
+        run_id=call.run_id,
+        occurred_at=call.finished_at or call.started_at,
+        task_id=call.task_id,
+        request_unit_id=call.request_unit_id,
+        tool_call_id=call.tool_call_id,
+        safe_tool_outcome=outcome,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "interrupted_attempt"),
+    (
+        (
+            ToolCallStatus.SUCCEEDED,
+            ToolResultOutcome.SUCCESS,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.FAILED,
+            ToolResultOutcome.BUSINESS_FAILURE,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.FAILED,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.TIMED_OUT,
+            ToolResultOutcome.TIMEOUT,
+            "finalized",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "absent",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "unfinished",
+        ),
+        (
+            ToolCallStatus.INTERRUPTED,
+            ToolResultOutcome.INTERRUPTED,
+            "finalized",
+        ),
+    ),
+)
+def test_exact_run_evidence_accepts_normalized_terminal_tool_outcomes(
+    status: ToolCallStatus,
+    outcome: ToolResultOutcome,
+    interrupted_attempt: str,
+) -> None:
+    closure = _terminal_tool_exact_run_evidence(
+        status=status,
+        outcome=outcome,
+        interrupted_attempt=interrupted_attempt,
+    )
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=outcome,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, normalized),
+    )
+    assert normalized.safe_tool_outcome is outcome
+    assert rebuilt.tool_calls[0].status is status
+
+
+def test_exact_run_evidence_rejects_safe_outcome_on_non_normalized_event() -> None:
+    closure = _tool_exact_run_evidence()
+    succeeded = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.TOOL_CALL_SUCCEEDED
+    )
+    polluted = _rebuild(
+        succeeded,
+        safe_tool_outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="safe_tool_outcome requires ToolResultNormalized",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is succeeded else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-safe-outcome",
+        "missing-tool-call",
+        "wrong-timestamp",
+        "wrong-status-outcome",
+    ),
+)
+def test_exact_run_evidence_rejects_malformed_normalized_tool_result(
+    mutation: str,
+) -> None:
+    closure = _tool_exact_run_evidence()
+    call = closure.tool_calls[0]
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    if mutation == "missing-safe-outcome":
+        invalid = _rebuild(normalized, safe_tool_outcome=None)
+    elif mutation == "missing-tool-call":
+        invalid = _rebuild(normalized, tool_call_id=None)
+    elif mutation == "wrong-timestamp":
+        invalid = _rebuild(
+            normalized,
+            occurred_at=call.finished_at + timedelta(microseconds=1),
+        )
+    else:
+        invalid = _rebuild(
+            normalized,
+            safe_tool_outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        )
+    with pytest.raises(ValidationError, match="ToolResultNormalized"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, invalid),
+        )
+
+
+def test_exact_run_evidence_rejects_duplicate_normalized_tool_result() -> None:
+    closure = _tool_exact_run_evidence()
+    first = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    second = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized must be unique per ToolCall",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, first, second),
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    (ToolCallStatus.CREATED, ToolCallStatus.RUNNING),
+)
+def test_exact_run_evidence_rejects_normalized_active_tool_call(
+    status: ToolCallStatus,
+) -> None:
+    closure = _active_tool_exact_run_evidence(status)
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SUCCESS,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized requires a terminal ToolCall",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, normalized),
+        )
+
+
+def test_exact_run_evidence_rejects_normalized_final_attempt_mismatch() -> None:
+    closure = _terminal_tool_exact_run_evidence(
+        status=ToolCallStatus.FAILED,
+        outcome=ToolResultOutcome.BUSINESS_FAILURE,
+    )
+    normalized = _normalized_tool_result_trace(
+        closure,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolResultNormalized must match the final ToolAttempt",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, normalized),
+        )
+
+
+def _gate_decision_trace(
+    closure: ExactRunEvidenceClosure,
+    gate: GateDecision,
+    **updates: object,
+) -> TraceEvent:
+    values: dict[str, object] = {
+        "event_type": TraceEventType.GATE_DECISION_RECORDED,
+        "run_id": closure.run_record.run_id,
+        "occurred_at": gate.decided_at,
+        "task_id": closure.task_records[0].task_id,
+        "request_unit_id": closure.request_unit_records[0].request_unit_id,
+        "model_call_id": gate.model_call_id,
+        "context_manifest_id": gate.context_manifest_id,
+        "requested_tool_name": gate.requested_provider_tool_name,
+        "validated_task_state_version": gate.validated_task_state_version,
+        "argument_binding_refs": gate.argument_binding_refs,
+        "gate_decision": gate.decision,
+        "gate_reason_code": gate.reason_code,
+    }
+    values.update(updates)
+    return _exact_evidence_trace(**values)
+
+
+def _rejected_gate_exact_run_evidence() -> ExactRunEvidenceClosure:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    manifest = closure.context_manifests[0]
+    gate = GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name=None,
+        snapshot_match=True,
+        registration_valid=False,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(
+            closure.input_binding_records[0].binding_id,
+        ),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.REJECT,
+        reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+        decided_at=UTC_NOW + timedelta(microseconds=100),
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        gate_decisions=(gate,),
+    )
+
+
+@pytest.mark.parametrize(
+    "closure_factory",
+    (_tool_exact_run_evidence, _rejected_gate_exact_run_evidence),
+)
+def test_exact_run_evidence_accepts_owner_backed_gate_trace(
+    closure_factory: Callable[[], ExactRunEvidenceClosure],
+) -> None:
+    closure = closure_factory()
+    gate = closure.gate_decisions[0]
+    gate_event = _gate_decision_trace(closure, gate)
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, gate_event),
+    )
+    assert gate_event.gate_decision is gate.decision
+    assert len(rebuilt.gate_decisions) == 1
+
+
+def test_exact_run_evidence_accepts_sparse_gate_trace() -> None:
+    for closure in (
+        _tool_exact_run_evidence(),
+        _rejected_gate_exact_run_evidence(),
+    ):
+        rebuilt = _rebuild_exact_run_evidence(closure)
+        assert not any(
+            event.event_type is TraceEventType.GATE_DECISION_RECORDED
+            for event in rebuilt.trace_events
+        )
+
+
+def test_exact_run_evidence_rejects_gate_trace_decision_forgery() -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_gate_trace_projection_forgery() -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        requested_tool_name="forged_tool",
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_excess_gate_trace_projection() -> None:
+    closure = _tool_exact_run_evidence()
+    gate = closure.gate_decisions[0]
+    first = _gate_decision_trace(closure, gate)
+    second = _gate_decision_trace(closure, gate)
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded must match an owner GateDecision",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, first, second),
+        )
+
+
+def test_exact_run_evidence_rejects_gate_fields_on_other_event_kinds() -> None:
+    closure = _minimal_exact_run_evidence()
+    accepted = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+    )
+    polluted = _rebuild(
+        accepted,
+        gate_decision=GateDecisionValue.REJECT,
+        gate_reason_code=GateReasonCode.TOOL_NOT_REGISTERED,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="Gate fields require GateDecisionRecorded",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is accepted else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_rejects_terminal_fields_on_other_event_kinds() -> None:
+    closure = _minimal_exact_run_evidence()
+    accepted = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.MESSAGE_ACCEPTED
+    )
+    polluted = _rebuild(
+        accepted,
+        user_outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReason.INPUT_INVALID,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="terminal fields require RunStopped",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                polluted if event is accepted else event
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_preserves_other_payload_correlations() -> None:
+    closure = _minimal_exact_run_evidence()
+    correlation_event = _exact_evidence_trace(
+        event_type=TraceEventType.PRESENTATION_PLAN_PROPOSED,
+        run_id=closure.run_record.run_id,
+        model_call_id=closure.context_manifests[0].model_call_id,
+        presentation_plan_ref=uuid4(),
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, correlation_event),
+    )
+    assert correlation_event in rebuilt.trace_events
+
+
+def _two_task_gate_exact_run_evidence(
+    *,
+    argument_binding_valid: bool,
+    manifest_task_ref: bool = False,
+) -> ExactRunEvidenceClosure:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    manifest = closure.context_manifests[0]
+    if manifest_task_ref:
+        manifest = _rebuild(
+            manifest,
+            task_state_ref_and_version=TaskStateRefAndVersion(
+                task_id=closure.task_records[0].task_id,
+                state_version=1,
+            ),
+        )
+        closure = _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(manifest,),
+        )
+    gate = GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=manifest.model_call_id,
+        context_manifest_id=manifest.context_manifest_id,
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name=(
+            "get_order" if argument_binding_valid else None
+        ),
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=argument_binding_valid,
+        argument_binding_refs=(
+            closure.input_binding_records[0].binding_id,
+        ),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=(2 if manifest_task_ref else 1),
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=(
+            GateDecisionValue.ACCEPT
+            if argument_binding_valid
+            else GateDecisionValue.REJECT
+        ),
+        reason_code=(
+            None
+            if argument_binding_valid
+            else GateReasonCode.ARGUMENT_BINDING_MISMATCH
+        ),
+        decided_at=UTC_NOW + timedelta(microseconds=100),
+    )
+    return _rebuild_exact_run_evidence(
+        closure,
+        gate_decisions=(gate,),
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("task_id", "request_unit_id"),
+)
+def test_exact_run_evidence_rejects_gate_trace_without_root_pair(
+    missing_field: str,
+) -> None:
+    closure = _tool_exact_run_evidence()
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        **{missing_field: None},
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded requires a root Task/RequestUnit pair",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_rejects_binding_valid_gate_on_other_task() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=True,
+    )
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded bindings must belong to its RequestUnit",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, gate_event),
+        )
+
+
+def test_exact_run_evidence_allows_binding_mismatch_gate_on_other_task() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=False,
+    )
+    gate_event = _gate_decision_trace(
+        closure,
+        closure.gate_decisions[0],
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, gate_event),
+    )
+    assert gate_event.gate_reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+    assert len(rebuilt.task_records) == 2
+
+
+def test_exact_run_evidence_closes_gate_trace_to_manifest_task_only() -> None:
+    closure = _two_task_gate_exact_run_evidence(
+        argument_binding_valid=False,
+        manifest_task_ref=True,
+    )
+    gate = closure.gate_decisions[0]
+    manifest = closure.context_manifests[0]
+    matching_event = _gate_decision_trace(closure, gate)
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        trace_events=(*closure.trace_events, matching_event),
+    )
+    assert manifest.task_state_ref_and_version.state_version == 1
+    assert matching_event.validated_task_state_version == 2
+    assert len(rebuilt.gate_decisions) == 1
+
+    mismatching_event = _rebuild(
+        matching_event,
+        trace_event_id=uuid4(),
+        task_id=closure.task_records[1].task_id,
+        request_unit_id=closure.request_unit_records[1].request_unit_id,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="GateDecisionRecorded Task must match ContextManifest",
+    ):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=(*closure.trace_events, mismatching_event),
         )

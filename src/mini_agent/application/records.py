@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
@@ -25,18 +26,23 @@ from mini_agent.core.common import (
     require_utc,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import OrderObservation
+from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     InputBinding,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
+    GateDecision,
+    GateDecisionValue,
+    ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
     ToolCallRecord,
     ToolCallStatus,
@@ -2484,4 +2490,1428 @@ class EvalResultRecord(_StrictAuditOnlyRecord):
             or self.usage_summary is not None
         ):
             raise ValueError("SKIPPED/NOT_RUN cannot carry execution or grading data")
+        return self
+
+
+class RequestUnderstandingCandidateInvalidError(Exception):
+    """Bounded invalid-candidate signal with no caller-controlled diagnostic."""
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__("REQUEST_UNDERSTANDING_CANDIDATE_INVALID")
+
+
+_EXACT_EVIDENCE_TUPLE_TYPES: dict[str, type[BaseModel]] = {
+    "message_records": MessageRecord,
+    "accepted_task_deltas": AcceptedTaskDeltaV2,
+    "input_binding_records": InputBinding,
+    "task_records": TaskRecord,
+    "task_state_transitions": TaskStateTransition,
+    "request_unit_records": RequestUnitRecord,
+    "conversation_task_links": ConversationTaskLinkRecord,
+    "run_task_links": RunTaskLinkRecord,
+    "gate_decisions": GateDecision,
+    "tool_calls": ToolCallRecord,
+    "tool_attempts": ToolAttemptRecord,
+    "observation_records": OrderObservation,
+    "context_manifests": ContextManifest,
+    "model_visible_toolset_artifacts": ModelVisibleToolsetArtifact,
+    "trace_events": TraceEvent,
+}
+
+_EXACT_EVIDENCE_TOOL_LIFECYCLE_STATUS: dict[
+    TraceEventType,
+    ToolCallStatus,
+] = {
+    TraceEventType.TOOL_CALL_CREATED: ToolCallStatus.CREATED,
+    TraceEventType.TOOL_CALL_STARTED: ToolCallStatus.RUNNING,
+    TraceEventType.TOOL_CALL_SUCCEEDED: ToolCallStatus.SUCCEEDED,
+    TraceEventType.TOOL_CALL_FAILED: ToolCallStatus.FAILED,
+    TraceEventType.TOOL_CALL_TIMED_OUT: ToolCallStatus.TIMED_OUT,
+    TraceEventType.TOOL_CALL_INTERRUPTED: ToolCallStatus.INTERRUPTED,
+}
+
+
+def _exact_evidence_unique(
+    identities: tuple[object, ...],
+    *,
+    family_name: str,
+) -> None:
+    if len(identities) != len(set(identities)):
+        raise ValueError(f"{family_name} identities must be unique")
+
+
+def _exact_evidence_require_unique_refs(
+    references: tuple[UUID, ...],
+    *,
+    field_name: str,
+) -> None:
+    if len(references) != len(set(references)):
+        raise ValueError(f"{field_name} references must be unique")
+
+
+def _exact_evidence_expand_supersedes(
+    initial_refs: set[UUID],
+    records_by_id: Mapping[UUID, InputBinding] | Mapping[UUID, OrderObservation],
+    *,
+    family_name: str,
+) -> set[UUID]:
+    reachable: set[UUID] = set()
+    for initial_ref in initial_refs:
+        path: set[UUID] = set()
+        current_ref: UUID | None = initial_ref
+        while current_ref is not None and current_ref not in reachable:
+            if current_ref in path:
+                raise ValueError(f"{family_name} supersedes graph must be acyclic")
+            current = records_by_id.get(current_ref)
+            if current is None:
+                raise ValueError(
+                    f"{family_name} reference must resolve in closure"
+                )
+            path.add(current_ref)
+            current_ref = current.supersedes
+        reachable.update(path)
+    return reachable
+
+
+class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
+    """Internally closed logical records for exactly one owner-scoped Run.
+
+    This DTO validates only the supplied graph. Infrastructure remains
+    responsible for proving exact physical rows, versions, provenance, metadata,
+    and database closed-set completeness in one consistent snapshot or fence.
+    """
+
+    conversation_record: ConversationRecord
+    run_record: AgentRunRecord
+    message_records: tuple[MessageRecord, ...]
+    request_understanding_record: RequestUnderstandingRecordV2 | None
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...]
+    input_binding_records: tuple[InputBinding, ...]
+    task_records: tuple[TaskRecord, ...]
+    task_state_transitions: tuple[TaskStateTransition, ...]
+    request_unit_records: tuple[RequestUnitRecord, ...]
+    conversation_task_links: tuple[ConversationTaskLinkRecord, ...]
+    run_task_links: tuple[RunTaskLinkRecord, ...]
+    gate_decisions: tuple[GateDecision, ...]
+    tool_calls: tuple[ToolCallRecord, ...]
+    tool_attempts: tuple[ToolAttemptRecord, ...]
+    observation_records: tuple[OrderObservation, ...]
+    context_manifests: tuple[ContextManifest, ...]
+    model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...]
+    trace_events: tuple[TraceEvent, ...]
+
+    @field_validator("conversation_record", "run_record", mode="before")
+    @classmethod
+    def root_records_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> BaseModel:
+        expected_type = (
+            ConversationRecord
+            if info.field_name == "conversation_record"
+            else AgentRunRecord
+        )
+        return _strict_rebuild_exact_model(
+            value,
+            expected_type,
+            error_message=f"{info.field_name} must be a canonical exact record",
+        )
+
+    @field_validator("request_understanding_record", mode="before")
+    @classmethod
+    def request_understanding_record_is_exact_or_absent(
+        cls,
+        value: object,
+    ) -> RequestUnderstandingRecordV2 | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_model(
+            value,
+            RequestUnderstandingRecordV2,
+            error_message=(
+                "request_understanding_record must be a canonical exact v2 record"
+            ),
+        )
+
+    @field_validator(*_EXACT_EVIDENCE_TUPLE_TYPES, mode="before")
+    @classmethod
+    def record_families_are_exact_tuples(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> tuple[BaseModel, ...]:
+        if type(value) is not tuple:
+            raise ValueError(f"{info.field_name} must be an exact tuple")
+        expected_type = _EXACT_EVIDENCE_TUPLE_TYPES[info.field_name]
+        return tuple(
+            _strict_rebuild_exact_model(
+                record,
+                expected_type,
+                error_message=(
+                    f"{info.field_name} must contain canonical exact records"
+                ),
+            )
+            for record in value
+        )
+
+    @model_validator(mode="after")
+    def supplied_graph_is_exact_and_root_closed(self) -> Self:
+        conversation = self.conversation_record
+        run = self.run_record
+        if (
+            run.conversation_id is None
+            or run.conversation_id != conversation.conversation_id
+        ):
+            raise ValueError("Run must identify the exact closure Conversation")
+
+        _exact_evidence_unique(
+            tuple(message.message_id for message in self.message_records),
+            family_name="Message",
+        )
+        _exact_evidence_unique(
+            tuple(
+                child.accepted_delta_id for child in self.accepted_task_deltas
+            ),
+            family_name="AcceptedTaskDelta",
+        )
+        _exact_evidence_unique(
+            tuple(binding.binding_id for binding in self.input_binding_records),
+            family_name="InputBinding",
+        )
+        _exact_evidence_unique(
+            tuple(task.task_id for task in self.task_records),
+            family_name="Task",
+        )
+        _exact_evidence_unique(
+            tuple(
+                (
+                    transition.task_id,
+                    transition.request_unit_id,
+                    transition.result_state_version,
+                )
+                for transition in self.task_state_transitions
+            ),
+            family_name="TaskStateTransition",
+        )
+        _exact_evidence_unique(
+            tuple(unit.request_unit_id for unit in self.request_unit_records),
+            family_name="RequestUnit",
+        )
+        _exact_evidence_unique(
+            tuple(
+                (link.conversation_id, link.task_id, link.linked_at)
+                for link in self.conversation_task_links
+            ),
+            family_name="ConversationTaskLink",
+        )
+        _exact_evidence_unique(
+            tuple(link.task_id for link in self.run_task_links),
+            family_name="RunTaskLink",
+        )
+        _exact_evidence_unique(
+            tuple(gate.gate_decision_id for gate in self.gate_decisions),
+            family_name="GateDecision",
+        )
+        _exact_evidence_unique(
+            tuple(call.tool_call_id for call in self.tool_calls),
+            family_name="ToolCall",
+        )
+        _exact_evidence_unique(
+            tuple(
+                (attempt.tool_call_id, attempt.attempt_no)
+                for attempt in self.tool_attempts
+            ),
+            family_name="ToolAttempt",
+        )
+        _exact_evidence_unique(
+            tuple(
+                observation.observation_id
+                for observation in self.observation_records
+            ),
+            family_name="Observation",
+        )
+        _exact_evidence_unique(
+            tuple(
+                manifest.context_manifest_id
+                for manifest in self.context_manifests
+            ),
+            family_name="ContextManifest",
+        )
+        _exact_evidence_unique(
+            tuple(
+                artifact.model_visible_toolset_hash
+                for artifact in self.model_visible_toolset_artifacts
+            ),
+            family_name="ModelVisibleToolsetArtifact",
+        )
+        _exact_evidence_unique(
+            tuple(event.trace_event_id for event in self.trace_events),
+            family_name="TraceEvent",
+        )
+
+        message_by_id = {
+            message.message_id: message for message in self.message_records
+        }
+        binding_by_id = {
+            binding.binding_id: binding for binding in self.input_binding_records
+        }
+        task_by_id = {task.task_id: task for task in self.task_records}
+        unit_by_id = {
+            unit.request_unit_id: unit for unit in self.request_unit_records
+        }
+        gate_by_id = {
+            gate.gate_decision_id: gate for gate in self.gate_decisions
+        }
+        call_by_id = {call.tool_call_id: call for call in self.tool_calls}
+        observation_by_id = {
+            observation.observation_id: observation
+            for observation in self.observation_records
+        }
+        manifest_by_id = {
+            manifest.context_manifest_id: manifest
+            for manifest in self.context_manifests
+        }
+        artifact_by_hash = {
+            artifact.model_visible_toolset_hash: artifact
+            for artifact in self.model_visible_toolset_artifacts
+        }
+        accepted_by_id = {
+            child.accepted_delta_id: child
+            for child in self.accepted_task_deltas
+        }
+
+        if any(
+            message.conversation_id != conversation.conversation_id
+            for message in self.message_records
+        ):
+            raise ValueError("every Message must belong to the root Conversation")
+
+        referenced_message_ids: set[UUID] = set()
+        referenced_binding_ids: set[UUID] = set()
+        referenced_observation_ids: set[UUID] = set()
+        referenced_artifact_hashes: set[str] = set()
+        ordered_children_by_task: dict[
+            UUID,
+            list[AcceptedTaskDeltaV2],
+        ] = {}
+
+        request_understanding = self.request_understanding_record
+        if request_understanding is None:
+            if self.accepted_task_deltas:
+                raise ValueError(
+                    "accepted children require a RequestUnderstanding record"
+                )
+            accepted_task_ids: set[UUID] = set()
+        else:
+            if (
+                request_understanding.run_id != run.run_id
+                or request_understanding.message_ref not in message_by_id
+            ):
+                raise ValueError(
+                    "RequestUnderstanding must bind the root Run and a closure Message"
+                )
+            referenced_message_ids.add(request_understanding.message_ref)
+            referenced_message_ids.update(
+                request_understanding.contextualization.source_message_refs
+            )
+            referenced_message_ids.update(
+                candidate.source_ref
+                for candidate in (
+                    request_understanding.contextualization
+                    .resolved_reference_candidates
+                )
+            )
+            referenced_message_ids.update(
+                candidate_input.source_ref
+                for candidate in request_understanding.task_delta_candidates
+                for candidate_input in candidate.input_candidates
+            )
+
+            if set(request_understanding.accepted_delta_refs) != set(
+                accepted_by_id
+            ):
+                raise ValueError(
+                    "RequestUnderstanding must name the exact accepted child set"
+                )
+            candidate_by_id = {
+                candidate.candidate_id: candidate
+                for candidate in request_understanding.task_delta_candidates
+            }
+            decision_by_candidate = {
+                decision.candidate_ref: decision
+                for decision in request_understanding.candidate_validation
+            }
+            child_by_candidate: dict[UUID, AcceptedTaskDeltaV2] = {}
+            for child in self.accepted_task_deltas:
+                if child.candidate_ref in child_by_candidate:
+                    raise ValueError(
+                        "an accepted candidate must have exactly one child"
+                    )
+                candidate = candidate_by_id.get(child.candidate_ref)
+                decision = decision_by_candidate.get(child.candidate_ref)
+                if (
+                    candidate is None
+                    or decision is None
+                    or decision.decision
+                    is not CandidateValidationDecision.ACCEPT
+                ):
+                    raise ValueError(
+                        "accepted child must bind one accepted candidate"
+                    )
+                if (
+                    child.message_ref != request_understanding.message_ref
+                    or child.operation is not candidate.operation
+                    or child.goal_text != candidate.goal_patch
+                    or child.accepted_at != request_understanding.created_at
+                ):
+                    raise ValueError(
+                        "accepted child must preserve its parent candidate projection"
+                    )
+                _exact_evidence_require_unique_refs(
+                    child.input_binding_refs,
+                    field_name="AcceptedTaskDelta.input_binding_refs",
+                )
+                child_bindings = tuple(
+                    binding_by_id.get(binding_ref)
+                    for binding_ref in child.input_binding_refs
+                )
+                if any(binding is None for binding in child_bindings):
+                    raise ValueError(
+                        "accepted child InputBinding refs must resolve in closure"
+                    )
+                expected_inputs = {
+                    candidate_input.name: candidate_input
+                    for candidate_input in candidate.input_candidates
+                }
+                actual_bindings = {
+                    binding.name: binding
+                    for binding in child_bindings
+                    if binding is not None
+                }
+                if set(actual_bindings) != set(expected_inputs):
+                    raise ValueError(
+                        "accepted child bindings must match candidate inputs"
+                    )
+                if any(
+                    binding.normalized_value
+                    != expected_inputs[name].candidate_value
+                    or binding.authority is not expected_inputs[name].authority
+                    or expected_inputs[name].source_ref not in binding.source_refs
+                    for name, binding in actual_bindings.items()
+                ):
+                    raise ValueError(
+                        "accepted child bindings must preserve validated input values"
+                    )
+                if child.task_id not in task_by_id:
+                    raise ValueError("accepted child Task must resolve in closure")
+                referenced_message_ids.add(child.message_ref)
+                referenced_binding_ids.update(child.input_binding_refs)
+                child_by_candidate[child.candidate_ref] = child
+
+            accepted_candidate_ids = {
+                candidate_id
+                for candidate_id, decision in decision_by_candidate.items()
+                if decision.decision is CandidateValidationDecision.ACCEPT
+            }
+            if set(child_by_candidate) != accepted_candidate_ids:
+                raise ValueError(
+                    "accepted decisions must have the exact accepted child set"
+                )
+
+            prior_result_by_task: dict[UUID, int] = {}
+            for candidate in request_understanding.task_delta_candidates:
+                child = child_by_candidate.get(candidate.candidate_id)
+                if child is None:
+                    continue
+                prior_result = prior_result_by_task.get(child.task_id)
+                if prior_result is None:
+                    if child.base_task_state_version is None:
+                        expected_result = 1
+                    else:
+                        expected_result = child.base_task_state_version + 1
+                else:
+                    if child.base_task_state_version != prior_result:
+                        raise ValueError(
+                            "accepted Task delta chain must be contiguous"
+                        )
+                    expected_result = prior_result + 1
+                if child.result_task_state_version != expected_result:
+                    raise ValueError(
+                        "accepted Task delta result version must advance once"
+                    )
+                if (
+                    child.result_task_state_version
+                    > task_by_id[child.task_id].state_version
+                ):
+                    raise ValueError(
+                        "accepted Task delta must fit the current Task history"
+                    )
+                prior_result_by_task[child.task_id] = (
+                    child.result_task_state_version
+                )
+                ordered_children_by_task.setdefault(child.task_id, []).append(
+                    child
+                )
+            accepted_task_ids = {
+                child.task_id for child in self.accepted_task_deltas
+            }
+
+        if accepted_task_ids != set(task_by_id):
+            raise ValueError(
+                "accepted child Task refs must match the exact closure Task set"
+            )
+
+        for task in self.task_records:
+            if task.owner_customer_id != conversation.owner_customer_id:
+                raise ValueError("Task owner must match the root Conversation owner")
+
+        run_link_by_task: dict[UUID, RunTaskLinkRecord] = {}
+        for link in self.run_task_links:
+            if link.run_id != run.run_id or link.task_id not in task_by_id:
+                raise ValueError("RunTaskLink must bind the root Run and closure Task")
+            task = task_by_id[link.task_id]
+            if (
+                link.base_task_state_version is not None
+                and link.base_task_state_version > task.state_version
+            ):
+                raise ValueError("RunTaskLink base version exceeds its Task")
+            if (
+                link.result_task_state_version is not None
+                and link.result_task_state_version != task.state_version
+            ):
+                raise ValueError(
+                    "RunTaskLink result version must match its Task projection"
+                )
+            if run.status in {AgentRunStatus.CREATED, AgentRunStatus.RUNNING}:
+                if link.result_task_state_version is not None:
+                    raise ValueError(
+                        "active RunTaskLink cannot carry a result Task version"
+                    )
+            elif link.result_task_state_version is None:
+                raise ValueError(
+                    "terminal RunTaskLink requires the exact Task result version"
+                )
+            task_children = ordered_children_by_task[link.task_id]
+            if (
+                task_children[0].base_task_state_version
+                != link.base_task_state_version
+            ):
+                raise ValueError(
+                    "accepted Task delta first base must match RunTaskLink base"
+                )
+            run_link_by_task[link.task_id] = link
+        if set(run_link_by_task) != set(task_by_id):
+            raise ValueError("RunTaskLink set must match the exact Task set")
+
+        conversation_link_tasks: set[UUID] = set()
+        for link in self.conversation_task_links:
+            if (
+                link.conversation_id != conversation.conversation_id
+                or link.task_id not in task_by_id
+            ):
+                raise ValueError(
+                    "ConversationTaskLink must bind the root Conversation and Task"
+                )
+            conversation_link_tasks.add(link.task_id)
+        if conversation_link_tasks != set(task_by_id):
+            raise ValueError(
+                "ConversationTaskLink set must match the exact Task set"
+            )
+
+        unit_by_task: dict[UUID, RequestUnitRecord] = {}
+        for unit in self.request_unit_records:
+            if unit.task_id not in task_by_id or unit.task_id in unit_by_task:
+                raise ValueError("closure requires one exact RequestUnit per Task")
+            task = task_by_id[unit.task_id]
+            if (
+                unit.status is not task.status
+                or unit.state_version != task.state_version
+            ):
+                raise ValueError(
+                    "RequestUnit status/version must match its Task projection"
+                )
+            for field_name, references in (
+                ("goal_source_refs", unit.goal_source_refs),
+                ("input_binding_refs", unit.input_binding_refs),
+                ("observation_refs", unit.observation_refs),
+            ):
+                _exact_evidence_require_unique_refs(
+                    references,
+                    field_name=f"RequestUnit.{field_name}",
+                )
+            if unit.evidence_binding_refs or unit.pending_action_ref is not None:
+                raise ValueError(
+                    "P0 exact Run closure cannot contain Evidence or Action refs"
+                )
+            referenced_message_ids.update(unit.goal_source_refs)
+            referenced_binding_ids.update(unit.input_binding_refs)
+            referenced_observation_ids.update(unit.observation_refs)
+            unit_by_task[unit.task_id] = unit
+        if set(unit_by_task) != set(task_by_id):
+            raise ValueError("RequestUnit set must match the exact Task set")
+        for task_id, task_children in ordered_children_by_task.items():
+            unit = unit_by_task[task_id]
+            latest_child = task_children[-1]
+            if (
+                latest_child.goal_text != unit.goal_text
+                or set(latest_child.input_binding_refs)
+                != set(unit.input_binding_refs)
+                or latest_child.message_ref not in unit.goal_source_refs
+            ):
+                raise ValueError(
+                    "latest accepted child and RequestUnit causality must match exactly"
+                )
+
+        transitions_by_task: dict[UUID, list[TaskStateTransition]] = {
+            task_id: [] for task_id in task_by_id
+        }
+        for transition in self.task_state_transitions:
+            task = task_by_id.get(transition.task_id)
+            unit = unit_by_id.get(transition.request_unit_id)
+            if (
+                task is None
+                or unit is None
+                or unit.task_id != transition.task_id
+            ):
+                raise ValueError(
+                    "Task transition must bind its closure Task and RequestUnit"
+                )
+            transitions_by_task[transition.task_id].append(transition)
+        for task_id, task in task_by_id.items():
+            transitions = transitions_by_task[task_id]
+            if task.state_version != len(transitions) + 1:
+                raise ValueError(
+                    "Task transition history must be complete and contiguous"
+                )
+            if any(
+                transition.result_state_version != expected_result_version
+                for expected_result_version, transition in enumerate(
+                    transitions,
+                    start=2,
+                )
+            ):
+                raise ValueError(
+                    "Task transition history must be complete and contiguous"
+                )
+            if not transitions:
+                if task.status is not TaskStatus.ACTIVE:
+                    raise ValueError(
+                        "Task without transitions must retain initial ACTIVE status"
+                    )
+                continue
+            if transitions[0].from_status is not TaskStatus.ACTIVE:
+                raise ValueError("Task history must start from ACTIVE")
+            if transitions[0].changed_at < task.created_at:
+                raise ValueError("Task transition cannot precede Task creation")
+            if any(
+                current.to_status is not following.from_status
+                or current.changed_at > following.changed_at
+                for current, following in zip(transitions, transitions[1:])
+            ):
+                raise ValueError(
+                    "Task transition status and timestamp chain must be contiguous"
+                )
+            if (
+                transitions[-1].to_status is not task.status
+                or transitions[-1].changed_at != task.updated_at
+            ):
+                raise ValueError(
+                    "Task terminal transition must match its current projection"
+                )
+            effective_time_by_version = {
+                1: task.created_at,
+                **{
+                    transition.result_state_version: transition.changed_at
+                    for transition in transitions
+                },
+            }
+            for child in ordered_children_by_task[task_id]:
+                base_version = child.base_task_state_version
+                if base_version is None:
+                    if task.created_at != child.accepted_at:
+                        raise ValueError(
+                            "new accepted Task delta must match Task creation time"
+                        )
+                    continue
+                base_effective_at = effective_time_by_version.get(base_version)
+                result_effective_at = effective_time_by_version.get(
+                    child.result_task_state_version
+                )
+                if (
+                    base_effective_at is None
+                    or result_effective_at is None
+                    or base_effective_at > child.accepted_at
+                    or result_effective_at < child.accepted_at
+                ):
+                    raise ValueError(
+                        "accepted Task delta must fit the current Task history"
+                    )
+
+        for binding in self.input_binding_records:
+            _exact_evidence_require_unique_refs(
+                binding.source_refs,
+                field_name="InputBinding.source_refs",
+            )
+            referenced_message_ids.update(binding.source_refs)
+
+        for manifest in self.context_manifests:
+            if manifest.run_id != run.run_id:
+                raise ValueError("ContextManifest must belong to the root Run")
+            _exact_evidence_require_unique_refs(
+                manifest.selected_message_refs,
+                field_name="ContextManifest.selected_message_refs",
+            )
+            referenced_message_ids.update(manifest.selected_message_refs)
+            if manifest.task_state_ref_and_version is not None:
+                task_state_ref = manifest.task_state_ref_and_version
+                task = task_by_id.get(task_state_ref.task_id)
+                if task is None:
+                    raise ValueError(
+                        "ContextManifest Task ref must resolve in closure"
+                    )
+                if task_state_ref.state_version == 1:
+                    effective_at = task.created_at
+                else:
+                    matching_transition = next(
+                        (
+                            transition
+                            for transition in transitions_by_task[task.task_id]
+                            if transition.result_state_version
+                            == task_state_ref.state_version
+                        ),
+                        None,
+                    )
+                    effective_at = (
+                        matching_transition.changed_at
+                        if matching_transition is not None
+                        else None
+                    )
+                following_transition = next(
+                    (
+                        transition
+                        for transition in transitions_by_task[task.task_id]
+                        if transition.result_state_version
+                        == task_state_ref.state_version + 1
+                    ),
+                    None,
+                )
+                if (
+                    effective_at is None
+                    or manifest.assembled_at < effective_at
+                    or (
+                        following_transition is not None
+                        and following_transition.changed_at
+                        <= manifest.assembled_at
+                    )
+                ):
+                    raise ValueError(
+                        "ContextManifest Task version must match history at assembly"
+                    )
+            observation_refs = tuple(
+                item.record_ref
+                for item in manifest.observation_refs_and_versions
+            )
+            _exact_evidence_require_unique_refs(
+                observation_refs,
+                field_name="ContextManifest.observation_refs_and_versions",
+            )
+            for versioned_ref in manifest.observation_refs_and_versions:
+                observation = observation_by_id.get(versioned_ref.record_ref)
+                if (
+                    observation is None
+                    or observation.source_version != versioned_ref.version
+                ):
+                    raise ValueError(
+                        "ContextManifest Observation version must match exactly"
+                    )
+            referenced_observation_ids.update(observation_refs)
+            if manifest.evidence_refs_and_versions or manifest.action_record_refs:
+                raise ValueError(
+                    "P0 exact Run closure cannot contain Evidence or Action refs"
+                )
+            referenced_artifact_hashes.add(
+                manifest.model_visible_toolset_hash
+            )
+
+        for gate in self.gate_decisions:
+            manifest = manifest_by_id.get(gate.context_manifest_id)
+            if manifest is None:
+                raise ValueError("GateDecision manifest must resolve in closure")
+            _exact_evidence_require_unique_refs(
+                gate.argument_binding_refs,
+                field_name="GateDecision.argument_binding_refs",
+            )
+            if gate.model_call_id != manifest.model_call_id:
+                raise ValueError(
+                    "GateDecision model call must match its ContextManifest"
+                )
+            referenced_binding_ids.update(gate.argument_binding_refs)
+
+        attempts_by_call: dict[UUID, list[ToolAttemptRecord]] = {
+            call_id: [] for call_id in call_by_id
+        }
+        used_gate_ids: set[UUID] = set()
+        for call in self.tool_calls:
+            task = task_by_id.get(call.task_id)
+            unit = unit_by_id.get(call.request_unit_id)
+            manifest = manifest_by_id.get(call.context_manifest_id)
+            gate = gate_by_id.get(call.gate_decision_id)
+            if (
+                call.run_id != run.run_id
+                or task is None
+                or unit is None
+                or unit.task_id != call.task_id
+                or manifest is None
+                or gate is None
+            ):
+                raise ValueError(
+                    "ToolCall owner graph must close to the exact Run"
+                )
+            if call.gate_decision_id in used_gate_ids:
+                raise ValueError("a GateDecision cannot dispatch multiple ToolCalls")
+            used_gate_ids.add(call.gate_decision_id)
+            _exact_evidence_require_unique_refs(
+                call.argument_binding_refs,
+                field_name="ToolCall.argument_binding_refs",
+            )
+            if not set(call.argument_binding_refs).issubset(
+                unit.input_binding_refs
+            ):
+                raise ValueError(
+                    "ToolCall argument bindings must belong to its RequestUnit"
+                )
+            if (
+                gate.decision is not GateDecisionValue.ACCEPT
+                or gate.resolved_canonical_tool_name != call.canonical_tool_name
+                or gate.model_call_id != call.model_call_id
+                or manifest.model_call_id != call.model_call_id
+                or gate.context_manifest_id != call.context_manifest_id
+                or set(gate.argument_binding_refs)
+                != set(call.argument_binding_refs)
+                or gate.validated_task_state_version
+                != call.validated_task_state_version
+                or manifest.tool_registry_version != call.tool_registry_version
+                or call.validated_task_state_version > task.state_version
+            ):
+                raise ValueError(
+                    "ToolCall must preserve its accepted Gate and Manifest projection"
+                )
+            referenced_binding_ids.update(call.argument_binding_refs)
+
+        for attempt in self.tool_attempts:
+            if attempt.tool_call_id not in attempts_by_call:
+                raise ValueError("ToolAttempt parent ToolCall must resolve in closure")
+            attempts_by_call[attempt.tool_call_id].append(attempt)
+        terminal_outcomes: dict[
+            ToolCallStatus,
+            frozenset[ToolResultOutcome],
+        ] = {
+            ToolCallStatus.SUCCEEDED: frozenset({ToolResultOutcome.SUCCESS}),
+            ToolCallStatus.FAILED: frozenset(
+                {
+                    ToolResultOutcome.BUSINESS_FAILURE,
+                    ToolResultOutcome.SYSTEM_FAILURE,
+                }
+            ),
+            ToolCallStatus.TIMED_OUT: frozenset({ToolResultOutcome.TIMEOUT}),
+        }
+        for call_id, call in call_by_id.items():
+            attempts = attempts_by_call[call_id]
+            if call.attempt_count != len(attempts):
+                raise ValueError(
+                    "ToolCall requires the exact contiguous attempt history"
+                )
+            if any(
+                attempt.attempt_no != expected_attempt_no
+                for expected_attempt_no, attempt in enumerate(
+                    attempts,
+                    start=1,
+                )
+            ):
+                raise ValueError(
+                    "ToolCall requires the exact contiguous attempt history"
+                )
+            if any(
+                attempt.started_at < call.started_at
+                for attempt in attempts
+            ) or any(
+                current.finished_at is None
+                or current.finished_at > following.started_at
+                for current, following in zip(attempts, attempts[1:])
+            ):
+                raise ValueError("ToolAttempt timestamps must be ordered")
+            if call.status is ToolCallStatus.CREATED:
+                continue
+            if call.status is ToolCallStatus.RUNNING:
+                if (
+                    not attempts
+                    or attempts[-1].finished_at is not None
+                    or attempts[-1].outcome is not None
+                    or any(
+                        attempt.finished_at is None or attempt.outcome is None
+                        for attempt in attempts[:-1]
+                    )
+                ):
+                    raise ValueError(
+                        "RUNNING ToolCall requires one active final attempt"
+                    )
+                continue
+            if call.status is ToolCallStatus.INTERRUPTED:
+                if any(
+                    attempt.finished_at is None or attempt.outcome is None
+                    for attempt in attempts[:-1]
+                ):
+                    raise ValueError(
+                        "INTERRUPTED ToolCall has inconsistent prior attempts"
+                    )
+                if attempts and attempts[-1].finished_at is not None:
+                    if (
+                        attempts[-1].outcome
+                        is not ToolResultOutcome.INTERRUPTED
+                        or call.finished_at != attempts[-1].finished_at
+                    ):
+                        raise ValueError(
+                            "INTERRUPTED ToolCall final attempt must agree"
+                        )
+                continue
+            if (
+                not attempts
+                or any(
+                    attempt.finished_at is None or attempt.outcome is None
+                    for attempt in attempts
+                )
+                or attempts[-1].outcome
+                not in terminal_outcomes.get(call.status, frozenset())
+                or call.finished_at != attempts[-1].finished_at
+                or call.failure_code != attempts[-1].failure_code
+            ):
+                raise ValueError(
+                    "terminal ToolCall and final attempt must agree"
+                )
+
+        for observation in self.observation_records:
+            if (
+                observation.supersedes is not None
+                and observation.supersedes not in observation_by_id
+            ):
+                raise ValueError(
+                    "Observation supersedes must resolve in closure"
+                )
+
+        observation_source_edge_counts: dict[UUID, int] = {}
+        run_stopped_events: list[TraceEvent] = []
+        tool_lifecycle_events_by_call: dict[
+            UUID,
+            list[tuple[ToolCallStatus, TraceEvent]],
+        ] = {call_id: [] for call_id in call_by_id}
+        normalized_tool_result_events_by_call: dict[UUID, TraceEvent] = {}
+        for event in self.trace_events:
+            if event.run_id != run.run_id or event.case_id is not None:
+                raise ValueError(
+                    "TraceEvent must bind the root Run without Eval case identity"
+                )
+            if (
+                event.event_type is not TraceEventType.GATE_DECISION_RECORDED
+                and (
+                    event.gate_decision is not None
+                    or event.gate_reason_code is not None
+                )
+            ):
+                raise ValueError(
+                    "Gate fields require GateDecisionRecorded"
+                )
+            if (
+                event.event_type is not TraceEventType.RUN_STOPPED
+                and (
+                    event.user_outcome is not None
+                    or event.stop_reason is not None
+                )
+            ):
+                raise ValueError(
+                    "terminal fields require RunStopped"
+                )
+            if event.event_type is TraceEventType.TOOL_RESULT_NORMALIZED:
+                if (
+                    event.safe_tool_outcome is None
+                    or event.tool_call_id is None
+                ):
+                    raise ValueError(
+                        "ToolResultNormalized requires safe_tool_outcome "
+                        "and tool_call_id"
+                    )
+                if event.tool_call_id in normalized_tool_result_events_by_call:
+                    raise ValueError(
+                        "ToolResultNormalized must be unique per ToolCall"
+                    )
+                normalized_tool_result_events_by_call[event.tool_call_id] = event
+            elif event.safe_tool_outcome is not None:
+                raise ValueError(
+                    "safe_tool_outcome requires ToolResultNormalized"
+                )
+            if event.event_type is TraceEventType.RUN_STOPPED:
+                run_stopped_events.append(event)
+            if event.message_ref is not None:
+                referenced_message_ids.add(event.message_ref)
+            if event.accepted_delta_ref is not None:
+                accepted_child = accepted_by_id.get(event.accepted_delta_ref)
+                if accepted_child is None:
+                    raise ValueError(
+                        "Trace accepted child ref must resolve in closure"
+                    )
+                accepted_unit = (
+                    unit_by_id.get(event.request_unit_id)
+                    if event.request_unit_id is not None
+                    else None
+                )
+                if (
+                    (
+                        event.message_ref is not None
+                        and event.message_ref != accepted_child.message_ref
+                    )
+                    or (
+                        event.task_id is not None
+                        and event.task_id != accepted_child.task_id
+                    )
+                    or (
+                        event.request_unit_id is not None
+                        and (
+                            accepted_unit is None
+                            or accepted_unit.task_id != accepted_child.task_id
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Trace accepted child correlations must match"
+                    )
+            if event.task_id is not None and event.task_id not in task_by_id:
+                raise ValueError("Trace Task ref must resolve in closure")
+            if (
+                event.request_unit_id is not None
+                and event.request_unit_id not in unit_by_id
+            ):
+                raise ValueError("Trace RequestUnit ref must resolve in closure")
+            if (
+                event.task_id is not None
+                and event.request_unit_id is not None
+                and unit_by_id[event.request_unit_id].task_id != event.task_id
+            ):
+                raise ValueError("Trace Task and RequestUnit refs must agree")
+            if event.input_binding_ref is not None:
+                referenced_binding_ids.add(event.input_binding_ref)
+            _exact_evidence_require_unique_refs(
+                event.argument_binding_refs,
+                field_name="TraceEvent.argument_binding_refs",
+            )
+            referenced_binding_ids.update(event.argument_binding_refs)
+            event_manifest: ContextManifest | None = None
+            if event.context_manifest_id is not None:
+                event_manifest = manifest_by_id.get(event.context_manifest_id)
+                if event_manifest is None:
+                    raise ValueError(
+                        "Trace ContextManifest ref must resolve in closure"
+                    )
+                if (
+                    (
+                        event.model_call_id is not None
+                        and event.model_call_id != event_manifest.model_call_id
+                    )
+                    or (
+                        event.model_visible_toolset_hash is not None
+                        and event.model_visible_toolset_hash
+                        != event_manifest.model_visible_toolset_hash
+                    )
+                    or (
+                        event.tool_registry_version is not None
+                        and event.tool_registry_version
+                        != event_manifest.tool_registry_version
+                    )
+                ):
+                    raise ValueError(
+                        "Trace Manifest correlations must match"
+                    )
+            if event.model_visible_toolset_hash is not None:
+                referenced_artifact_hashes.add(
+                    event.model_visible_toolset_hash
+                )
+            if event.tool_call_id is not None:
+                call = call_by_id.get(event.tool_call_id)
+                if call is None:
+                    raise ValueError("Trace ToolCall ref must resolve in closure")
+                lifecycle_status = _EXACT_EVIDENCE_TOOL_LIFECYCLE_STATUS.get(
+                    event.event_type
+                )
+                if lifecycle_status is not None:
+                    tool_lifecycle_events_by_call[event.tool_call_id].append(
+                        (lifecycle_status, event)
+                    )
+                if event.task_id is not None and event.task_id != call.task_id:
+                    raise ValueError("Trace Task must match its ToolCall")
+                if (
+                    event.request_unit_id is not None
+                    and event.request_unit_id != call.request_unit_id
+                ):
+                    raise ValueError("Trace RequestUnit must match its ToolCall")
+                if (
+                    event.context_manifest_id is not None
+                    and event.context_manifest_id != call.context_manifest_id
+                ):
+                    raise ValueError("Trace Manifest must match its ToolCall")
+                call_manifest = manifest_by_id[call.context_manifest_id]
+                if (
+                    (
+                        event.model_call_id is not None
+                        and event.model_call_id != call.model_call_id
+                    )
+                    or (
+                        event.model_visible_toolset_hash is not None
+                        and event.model_visible_toolset_hash
+                        != call_manifest.model_visible_toolset_hash
+                    )
+                    or (
+                        event.tool_registry_version is not None
+                        and event.tool_registry_version
+                        != call.tool_registry_version
+                    )
+                    or (
+                        event.argument_binding_refs
+                        and set(event.argument_binding_refs)
+                        != set(call.argument_binding_refs)
+                    )
+                ):
+                    raise ValueError(
+                        "Trace ToolCall correlations must match"
+                    )
+            if event.observation_ref is not None:
+                referenced_observation_ids.add(event.observation_ref)
+                observation = observation_by_id.get(event.observation_ref)
+                if observation is None:
+                    raise ValueError(
+                        "Trace Observation ref must resolve in closure"
+                    )
+                if event.event_type is not TraceEventType.OBSERVATION_RECORDED:
+                    continue
+                call = (
+                    call_by_id.get(event.tool_call_id)
+                    if event.tool_call_id is not None
+                    else None
+                )
+                if (
+                    call is None
+                    or call.status is not ToolCallStatus.SUCCEEDED
+                    or call.effect is not ToolEffect.READ
+                    or observation.source_tool != call.canonical_tool_name
+                    or event.task_id != call.task_id
+                    or event.request_unit_id != call.request_unit_id
+                    or event.occurred_at != observation.recorded_at
+                ):
+                    raise ValueError(
+                        "Observation source must close to a root Run ToolCall"
+                    )
+                observation_source_edge_counts[event.observation_ref] = (
+                    observation_source_edge_counts.get(
+                        event.observation_ref,
+                        0,
+                    )
+                    + 1
+                )
+
+        gate_trace_events_by_projection: dict[
+            tuple[object, ...],
+            list[TraceEvent],
+        ] = {}
+        for event in self.trace_events:
+            if event.event_type is not TraceEventType.GATE_DECISION_RECORDED:
+                continue
+            projection = (
+                event.model_call_id,
+                event.context_manifest_id,
+                event.requested_tool_name,
+                event.validated_task_state_version,
+                event.argument_binding_refs,
+                event.gate_decision,
+                event.gate_reason_code,
+            )
+            gate_trace_events_by_projection.setdefault(projection, []).append(
+                event
+            )
+
+        gate_owner_records_by_projection: dict[
+            tuple[object, ...],
+            list[GateDecision],
+        ] = {}
+        for gate in self.gate_decisions:
+            projection = (
+                gate.model_call_id,
+                gate.context_manifest_id,
+                gate.requested_provider_tool_name,
+                gate.validated_task_state_version,
+                gate.argument_binding_refs,
+                gate.decision,
+                gate.reason_code,
+            )
+            gate_owner_records_by_projection.setdefault(projection, []).append(
+                gate
+            )
+
+        gate_trace_projection_counts = Counter(
+            {
+                projection: len(events)
+                for projection, events in gate_trace_events_by_projection.items()
+            }
+        )
+        gate_owner_projection_counts = Counter(
+            {
+                projection: len(gates)
+                for projection, gates in gate_owner_records_by_projection.items()
+            }
+        )
+        if not gate_trace_projection_counts <= gate_owner_projection_counts:
+            raise ValueError(
+                "GateDecisionRecorded must match an owner GateDecision projection"
+            )
+
+        for projection, events in gate_trace_events_by_projection.items():
+            owners = gate_owner_records_by_projection[projection]
+            for event in events:
+                if event.task_id is None or event.request_unit_id is None:
+                    raise ValueError(
+                        "GateDecisionRecorded requires a root Task/RequestUnit pair"
+                    )
+                manifest = manifest_by_id[event.context_manifest_id]
+                if (
+                    manifest.task_state_ref_and_version is not None
+                    and event.task_id
+                    != manifest.task_state_ref_and_version.task_id
+                ):
+                    raise ValueError(
+                        "GateDecisionRecorded Task must match ContextManifest"
+                    )
+
+            gate_binding_refs = set(owners[0].argument_binding_refs)
+            cross_unit_binding_count = sum(
+                not gate_binding_refs.issubset(
+                    unit_by_id[event.request_unit_id].input_binding_refs
+                )
+                for event in events
+            )
+            binding_invalid_owner_count = sum(
+                not owner.argument_binding_valid for owner in owners
+            )
+            if cross_unit_binding_count > binding_invalid_owner_count:
+                raise ValueError(
+                    "GateDecisionRecorded bindings must belong to its RequestUnit"
+                )
+
+        for call_id, normalized in normalized_tool_result_events_by_call.items():
+            call = call_by_id[call_id]
+            allowed_outcomes = _TERMINAL_TOOL_OUTCOMES.get(call.status)
+            if allowed_outcomes is None:
+                raise ValueError(
+                    "ToolResultNormalized requires a terminal ToolCall"
+                )
+            if (
+                normalized.occurred_at != call.finished_at
+                or normalized.safe_tool_outcome not in allowed_outcomes
+            ):
+                raise ValueError(
+                    "ToolResultNormalized must match terminal ToolCall "
+                    "status and timestamp"
+                )
+            attempts = attempts_by_call[call_id]
+            if call.status is ToolCallStatus.INTERRUPTED:
+                if call.attempt_count == 0:
+                    if attempts:
+                        raise ValueError(
+                            "ToolResultNormalized must match the final ToolAttempt"
+                        )
+                elif (
+                    not attempts
+                    or attempts[-1].outcome
+                    not in {None, ToolResultOutcome.INTERRUPTED}
+                ):
+                    raise ValueError(
+                        "ToolResultNormalized must match the final ToolAttempt"
+                    )
+            elif (
+                not attempts
+                or attempts[-1].outcome
+                is not normalized.safe_tool_outcome
+            ):
+                raise ValueError(
+                    "ToolResultNormalized must match the final ToolAttempt"
+                )
+
+        active_run_statuses = {
+            AgentRunStatus.CREATED,
+            AgentRunStatus.RUNNING,
+        }
+        if run.status in active_run_statuses:
+            if run_stopped_events:
+                raise ValueError("active Run cannot have RunStopped Trace")
+        elif run.status is AgentRunStatus.FAILED:
+            if run.stop_reason is not None:
+                raise ValueError("FAILED Run must not carry stop_reason")
+            if run_stopped_events:
+                raise ValueError("FAILED Run cannot have RunStopped Trace")
+        else:
+            if len(run_stopped_events) != 1:
+                raise ValueError(
+                    "terminal RunStopped Trace must exist exactly once"
+                )
+            run_stopped = run_stopped_events[0]
+            allowed_run_stopped_fields = _TERMINAL_TRACE_ALLOWED_FIELDS[
+                TraceEventType.RUN_STOPPED
+            ]
+            if any(
+                getattr(run_stopped, field_name) != field_info.default
+                for field_name, field_info in TraceEvent.model_fields.items()
+                if field_name not in allowed_run_stopped_fields
+            ):
+                raise ValueError(
+                    "RunStopped Trace only allows its exact per-kind projection"
+                )
+            if (
+                run_stopped.stop_reason is not run.stop_reason
+                or run_stopped.occurred_at != run.completed_at
+            ):
+                raise ValueError(
+                    "terminal RunStopped Trace must match the Run projection"
+                )
+            if run.status is AgentRunStatus.COMPLETED:
+                task_statuses = {task.status for task in self.task_records}
+                task_status = (
+                    next(iter(task_statuses))
+                    if len(task_statuses) == 1
+                    else None
+                )
+                completed_row = (
+                    run.stop_reason,
+                    bool(self.task_records),
+                    run_stopped.user_outcome,
+                    task_status,
+                )
+                if (
+                    len(task_statuses) > 1
+                    or completed_row not in _COMPLETED_FINALIZATION_ROWS
+                ):
+                    raise ValueError(
+                        "RunStopped projection is outside the closed "
+                        "completed Run matrix"
+                    )
+            elif (
+                run.stop_reason
+                is not StopReason.PROCESS_RESTART_DETECTED
+                or run_stopped.user_outcome is not AgentOutcome.BLOCKED
+            ):
+                raise ValueError(
+                    "INCOMPLETE RunStopped requires "
+                    "PROCESS_RESTART_DETECTED and BLOCKED"
+                )
+
+        terminal_tool_statuses = {
+            ToolCallStatus.SUCCEEDED,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.TIMED_OUT,
+            ToolCallStatus.INTERRUPTED,
+        }
+        tool_lifecycle_phase = {
+            ToolCallStatus.CREATED: 0,
+            ToolCallStatus.RUNNING: 1,
+            ToolCallStatus.SUCCEEDED: 2,
+            ToolCallStatus.FAILED: 2,
+            ToolCallStatus.TIMED_OUT: 2,
+            ToolCallStatus.INTERRUPTED: 2,
+        }
+        for call_id, call in call_by_id.items():
+            lifecycle_events = tool_lifecycle_events_by_call[call_id]
+            if not lifecycle_events:
+                raise ValueError(
+                    "ToolCall lifecycle must include its current projection"
+                )
+            ordered_lifecycle = sorted(
+                lifecycle_events,
+                key=lambda item: (
+                    item[1].occurred_at,
+                    tool_lifecycle_phase[item[0]],
+                    item[1].trace_event_id.hex,
+                ),
+            )
+            ordered_statuses = tuple(
+                status for status, _event in ordered_lifecycle
+            )
+            if (
+                len(ordered_statuses) != len(set(ordered_statuses))
+                or any(
+                    tool_lifecycle_phase[current]
+                    >= tool_lifecycle_phase[following]
+                    for current, following in zip(
+                        ordered_statuses,
+                        ordered_statuses[1:],
+                    )
+                )
+                or any(
+                    event.occurred_at < call.started_at
+                    for _status, event in ordered_lifecycle
+                )
+            ):
+                raise ValueError(
+                    "ToolCall lifecycle timestamps and status order must agree"
+                )
+            terminal_lifecycle = tuple(
+                (status, event)
+                for status, event in ordered_lifecycle
+                if status in terminal_tool_statuses
+            )
+            latest_status, latest_event = ordered_lifecycle[-1]
+            if call.status in terminal_tool_statuses:
+                if (
+                    len(terminal_lifecycle) != 1
+                    or latest_status is not call.status
+                    or latest_event.occurred_at != call.finished_at
+                    or any(
+                        event.occurred_at > call.finished_at
+                        for _status, event in ordered_lifecycle
+                    )
+                ):
+                    raise ValueError(
+                        "ToolCall lifecycle must match its terminal projection"
+                    )
+            elif (
+                terminal_lifecycle
+                or latest_status is not call.status
+            ):
+                raise ValueError(
+                    "ToolCall lifecycle must match its active projection"
+                )
+
+        if set(observation_source_edge_counts) != set(observation_by_id) or any(
+            count != 1 for count in observation_source_edge_counts.values()
+        ):
+            raise ValueError(
+                "each Observation source edge must exist exactly once for root Run"
+            )
+
+        referenced_binding_ids = _exact_evidence_expand_supersedes(
+            referenced_binding_ids,
+            binding_by_id,
+            family_name="InputBinding",
+        )
+        referenced_observation_ids = _exact_evidence_expand_supersedes(
+            referenced_observation_ids,
+            observation_by_id,
+            family_name="Observation",
+        )
+        if referenced_message_ids != set(message_by_id):
+            raise ValueError("Message family must be the exact referenced set")
+        if referenced_binding_ids != set(binding_by_id):
+            raise ValueError("InputBinding family must be the exact referenced set")
+        if referenced_observation_ids != set(observation_by_id):
+            raise ValueError("Observation family must be the exact referenced set")
+        if referenced_artifact_hashes != set(artifact_by_hash):
+            raise ValueError(
+                "ModelVisibleToolsetArtifact family must be the exact referenced set"
+            )
         return self
