@@ -243,7 +243,7 @@ commit_contract:
 
 1. RED `test(01-07K): define strict postgres evidence readers`：只改两份owned Integration test；两个source blob仍等于B_IP。focused command必须因reader缺失和legacy `FOUND + None` contract失败，不得因migration、fixture、syntax或环境失败。
 2. GREEN `feat(01-07K): add strict postgres evidence readers`：只改两份owned source；不重写RED。
-3. 正常feature history相对B_IP恰为上述两个commit。Finding修复只能追加`fix(01-07K): ...`，不得amend/rebase/force-push已审历史。
+3. 首个review candidate相对B_IP恰为上述两个commit；final history为这两个固定RED/GREEN加零到多笔append-only `fix(01-07K): ...`。Finding修复不得amend/rebase/force-push已审历史，且每笔fix仍只能修改四文件allowlist。
 
 contract_changes: `YES / ADDITIVE INFRASTRUCTURE DEPENDENCY` — 实现既有ExactRunEvidencePort并使唯一get_order producer返回authoritative token；不改Port/DTO/schema/codec active routing。
 security_impact: `YES` — trusted-owner prefilter、single snapshot、exact version/provenance/closed set、foreign/absent不可区分、corruption fail-closed、raw diagnostic disposal和single-read token authority。
@@ -324,7 +324,30 @@ uv run pytest tests/integration/test_postgres_record_adapters.py tests/integrati
 uv run pytest
 
 git diff --check "$base_sha...HEAD"
-test "$(git rev-list --count "$base_sha..HEAD")" -eq 2
+test "$(git rev-list --count "$base_sha..HEAD")" -ge 2
+test "$(git rev-list --merges --count "$base_sha..HEAD")" -eq 0
+red_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '1p')"
+green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '2p')"
+test "$(git show -s --format=%s "$red_sha")" = \
+  "test(01-07K): define strict postgres evidence readers"
+test "$(git show -s --format=%s "$green_sha")" = \
+  "feat(01-07K): add strict postgres evidence readers"
+test "$(git diff-tree --no-commit-id --name-only -r "$red_sha" | LC_ALL=C sort)" = \
+  "$(printf '%s\n' \
+    tests/integration/test_postgres_get_order.py \
+    tests/integration/test_postgres_record_adapters.py)"
+test "$(git diff-tree --no-commit-id --name-only -r "$green_sha" | LC_ALL=C sort)" = \
+  "$(printf '%s\n' \
+    src/mini_agent/infrastructure/order/postgres.py \
+    src/mini_agent/infrastructure/persistence/postgres.py)"
+test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
+  sed '1,2d' |
+  rg -v '^fix\(01-07K\): .+$' || true)"
+for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,2d'); do
+  test -z "$(git diff-tree --no-commit-id --name-only -r "$fix_sha" |
+    rg -v '^(src/mini_agent/infrastructure/(order/postgres|persistence/postgres)\.py|tests/integration/test_postgres_(get_order|record_adapters)\.py)$' ||
+    true)"
+done
 test "$(git diff --name-only "$base_sha...HEAD" | LC_ALL=C sort)" = "$(printf '%s\n' \
   src/mini_agent/infrastructure/order/postgres.py \
   src/mini_agent/infrastructure/persistence/postgres.py \
