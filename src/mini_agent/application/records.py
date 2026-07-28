@@ -2688,7 +2688,10 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             family_name="RequestUnit",
         )
         _exact_evidence_unique(
-            tuple(link.task_id for link in self.conversation_task_links),
+            tuple(
+                (link.conversation_id, link.task_id, link.linked_at)
+                for link in self.conversation_task_links
+            ),
             family_name="ConversationTaskLink",
         )
         _exact_evidence_unique(
@@ -2777,6 +2780,10 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         referenced_binding_ids: set[UUID] = set()
         referenced_observation_ids: set[UUID] = set()
         referenced_artifact_hashes: set[str] = set()
+        ordered_children_by_task: dict[
+            UUID,
+            list[AcceptedTaskDeltaV2],
+        ] = {}
 
         request_understanding = self.request_understanding_record
         if request_understanding is None:
@@ -2922,8 +2929,18 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     raise ValueError(
                         "accepted Task delta result version must advance once"
                     )
+                if (
+                    child.result_task_state_version
+                    > task_by_id[child.task_id].state_version
+                ):
+                    raise ValueError(
+                        "accepted Task delta must fit the current Task history"
+                    )
                 prior_result_by_task[child.task_id] = (
                     child.result_task_state_version
+                )
+                ordered_children_by_task.setdefault(child.task_id, []).append(
+                    child
                 )
             accepted_task_ids = {
                 child.task_id for child in self.accepted_task_deltas
@@ -2954,6 +2971,22 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             ):
                 raise ValueError(
                     "RunTaskLink result version must match its Task projection"
+                )
+            if (
+                run.status
+                not in {AgentRunStatus.CREATED, AgentRunStatus.RUNNING}
+                and link.result_task_state_version is None
+            ):
+                raise ValueError(
+                    "terminal RunTaskLink requires the exact Task result version"
+                )
+            task_children = ordered_children_by_task[link.task_id]
+            if (
+                task_children[0].base_task_state_version
+                != link.base_task_state_version
+            ):
+                raise ValueError(
+                    "accepted Task delta first base must match RunTaskLink base"
                 )
             run_link_by_task[link.task_id] = link
         if set(run_link_by_task) != set(task_by_id):
@@ -3005,6 +3038,18 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             unit_by_task[unit.task_id] = unit
         if set(unit_by_task) != set(task_by_id):
             raise ValueError("RequestUnit set must match the exact Task set")
+        for task_id, task_children in ordered_children_by_task.items():
+            unit = unit_by_task[task_id]
+            if any(
+                child.goal_text != unit.goal_text
+                or set(child.input_binding_refs)
+                != set(unit.input_binding_refs)
+                or child.message_ref not in unit.goal_source_refs
+                for child in task_children
+            ):
+                raise ValueError(
+                    "accepted child and RequestUnit causality must match exactly"
+                )
 
         transitions_by_task: dict[UUID, list[TaskStateTransition]] = {
             task_id: [] for task_id in task_by_id
@@ -3023,10 +3068,17 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             transitions_by_task[transition.task_id].append(transition)
         for task_id, task in task_by_id.items():
             transitions = transitions_by_task[task_id]
-            expected_versions = list(range(2, task.state_version + 1))
-            if [
-                transition.result_state_version for transition in transitions
-            ] != expected_versions:
+            if task.state_version != len(transitions) + 1:
+                raise ValueError(
+                    "Task transition history must be complete and contiguous"
+                )
+            if any(
+                transition.result_state_version != expected_result_version
+                for expected_result_version, transition in enumerate(
+                    transitions,
+                    start=2,
+                )
+            ):
                 raise ValueError(
                     "Task transition history must be complete and contiguous"
                 )
@@ -3055,6 +3107,34 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 raise ValueError(
                     "Task terminal transition must match its current projection"
                 )
+            effective_time_by_version = {
+                1: task.created_at,
+                **{
+                    transition.result_state_version: transition.changed_at
+                    for transition in transitions
+                },
+            }
+            for child in ordered_children_by_task[task_id]:
+                base_version = child.base_task_state_version
+                if base_version is None:
+                    if task.created_at != child.accepted_at:
+                        raise ValueError(
+                            "new accepted Task delta must match Task creation time"
+                        )
+                    continue
+                base_effective_at = effective_time_by_version.get(base_version)
+                result_effective_at = effective_time_by_version.get(
+                    child.result_task_state_version
+                )
+                if (
+                    base_effective_at is None
+                    or result_effective_at is None
+                    or base_effective_at > child.accepted_at
+                    or result_effective_at < child.accepted_at
+                ):
+                    raise ValueError(
+                        "accepted Task delta must fit the current Task history"
+                    )
 
         for binding in self.input_binding_records:
             _exact_evidence_require_unique_refs(
@@ -3072,9 +3152,49 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             )
             referenced_message_ids.update(manifest.selected_message_refs)
             if manifest.task_state_ref_and_version is not None:
-                if manifest.task_state_ref_and_version.task_id not in task_by_id:
+                task_state_ref = manifest.task_state_ref_and_version
+                task = task_by_id.get(task_state_ref.task_id)
+                if task is None:
                     raise ValueError(
                         "ContextManifest Task ref must resolve in closure"
+                    )
+                if task_state_ref.state_version == 1:
+                    effective_at = task.created_at
+                else:
+                    matching_transition = next(
+                        (
+                            transition
+                            for transition in transitions_by_task[task.task_id]
+                            if transition.result_state_version
+                            == task_state_ref.state_version
+                        ),
+                        None,
+                    )
+                    effective_at = (
+                        matching_transition.changed_at
+                        if matching_transition is not None
+                        else None
+                    )
+                following_transition = next(
+                    (
+                        transition
+                        for transition in transitions_by_task[task.task_id]
+                        if transition.result_state_version
+                        == task_state_ref.state_version + 1
+                    ),
+                    None,
+                )
+                if (
+                    effective_at is None
+                    or manifest.assembled_at < effective_at
+                    or (
+                        following_transition is not None
+                        and following_transition.changed_at
+                        <= manifest.assembled_at
+                    )
+                ):
+                    raise ValueError(
+                        "ContextManifest Task version must match history at assembly"
                     )
             observation_refs = tuple(
                 item.record_ref
@@ -3084,6 +3204,15 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 observation_refs,
                 field_name="ContextManifest.observation_refs_and_versions",
             )
+            for versioned_ref in manifest.observation_refs_and_versions:
+                observation = observation_by_id.get(versioned_ref.record_ref)
+                if (
+                    observation is None
+                    or observation.source_version != versioned_ref.version
+                ):
+                    raise ValueError(
+                        "ContextManifest Observation version must match exactly"
+                    )
             referenced_observation_ids.update(observation_refs)
             if manifest.evidence_refs_and_versions or manifest.action_record_refs:
                 raise ValueError(
@@ -3177,8 +3306,16 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         }
         for call_id, call in call_by_id.items():
             attempts = attempts_by_call[call_id]
-            if [attempt.attempt_no for attempt in attempts] != list(
-                range(1, call.attempt_count + 1)
+            if call.attempt_count != len(attempts):
+                raise ValueError(
+                    "ToolCall requires the exact contiguous attempt history"
+                )
+            if any(
+                attempt.attempt_no != expected_attempt_no
+                for expected_attempt_no, attempt in enumerate(
+                    attempts,
+                    start=1,
+                )
             ):
                 raise ValueError(
                     "ToolCall requires the exact contiguous attempt history"
@@ -3250,6 +3387,7 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     "Observation supersedes must resolve in closure"
                 )
 
+        observation_source_edge_counts: dict[UUID, int] = {}
         for event in self.trace_events:
             if event.run_id != run.run_id or event.case_id is not None:
                 raise ValueError(
@@ -3258,9 +3396,35 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             if event.message_ref is not None:
                 referenced_message_ids.add(event.message_ref)
             if event.accepted_delta_ref is not None:
-                if event.accepted_delta_ref not in accepted_by_id:
+                accepted_child = accepted_by_id.get(event.accepted_delta_ref)
+                if accepted_child is None:
                     raise ValueError(
                         "Trace accepted child ref must resolve in closure"
+                    )
+                accepted_unit = (
+                    unit_by_id.get(event.request_unit_id)
+                    if event.request_unit_id is not None
+                    else None
+                )
+                if (
+                    (
+                        event.message_ref is not None
+                        and event.message_ref != accepted_child.message_ref
+                    )
+                    or (
+                        event.task_id is not None
+                        and event.task_id != accepted_child.task_id
+                    )
+                    or (
+                        event.request_unit_id is not None
+                        and (
+                            accepted_unit is None
+                            or accepted_unit.task_id != accepted_child.task_id
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Trace accepted child correlations must match"
                     )
             if event.task_id is not None and event.task_id not in task_by_id:
                 raise ValueError("Trace Task ref must resolve in closure")
@@ -3282,13 +3446,32 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 field_name="TraceEvent.argument_binding_refs",
             )
             referenced_binding_ids.update(event.argument_binding_refs)
-            if (
-                event.context_manifest_id is not None
-                and event.context_manifest_id not in manifest_by_id
-            ):
-                raise ValueError(
-                    "Trace ContextManifest ref must resolve in closure"
-                )
+            event_manifest: ContextManifest | None = None
+            if event.context_manifest_id is not None:
+                event_manifest = manifest_by_id.get(event.context_manifest_id)
+                if event_manifest is None:
+                    raise ValueError(
+                        "Trace ContextManifest ref must resolve in closure"
+                    )
+                if (
+                    (
+                        event.model_call_id is not None
+                        and event.model_call_id != event_manifest.model_call_id
+                    )
+                    or (
+                        event.model_visible_toolset_hash is not None
+                        and event.model_visible_toolset_hash
+                        != event_manifest.model_visible_toolset_hash
+                    )
+                    or (
+                        event.tool_registry_version is not None
+                        and event.tool_registry_version
+                        != event_manifest.tool_registry_version
+                    )
+                ):
+                    raise ValueError(
+                        "Trace Manifest correlations must match"
+                    )
             if event.model_visible_toolset_hash is not None:
                 referenced_artifact_hashes.add(
                     event.model_visible_toolset_hash
@@ -3309,22 +3492,71 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     and event.context_manifest_id != call.context_manifest_id
                 ):
                     raise ValueError("Trace Manifest must match its ToolCall")
+                call_manifest = manifest_by_id[call.context_manifest_id]
+                if (
+                    (
+                        event.model_call_id is not None
+                        and event.model_call_id != call.model_call_id
+                    )
+                    or (
+                        event.model_visible_toolset_hash is not None
+                        and event.model_visible_toolset_hash
+                        != call_manifest.model_visible_toolset_hash
+                    )
+                    or (
+                        event.tool_registry_version is not None
+                        and event.tool_registry_version
+                        != call.tool_registry_version
+                    )
+                    or (
+                        event.argument_binding_refs
+                        and set(event.argument_binding_refs)
+                        != set(call.argument_binding_refs)
+                    )
+                ):
+                    raise ValueError(
+                        "Trace ToolCall correlations must match"
+                    )
             if event.observation_ref is not None:
                 referenced_observation_ids.add(event.observation_ref)
-                if event.tool_call_id is None:
-                    raise ValueError(
-                        "Observation Trace must identify its source ToolCall"
-                    )
                 observation = observation_by_id.get(event.observation_ref)
-                call = call_by_id.get(event.tool_call_id)
+                if observation is None:
+                    raise ValueError(
+                        "Trace Observation ref must resolve in closure"
+                    )
+                if event.event_type is not TraceEventType.OBSERVATION_RECORDED:
+                    continue
+                call = (
+                    call_by_id.get(event.tool_call_id)
+                    if event.tool_call_id is not None
+                    else None
+                )
                 if (
-                    observation is None
-                    or call is None
+                    call is None
+                    or call.status is not ToolCallStatus.SUCCEEDED
+                    or call.effect is not ToolEffect.READ
                     or observation.source_tool != call.canonical_tool_name
+                    or event.task_id != call.task_id
+                    or event.request_unit_id != call.request_unit_id
+                    or event.occurred_at != observation.recorded_at
                 ):
                     raise ValueError(
                         "Observation source must close to a root Run ToolCall"
                     )
+                observation_source_edge_counts[event.observation_ref] = (
+                    observation_source_edge_counts.get(
+                        event.observation_ref,
+                        0,
+                    )
+                    + 1
+                )
+
+        if set(observation_source_edge_counts) != set(observation_by_id) or any(
+            count != 1 for count in observation_source_edge_counts.values()
+        ):
+            raise ValueError(
+                "each Observation source edge must exist exactly once for root Run"
+            )
 
         referenced_binding_ids = _exact_evidence_expand_supersedes(
             referenced_binding_ids,

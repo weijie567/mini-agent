@@ -62,7 +62,9 @@ from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
     OrderObservation,
+    TaskStateRefAndVersion,
     TokenCounts,
+    VersionedRecordRef,
 )
 from mini_agent.core.order import (
     OrderLineSummary,
@@ -5175,3 +5177,290 @@ def test_exact_run_evidence_does_not_treat_payload_correlations_as_records() -> 
         trace_events=(*closure.trace_events, correlation_event),
     )
     assert rebuilt.trace_events[-1].presentation_plan_ref is not None
+
+
+@pytest.mark.parametrize("family_name", ("task", "tool_attempt"))
+def test_exact_run_evidence_rejects_large_persisted_scalars_without_range_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    family_name: str,
+) -> None:
+    closure = (
+        _request_understanding_exact_run_evidence(
+            candidate_count=1,
+            accepted_count=1,
+        )
+        if family_name == "task"
+        else _tool_exact_run_evidence()
+    )
+    updates: dict[str, object]
+    expected_message: str
+    if family_name == "task":
+        task = closure.task_records[0]
+        unit = closure.request_unit_records[0]
+        updates = {
+            "task_records": (
+                _rebuild(task, state_version=100_000),
+            ),
+            "request_unit_records": (
+                _rebuild(unit, state_version=100_000),
+            ),
+            "run_task_links": (
+                _rebuild(
+                    closure.run_task_links[0],
+                    result_task_state_version=100_000,
+                ),
+            ),
+        }
+        expected_message = "complete and contiguous"
+    else:
+        updates = {
+            "tool_calls": (
+                _rebuild(closure.tool_calls[0], attempt_count=100_000),
+            ),
+        }
+        expected_message = "exact contiguous attempt"
+
+    def fail_if_materialized(*_args: object) -> None:
+        raise AssertionError(
+            "persisted scalar must not drive range materialization"
+        )
+
+    monkeypatch.setattr(
+        application_records_module,
+        "range",
+        fail_if_materialized,
+        raising=False,
+    )
+    with pytest.raises(ValidationError, match=expected_message):
+        _rebuild_exact_run_evidence(closure, **updates)
+
+
+def test_exact_run_evidence_binds_accepted_versions_to_task_and_run_link() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    child = closure.accepted_task_deltas[0]
+
+    with pytest.raises(ValidationError, match="current Task history"):
+        _rebuild_exact_run_evidence(
+            closure,
+            accepted_task_deltas=(
+                _rebuild(
+                    child,
+                    base_task_state_version=2,
+                    result_task_state_version=3,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="RunTaskLink base"):
+        _rebuild_exact_run_evidence(
+            closure,
+            accepted_task_deltas=(
+                _rebuild(
+                    child,
+                    base_task_state_version=1,
+                    result_task_state_version=2,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="terminal RunTaskLink"):
+        _rebuild_exact_run_evidence(
+            closure,
+            run_task_links=(
+                _rebuild(
+                    closure.run_task_links[0],
+                    result_task_state_version=None,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("swapped_field", ("input_binding_refs", "goal_text"))
+def test_exact_run_evidence_binds_each_accepted_child_to_its_request_unit(
+    swapped_field: str,
+) -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first, second = closure.request_unit_records
+    if swapped_field == "input_binding_refs":
+        first_updates = {"input_binding_refs": second.input_binding_refs}
+        second_updates = {"input_binding_refs": first.input_binding_refs}
+    else:
+        first_updates = {"goal_text": second.goal_text}
+        second_updates = {"goal_text": first.goal_text}
+
+    with pytest.raises(ValidationError, match="RequestUnit causality"):
+        _rebuild_exact_run_evidence(
+            closure,
+            request_unit_records=(
+                _rebuild(first, **first_updates),
+                _rebuild(second, **second_updates),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("state_version", "assembled_at"),
+    (
+        (999, UTC_NOW),
+        (2, UTC_NOW),
+    ),
+)
+def test_exact_run_evidence_rejects_impossible_manifest_task_versions(
+    state_version: int,
+    assembled_at: datetime,
+) -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    task = closure.task_records[0]
+    manifest = closure.context_manifests[0]
+    invalid_manifest = _rebuild(
+        manifest,
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=state_version,
+        ),
+        assembled_at=assembled_at,
+    )
+    with pytest.raises(ValidationError, match="Manifest Task version"):
+        _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(invalid_manifest,),
+        )
+
+
+def test_exact_run_evidence_binds_manifest_observation_version_exactly() -> None:
+    closure = _tool_exact_run_evidence()
+    observation = closure.observation_records[0]
+    manifest = closure.context_manifests[0]
+    invalid_manifest = _rebuild(
+        manifest,
+        observation_refs_and_versions=(
+            VersionedRecordRef(
+                record_ref=observation.observation_id,
+                version="WRONG",
+            ),
+        ),
+    )
+    with pytest.raises(ValidationError, match="Observation version"):
+        _rebuild_exact_run_evidence(
+            closure,
+            context_manifests=(invalid_manifest,),
+        )
+
+
+def test_exact_run_evidence_requires_each_observation_source_edge() -> None:
+    closure = _tool_exact_run_evidence()
+    traces_without_source = tuple(
+        event
+        for event in closure.trace_events
+        if event.event_type is not TraceEventType.OBSERVATION_RECORDED
+    )
+    with pytest.raises(ValidationError, match="Observation source edge"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=traces_without_source,
+        )
+
+
+def test_exact_run_evidence_cross_checks_accepted_trace_task() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=2,
+        accepted_count=2,
+    )
+    first_child, second_child = closure.accepted_task_deltas
+    traces = tuple(
+        (
+            _rebuild(event, task_id=second_child.task_id)
+            if event.accepted_delta_ref == first_child.accepted_delta_id
+            else event
+        )
+        for event in closure.trace_events
+    )
+    with pytest.raises(ValidationError, match="accepted child"):
+        _rebuild_exact_run_evidence(closure, trace_events=traces)
+
+
+def test_exact_run_evidence_cross_checks_trace_manifest_correlations() -> None:
+    closure = _minimal_exact_run_evidence()
+    context_event = next(
+        event
+        for event in closure.trace_events
+        if event.event_type is TraceEventType.CONTEXT_MANIFEST_RECORDED
+    )
+    with pytest.raises(ValidationError, match="Trace Manifest correlations"):
+        _rebuild_exact_run_evidence(
+            closure,
+            trace_events=tuple(
+                (
+                    _rebuild(context_event, model_call_id=uuid4())
+                    if event is context_event
+                    else event
+                )
+                for event in closure.trace_events
+            ),
+        )
+
+    second_spec = _rebuild(get_order_tool_spec(), name="get_order_alternate")
+    second_artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (second_spec,)
+        ),
+        provider_visible_tool_specs=(second_spec,),
+    )
+    with pytest.raises(ValidationError, match="Trace Manifest correlations"):
+        _rebuild_exact_run_evidence(
+            closure,
+            model_visible_toolset_artifacts=(
+                *closure.model_visible_toolset_artifacts,
+                second_artifact,
+            ),
+            trace_events=tuple(
+                (
+                    _rebuild(
+                        context_event,
+                        model_visible_toolset_hash=(
+                            second_artifact.model_visible_toolset_hash
+                        ),
+                    )
+                    if event is context_event
+                    else event
+                )
+                for event in closure.trace_events
+            ),
+        )
+
+
+def test_exact_run_evidence_uses_conversation_link_composite_identity() -> None:
+    closure = _request_understanding_exact_run_evidence(
+        candidate_count=1,
+        accepted_count=1,
+    )
+    original = closure.conversation_task_links[0]
+    historical = _rebuild(
+        original,
+        ended_at=original.linked_at + timedelta(microseconds=1),
+    )
+    active = _rebuild(
+        original,
+        linked_at=original.linked_at + timedelta(microseconds=2),
+    )
+    rebuilt = _rebuild_exact_run_evidence(
+        closure,
+        conversation_task_links=(historical, active),
+    )
+    assert len(rebuilt.conversation_task_links) == 2
+
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        _rebuild_exact_run_evidence(
+            closure,
+            conversation_task_links=(
+                historical,
+                _rebuild(historical, link_reason="REOPENED"),
+            ),
+        )
