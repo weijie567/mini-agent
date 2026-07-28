@@ -640,7 +640,10 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
                 "tests/component/application/test_record_contracts.py",
                 "tests/component/application/test_ports_contract.py"
               ],
-              "active_routing": false
+              "active_routing": false,
+              "completion_status": "COMPLETE_REVIEWED_MERGED",
+              "reviewed_merge_sha": "b14a15d60b17eda8d8b5aed892c5d00f16005310",
+              "reviewed_merge_tree": "0825efeff47730e17974ea7d65bfd3af9a58fe51"
             },
             {
               "packet_id": "01-07P",
@@ -654,7 +657,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
               ],
               "active_routing": false,
               "review_remediation": {
-                "status": "ACCEPTANCE_REPLAY_REQUIRED",
+                "status": "COMPLETE_REVIEWED_MERGED",
                 "preserves_packet_id": true,
                 "denominator_delta": 0,
                 "original_input_barrier": "B_FE_EXPAND",
@@ -671,10 +674,30 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
                 "acceptance_base_sha": "0fb4d0ba5fb9d673f2d116041ce023dd367a52ec",
                 "acceptance_base_tree": "53f0d499fe7d62b515cf35382ec7699958bf7bb9",
                 "replay_requires_original_patch_equivalence": true,
-                "replay_requires_feature_and_latest_overlay_full_gate": true
+                "replay_requires_feature_and_latest_overlay_full_gate": true,
+                "acceptance_plan_pr": 86,
+                "acceptance_plan_merge_sha": "dd4439f1c11853a4f10bca93a6f0cba1fa7c8cdc",
+                "acceptance_red_sha": "571d25e950b725a4ba968562ffa1c73b06d3b8f3",
+                "acceptance_green_sha": "7521e27f12b99c9e3f5fdaa396ea784599a273c8",
+                "acceptance_review_fix_sha": "5328f435fdba41a64512bc810c94a550a1e24c40",
+                "acceptance_head_tree": "71d98adc548c690966631851ba18dca63ac9a766",
+                "acceptance_feature_pr": 87,
+                "acceptance_overlay_base_sha": "dd4439f1c11853a4f10bca93a6f0cba1fa7c8cdc",
+                "acceptance_overlay_tree": "65415ff5846892f257e95d8b8bd34f50752980a2",
+                "acceptance_merge_sha": "bbe14fadc0cd2e14ad35e19177b079fcab685dfc",
+                "acceptance_merge_tree": "65415ff5846892f257e95d8b8bd34f50752980a2"
               }
             }
-          ]
+          ],
+          "barrier_evidence": {
+            "status": "COMPLETE_REVIEWED_MERGED",
+            "barrier": "B_IP",
+            "merge_sha": "bbe14fadc0cd2e14ad35e19177b079fcab685dfc",
+            "merge_tree": "65415ff5846892f257e95d8b8bd34f50752980a2",
+            "feature_union_from_b_fe_count": 8,
+            "canonical_full_gate": "1767 passed, 1 deselected, 12 warnings",
+            "test_namespace_residual": 0
+          }
         },
         {
           "input_barrier": "B_IP",
@@ -956,9 +979,10 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 - exact `B_DH` preflight发现旧的E/F同base并行授权无法闭合nested DTO、closed rejection、provenance replay和v1/v2 cutover。01-07N Plan / owner [PR #62](https://github.com/weijie567/mini-agent/pull/62) / [PR #63](https://github.com/weijie567/mini-agent/pull/63) 已以reviewed merge `a4b1edb4c50a2e3e826571194bac58f7b31eab6d`、tree `469e26460c1041d9ca5042d39ae9a57ded7d5442` 冻结 `p0-ru-v2-cutover-r1`；这项remediation没有实现任何Core、codec、migration或active routing。
 - 01-07O Plan [PR #64](https://github.com/weijie567/mini-agent/pull/64) 的reviewed head `9d9afe6b1242667c6e71d16d6f4fae8ea2956fa8`以final `blocker/critical/major/minor = 0/0/0/0`通过，squash merge为`274178bad8796e08831dcd9204b6610c19930982`，Plan blob为`ef63e5a79b61622e3b495d3ba8d49801e3054cbe`。owner feature从exact remediation merge `a4b1edb...`执行，exact head `1fa6550ac22255a49a34e912f1e1b6d047431750`与latest-integration overlay `8d7ac2f65ad12673ba778ca6d9093415c994c878`均以final `0/0/0/0`通过；[PR #65](https://github.com/weijie567/mini-agent/pull/65) reviewed merge为`73320913a9321c52c220104f66ed295d692a0c33`、tree `359eb1961157f71e1b3cc48b50a901e831cb0be9`。
 - PR #65 reviewed merge当时只解锁两道status barrier；planning-status PR #67与Project Direction PR #68随后依次形成`B_O_PLANNING_STATUS`与`B_O_STATUS = 73696a138eb13fc4a90a0f760b13865f53d08704`。01-07F Plan / feature PR #70/#71再形成`B_F = 034cf57228c4a9da4764b0c7322dc5d34652a09c`，01-07E Plan / correction / feature PR #72/#73/#74形成共同non-routable `B_FE_EXPAND = 294ada386ec160ec2a48fc8883b5a38f1880e4ba`。这些barrier与后续状态对齐均不推进canonical lifecycle；该map当时允许01-07I / 01-07P从exact `B_FE_EXPAND`启动，当前P acceptance route已由下方review-remediation lineage替换。
-- 01-07I Plan / feature [PR #80](https://github.com/weijie567/mini-agent/pull/80) / [PR #83](https://github.com/weijie567/mini-agent/pull/83) 已从exact `B_FE_EXPAND`完成RED/GREEN、exact-head与latest-overlay独立`0/0/0/0`审查，并reviewed merge为`b14a15d60b17eda8d8b5aed892c5d00f16005310`、tree `0825efeff47730e17974ea7d65bfd3af9a58fe51`。01-07P Plan [PR #81](https://github.com/weijie567/mini-agent/pull/81) 与原始feature [PR #82](https://github.com/weijie567/mini-agent/pull/82) 同样从`B_FE_EXPAND`形成三文件RED `e6b8e447...` / GREEN `14c1abd...`；focused 48、database regression 119与shared dev 0003 migration通过，但full gate唯一失败于01-07E把阶段性symbol absence永久化的test oracle，故原PR #82保持`SUPERSEDED_DO_NOT_MERGE`。
+- 01-07I Plan / feature [PR #80](https://github.com/weijie567/mini-agent/pull/80) / [PR #83](https://github.com/weijie567/mini-agent/pull/83) 已从exact `B_FE_EXPAND`完成RED/GREEN、exact-head与latest-overlay独立`0/0/0/0`审查，并reviewed merge为`b14a15d60b17eda8d8b5aed892c5d00f16005310`、tree `0825efeff47730e17974ea7d65bfd3af9a58fe51`。01-07P Plan [PR #81](https://github.com/weijie567/mini-agent/pull/81) 与原始feature [PR #82](https://github.com/weijie567/mini-agent/pull/82) 同样从`B_FE_EXPAND`形成三文件RED `e6b8e447...` / GREEN `14c1abd...`；focused 48、database regression 119与shared dev 0003 migration通过，但full gate唯一失败于01-07E把阶段性symbol absence永久化的test oracle，故原PR #82已按`SUPERSEDED_DO_NOT_MERGE`关闭且未merge。
 - dedicated Application oracle-fix [PR #84](https://github.com/weijie567/mini-agent/pull/84) 只改`tests/component/application/test_persistence_contract.py`，经四轮append-only修复在exact head `1e28b85e1bbf3b0f85561092d6e639b2ffaebfa2`取得独立`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`；pre-P full为`1759 passed, 1 deselected`，叠加原P patch后focused 48、database 119与full `1767 passed, 1 deselected`。reviewed merge `0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`、tree `53f0d499fe7d62b515cf35382ec7699958bf7bb9`命名为review-remediation replay base `B_I_E_ORACLE_FIX`，不新增Packet或改变39分母。
-- 现有01-07P entry因此授权同一Packet的r1 acceptance replay：从exact `B_I_E_ORACLE_FIX`使用replacement branch/worktree，三文件allowlist与产品合同不变，必须证明原始patch byte-equivalent并重新通过feature/latest-overlay full与独立review。只有r1串行merge才形成`B_IP`；本remediation不把原full失败改写为通过，也不声称physical schema、active routing或readiness已完成。
+- canonical execution-owner remediation [PR #85](https://github.com/weijie567/mini-agent/pull/85) 与r1 Plan [PR #86](https://github.com/weijie567/mini-agent/pull/86) 依次把同一01-07P Packet的acceptance route固定为exact `B_I_E_ORACLE_FIX`，不增加Wave 21依赖或第40个Packet。replacement [PR #87](https://github.com/weijie567/mini-agent/pull/87) 形成fresh RED `571d25e...` / GREEN `7521e27...`，GREEN patch SHA-256精确等于原始`4e85ed...`；首轮review发现downgrade lock oracle可绕过后，以append-only `5328f435fdba41a64512bc810c94a550a1e24c40`修复并取得feature/latest-overlay独立`0/0/0/0`。
+- 01-07P feature与基于Plan merge `dd4439f1c11853a4f10bca93a6f0cba1fa7c8cdc`的latest overlay均通过focused 48、database regression 119与full `1767 passed, 1 deselected, 12 warnings`；overlay tree `65415ff5846892f257e95d8b8bd34f50752980a2`经review后由PR #87串行merge为`B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc`，merge tree保持相同。exact barrier再次通过canonical full gate，且`B_FE_EXPAND...B_IP`的source/test/infra union恰为I四文件、P三文件与oracle-fix一文件共8项。该完成证据只证明01-07I/P dependency-expand，不把原full失败改写为通过，也不声称active routing、Runtime/Provider/Eval或产品readiness已完成。
 - 用户已明确要求暂时停用Graphify；后续不运行或引用Graphify，也不再把其freshness作为status、F/E或共同barrier的门禁。历史Graphify输出只保留为既有ignored artifact，不参与当前完成结论。
 
 - 01-07I以Application Port declaration owner身份同时冻结exact-Run Evidence Port和fresh parameterless、raw-diagnostic-free的Request Understanding candidate-invalid signal；`ModelProvider`合同明确只有Request Understanding output的Pydantic/trusted-field拒绝使用该signal，framing/transport/zero-or-multiple/wrong-call及Presentation校验仍使用fresh `ProviderProtocolError`。建议精确owner files为`src/mini_agent/application/records.py`、`src/mini_agent/application/ports.py`及现有records/ports contract tests；它不得实现Runtime catch或Adapter。
@@ -1076,7 +1100,7 @@ Recommended merge order:
 
 ## 11. GSD 使用边界
 
-GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，在PR #29 latest overlay复验后串行合并01-07，并以PR #37/#38完成01-07A；PR #39–#41形成01-07B execution base `8544137...`。01-07B继续使用GSD planner/checker只读建议与Integrator single-writer planning-status PR，通过PR #42–#43签发并对齐状态，再由PR #44 exact six-file feature、双review与latest-integration overlay完成merge `ccdafe87...`；[01-07B Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)索引精确证据。01-07C经PR #46签发、PR #49纠正公开路径、PR #52纠正review暴露的Plan缺口，并由PR #53完成r1 feature；01-07G经PR #48/#50完成Plan与feature。两者从同一execution base出发，最终共同barrier为`327b39d...`；Project Direction状态由独立owner PR #54对齐并merge `ffcc562...`，不改变execution base；[01-07C Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md)与[01-07G Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07G-SUMMARY.md)索引精确证据。01-07D / 01-07H通过Plan PR #56/#57与feature PR #59/#60完成并形成`B_DH = 4a7e802...`，PR #61索引证据；01-07N再通过Plan/owner PR #62/#63关闭cutover裁决并形成`a4b1edb...`。01-07O Plan / owner PR #64/#65已完成并形成`7332091...`；planning-status与Project Direction PR #67/#68随后形成`B_O_STATUS = 73696a1...`，01-07F Plan / feature PR #70/#71形成`B_F = 034cf57...`，01-07E Plan / correction / feature PR #72/#73/#74形成`B_FE_EXPAND = 294ada3...`。PR #75/#76/#77已完成派生状态、Project Direction与README对齐；I已由PR #80/#83完成，P原始PR #82被review finding阻断，PR #84形成`B_I_E_ORACLE_FIX = 0fb4d0b...`，当前只允许同一01-07P Packet从canonical replacement route执行r1 acceptance replay；stock mutating workflow仍保持禁用。
+GSD 只可作为现有协作模型上的派生编排层。W1 与 W2.0 未使用 GSD；activation feature head `957cabd6b31dd2156848acd515d2e8dc3d19bd50` 已通过双独立 exact-head review，并由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) squash merge 为 integration commit `624475681847be5a8e463e32dafd28a0483b213b`。Plan 01-01至01-04G已通过PR #11–#25完成；historical Plans 01-05/06/07通过planning PR #26发布并形成PR #28/#30/#29。受控adapter随后以PR #31/#32完成01-04H，以PR #33/#34完成01-05R，以PR #35/#36完成01-06R，在PR #29 latest overlay复验后串行合并01-07，并以PR #37/#38完成01-07A；PR #39–#41形成01-07B execution base `8544137...`。01-07B继续使用GSD planner/checker只读建议与Integrator single-writer planning-status PR，通过PR #42–#43签发并对齐状态，再由PR #44 exact six-file feature、双review与latest-integration overlay完成merge `ccdafe87...`；[01-07B Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07B-SUMMARY.md)索引精确证据。01-07C经PR #46签发、PR #49纠正公开路径、PR #52纠正review暴露的Plan缺口，并由PR #53完成r1 feature；01-07G经PR #48/#50完成Plan与feature。两者从同一execution base出发，最终共同barrier为`327b39d...`；Project Direction状态由独立owner PR #54对齐并merge `ffcc562...`，不改变execution base；[01-07C Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07C-SUMMARY.md)与[01-07G Summary](../../.planning/phases/01-cycle-1-e2e-01/01-07G-SUMMARY.md)索引精确证据。01-07D / 01-07H通过Plan PR #56/#57与feature PR #59/#60完成并形成`B_DH = 4a7e802...`，PR #61索引证据；01-07N再通过Plan/owner PR #62/#63关闭cutover裁决并形成`a4b1edb...`。01-07O Plan / owner PR #64/#65已完成并形成`7332091...`；planning-status与Project Direction PR #67/#68随后形成`B_O_STATUS = 73696a1...`，01-07F Plan / feature PR #70/#71形成`B_F = 034cf57...`，01-07E Plan / correction / feature PR #72/#73/#74形成`B_FE_EXPAND = 294ada3...`。PR #75/#76/#77已完成派生状态、Project Direction与README对齐；I由PR #80/#83完成，P原始PR #82被review finding阻断并关闭，PR #84形成`B_I_E_ORACLE_FIX = 0fb4d0b...`，PR #85/#86固定replacement route与Plan，PR #87最终形成`B_IP = bbe14fa...`；stock mutating workflow仍保持禁用。
 
 ### 11.1 Activation Gate（`COMPLETE / EFFECTIVE`）
 
@@ -1135,16 +1159,16 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
 | GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；D/H feature PR #59/#60形成`B_DH = 4a7e802...`，01-07N Plan/owner PR #62/#63形成remediation merge `a4b1edb...`，01-07O Plan/owner PR #64/#65形成`7332091...`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / I_MERGED / P_R1_REPLAY_AUTHORIZED` | activation PR #10生效；PR #70–#74形成`B_F`与`B_FE_EXPAND`；I由PR #80/#83 reviewed merge，P原始PR #82因跨Packet test-oracle finding不得merge，PR #84形成exact `B_I_E_ORACLE_FIX`并授权同一01-07P Packet的r1 acceptance replay；39分母不变 |
+| GSD | `ACTIVE / EFFECTIVE / I_P_REVIEWED_MERGED / B_IP_FORMED` | activation PR #10生效；PR #70–#74形成`B_F`与`B_FE_EXPAND`；I由PR #80/#83 reviewed merge，P经PR #84–#87完成同一Packet的oracle remediation、r1 Plan、acceptance replay与双review，形成exact `B_IP = bbe14fa...`；39分母不变 |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I REVIEWED_MERGED / P_R1_REPLAY_AUTHORIZED` | 既有Runtime/Infra/Eval与C/G/D/H/N/O/F/E evidence不变；I feature PR #83 merge `b14a15d...`；P原始head `14c1abd...`只保留RED/GREEN与失败证据，oracle-fix PR #84 merge `0fb4d0b...`后由同一Packet从replacement branch重放，尚未形成`B_IP` |
+| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P REVIEWED_MERGED / B_IP_FORMED` | 既有Runtime/Infra/Eval与C/G/D/H/N/O/F/E evidence不变；I feature PR #83 merge `b14a15d...`；P原始head/PR #82只保留失败证据，replacement PR #87 exact feature/latest-overlay双PASS后merge `bbe14fa...`并形成`B_IP` |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/N/O、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为23/39；Phase目录中正式Plan文件总数为26，现有Summary为22。01-07E oracle-fix是quality-gate remediation，不计为新Plan或feature denominator。Plan签发、execution-map落盘或状态索引都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/N/O/P、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为24/39；Phase目录中正式Plan文件总数为26，现有Summary仍为22，01-07I/P Summary待下一个dedicated planning-status PR创建。01-07E oracle-fix是quality-gate remediation，不计为新Plan或feature denominator。Plan签发、execution-map落盘或状态索引都不等于后续Task Packet实现完成。
 
-Cross-file impact scan确认下列consumer仍停留在pre-I/P或`I_P_READY`快照：`.planning/PROJECT.md`、`.planning/REQUIREMENTS.md`、`.planning/ROADMAP.md`、`.planning/STATE.md`、`.planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md`、`PROJECT_DIRECTION.md`与`README.md`；01-07I/P Summary也尚未创建。当前single-writer allowlist只允许本canonical execution owner，故不得在本PR混写这些文件。风险是只读派生consumer可能暂时显示旧next-route；处理顺序固定为先完成P-r1并形成exact `B_IP`，随后由dedicated planning-status、Project Direction与README single-writer PR依次对齐并新增I/P evidence index。该延迟不授权从旧`B_FE_EXPAND`再次启动P，也不推进Case/Requirement/Phase lifecycle。
+Cross-file impact scan确认下列consumer仍停留在pre-I/P或`I_P_READY`快照：`.planning/PROJECT.md`、`.planning/REQUIREMENTS.md`、`.planning/ROADMAP.md`、`.planning/STATE.md`、`.planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md`、`PROJECT_DIRECTION.md`与`README.md`；01-07I/P Summary也尚未创建。当前single-writer allowlist只允许本canonical execution owner，故不得在本PR混写这些文件。风险是只读派生consumer暂时仍显示旧next-route；处理顺序固定为从reviewed `B_IP`依次执行dedicated planning-status、Project Direction与README single-writer PR，再由本owner完成最终closure索引。该延迟不改变exact `B_IP`，也不推进Case/Requirement/Phase lifecycle。
 
-下一步是从exact `B_I_E_ORACLE_FIX = 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`签发同一01-07P Packet的r1 Plan correction与三文件acceptance replay；不得merge原PR #82，也不得新增第40个Packet。P-r1 exact-head与latest-overlay独立PASS并串行merge后才形成`B_IP`；在此之前01-07K/01-07L继续blocked。现有证据不支持“切片可运行”“active routing已切换”或“Case已通过”结论。
+下一步先完成上述status alignment；随后可从exact `B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc`分别签发01-07K与01-07L。两者仍须独立Plan、互斥Worktree、exact-head/latest-overlay审查与串行merge，不能把dependency-expand barrier解释为strict reader、Provider/Runtime consumer、active routing、Case通过或切片可运行。
