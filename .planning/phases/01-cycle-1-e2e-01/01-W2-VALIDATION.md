@@ -302,7 +302,7 @@ graphify update .
 - I Plan / feature PR #80/#83从exact `B_FE_EXPAND`完成Application exact-Run closure、Port、bounded signal与additive Provider v2 declaration；feature与latest overlay最终357 focused、1759 full及independent `0/0/0/0`通过，reviewed merge为`b14a15d60b17eda8d8b5aed892c5d00f16005310`。
 - P原PR #82只保留blocked lineage并关闭未合并；dedicated oracle fix PR #84形成`B_I_E_ORACLE_FIX = 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`，execution-owner remediation PR #85与r1 Plan PR #86授权同一Packet acceptance replay。P-r1 feature PR #87经首轮`0/0/1/0` finding closure后，feature/overlay最终48 focused、119 database、1767 full及independent `0/0/0/0`通过。
 - P-r1 reviewed serial merge形成`B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc` / tree `65415ff5846892f257e95d8b8bd34f50752980a2`；exact post-merge Alembic head为`20260728_0003`，full为`1767 passed, 1 deselected, 12 warnings`，namespace contamination为0。
-- `B_IP`已经解锁K/L，但仍明确不切换active registry、strict PostgreSQL evidence reader、Runtime、Provider/Eval consumers、v1 contract或readiness。本派生状态对齐不创建第二道barrier。
+- `B_IP`已满足K/L的implementation input，但K/L签发仍等待四步status alignment closure；active registry、strict PostgreSQL evidence reader、Runtime、Provider/Eval consumers、v1 contract与readiness均未切换。本派生状态对齐不创建第二道implementation barrier。
 - 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## Manual-only Verification
@@ -356,4 +356,4 @@ graphify update .
 - [x] 当前scope的Wave 0已完成，`wave_0_complete=true`；这不推进Case lifecycle。
 - [x] F/E后七文件派生状态Packet已通过exact-head review并由PR #75 merge `b1deb0a...`；Project Direction PR #76、README PR #77与execution owner PR #78随后完成各自single-writer evidence-only对齐。四者均不是I/P前置barrier，也不创建第二道barrier。
 
-**Approval:** `W2_THROUGH_01-07I_01-07P_COMPLETE / B_IP_CONFIRMED / WAVE_0_COMPLETE`。I/P均已完成Plan、真实RED→GREEN、review fixes、focused/database/full、exact-head review、latest-integration replay与串行merge；共同barrier为`bbe14fadc0cd2e14ad35e19177b079fcab685dfc`。当前正式签发26个Plan、24份Summary，目标Packet完成证据为`24/39`，numbered Plan evidence仍为7/8，canonical lifecycle与Requirements checkbox仍为0/8。K/L由exact `B_IP`直接解锁；本次派生状态对齐不创建第二道barrier，也不批准active routing、Case、credentialed Baseline、release或lifecycle结论。用户已暂停Graphify，后续不运行、不引用，也不把freshness作为门禁。
+**Approval:** `W2_THROUGH_01-07I_01-07P_COMPLETE / B_IP_CONFIRMED / WAVE_0_COMPLETE / STATUS_ALIGNMENT_IN_PROGRESS`。I/P均已完成Plan、真实RED→GREEN、review fixes、focused/database/full、exact-head review、latest-integration replay与串行merge；共同barrier为`bbe14fadc0cd2e14ad35e19177b079fcab685dfc`。当前正式签发26个Plan、24份Summary，目标Packet完成证据为`24/39`，numbered Plan evidence仍为7/8，canonical lifecycle与Requirements checkbox仍为0/8。Exact `B_IP`已满足K/L的implementation input，但须先依次完成本dedicated planning-status、Project Direction、README与execution-owner final closure，之后才可签发K/L；这些evidence-only PR不创建第二道implementation barrier，也不批准active routing、Case、credentialed Baseline、release或lifecycle结论。用户已暂停Graphify，后续不运行、不引用，也不把freshness作为门禁。

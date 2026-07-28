@@ -32,11 +32,11 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 
 ### Phase 1: Cycle 1｜第一最薄 E2E-01
 
-**Status**: `ACTIVE / 01-07I_01-07P_COMPLETE / B_IP_CONFIRMED`
+**Status**: `ACTIVE / 01-07I_01-07P_COMPLETE / B_IP_CONFIRMED / STATUS_ALIGNMENT_IN_PROGRESS`
 
 **Goal**: 为 canonical `E2E01-01/04` 取得可复现的源码、HTTP、Trace、结构化 Eval 与安全门禁证据。
 
-**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation与01-01–01-07B既有reviewed merge、01-07C/01-07G共同barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、D/H共同barrier `B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131`、01-07N/O cutover与execution-map reviewed merge、`B_O_STATUS = 73696a138eb13fc4a90a0f760b13865f53d08704`、01-07F `B_F = 034cf57228c4a9da4764b0c7322dc5d34652a09c`、01-07E `B_FE_EXPAND = 294ada386ec160ec2a48fc8883b5a38f1880e4ba`，以及01-07I / 01-07P reviewed serial merge形成的 `B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc`（均已满足）。当前01-07K / 01-07L可从exact `B_IP`启动；派生状态对齐不增加第二道barrier。
+**Depends on**: W1 骨架、W2.0 persistence contract freeze、activation与01-01–01-07B既有reviewed merge、01-07C/01-07G共同barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、D/H共同barrier `B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131`、01-07N/O cutover与execution-map reviewed merge、`B_O_STATUS = 73696a138eb13fc4a90a0f760b13865f53d08704`、01-07F `B_F = 034cf57228c4a9da4764b0c7322dc5d34652a09c`、01-07E `B_FE_EXPAND = 294ada386ec160ec2a48fc8883b5a38f1880e4ba`，以及01-07I / 01-07P reviewed serial merge形成的 `B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc`（均已满足）。K/L的implementation input已满足，但须等待planning-status → Project Direction → README → execution-owner final closure依次完成；派生状态对齐不增加第二道implementation barrier。
 
 **Requirements**: [E2E01-01, E2E01-04]
 
@@ -47,7 +47,7 @@ P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 当前磁盘正式签发26个Plan（7个numbered + 17个inserted dependency Packets + 2个replacement `01-05R/01-06R`），新增I/P Summary后共有24份Summary。01-07I [PR #83](https://github.com/weijie567/mini-agent/pull/83)完成 Application dependency expand；01-07P在原[#82](https://github.com/weijie567/mini-agent/pull/82)保留blocked lineage、[#84](https://github.com/weijie567/mini-agent/pull/84) / [#85](https://github.com/weijie567/mini-agent/pull/85)关闭跨Packet oracle缺陷、r1 Plan / feature [#86](https://github.com/weijie567/mini-agent/pull/86) / [#87](https://github.com/weijie567/mini-agent/pull/87)重新review后，最终形成`B_IP = bbe14fa...`、tree `65415ff...`。目标Packet完成口径为`24/39`，numbered Plan evidence仍为`7/8`，canonical lifecycle与Requirements checkbox仍为`0/8`。后续严格按 `{I,P} → {K,L} → M → Q → J → {S,U} → X → T → W → V`执行；K/L已由exact `B_IP`解锁。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。若owner裁决要求激活默认inactive的01-07R或新增其他依赖，必须先修改唯一execution map与分母，不得只改本Roadmap。
+**Plans**: 当前磁盘正式签发26个Plan（7个numbered + 17个inserted dependency Packets + 2个replacement `01-05R/01-06R`），新增I/P Summary后共有24份Summary。01-07I [PR #83](https://github.com/weijie567/mini-agent/pull/83)完成 Application dependency expand；01-07P在原[#82](https://github.com/weijie567/mini-agent/pull/82)保留blocked lineage、[#84](https://github.com/weijie567/mini-agent/pull/84) / [#85](https://github.com/weijie567/mini-agent/pull/85)关闭跨Packet oracle缺陷、r1 Plan / feature [#86](https://github.com/weijie567/mini-agent/pull/86) / [#87](https://github.com/weijie567/mini-agent/pull/87)重新review后，最终形成`B_IP = bbe14fa...`、tree `65415ff...`。目标Packet完成口径为`24/39`，numbered Plan evidence仍为`7/8`，canonical lifecycle与Requirements checkbox仍为`0/8`。K/L的exact implementation input已满足，但签发须等待四步status alignment closure；完成后严格按 `{K,L} → M → Q → J → {S,U} → X → T → W → V`执行。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。若owner裁决要求激活默认inactive的01-07R或新增其他依赖，必须先修改唯一execution map与分母，不得只改本Roadmap。
 
 Plans:
 
@@ -77,7 +77,7 @@ Plans:
 - [ ] 01-07O: execution-map alignment（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；Plan / owner [PR #64](https://github.com/weijie567/mini-agent/pull/64) / [PR #65](https://github.com/weijie567/mini-agent/pull/65) reviewed merge `7332091...`，PR #66校正派生状态；[Summary](phases/01-cycle-1-e2e-01/01-07O-SUMMARY.md)）
 - [ ] 01-07I: Application exact-Run evidence boundary（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；Plan / feature [PR #80](https://github.com/weijie567/mini-agent/pull/80) / [#83](https://github.com/weijie567/mini-agent/pull/83)；357 focused / 1759 full；[Summary](phases/01-cycle-1-e2e-01/01-07I-SUMMARY.md)；checkbox因lifecycle仍为0/8而保持未勾选）
 - [ ] 01-07P: migration-chain physical expand（`TASK_PACKET_COMPLETE / EVIDENCE_INDEXED`；原PR #82 closed/unmerged，remediation PR #84/#85，r1 Plan / feature [PR #86](https://github.com/weijie567/mini-agent/pull/86) / [#87](https://github.com/weijie567/mini-agent/pull/87)；48 focused / 119 database / 1767 full；形成`B_IP = bbe14fa...`；[Summary](phases/01-cycle-1-e2e-01/01-07P-SUMMARY.md)；checkbox因lifecycle仍为0/8而保持未勾选）
-- [ ] 01-07K / 01-07L: Infra reader/order producer / Eval mapper+Provider dependency consumers（`READY_FROM_B_IP`；两个互斥writer从exact `bbe14fadc0cd2e14ad35e19177b079fcab685dfc`执行并串行形成`B_DEPENDENCY`）
+- [ ] 01-07K / 01-07L: Infra reader/order producer / Eval mapper+Provider dependency consumers（`BLOCKED_BY_STATUS_ALIGNMENT / READY_FROM_B_IP_AFTER_CLOSURE`；exact implementation input为`bbe14fadc0cd2e14ad35e19177b079fcab685dfc`，四步status alignment closure后两个互斥writer执行并串行形成`B_DEPENDENCY`）
 - [ ] 01-07M: Core source-version contract closure（`BLOCKED_BY_B_DEPENDENCY`；形成`B_DEPENDENCY_M`）
 - [ ] 01-07Q: Application codec active switch（`BLOCKED_BY_B_DEPENDENCY_M`；形成`B_Q`）
 - [ ] 01-07J: Runtime v2 active switch / INPUT_INVALID mapping（`BLOCKED_BY_B_Q`；形成`B_ACTIVE`）
@@ -115,7 +115,7 @@ Plans:
 | 01-07F | RU Core expand | `COMPLETE / EVIDENCE_INDEXED`：PR #70/#71；`B_F = 034cf57...`；41-definition protected-v1 gate与1575 full通过 |
 | 01-07E | persistence codec expand | `COMPLETE / EVIDENCE_INDEXED`：PR #72/#73/#74；`B_FE_EXPAND = 294ada3...`；60-definition oracle与1671 full通过；active routing未切换 |
 | 01-07I / 01-07P | Application Port / migration-chain dependency expand | `COMPLETE / EVIDENCE_INDEXED`：PR #80–#87；I/P分别完成Application与physical expand；serial merge形成`B_IP = bbe14fa...` / tree `65415ff...`；exact B_IP full为1767 passed |
-| 01-07K / 01-07L | Infra reader/order producer / Eval mapper+Provider consumers | `READY_FROM_B_IP`：从exact `bbe14fadc0cd2e14ad35e19177b079fcab685dfc`以互斥ownership执行并串行形成`B_DEPENDENCY` |
+| 01-07K / 01-07L | Infra reader/order producer / Eval mapper+Provider consumers | `BLOCKED_BY_STATUS_ALIGNMENT / READY_FROM_B_IP_AFTER_CLOSURE`：exact implementation input为`bbe14fadc0cd2e14ad35e19177b079fcab685dfc`；四步status alignment closure后以互斥ownership执行并串行形成`B_DEPENDENCY` |
 | 01-07M → 01-07Q → 01-07J | Core closure / codec active switch / Runtime active switch | 严格按`B_DEPENDENCY → B_DEPENDENCY_M → B_Q → B_ACTIVE`串行，不得从additive barrier直接路由 |
 | 01-07S/U → X → T → W → V | v1 contract closure | 严格按唯一map逐owner删除v1 surface；V必须最后形成`B_RU_V2_CONTRACT` |
 | 01-08 | W3 串行集成 | `B_RU_V2_CONTRACT` reviewed merge后，由Integrator从新的exact SHA完成Composition Root与真实纵向证据 |
@@ -227,7 +227,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
-| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 7/8；目标Packet完成24/39、正式签发26个Plan、24份Summary；01-07I/P complete并形成non-routable B_IP；01-07K/L已解锁，其余严格等待唯一execution map中的前置barrier` | - |
+| 1. 第一最薄 E2E-01 | 0/8 | `Derived lifecycle 0/8；numbered Plan evidence indexed 7/8；目标Packet完成24/39、正式签发26个Plan、24份Summary；01-07I/P complete并形成non-routable B_IP；四步status alignment进行中，closure后方可签发01-07K/L` | - |
 | 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
