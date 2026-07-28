@@ -19,6 +19,7 @@ from mini_agent.application.records import (
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
+    ExactRunEvidenceClosure,
     FinalizeRunCommand,
     FinalizeToolCallCommand,
     InsertOnlyWriteResult,
@@ -44,6 +45,7 @@ from mini_agent.core.presentation import (
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
     RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
@@ -453,3 +455,61 @@ class RestartRecoveryPort(Protocol):
         Tool/Action owner path. Integrity failure raises instead of returning.
         """
         ...
+
+
+@runtime_checkable
+class ModelProviderV2(Protocol):
+    """Bounded Request Understanding v2 and Presentation candidate provider.
+
+    For a correctly framed Request Understanding target function, an Adapter
+    validates the arguments as ``RequestUnderstandingOutputV2``. Rejection of its
+    Pydantic shape, version, source, authority, ``InputBinding``, or trusted or
+    private field is exposed as a fresh
+    ``RequestUnderstandingCandidateInvalidError``.
+
+    Request Understanding transport, HTTP, JSON, framing, zero, multiple, or
+    wrong-name target-call failures remain a fresh ``ProviderProtocolError``.
+    Presentation transport, framing, target-call, and ``PresentationPlan``
+    validation failures also remain a fresh ``ProviderProtocolError``.
+
+    Both bounded errors may be exposed only after discarding the raw diagnostic,
+    with ``__cause__`` and ``__context__`` cleared.
+    """
+
+    async def propose_next_move(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> RequestUnderstandingOutputV2: ...
+
+    async def plan_presentation(
+        self,
+        request: PresentationInput,
+    ) -> PresentationPlan: ...
+
+
+@runtime_checkable
+class ExactRunEvidencePort(Protocol):
+    """Owner-scoped, expectation-free exact-Run logical evidence boundary.
+
+    ``None only`` represents the indistinguishable pre-payload states absent,
+    unauthorized, or ownership-unverified. Once Infrastructure selects the owner
+    root, identity, version, decode, provenance, owner-graph, relation,
+    cardinality, or database closed set failure raises the bounded
+    ``P0PersistenceIntegrityError``.
+
+    Infrastructure must strict-decode and prove the database closed set under one
+    transactionally consistent snapshot or an equivalent exact fence. It cannot
+    return a partial closure, skip-corrupt data, retry through another session, or
+    stitch grader-facing evidence from independent Port calls.
+
+    The returned logical closure does not authorize access, does not write, does
+    not claim recovery, and does not construct Case, expectation, HTTP, or Eval
+    Result projections.
+    """
+
+    async def load_exact_run_evidence_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> ExactRunEvidenceClosure | None: ...
