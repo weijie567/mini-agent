@@ -341,7 +341,8 @@ def revalidate_next_move(
 from datetime import datetime
 from hashlib import sha256
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticSerializationError
 
 from .common import require_utc
 from .request_understanding import (
@@ -352,6 +353,8 @@ from .request_understanding import (
     RequestUnderstandingOutputV2,
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
+    UncertaintyReasonCodeV2,
+    UncertaintyV2,
 )
 from .task_state import (
     AcceptedTaskDeltaV2,
@@ -401,6 +404,35 @@ def _fail_request_understanding_v2(
     raise RequestUnderstandingV2Error(reason_code)
 
 
+def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, BaseModel):
+        return all(
+            hasattr(left, field_name)
+            and hasattr(right, field_name)
+            and _runtime_values_match_exactly_v2(
+                getattr(left, field_name),
+                getattr(right, field_name),
+            )
+            for field_name in type(left).model_fields
+        )
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _runtime_values_match_exactly_v2(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, Mapping):
+        return (
+            tuple(left) == tuple(right)
+            and all(
+                _runtime_values_match_exactly_v2(left[key], right[key])
+                for key in left
+            )
+        )
+    return left == right
+
+
 def _canonical_request_input_v2(
     value: object,
 ) -> RequestUnderstandingInput:
@@ -409,7 +441,10 @@ def _canonical_request_input_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
     request_input = value
-    if "schema_version" not in request_input.model_fields_set:
+    if (
+        "schema_version" not in request_input.model_fields_set
+        or not hasattr(request_input, "schema_version")
+    ):
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
@@ -417,19 +452,100 @@ def _canonical_request_input_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
         )
+    payload: dict[str, Any] | None
     try:
-        rebuilt = RequestUnderstandingInput.model_validate(
-            request_input.model_dump(mode="python", round_trip=True)
+        payload = request_input.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
         )
-    except (TypeError, ValueError, ValidationError):
+    except (TypeError, ValueError, PydanticSerializationError):
+        payload = None
+    if payload is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
-    if rebuilt != request_input:
+    rebuilt: RequestUnderstandingInput | None
+    try:
+        rebuilt = RequestUnderstandingInput.model_validate(payload)
+    except (TypeError, ValueError, ValidationError):
+        rebuilt = None
+    if rebuilt is None:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+        )
+    if not _runtime_values_match_exactly_v2(rebuilt, request_input):
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
     return request_input
+
+
+def _request_output_nested_types_are_exact_v2(
+    output: RequestUnderstandingOutputV2,
+) -> bool:
+    try:
+        contextualization = output.contextualization
+        candidates = output.task_delta_candidates
+        next_move = output.next_move_candidate
+        if (
+            type(output.message_ref) is not UUID
+            or type(contextualization)
+            is not QueryContextualizationCandidateV2
+            or type(contextualization.resolved_reference_candidates)
+            is not tuple
+            or type(contextualization.uncertainties) is not tuple
+            or type(contextualization.source_message_refs) is not tuple
+            or any(
+                type(source_ref) is not UUID
+                for source_ref in contextualization.source_message_refs
+            )
+            or type(candidates) is not tuple
+            or type(next_move) is not NextMove
+            or type(next_move.kind) is not NextMoveKind
+        ):
+            return False
+        for resolved in contextualization.resolved_reference_candidates:
+            if (
+                type(resolved) is not ResolvedReferenceCandidateV2
+                or type(resolved.source_kind) is not ReferenceSourceKindV2
+                or type(resolved.source_ref) is not UUID
+                or type(resolved.source_quote) is not str
+            ):
+                return False
+        for uncertainty in contextualization.uncertainties:
+            if (
+                type(uncertainty) is not UncertaintyV2
+                or type(uncertainty.reason_code)
+                is not UncertaintyReasonCodeV2
+                or type(uncertainty.candidate_values) is not tuple
+                or type(uncertainty.source_message_refs) is not tuple
+                or any(
+                    type(source_ref) is not UUID
+                    for source_ref in uncertainty.source_message_refs
+                )
+            ):
+                return False
+        for candidate in candidates:
+            if (
+                type(candidate) is not TaskDeltaCandidate
+                or type(candidate.candidate_id) is not UUID
+                or type(candidate.operation) is not TaskDeltaOperation
+                or type(candidate.input_candidates) is not tuple
+            ):
+                return False
+            for input_candidate in candidate.input_candidates:
+                if (
+                    type(input_candidate) is not InputCandidate
+                    or type(input_candidate.authority) is not InputAuthority
+                    or type(input_candidate.source_kind) is not InputSourceKind
+                    or type(input_candidate.source_ref) is not UUID
+                    or type(input_candidate.source_quote) is not str
+                ):
+                    return False
+    except (AttributeError, TypeError):
+        return False
+    return True
 
 
 def _canonical_request_output_v2(
@@ -440,13 +556,28 @@ def _canonical_request_output_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
     output = value
+    if not hasattr(output, "schema_version"):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
     if output.schema_version != "e2e01-thin-v2":
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
         )
+    if not _request_output_nested_types_are_exact_v2(output):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    payload: dict[str, Any] | None
     try:
-        payload = output.model_dump(mode="python", round_trip=True)
-    except (TypeError, ValueError):
+        payload = output.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+    except (TypeError, ValueError, PydanticSerializationError):
+        payload = None
+    if payload is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
@@ -454,13 +585,16 @@ def _canonical_request_output_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
         )
+    rebuilt: RequestUnderstandingOutputV2 | None
     try:
         rebuilt = RequestUnderstandingOutputV2.model_validate(payload)
     except (TypeError, ValueError, ValidationError):
+        rebuilt = None
+    if rebuilt is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
-    if rebuilt != output:
+    if not _runtime_values_match_exactly_v2(rebuilt, output):
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
@@ -488,7 +622,7 @@ def _canonical_candidate_validation_v2(
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
-        if rebuilt != value:
+        if not _runtime_values_match_exactly_v2(rebuilt, value):
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
@@ -517,7 +651,7 @@ def _canonical_accepted_task_deltas_v2(
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
-        if rebuilt != value:
+        if not _runtime_values_match_exactly_v2(rebuilt, value):
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
@@ -708,6 +842,37 @@ def _project_task_delta_v2(
         )
 
 
+def _validate_input_visible_source_scope_v2(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2,
+) -> None:
+    current_ref = request_input.message_ref
+    recent_refs = set(request_input.recent_message_refs)
+    visible_refs = {current_ref, *recent_refs}
+    if any(
+        source_ref not in visible_refs
+        for source_ref in output.contextualization.source_message_refs
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    for resolved in output.contextualization.resolved_reference_candidates:
+        if (
+            resolved.source_kind is ReferenceSourceKindV2.CURRENT_MESSAGE
+            and resolved.source_ref != current_ref
+        ) or (
+            resolved.source_kind is ReferenceSourceKindV2.RECENT_MESSAGE
+            and (
+                resolved.source_ref == current_ref
+                or resolved.source_ref not in recent_refs
+            )
+        ):
+            _fail_request_understanding_v2(
+                RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+            )
+
+
 def _validate_durable_closure_v2(
     *,
     output: RequestUnderstandingOutputV2,
@@ -841,6 +1006,10 @@ def build_request_understanding_closure_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
         )
+    _validate_input_visible_source_scope_v2(
+        request_input=canonical_input,
+        output=canonical_output,
+    )
     current_message = _authoritative_message_v2(
         authoritative_messages,
         canonical_input.message_ref,

@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from hashlib import sha256
+import warnings
 from uuid import UUID, uuid4
 
 import pytest
@@ -357,6 +358,7 @@ def _request_input_v2(
     message_ref: UUID,
     message: str,
     run_id: UUID | None = None,
+    recent_message_refs: tuple[UUID, ...] = (),
     explicit_schema_version: bool = True,
 ) -> RequestUnderstandingInput:
     tool_spec = get_order_tool_spec()
@@ -364,6 +366,7 @@ def _request_input_v2(
         "run_id": run_id or uuid4(),
         "message_ref": message_ref,
         "original_query": message,
+        "recent_message_refs": recent_message_refs,
         "provider_visible_tool_specs": (tool_spec,),
         "model_visible_toolset_hash": compute_model_visible_toolset_hash(
             (tool_spec,)
@@ -1006,7 +1009,7 @@ def test_v2_builder_requires_explicit_exact_canonical_input_instance() -> None:
             **canonical.model_dump(),
             "schema_version": "e2e01-thin-v9",
         },
-        _fields_set=set(canonical.model_fields),
+        _fields_set=set(RequestUnderstandingInput.model_fields),
     )
     with pytest.raises(RequestUnderstandingV2Error) as caught:
         _build_v2(
@@ -1111,3 +1114,234 @@ def test_v2_builder_requires_next_move_versions_to_close_without_ref() -> None:
         caught.value.reason_code
         is RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
     )
+
+
+def test_v2_builder_bounds_constructed_objects_with_missing_schema_fields() -> None:
+    message_ref = uuid4()
+    message = "查询订单 O-4242"
+    canonical_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _output_v2(message_ref=message_ref, candidates=())
+    input_values = canonical_input.model_dump()
+    input_values.pop("schema_version")
+    missing_input_schema = RequestUnderstandingInput.model_construct(
+        **input_values,
+        _fields_set=set(RequestUnderstandingInput.model_fields),
+    )
+    missing_output_schema = RequestUnderstandingOutputV2.model_construct(
+        message_ref=output.message_ref,
+        contextualization=output.contextualization,
+        task_delta_candidates=output.task_delta_candidates,
+        next_move_candidate=output.next_move_candidate,
+        _fields_set=set(RequestUnderstandingOutputV2.model_fields),
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=missing_input_schema,
+            output=output,
+            authoritative_messages={message_ref: message},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+    assert (
+        caught.value.reason_code
+        is RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=canonical_input,
+            output=missing_output_schema,
+            authoritative_messages={message_ref: message},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+    assert (
+        caught.value.reason_code
+        is RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+    )
+
+
+def test_v2_builder_rejects_noncanonical_nested_types_without_diagnostics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    message_ref = uuid4()
+    message = "查询订单 O-4242"
+    raw_quote = "RAW-QUOTE-MARKER O-4242"
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    constructed_resolved = ResolvedReferenceCandidateV2.model_construct(
+        name="order_id",
+        candidate_value="O-4242",
+        source_kind="CURRENT_MESSAGE",
+        source_ref=message_ref,
+        source_quote=raw_quote,
+        confidence=0.9,
+    )
+    contextualization = QueryContextualizationCandidateV2(
+        text="查询订单状态",
+        resolved_reference_candidates=(constructed_resolved,),
+        uncertainties=(),
+        source_message_refs=(message_ref,),
+    )
+    output = RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=message_ref,
+        contextualization=contextualization,
+        task_delta_candidates=(),
+        next_move_candidate=NextMove(kind=NextMoveKind.ASK_USER),
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(RequestUnderstandingV2Error) as caught:
+            _build_v2(
+                request_input=request_input,
+                output=output,
+                authoritative_messages={message_ref: message},
+                candidate_validation=(),
+                accepted_task_deltas=(),
+            )
+
+    assert (
+        caught.value.reason_code
+        is RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+    )
+    assert caught.value.__context__ is None
+    assert caught_warnings == []
+    captured = capsys.readouterr()
+    assert raw_quote not in captured.out
+    assert raw_quote not in captured.err
+    assert raw_quote not in str(caught.value)
+    assert raw_quote not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unseen_recent",
+        "current_kind_on_recent_ref",
+        "recent_kind_on_current_ref",
+    ],
+)
+def test_v2_builder_binds_reference_kind_to_actual_input_visible_scope(
+    case: str,
+) -> None:
+    current_ref = uuid4()
+    recent_ref = uuid4()
+    current_message = "请查订单 O-4242"
+    recent_message = "此前提到订单 O-4242"
+    source_ref = recent_ref
+    source_kind = ReferenceSourceKindV2.RECENT_MESSAGE
+    recent_message_refs: tuple[UUID, ...] = ()
+    source_quote = "订单 O-4242"
+    context_refs = (current_ref, recent_ref)
+
+    if case == "current_kind_on_recent_ref":
+        source_kind = ReferenceSourceKindV2.CURRENT_MESSAGE
+        recent_message_refs = (recent_ref,)
+    elif case == "recent_kind_on_current_ref":
+        source_ref = current_ref
+        recent_message_refs = (recent_ref,)
+        context_refs = (current_ref,)
+
+    request_input = _request_input_v2(
+        message_ref=current_ref,
+        message=current_message,
+        recent_message_refs=recent_message_refs,
+    )
+    output = RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=current_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="查询订单状态",
+            resolved_reference_candidates=(
+                ResolvedReferenceCandidateV2(
+                    name="order_id",
+                    candidate_value="O-4242",
+                    source_kind=source_kind,
+                    source_ref=source_ref,
+                    source_quote=source_quote,
+                    confidence=0.9,
+                ),
+            ),
+            uncertainties=(),
+            source_message_refs=context_refs,
+        ),
+        task_delta_candidates=(),
+        next_move_candidate=NextMove(kind=NextMoveKind.ASK_USER),
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={
+                current_ref: current_message,
+                recent_ref: recent_message,
+            },
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+    assert (
+        caught.value.reason_code
+        is RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+
+
+def test_v2_builder_projects_an_authorized_recent_message_reference() -> None:
+    current_ref = uuid4()
+    recent_ref = uuid4()
+    current_message = "请查询刚才提到的订单"
+    recent_message = "此前提到订单 O-4242"
+    source_quote = "订单 O-4242"
+    request_input = _request_input_v2(
+        message_ref=current_ref,
+        message=current_message,
+        recent_message_refs=(recent_ref,),
+    )
+    output = RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=current_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="查询订单 O-4242 的状态",
+            resolved_reference_candidates=(
+                ResolvedReferenceCandidateV2(
+                    name="order_id",
+                    candidate_value="O-4242",
+                    source_kind=ReferenceSourceKindV2.RECENT_MESSAGE,
+                    source_ref=recent_ref,
+                    source_quote=source_quote,
+                    confidence=0.9,
+                ),
+            ),
+            uncertainties=(),
+            source_message_refs=(current_ref, recent_ref),
+        ),
+        task_delta_candidates=(),
+        next_move_candidate=NextMove(kind=NextMoveKind.ASK_USER),
+    )
+
+    closure = _build_v2(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={
+            current_ref: current_message,
+            recent_ref: recent_message,
+        },
+        candidate_validation=(),
+        accepted_task_deltas=(),
+    )
+
+    durable = closure.record.contextualization.resolved_reference_candidates[0]
+    assert durable.source_kind is ReferenceSourceKindV2.RECENT_MESSAGE
+    assert durable.source_ref == recent_ref
+    assert durable.source_span_start == recent_message.index(source_quote)
+    assert durable.source_quote_sha256 == sha256(
+        source_quote.encode("utf-8")
+    ).hexdigest()
