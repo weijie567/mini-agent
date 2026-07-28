@@ -16,6 +16,7 @@ from pydantic_core import TzInfo
 
 from mini_agent.application.ports import EvalResultPort
 from mini_agent.application.records import (
+    AgentRunResult,
     CriticalFailureCode,
     EvalExecutionFailurePhase,
     EvalExecutionFailureRecord,
@@ -26,6 +27,7 @@ from mini_agent.application.records import (
     EvalResultRecord,
     EvalResultStatus,
     EvalVersionManifest,
+    ExactRunEvidenceClosure,
     InsertOnlyWriteResult,
 )
 from mini_agent.core.common import (
@@ -66,6 +68,7 @@ from mini_agent.evaluation.graders import (
     TraceEventCountExpectation,
     derive_grading_outcome,
     e2e01_04_safe_observables_match,
+    _fixed_message,
     grade_evidence,
     ordinary_trace_shape,
 )
@@ -141,6 +144,9 @@ _UNBOUND_EVIDENCE_FIELD_ALLOWLIST = (
     "observation_persistence_envelopes",
     "context_manifests",
     "model_visible_toolset_artifacts",
+    "request_understanding_records_v2",
+    "accepted_task_deltas_v2",
+    "task_state_transitions",
 )
 _SEMANTIC_SCHEMA_IDENTITY_FIELDS = frozenset({"case_id"})
 _SEMANTIC_IDENTITY_ENTITIES = frozenset({"case", "script"})
@@ -377,6 +383,241 @@ def _fresh_command_error() -> EvalHarnessCommandError:
     error.__cause__ = None
     error.__context__ = None
     return error
+
+
+def _exact_run_eval_response_policy(
+    stop_reason: StopReason,
+) -> str | None:
+    if stop_reason is StopReason.GOAL_COMPLETED:
+        return "DETERMINISTIC_ORDER_SUMMARY_V1"
+    if stop_reason is StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE:
+        return "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE"
+    if stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE:
+        return "FIXED_ORDER_SERVICE_UNAVAILABLE"
+    if stop_reason in {
+        StopReason.INPUT_INVALID,
+        StopReason.GATE_REJECTED,
+        StopReason.PROVIDER_PROTOCOL_ERROR,
+        StopReason.PRESENTATION_PLAN_REJECTED,
+        StopReason.RENDERER_INVARIANT_FAILED,
+    }:
+        return "FIXED_SAFE_PROCESSING_ERROR"
+    return None
+
+
+def _exact_run_eval_expected_outcome(
+    stop_reason: StopReason,
+) -> AgentOutcome | None:
+    if stop_reason is StopReason.GOAL_COMPLETED:
+        return AgentOutcome.COMPLETED
+    if stop_reason is StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE:
+        return AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
+    if stop_reason in {
+        StopReason.INPUT_INVALID,
+        StopReason.GATE_REJECTED,
+        StopReason.PROVIDER_PROTOCOL_ERROR,
+        StopReason.ORDER_SERVICE_UNAVAILABLE,
+        StopReason.PRESENTATION_PLAN_REJECTED,
+        StopReason.RENDERER_INVARIANT_FAILED,
+    }:
+        return AgentOutcome.BLOCKED
+    return None
+
+
+def _exact_run_eval_detached_closure(
+    value: object,
+) -> ExactRunEvidenceClosure | None:
+    if (
+        type(value) is not ExactRunEvidenceClosure
+        or not _model_storage_is_closed(
+            value,
+            ExactRunEvidenceClosure,
+        )
+        or any(
+            not _payload_tree_is_closed(
+                getattr(value, field_name),
+                forbidden_identity_values=frozenset(),
+                allow_any_schema_identity_value=True,
+                allow_semantic_json_keys=True,
+            )
+            for field_name in ExactRunEvidenceClosure.model_fields
+        )
+    ):
+        return None
+    try:
+        detached_fields: dict[str, object] = {}
+        for field_name in ExactRunEvidenceClosure.model_fields:
+            field_value = getattr(value, field_name)
+            if field_value is None:
+                detached_fields[field_name] = None
+                continue
+            if type(field_value) in _CANONICAL_PAYLOAD_MODEL_TYPES:
+                detached = _detached_canonical_model(
+                    field_value,
+                    type(field_value),
+                )
+                if detached is None:
+                    return None
+                detached_fields[field_name] = detached
+                continue
+            if type(field_value) is not tuple:
+                return None
+            detached_items: list[BaseModel] = []
+            for item in field_value:
+                if type(item) not in _CANONICAL_PAYLOAD_MODEL_TYPES:
+                    return None
+                detached_item = _detached_canonical_model(
+                    item,
+                    type(item),
+                )
+                if detached_item is None:
+                    return None
+                detached_items.append(detached_item)
+            detached_fields[field_name] = tuple(detached_items)
+        rebuilt = ExactRunEvidenceClosure(
+            **detached_fields,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not ExactRunEvidenceClosure
+        or not _model_storage_is_closed(
+            rebuilt,
+            ExactRunEvidenceClosure,
+        )
+        or any(
+            not _payload_tree_is_closed(
+                getattr(rebuilt, field_name),
+                forbidden_identity_values=frozenset(),
+                allow_any_schema_identity_value=True,
+                allow_semantic_json_keys=True,
+            )
+            for field_name in ExactRunEvidenceClosure.model_fields
+        )
+        or not _same_exact_value_tree(value, rebuilt)
+        or rebuilt != value
+    ):
+        return None
+    return rebuilt
+
+
+def map_exact_run_http_result_to_sut_result(
+    *,
+    execution_ref: UUID,
+    http_status: int,
+    agent_result: AgentRunResult,
+    closure: ExactRunEvidenceClosure,
+) -> EvalCaseSutResult:
+    mapped_result: EvalCaseSutResult | None = None
+    failed = False
+    try:
+        detached_execution_ref = _detached_closed_uuid(execution_ref)
+        detached_agent_result = _detached_canonical_model(
+            agent_result,
+            AgentRunResult,
+        )
+        detached_closure = _exact_run_eval_detached_closure(closure)
+        if (
+            detached_execution_ref is None
+            or detached_execution_ref.version != 4
+            or type(http_status) is not int
+            or http_status != 200
+            or type(detached_agent_result) is not AgentRunResult
+            or type(detached_closure) is not ExactRunEvidenceClosure
+        ):
+            raise ValueError
+        run = detached_closure.run_record
+        stop_reason = run.stop_reason
+        if (
+            run.status is not AgentRunStatus.COMPLETED
+            or stop_reason is None
+            or detached_agent_result.run_id != run.run_id
+            or not detached_closure.trace_events
+            or any(
+                event.run_id != run.run_id or event.case_id is not None
+                for event in detached_closure.trace_events
+            )
+        ):
+            raise ValueError
+        response_policy = _exact_run_eval_response_policy(stop_reason)
+        expected_outcome = _exact_run_eval_expected_outcome(stop_reason)
+        if (
+            response_policy is None
+            or expected_outcome is None
+            or detached_agent_result.outcome is not expected_outcome
+        ):
+            raise ValueError
+        fixed_message = _fixed_message(response_policy)
+        if (
+            fixed_message is not None
+            and detached_agent_result.message != fixed_message
+        ):
+            raise ValueError
+        understanding_records = (
+            (detached_closure.request_understanding_record,)
+            if detached_closure.request_understanding_record is not None
+            else ()
+        )
+        evidence = UnboundEvalEvidence(
+            observed_outcome=detached_agent_result.outcome,
+            trace_ref=run.run_id,
+            trace_events=detached_closure.trace_events,
+            run_record=run,
+            agent_result=detached_agent_result,
+            conversation_records=(detached_closure.conversation_record,),
+            message_records=detached_closure.message_records,
+            request_understanding_output=None,
+            request_understanding_records=(),
+            accepted_task_deltas=(),
+            input_bindings=detached_closure.input_binding_records,
+            task_records=detached_closure.task_records,
+            request_units=detached_closure.request_unit_records,
+            conversation_task_links=(
+                detached_closure.conversation_task_links
+            ),
+            run_task_links=detached_closure.run_task_links,
+            gate_decisions=detached_closure.gate_decisions,
+            tool_calls=detached_closure.tool_calls,
+            tool_attempts=detached_closure.tool_attempts,
+            observations=detached_closure.observation_records,
+            observation_persistence_envelopes=(),
+            context_manifests=detached_closure.context_manifests,
+            model_visible_toolset_artifacts=(
+                detached_closure.model_visible_toolset_artifacts
+            ),
+            request_understanding_records_v2=understanding_records,
+            accepted_task_deltas_v2=(
+                detached_closure.accepted_task_deltas
+            ),
+            task_state_transitions=(
+                detached_closure.task_state_transitions
+            ),
+        )
+        safe_observable = UnboundSafeCaseObservable(
+            http_status=http_status,
+            user_outcome=detached_agent_result.outcome,
+            response_policy=response_policy,
+            ordinary_trace_shape=ordinary_trace_shape(
+                detached_closure.trace_events
+            ),
+            model_calls=len(detached_closure.context_manifests),
+        )
+        candidate_result = EvalCaseSutResult(
+            execution_ref=detached_execution_ref,
+            evidence=evidence,
+            safe_observable=safe_observable,
+        )
+        mapped_result = _canonical_unbound_result(
+            candidate_result,
+            authenticated_identity_values=frozenset(),
+        )
+    except Exception:
+        failed = True
+    agent_result = None  # type: ignore[assignment]
+    closure = None  # type: ignore[assignment]
+    if failed or mapped_result is None:
+        raise _fresh_command_error()
+    return mapped_result
 
 
 _NO_CANONICAL_REQUEST_OUTPUT = frozenset(

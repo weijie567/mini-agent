@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -48,11 +49,14 @@ from mini_agent.core.request_understanding import (
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
+    AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     InputBinding,
     RequestUnderstandingRecord,
+    RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
+    TaskStateTransition,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
@@ -279,6 +283,12 @@ class EvalEvidence(AuditOnlyModel):
     observation_persistence_envelopes: tuple[P0PersistenceEnvelope, ...] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
+    request_understanding_records_v2: tuple[
+        RequestUnderstandingRecordV2,
+        ...,
+    ] = ()
+    accepted_task_deltas_v2: tuple[AcceptedTaskDeltaV2, ...] = ()
+    task_state_transitions: tuple[TaskStateTransition, ...] = ()
 
     @model_validator(mode="after")
     def evidence_sets_are_unambiguous(self) -> "EvalEvidence":
@@ -307,9 +317,73 @@ class EvalEvidence(AuditOnlyModel):
                 item.model_visible_toolset_hash
                 for item in self.model_visible_toolset_artifacts
             ),
+            tuple(
+                item.request_understanding_record_id
+                for item in self.request_understanding_records_v2
+            ),
+            tuple(
+                item.accepted_delta_id
+                for item in self.accepted_task_deltas_v2
+            ),
+            tuple(
+                (
+                    item.task_id,
+                    item.request_unit_id,
+                    item.result_state_version,
+                )
+                for item in self.task_state_transitions
+            ),
         )
         if any(len(values) != len(set(values)) for values in identity_sets):
             raise ValueError("typed Eval evidence identities must be unique")
+        v1_present = (
+            self.request_understanding_output is not None
+            or bool(self.request_understanding_records)
+            or bool(self.accepted_task_deltas)
+        )
+        v2_present = (
+            bool(self.request_understanding_records_v2)
+            or bool(self.accepted_task_deltas_v2)
+            or bool(self.task_state_transitions)
+        )
+        if v1_present and v2_present:
+            raise ValueError(
+                "v1 and v2 Request Understanding evidence cannot mix"
+            )
+        if len(self.request_understanding_records_v2) > 1:
+            raise ValueError(
+                "v2 Eval evidence allows at most one Request Understanding record"
+            )
+        if not self.request_understanding_records_v2:
+            if self.accepted_task_deltas_v2 or self.task_state_transitions:
+                raise ValueError(
+                    "v2 children require a Request Understanding record"
+                )
+        else:
+            understanding = self.request_understanding_records_v2[0]
+            if set(understanding.accepted_delta_refs) != {
+                item.accepted_delta_id
+                for item in self.accepted_task_deltas_v2
+            }:
+                raise ValueError(
+                    "v2 Request Understanding accepted children must close"
+                )
+            candidate_ids = {
+                item.candidate_id
+                for item in understanding.task_delta_candidates
+            }
+            accepted_candidate_ids = {
+                item.candidate_ref
+                for item in self.accepted_task_deltas_v2
+            }
+            if not accepted_candidate_ids.issubset(candidate_ids):
+                raise ValueError(
+                    "v2 accepted children must reference durable candidates"
+                )
+        if v2_present and self.observation_persistence_envelopes:
+            raise ValueError(
+                "v2 logical evidence cannot fabricate persistence envelopes"
+            )
         return self
 
 
@@ -535,6 +609,151 @@ class IdentityBoundaryGrader:
         return _passed(self.name)
 
 
+def _v2_evidence_is_active(evidence: EvalEvidence) -> bool:
+    return bool(
+        evidence.request_understanding_records_v2
+        or evidence.accepted_task_deltas_v2
+        or evidence.task_state_transitions
+    )
+
+
+def _v2_source_span_is_valid(
+    *,
+    message: MessageRecord,
+    source_ref: UUID,
+    source_span_start: int,
+    source_span_end_exclusive: int,
+    source_quote_sha256: str,
+    candidate_value: str,
+) -> bool:
+    if (
+        source_ref != message.message_id
+        or source_span_start < 0
+        or source_span_end_exclusive <= source_span_start
+        or source_span_end_exclusive > len(message.content)
+    ):
+        return False
+    source_quote = message.content[
+        source_span_start:source_span_end_exclusive
+    ]
+    return (
+        candidate_value in source_quote
+        and hashlib.sha256(source_quote.encode("utf-8")).hexdigest()
+        == source_quote_sha256
+    )
+
+
+def _v2_source_provenance_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    if not _v2_evidence_is_active(evidence):
+        return None
+    if (
+        len(evidence.request_understanding_records_v2) != 1
+        or len(evidence.message_records) != 1
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+    understanding = evidence.request_understanding_records_v2[0]
+    message = evidence.message_records[0]
+    if (
+        understanding.message_ref != message.message_id
+        or set(understanding.contextualization.source_message_refs)
+        != {message.message_id}
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    source_candidates = (
+        *understanding.contextualization.resolved_reference_candidates,
+        *(
+            candidate_input
+            for candidate in understanding.task_delta_candidates
+            for candidate_input in candidate.input_candidates
+        ),
+    )
+    if any(
+        not _v2_source_span_is_valid(
+            message=message,
+            source_ref=item.source_ref,
+            source_span_start=item.source_span_start,
+            source_span_end_exclusive=item.source_span_end_exclusive,
+            source_quote_sha256=item.source_quote_sha256,
+            candidate_value=item.candidate_value,
+        )
+        for item in source_candidates
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _v2_task_transition_graph_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    if not _v2_evidence_is_active(evidence):
+        return None
+    if not evidence.task_records:
+        return (
+            None
+            if not evidence.task_state_transitions
+            and not evidence.request_units
+            else EvalGraderReasonCode.ASSERTION_FAILED
+        )
+    task_by_id = {task.task_id: task for task in evidence.task_records}
+    unit_by_task: dict[UUID, RequestUnitRecord] = {}
+    for unit in evidence.request_units:
+        if unit.task_id in unit_by_task or unit.task_id not in task_by_id:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        unit_by_task[unit.task_id] = unit
+    if set(unit_by_task) != set(task_by_id):
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    transitions_by_task: dict[UUID, list[TaskStateTransition]] = {
+        task_id: [] for task_id in task_by_id
+    }
+    for transition in evidence.task_state_transitions:
+        if transition.task_id not in transitions_by_task:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        transitions_by_task[transition.task_id].append(transition)
+    for task_id, task in task_by_id.items():
+        unit = unit_by_task[task_id]
+        transitions = transitions_by_task[task_id]
+        if len(transitions) < task.state_version - 1:
+            return EvalGraderReasonCode.MISSING_RECORD
+        if len(transitions) > task.state_version - 1:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if (
+            unit.status is not task.status
+            or unit.state_version != task.state_version
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if not transitions:
+            if task.status is not TaskStatus.ACTIVE:
+                return EvalGraderReasonCode.ASSERTION_FAILED
+            continue
+        if (
+            transitions[0].from_status is not TaskStatus.ACTIVE
+            or transitions[0].changed_at < task.created_at
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        for expected_version, transition in enumerate(transitions, start=2):
+            if (
+                transition.request_unit_id != unit.request_unit_id
+                or transition.base_state_version != expected_version - 1
+                or transition.result_state_version != expected_version
+            ):
+                return EvalGraderReasonCode.ASSERTION_FAILED
+        if any(
+            current.to_status is not following.from_status
+            or current.changed_at > following.changed_at
+            for current, following in zip(transitions, transitions[1:])
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        if (
+            transitions[-1].to_status is not task.status
+            or transitions[-1].changed_at != task.updated_at
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 class RequestUnderstandingGrader:
     name = "RequestUnderstandingGrader"
 
@@ -551,8 +770,76 @@ class RequestUnderstandingGrader:
             return (
                 _passed(self.name)
                 if output is None
+                and not evidence.request_understanding_records
+                and not evidence.accepted_task_deltas
+                and not evidence.request_understanding_records_v2
+                and not evidence.accepted_task_deltas_v2
                 else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
             )
+        if _v2_evidence_is_active(evidence):
+            if not evidence.request_understanding_records_v2:
+                return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
+            if len(evidence.request_understanding_records_v2) != 1:
+                return _failed(
+                    self.name,
+                    EvalGraderReasonCode.ASSERTION_FAILED,
+                )
+            understanding = evidence.request_understanding_records_v2[0]
+            if len(understanding.task_delta_candidates) != 1:
+                return _failed(
+                    self.name,
+                    EvalGraderReasonCode.ASSERTION_FAILED,
+                )
+            delta = understanding.task_delta_candidates[0]
+            if len(delta.input_candidates) != 1:
+                return _failed(
+                    self.name,
+                    EvalGraderReasonCode.ASSERTION_FAILED,
+                )
+            candidate = delta.input_candidates[0]
+            accepted = tuple(
+                decision
+                for decision in understanding.candidate_validation
+                if decision.decision is CandidateValidationDecision.ACCEPT
+            )
+            gate_names = {
+                gate.requested_provider_tool_name
+                for gate in evidence.gate_decisions
+            }
+            binding_values = {
+                binding.normalized_value for binding in evidence.input_bindings
+            }
+            if (
+                output is not None
+                or candidate.candidate_value
+                != expectations.expected_binding_order_id
+                or candidate.authority is not InputAuthority.USER_CLAIM
+                or candidate.source_ref != understanding.message_ref
+                or len(accepted) != 1
+                or accepted[0].candidate_ref != delta.candidate_id
+                or understanding.proposed_base_task_state_version is not None
+                or understanding.validated_task_state_version
+                != expectations.expected_validated_task_state_version
+                or understanding.next_move_candidate_ref is None
+                or binding_values
+                != {expectations.expected_next_move_order_id}
+                or (
+                    expectations.expected_requested_tool_name is not None
+                    and gate_names
+                    != {expectations.expected_requested_tool_name}
+                )
+            ):
+                return _failed(
+                    self.name,
+                    EvalGraderReasonCode.ASSERTION_FAILED,
+                )
+            graph_reason = _request_understanding_graph_reason(
+                evidence,
+                expectations,
+            )
+            if graph_reason is not None:
+                return _failed(self.name, graph_reason)
+            return _passed(self.name)
         if output is None:
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         if len(output.task_delta_candidates) != 1:
@@ -598,16 +885,28 @@ class InputBindingGrader:
                 else _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
             )
         output = evidence.request_understanding_output
-        if not evidence.input_bindings or output is None:
+        understanding_v2 = (
+            evidence.request_understanding_records_v2[0]
+            if len(evidence.request_understanding_records_v2) == 1
+            else None
+        )
+        if not evidence.input_bindings or (
+            output is None and understanding_v2 is None
+        ):
             return _failed(self.name, EvalGraderReasonCode.MISSING_RECORD)
         if len(evidence.input_bindings) != 1:
             return _failed(self.name, EvalGraderReasonCode.ASSERTION_FAILED)
         binding = evidence.input_bindings[0]
         assert isinstance(binding, InputBinding)
+        message_ref = (
+            understanding_v2.message_ref
+            if understanding_v2 is not None
+            else output.message_ref
+        )
         if (
             binding.normalized_value != expectations.expected_binding_order_id
             or binding.authority is not InputAuthority.USER_CLAIM
-            or binding.source_refs != (output.message_ref,)
+            or binding.source_refs != (message_ref,)
             or binding.confirmed_by_user is not True
             or any(
                 binding.binding_id not in unit.input_binding_refs
@@ -699,6 +998,11 @@ def _conversation_graph_reason(
 
     message_ref = message.message_id
     output = evidence.request_understanding_output
+    understanding_v2 = (
+        evidence.request_understanding_records_v2[0]
+        if len(evidence.request_understanding_records_v2) == 1
+        else None
+    )
     if output is not None and output.message_ref != message_ref:
         return EvalGraderReasonCode.ASSERTION_FAILED
     if output is not None and any(
@@ -709,6 +1013,12 @@ def _conversation_graph_reason(
         for input_candidate in delta.input_candidates
     ):
         return EvalGraderReasonCode.ASSERTION_FAILED
+    if understanding_v2 is not None:
+        if understanding_v2.message_ref != message_ref:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        provenance_reason = _v2_source_provenance_reason(evidence)
+        if provenance_reason is not None:
+            return provenance_reason
     if any(
         binding.source_refs != (message_ref,) for binding in evidence.input_bindings
     ):
@@ -718,10 +1028,131 @@ def _conversation_graph_reason(
     return None
 
 
+def _v2_request_understanding_graph_reason(
+    evidence: EvalEvidence,
+    expectations: EvalCaseExpectations,
+) -> EvalGraderReasonCode | None:
+    expected_count = 1 if expectations.expected_task_status is not None else 0
+    for records in (
+        evidence.request_understanding_records_v2,
+        evidence.accepted_task_deltas_v2,
+        evidence.conversation_task_links,
+        evidence.run_task_links,
+    ):
+        count_reason = _closed_record_count_reason(
+            len(records),
+            expected_count,
+        )
+        if count_reason is not None:
+            return count_reason
+    if expected_count == 0:
+        return None
+    if (
+        evidence.run_record is None
+        or len(evidence.conversation_records) != 1
+        or len(evidence.message_records) != 1
+        or len(evidence.input_bindings) != 1
+        or len(evidence.task_records) != 1
+        or len(evidence.request_units) != 1
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+
+    conversation = evidence.conversation_records[0]
+    message = evidence.message_records[0]
+    understanding = evidence.request_understanding_records_v2[0]
+    accepted_delta = evidence.accepted_task_deltas_v2[0]
+    binding = evidence.input_bindings[0]
+    task = evidence.task_records[0]
+    request_unit = evidence.request_units[0]
+    conversation_link = evidence.conversation_task_links[0]
+    run_link = evidence.run_task_links[0]
+    if (
+        len(understanding.task_delta_candidates) != 1
+        or len(understanding.task_delta_candidates[0].input_candidates) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    proposed_delta = understanding.task_delta_candidates[0]
+    input_candidate = proposed_delta.input_candidates[0]
+    accepted_candidates = tuple(
+        validation
+        for validation in understanding.candidate_validation
+        if validation.decision is CandidateValidationDecision.ACCEPT
+    )
+    provenance_reason = _v2_source_provenance_reason(evidence)
+    if provenance_reason is not None:
+        return provenance_reason
+    transition_reason = _v2_task_transition_graph_reason(evidence)
+    if transition_reason is not None:
+        return transition_reason
+    if (
+        understanding.schema_version
+        != "request_understanding_record.p0.v2"
+        or understanding.model_input_schema_version != "e2e01-thin-v1"
+        or understanding.model_output_schema_version != "e2e01-thin-v2"
+        or understanding.run_id != evidence.run_record.run_id
+        or understanding.message_ref != message.message_id
+        or understanding.proposed_base_task_state_version is not None
+        or understanding.validated_task_state_version
+        != expectations.expected_validated_task_state_version
+        or understanding.next_move_candidate_ref is None
+        or len(understanding.candidate_validation) != 1
+        or len(accepted_candidates) != 1
+        or accepted_candidates[0].candidate_ref != proposed_delta.candidate_id
+        or understanding.accepted_delta_refs
+        != (accepted_delta.accepted_delta_id,)
+        or accepted_delta.candidate_ref != proposed_delta.candidate_id
+        or accepted_delta.message_ref != understanding.message_ref
+        or accepted_delta.operation is not proposed_delta.operation
+        or accepted_delta.goal_text != proposed_delta.goal_patch
+        or accepted_delta.input_binding_refs != (binding.binding_id,)
+        or accepted_delta.accepted_at != understanding.created_at
+        or accepted_delta.task_id != task.task_id
+        or accepted_delta.base_task_state_version is not None
+        or accepted_delta.result_task_state_version != 1
+        or input_candidate.source_ref != message.message_id
+        or binding.normalized_value != input_candidate.candidate_value
+        or binding.source_refs != (message.message_id,)
+        or request_unit.task_id != task.task_id
+        or request_unit.goal_text != accepted_delta.goal_text
+        or request_unit.goal_source_refs != (message.message_id,)
+        or request_unit.input_binding_refs != accepted_delta.input_binding_refs
+        or conversation_link.schema_version
+        != "conversation_task_link_record.p0.v1"
+        or conversation_link.conversation_id != conversation.conversation_id
+        or conversation_link.task_id != task.task_id
+        or type(conversation_link.link_reason) is not str
+        or not conversation_link.link_reason
+        or conversation_link.ended_at is not None
+        or run_link.schema_version != "run_task_link_record.p0.v1"
+        or run_link.run_id != evidence.run_record.run_id
+        or run_link.task_id != task.task_id
+        or run_link.base_task_state_version is not None
+        or run_link.result_task_state_version != task.state_version
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    selected_observation_ids = set(request_unit.observation_refs)
+    selected_observations = tuple(
+        observation
+        for observation in evidence.observations
+        if observation.observation_id in selected_observation_ids
+    )
+    if selected_observations and any(
+        observation.source_resource_ref != input_candidate.candidate_value
+        for observation in selected_observations
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 def _request_understanding_graph_reason(
     evidence: EvalEvidence,
     expectations: EvalCaseExpectations,
 ) -> EvalGraderReasonCode | None:
+    if _v2_evidence_is_active(evidence):
+        return _v2_request_understanding_graph_reason(
+            evidence,
+            expectations,
+        )
     expected_count = 1 if expectations.expected_task_status is not None else 0
     for records in (
         evidence.request_understanding_records,
@@ -855,12 +1286,90 @@ def _p0_reference(
     )
 
 
+def _v2_logical_observation_graph_reason(
+    evidence: EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    if evidence.observation_persistence_envelopes:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    observation_by_id = {
+        observation.observation_id: observation
+        for observation in evidence.observations
+    }
+    unit_refs = tuple(
+        observation_ref
+        for unit in evidence.request_units
+        for observation_ref in unit.observation_refs
+    )
+    manifest_refs = tuple(
+        versioned_ref
+        for manifest in evidence.context_manifests
+        for versioned_ref in manifest.observation_refs_and_versions
+    )
+    trace_events = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.OBSERVATION_RECORDED
+    )
+    if not observation_by_id:
+        if unit_refs or manifest_refs or trace_events:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        return None
+    if (
+        len(evidence.observations) != 1
+        or len(evidence.task_records) != 1
+        or len(evidence.request_units) != 1
+        or len(evidence.tool_calls) != 1
+        or len(evidence.input_bindings) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    observation = evidence.observations[0]
+    task = evidence.task_records[0]
+    unit = evidence.request_units[0]
+    call = evidence.tool_calls[0]
+    binding = evidence.input_bindings[0]
+    if (
+        unit.task_id != task.task_id
+        or unit.observation_refs != (observation.observation_id,)
+        or call.task_id != task.task_id
+        or call.request_unit_id != unit.request_unit_id
+        or call.status is not ToolCallStatus.SUCCEEDED
+        or call.effect is not ToolEffect.READ
+        or call.canonical_tool_name != observation.source_tool
+        or observation.source_resource_ref != binding.normalized_value
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if (
+        not manifest_refs
+        or any(
+            item.record_ref not in observation_by_id
+            or item.version
+            != observation_by_id[item.record_ref].source_version
+            for item in manifest_refs
+        )
+        or {item.record_ref for item in manifest_refs}
+        != set(observation_by_id)
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    matching_trace = tuple(
+        event
+        for event in trace_events
+        if event.observation_ref == observation.observation_id
+    )
+    if (
+        len(matching_trace) != 1
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
 def _observation_persistence_graph_reason(
     evidence: EvalEvidence,
 ) -> EvalGraderReasonCode | None:
     canonicalization_reason = _observation_canonicalization_reason(evidence)
     if canonicalization_reason is not None:
         return canonicalization_reason
+    if _v2_evidence_is_active(evidence):
+        return _v2_logical_observation_graph_reason(evidence)
     count_reason = _closed_record_count_reason(
         len(evidence.observation_persistence_envelopes),
         len(evidence.observations),
@@ -1202,7 +1711,10 @@ def _tool_graph_is_closed(
         or len(evidence.task_records) != 1
         or len(evidence.request_units) != 1
         or evidence.run_record is None
-        or evidence.request_understanding_output is None
+        or (
+            evidence.request_understanding_output is None
+            and len(evidence.request_understanding_records_v2) != 1
+        )
     ):
         return False
 
@@ -1215,6 +1727,11 @@ def _tool_graph_is_closed(
         for manifest in evidence.context_manifests
     }
     manifest = manifests.get(gate.context_manifest_id)
+    message_ref = (
+        evidence.request_understanding_records_v2[0].message_ref
+        if evidence.request_understanding_records_v2
+        else evidence.request_understanding_output.message_ref
+    )
     expected_version = expectations.expected_validated_task_state_version
     expected_resolved_name = (
         None
@@ -1226,7 +1743,7 @@ def _tool_graph_is_closed(
         or manifest.run_id != evidence.run_record.run_id
         or manifest.model_call_id != gate.model_call_id
         or manifest.selected_message_refs
-        != (evidence.request_understanding_output.message_ref,)
+        != (message_ref,)
         or manifest.task_state_ref_and_version is not None
         or manifest.observation_refs_and_versions
         or manifest.model_visible_toolset_hash
@@ -1299,7 +1816,10 @@ class ToolCallGrader:
             return _passed(self.name)
         if (
             evidence.run_record is None
-            or evidence.request_understanding_output is None
+            or (
+                evidence.request_understanding_output is None
+                and not evidence.request_understanding_records_v2
+            )
             or not evidence.input_bindings
             or not evidence.task_records
             or not evidence.request_units
@@ -1867,6 +2387,15 @@ class PersistenceGrader:
         )
         if understanding_reason is not None:
             return _failed(self.name, understanding_reason)
+        if _v2_evidence_is_active(evidence):
+            transition_reason = _v2_task_transition_graph_reason(evidence)
+            if transition_reason is not None:
+                return _failed(self.name, transition_reason)
+            if evidence.observation_persistence_envelopes:
+                return _failed(
+                    self.name,
+                    EvalGraderReasonCode.ASSERTION_FAILED,
+                )
         if expectations.expected_task_status is not None and (
             not evidence.task_records
             or not evidence.request_units
@@ -2019,6 +2548,9 @@ _FIXED_MESSAGES = MappingProxyType(
     {
         "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE": (
             "未找到可访问的订单，请核对订单号后重试。"
+        ),
+        "FIXED_ORDER_SERVICE_UNAVAILABLE": (
+            "订单服务暂时不可用，请稍后重试。"
         ),
         "FIXED_SAFE_PROCESSING_ERROR": ("当前无法安全处理该请求，请稍后重试。"),
     }
@@ -2317,8 +2849,13 @@ def _trace_references_match_typed_records(
         return False
     events = evidence.trace_events
     message_refs = {item.message_id for item in evidence.message_records}
+    accepted_task_deltas = (
+        evidence.accepted_task_deltas_v2
+        if _v2_evidence_is_active(evidence)
+        else evidence.accepted_task_deltas
+    )
     accepted_delta_by_id = {
-        item.accepted_delta_id: item for item in evidence.accepted_task_deltas
+        item.accepted_delta_id: item for item in accepted_task_deltas
     }
     task_ids = {item.task_id for item in evidence.task_records}
     request_unit_ids = {item.request_unit_id for item in evidence.request_units}
