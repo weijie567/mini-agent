@@ -144,7 +144,7 @@ K在Infrastructure module内冻结以下**reader safety cap**；这些数值只�
 candidate discovery在同一snapshot内按以下固定顺序执行，并对每个selector分别应用上表的`N+1` overflow probe；同一family从多个selector所得identity先去重，再次要求union size不超过该family cap：
 
 1. **Trusted root selector**：只用`record_code=agent_run_record + exact run_id + scope_owner_customer_id`取得唯一Run；strict decode后取得exact Conversation identity。
-2. **Reverse-reference selector**：从root Run identity开始，只沿Thin Slice reference matrix中“source属于本Run descendant、target属于已发现Run/Task/RequestUnit/ToolCall anchor”的registered relation反向找source identity；不得泛化为对Conversation、Message或Toolset dependency的全部incoming traversal，以免把其他Run历史带入。每个新source再按exact `(record_code, logical_identity, scope_owner_customer_id)`取row。
+2. **Reverse-reference selector**：从root Run identity开始，只沿Thin Slice reference matrix中“source属于本Run descendant、target属于已发现Run/Task/RequestUnit/ToolCall anchor”的registered relation反向找source identity。已发现的`ContextManifest`与`InputBinding`也作为受控anchor，但只允许`GateDecisionRecord.context_manifest_id → context_manifest_record`及`GateDecisionRecord.argument_binding_refs[] → input_binding_record`两类canonical incoming relation，以便没有ToolCall的rejected Gate仍可发现；不得泛化为对Conversation、Message、Manifest、Binding或Toolset dependency的全部incoming traversal，以免把其他Run历史带入。每个新source再按exact `(record_code, logical_identity, scope_owner_customer_id)`取row。
 3. **Physical-projection selector**：按family查询`run_id=root run`；对已发现Task/RequestUnit再查询exact `task_id IN (...)` / `request_unit_id IN (...)`；Conversation只取root指定identity，Message只可由approved outgoing source refs发现，不能用`conversation_id`批量猜测。selector结果与reverse-reference union，不相互替代。
 4. **Forward-reference selector**：对每个已选source读取normalized outgoing references，按exact code/identity/owner取dependency row；只接受canonical matrix中的top-level reference，payload/local correlation不伪装成top-level。
 5. 以visited `(record_code, logical_identity)`集合迭代2–4至fixed point；family cap和每source reference cap使总frontier有确定上界。Eval Result/Failure source、catalog外code/relation或跨owner endpoint一律整体失败，不扩展closure。
@@ -161,6 +161,7 @@ anti-extra RED必须分别证明两个独立发现通道不能被单点篡改绕
 - 正确`run_id/task_id/request_unit_id` projection但删除或改向root reference的额外row，仍被physical-projection selector发现并拒绝；
 - null/wrong physical projection但保留指向root anchor的合法registered reference，仍被reverse-reference selector发现并拒绝；
 - expected row由reference发现但其physical projection坏，或由projection发现但normalized reference缺失，均在parity gate失败；
+- `GATE_REJECTED`且没有ToolCall时，Gate仍必须通过已发现Manifest/InputBinding的受控reverse relation进入closure；删除任一mandatory Gate relation或注入另一个Gate都失败；
 - 对上表每个cap class参数化插入第`N+1`项，并增加“一个通道规避、另一个通道命中”的evasive-extra回归。
 
 同时篡改全部root anchor projection与全部registered reference、因而不再声明属于该Run的孤立row不属于本exact-Run closure；K不得为寻找这类全局孤儿而扫描整个owner namespace。所有family按stable deterministic order构造现有`ExactRunEvidenceClosure`；任何失败整体丢弃，不返回partial closure。
@@ -338,6 +339,8 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、四个ba
 Feature Worktree必须从仓库根目录运行：
 
 ```bash
+set -euo pipefail
+
 base_sha=bbe14fadc0cd2e14ad35e19177b079fcab685dfc
 base_tree=65415ff5846892f257e95d8b8bd34f50752980a2
 expected_branch=codex/e2e01-01-strict-readers
