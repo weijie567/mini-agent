@@ -813,17 +813,9 @@ def _exact_run_projection_values(
     }
 
 
-def _exact_run_decode_and_validate_row(
-    session: Session,
+def _exact_run_decode_spec(
     row: P0RecordModel,
-    *,
-    trusted_owner_customer_id: str,
-) -> tuple[
-    P0RecordCode,
-    DecodedP0PersistenceRecord,
-    P0PersistenceEnvelope,
-    tuple[P0RecordReference, ...],
-]:
+) -> tuple[P0RecordCode, str]:
     record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
     if record_code is None:
         raise _integrity(
@@ -848,12 +840,20 @@ def _exact_run_decode_and_validate_row(
         raise _integrity(
             P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
         )
-    decoded = decode_persistence_record_versioned(
-        _exact_run_versioned_decode_input(row, record_code),
-        expected_record_code=record_code,
-        expected_schema_version=expected_version,
-        correlation_ref=uuid4(),
-    )
+    return record_code, expected_version
+
+
+def _exact_run_validate_decoded_row(
+    session: Session,
+    row: P0RecordModel,
+    *,
+    record_code: P0RecordCode,
+    decoded: DecodedP0PersistenceRecord,
+    trusted_owner_customer_id: str,
+) -> tuple[
+    P0PersistenceEnvelope,
+    tuple[P0RecordReference, ...],
+]:
     envelope = _exact_run_parse_envelope(row.envelope)
     references = _exact_run_normalized_references(session, row)
     expected_scope_owner = (
@@ -902,7 +902,7 @@ def _exact_run_decode_and_validate_row(
                     P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
                 )
             raise _integrity(category)
-    return record_code, decoded, envelope, references
+    return envelope, references
 
 
 class PostgresRecordAdapter:
@@ -1023,11 +1023,28 @@ class PostgresRecordAdapter:
                     selected[key] = candidates[0]
                     return True
 
-                _exact_run_decode_and_validate_row(
-                    session,
-                    root,
-                    trusted_owner_customer_id=trusted_owner,
+                root_record_code, root_expected_version = (
+                    _exact_run_decode_spec(root)
                 )
+                root_decoded = decode_persistence_record_versioned(
+                    _exact_run_versioned_decode_input(
+                        root,
+                        root_record_code,
+                    ),
+                    expected_record_code=root_record_code,
+                    expected_schema_version=root_expected_version,
+                    correlation_ref=uuid4(),
+                )
+                _root_envelope, root_references = (
+                    _exact_run_validate_decoded_row(
+                        session,
+                        root,
+                        record_code=root_record_code,
+                        decoded=root_decoded,
+                        trusted_owner_customer_id=trusted_owner,
+                    )
+                )
+                references_by_key[root_key] = root_references
 
                 while True:
                     selected_count_before = len(selected)
@@ -1205,15 +1222,23 @@ class PostgresRecordAdapter:
                     selected.items(),
                     key=lambda item: (item[0][0].value, item[0][1]),
                 ):
-                    (
-                        record_code,
-                        decoded,
-                        _envelope,
-                        references,
-                    ) = _exact_run_decode_and_validate_row(
-                        session,
-                        row,
-                        trusted_owner_customer_id=trusted_owner,
+                    record_code, expected_version = _exact_run_decode_spec(
+                        row
+                    )
+                    decoded = decode_persistence_record_versioned(
+                        _exact_run_versioned_decode_input(row, record_code),
+                        expected_record_code=record_code,
+                        expected_schema_version=expected_version,
+                        correlation_ref=uuid4(),
+                    )
+                    _envelope, references = (
+                        _exact_run_validate_decoded_row(
+                            session,
+                            row,
+                            record_code=record_code,
+                            decoded=decoded,
+                            trusted_owner_customer_id=trusted_owner,
+                        )
                     )
                     initial_references = references_by_key.get(key)
                     if (
