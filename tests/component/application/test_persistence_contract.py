@@ -3065,6 +3065,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 sys_bindings: set[str] = set()
                 sys_modules_bindings: set[str] = set()
                 module_import_without_alias = False
+                persistence_star_import = False
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
                         for imported in node.names:
@@ -3080,6 +3081,20 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                 sys_bindings.add(imported.asname or "sys")
                     elif isinstance(node, ast.ImportFrom):
                         for imported in node.names:
+                            if (
+                                imported.name == "*"
+                                and (
+                                    node.module
+                                    == "mini_agent.application.persistence"
+                                    or (
+                                        node.level > 0
+                                        and node.module is not None
+                                        and node.module.split(".")[-1]
+                                        == "persistence"
+                                    )
+                                )
+                            ):
+                                persistence_star_import = True
                             if (
                                 node.module == "sys"
                                 and imported.name == "modules"
@@ -3158,6 +3173,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
 
                 dynamic_module_lookup = (
                     module_import_without_alias
+                    or persistence_star_import
                     or any(
                         isinstance(node, ast.Name)
                         and isinstance(node.ctx, ast.Load)
