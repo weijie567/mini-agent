@@ -94,6 +94,10 @@ class FlipTzInfo(tzinfo):
         return "raw-customer-B-secret"
 
 
+class TimestampSubclass(datetime):
+    pass
+
+
 class RuntimeSpy:
     def __init__(
         self,
@@ -531,21 +535,65 @@ def test_custom_timezone_sidecar_fails_without_method_read(
     assert timezone_type.__name__ not in str(execution)
 
 
-def test_poisoned_order_status_singleton_fails_before_observation() -> None:
-    status = OrderStatus.SHIPPED
-    storage = object.__getattribute__(status, "__dict__")
+def test_datetime_subclass_sidecar_fails_before_observation() -> None:
+    timestamp = TimestampSubclass(
+        2030,
+        1,
+        1,
+        tzinfo=UTC,
+    )
+    timestamp.hidden_raw = "raw-customer-B-secret"
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "TimestampSubclass" not in str(execution)
+
+
+@pytest.mark.parametrize("poisoned_field", ["outcome", "status"])
+def test_poisoned_get_order_enum_singleton_fails_before_observation(
+    poisoned_field: str,
+) -> None:
+    member = (
+        GetOrderOutcome.FOUND
+        if poisoned_field == "outcome"
+        else OrderStatus.SHIPPED
+    )
+    storage = object.__getattribute__(member, "__dict__")
     original_items = tuple(
         (key, dict.__getitem__(storage, key))
         for key in dict.__iter__(storage)
     )
     object.__setattr__(
-        status,
+        member,
         "hidden_raw",
         "raw-customer-B-secret",
     )
     summary = OrderSummaryProjection.model_construct(
         order_number="O-1001",
-        status=status,
+        status=OrderStatus.SHIPPED,
         line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
         ordered_at=NOW,
         status_updated_at=NOW,

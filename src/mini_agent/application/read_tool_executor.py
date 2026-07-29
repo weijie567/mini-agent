@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,7 @@ from mini_agent.core.order import (
     GetOrderQuery,
     GetOrderResult,
     OrderLineSummary,
+    OrderStatus,
     OrderSummaryProjection,
 )
 from mini_agent.core.tool_system import (
@@ -70,6 +72,107 @@ _GET_ORDER_SOURCE_VERSION_PATTERN = re.compile(
     r"mock-order-source-version\.p0\.v1:sha256:[0-9a-f]{64}",
     flags=re.ASCII,
 )
+
+
+def _build_get_order_enum_member_snapshots() -> (
+    tuple[
+        tuple[
+            type[Enum],
+            tuple[tuple[Enum, tuple[tuple[str, object], ...]], ...],
+        ],
+        ...,
+    ]
+):
+    snapshots_by_type = []
+    for enum_type in (GetOrderOutcome, OrderStatus):
+        member_snapshots = []
+        for member in enum_type:
+            storage = object.__getattribute__(member, "__dict__")
+            if type(member) is not enum_type or type(storage) is not dict:
+                raise RuntimeError(
+                    "canonical get_order Enum storage changed"
+                )
+            storage_items = tuple(
+                (
+                    key,
+                    dict.__getitem__(storage, key),
+                )
+                for key in dict.__iter__(storage)
+            )
+            if any(
+                type(key) is not str
+                or not (
+                    stored_value is enum_type
+                    or type(stored_value) in {int, str}
+                )
+                for key, stored_value in storage_items
+            ):
+                raise RuntimeError(
+                    "canonical get_order Enum storage is not closed"
+                )
+            member_snapshots.append((member, storage_items))
+        snapshots_by_type.append((enum_type, tuple(member_snapshots)))
+    return tuple(snapshots_by_type)
+
+
+_GET_ORDER_ENUM_MEMBER_SNAPSHOTS = (
+    _build_get_order_enum_member_snapshots()
+)
+
+
+def _canonical_enum_member_is_closed(value: object) -> bool:
+    enum_type = type(value)
+    member_snapshots = next(
+        (
+            snapshots
+            for candidate_type, snapshots in (
+                _GET_ORDER_ENUM_MEMBER_SNAPSHOTS
+            )
+            if enum_type is candidate_type
+        ),
+        None,
+    )
+    if member_snapshots is None:
+        return False
+    snapshot = next(
+        (
+            candidate
+            for candidate in member_snapshots
+            if value is candidate[0]
+        ),
+        None,
+    )
+    if snapshot is None:
+        return False
+    storage = object.__getattribute__(value, "__dict__")
+    expected_items = snapshot[1]
+    if type(storage) is not dict or len(storage) != len(expected_items):
+        return False
+    stored_names = tuple(dict.__iter__(storage))
+    if (
+        any(type(name) is not str for name in stored_names)
+        or stored_names
+        != tuple(name for name, _ in expected_items)
+    ):
+        return False
+    for name, expected_value in expected_items:
+        stored_value = dict.__getitem__(storage, name)
+        if expected_value is enum_type:
+            if stored_value is not expected_value:
+                return False
+        elif (
+            type(stored_value) is not type(expected_value)
+            or stored_value != expected_value
+        ):
+            return False
+    return True
+
+
+def _is_closed_utc_datetime(value: object) -> bool:
+    return (
+        type(value) is datetime
+        and object.__getattribute__(value, "tzinfo") is UTC
+    )
 
 
 def _is_canonical_get_order_source_version(value: object) -> bool:
@@ -154,12 +257,16 @@ def _rebuild_canonical_get_order_result(
 ) -> GetOrderResult | None:
     if (
         not _has_exact_declared_model_state(value, GetOrderResult)
+        or not _canonical_enum_member_is_closed(value.outcome)
         or (
             value.order_summary is not None
             and (
                 not _has_exact_declared_model_state(
                     value.order_summary,
                     OrderSummaryProjection,
+                )
+                or not _canonical_enum_member_is_closed(
+                    value.order_summary.status
                 )
                 or type(value.order_summary.line_items) is not tuple
                 or any(
@@ -168,6 +275,12 @@ def _rebuild_canonical_get_order_result(
                         OrderLineSummary,
                     )
                     for line_item in value.order_summary.line_items
+                )
+                or not _is_closed_utc_datetime(
+                    value.order_summary.ordered_at
+                )
+                or not _is_closed_utc_datetime(
+                    value.order_summary.status_updated_at
                 )
             )
         )
