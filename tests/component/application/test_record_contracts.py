@@ -2634,6 +2634,77 @@ def test_v2_commands_reject_subclass_and_undeclared_nested_state() -> None:
         _rebuild(graph, request_understanding=poisoned_wrapper)
 
 
+def test_v2_commands_reject_noncanonical_nested_model_sidecars() -> None:
+    class DictSubclass(dict):
+        pass
+
+    class SetSubclass(set):
+        pass
+
+    class StringSubclass(str):
+        pass
+
+    no_task = _v2_no_task_command()
+    record = no_task.request_understanding_record
+
+    missing_required_field = record.model_copy()
+    missing_required_field.__pydantic_fields_set__.discard("run_id")
+
+    constructed_with_missing_field = type(record).model_construct(
+        _fields_set=record.model_fields_set - {"run_id"},
+        **record.__dict__,
+    )
+
+    poisoned_state_container = record.model_copy()
+    object.__setattr__(
+        poisoned_state_container,
+        "__dict__",
+        DictSubclass(poisoned_state_container.__dict__),
+    )
+
+    poisoned_fields_container = record.model_copy()
+    object.__setattr__(
+        poisoned_fields_container,
+        "__pydantic_fields_set__",
+        SetSubclass(poisoned_fields_container.model_fields_set),
+    )
+
+    poisoned_fields_member = record.model_copy()
+    poisoned_fields = set(poisoned_fields_member.model_fields_set)
+    poisoned_fields.remove("run_id")
+    poisoned_fields.add(StringSubclass("run_id"))
+    object.__setattr__(
+        poisoned_fields_member,
+        "__pydantic_fields_set__",
+        poisoned_fields,
+    )
+
+    poisoned_records = (
+        missing_required_field,
+        constructed_with_missing_field,
+        poisoned_state_container,
+        poisoned_fields_container,
+        poisoned_fields_member,
+    )
+    for poisoned_record in poisoned_records:
+        with pytest.raises(ValidationError, match="canonical"):
+            _rebuild(
+                no_task,
+                request_understanding_record=poisoned_record,
+            )
+
+    graph = _initial_v2_graph()
+    for poisoned_record in poisoned_records:
+        poisoned_wrapper = graph.request_understanding.model_copy(
+            update={"record": poisoned_record}
+        )
+        with pytest.raises(ValidationError, match="canonical"):
+            _rebuild(
+                graph,
+                request_understanding=poisoned_wrapper,
+            )
+
+
 def test_v2_no_task_command_rejects_poisoned_primitive_subclasses() -> None:
     command = _v2_no_task_command()
     record = command.request_understanding_record
