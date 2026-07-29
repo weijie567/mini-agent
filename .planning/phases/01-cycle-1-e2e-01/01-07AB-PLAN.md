@@ -54,6 +54,8 @@ base_blob:
 forbidden_files: ALL REPOSITORY FILES OUTSIDE THE ONE-FILE ALLOWLIST
 dependencies:
   - reviewed 01-07J Plan merge 023cce5a357122511823bc759ad767d75f8fb053
+  - provisional J feature head a00b53eedcf84d477f01d8a9cf06cd097361609b
+  - J oracle blob 3c147a754ceae7bf8534e16ae2fd0d1f1531c5a3
   - 01-07J feature exact base remains B_J_READY; this Packet does not rebase it
 contract_changes: NONE
 security_impact: NONE; static dependency inventory only
@@ -78,11 +80,14 @@ Plan branch与feature branch均从上述 exact base 独立创建。Plan merge只
 
 ## Verification
 
-1. RED 证据复现：
+1. RED 证据在 exact J feature head
+   `a00b53eedcf84d477f01d8a9cf06cd097361609b` 复现：
    `uv run pytest tests/component/application/test_persistence_contract.py::test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim -q`
-   在 base 上只因新 J oracle 路径为 extra item 而失败。
-2. GREEN：
-   同一命令通过。
+   只因新 J oracle 路径为 extra item 而失败。01-07AB 自身 base 尚无该
+   test 文件，因此不得伪称 base 单独为 RED。
+2. GREEN 在 detached synthetic overlay 中验证：以 exact J head 为 tree
+   输入，只应用 01-07AB one-line patch；同一命令通过。记录 overlay
+   base/head/tree、J oracle blob 与 alignment target blob。
 3. Application：
    `uv run pytest tests/component/application -q`，零失败。
 4. 01-07J focused：
@@ -105,4 +110,3 @@ Plan branch与feature branch均从上述 exact base 独立创建。Plan merge只
 单文件 exact dependency inventory 对齐经双重独立审查、串行 merge 与
 post-merge gate 后形成 `B_J_SCOPE`；01-07J feature 仍保留原 exact
 `B_J_READY` base，并在 `B_J_SCOPE` 上构造 latest-integration overlay。
-
