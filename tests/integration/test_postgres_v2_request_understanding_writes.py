@@ -52,7 +52,6 @@ _COMPONENT_APPLICATION_TESTS = (
 )
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_record_contracts import (  # noqa: E402
-    _initial_graph,
     _initial_v2_graph,
 )
 
@@ -159,80 +158,6 @@ def _second_v2_graph(
         run_task_link=type(graph.run_task_link)(
             active_record=graph.run_task_link.active_record.model_copy(
                 update={"task_id": task_id}
-            )
-        ),
-    )
-
-
-def _legacy_graph_for(
-    graph: CreateInitialTaskGraphV2Command,
-):
-    template = _initial_graph()
-    current_message = next(
-        message
-        for message in graph.expected_message_records
-        if message.message_id == graph.request_understanding.record.message_ref
-    )
-    binding_template = template.input_bindings[0]
-    binding = binding_template.record.model_copy(
-        update={"source_refs": (current_message.message_id,)}
-    )
-    accepted_template = template.request_understanding.accepted_deltas[0]
-    accepted = accepted_template.model_copy(
-        update={
-            "message_ref": current_message.message_id,
-            "input_binding_refs": (binding.binding_id,),
-        }
-    )
-    understanding = template.request_understanding.record.model_copy(
-        update={
-            "run_id": graph.expected_active_run_record.run_id,
-            "message_ref": current_message.message_id,
-            "accepted_delta_refs": (accepted.accepted_delta_id,),
-        }
-    )
-    task = template.initial_task.initial_record
-    unit = template.initial_request_unit.initial_record.model_copy(
-        update={
-            "task_id": task.task_id,
-            "goal_text": accepted.goal_text,
-            "goal_source_refs": (current_message.message_id,),
-            "input_binding_refs": (binding.binding_id,),
-        }
-    )
-    return type(template)(
-        owner_scope=graph.owner_scope,
-        expected_conversation_record=graph.expected_conversation_record,
-        expected_message_record=current_message,
-        expected_active_run_record=graph.expected_active_run_record,
-        request_understanding=type(template.request_understanding)(
-            record=understanding,
-            accepted_deltas=(accepted,),
-        ),
-        initial_task=type(template.initial_task)(initial_record=task),
-        initial_request_unit=type(template.initial_request_unit)(
-            initial_record=unit
-        ),
-        input_bindings=(
-            type(binding_template)(
-                record=binding,
-                request_unit_id=unit.request_unit_id,
-            ),
-        ),
-        conversation_task_link=template.conversation_task_link.model_copy(
-            update={
-                "conversation_id": (
-                    graph.expected_conversation_record.conversation_id
-                ),
-                "task_id": task.task_id,
-            }
-        ),
-        run_task_link=type(template.run_task_link)(
-            active_record=template.run_task_link.active_record.model_copy(
-                update={
-                    "run_id": graph.expected_active_run_record.run_id,
-                    "task_id": task.task_id,
-                }
             )
         ),
     )
@@ -774,36 +699,49 @@ async def test_distinct_v2_graphs_allow_only_one_complete_closure(
         engine.dispose()
 
 
-@pytest.mark.parametrize("first_writer", ("legacy", "v2"))
-async def test_legacy_and_v2_writers_recheck_same_run_in_both_orders(
+async def test_physical_v1_metadata_collision_blocks_v2_writer_without_mutation(
     eval_postgres_namespace,
-    first_writer: str,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    v2 = _initial_v2_graph()
-    legacy = _legacy_graph_for(v2)
+    initial = _initial_v2_graph()
+    no_task = _no_task_from_graph(initial)
     try:
-        await _seed_v2_roots(adapter, v2)
-        if first_writer == "legacy":
-            first_result = await adapter.create_initial_task_graph_if_current(
-                legacy
+        await _seed_v2_roots(adapter, initial)
+        assert (
+            await adapter.save_request_understanding_v2_no_task_if_current(
+                no_task
             )
-            first_snapshot = _database_snapshot(adapter)
-            second_result = (
-                await adapter.create_initial_task_graph_v2_if_current(v2)
+            is ConditionalWriteResult.APPLIED
+        )
+        with adapter.session_factory.begin() as session:
+            row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
+                    P0RecordModel.run_id
+                    == initial.expected_active_run_record.run_id,
+                )
             )
-        else:
-            first_result = (
-                await adapter.create_initial_task_graph_v2_if_current(v2)
+            assert row is not None
+            assert row.record_schema_version == (
+                "request_understanding_record.p0.v2"
             )
-            first_snapshot = _database_snapshot(adapter)
-            second_result = await adapter.create_initial_task_graph_if_current(
-                legacy
-            )
-        assert first_result is ConditionalWriteResult.APPLIED
-        assert second_result is ConditionalWriteResult.PROJECTION_CONFLICT
-        assert _database_snapshot(adapter) == first_snapshot
+            row.record_schema_version = "request_understanding_record.p0.v1"
+
+        before = _database_snapshot(adapter)
+        assert (
+            await adapter.create_initial_task_graph_v2_if_current(initial)
+            is ConditionalWriteResult.PROJECTION_CONFLICT
+        )
+        assert _database_snapshot(adapter) == before
+        counts = _task_graph_family_counts(adapter)
+        assert counts[P0RecordCode.REQUEST_UNDERSTANDING_RECORD] == 1
+        assert all(
+            count == 0
+            for code, count in counts.items()
+            if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        )
     finally:
         engine.dispose()
 
@@ -1438,145 +1376,6 @@ async def test_no_task_and_initial_writers_commit_one_nonhybrid_closure(
             )
         else:
             await _assert_initial_graph_closure(adapter, initial)
-    finally:
-        race.release_waiters()
-        engine.dispose()
-
-
-@pytest.mark.parametrize("winner", ("legacy", "v2"))
-async def test_legacy_and_v2_writers_serialize_both_lock_orders(
-    eval_postgres_namespace,
-    monkeypatch,
-    winner: str,
-) -> None:
-    engine = eval_postgres_namespace.build_engine()
-    session_factory = build_session_factory(engine)
-    legacy_adapter = PostgresRecordAdapter(session_factory)
-    v2_adapter = PostgresRecordAdapter(session_factory)
-    v2 = _initial_v2_graph()
-    legacy = _legacy_graph_for(v2)
-    race = _DeterministicRunLockRace(engine)
-    gate_used = False
-
-    try:
-        await _seed_v2_roots(v2_adapter, v2)
-        if winner == "legacy":
-            original_legacy_validate = (
-                legacy_adapter._validate_physical_projection
-            )
-
-            def hold_legacy_after_run_lock(session, row, **kwargs):
-                nonlocal gate_used
-                decoded = original_legacy_validate(session, row, **kwargs)
-                if (
-                    not gate_used
-                    and row.record_code
-                    == P0RecordCode.AGENT_RUN_RECORD.value
-                ):
-                    gate_used = True
-                    race.winner_after_lock(session)
-                return decoded
-
-            original_v2_lock_roots = (
-                PostgresRecordAdapter._ru_v2_write_lock_roots
-            )
-
-            def block_v2_loser(_cls, session, **kwargs):
-                race.loser_before_lock(session)
-                rows = original_v2_lock_roots(session, **kwargs)
-                race.loser_after_lock()
-                return rows
-
-            monkeypatch.setattr(
-                legacy_adapter,
-                "_validate_physical_projection",
-                hold_legacy_after_run_lock,
-            )
-            monkeypatch.setattr(
-                PostgresRecordAdapter,
-                "_ru_v2_write_lock_roots",
-                classmethod(block_v2_loser),
-            )
-        else:
-            original_v2_lock_roots = (
-                PostgresRecordAdapter._ru_v2_write_lock_roots
-            )
-
-            def hold_v2_after_run_lock(_cls, session, **kwargs):
-                rows = original_v2_lock_roots(session, **kwargs)
-                race.winner_after_lock(session)
-                return rows
-
-            original_legacy_row = legacy_adapter._row_for_identity
-
-            def block_legacy_loser(session, *args, **kwargs):
-                nonlocal gate_used
-                is_run_lock = (
-                    not gate_used
-                    and kwargs.get("for_update")
-                    and kwargs.get("record_code")
-                    is P0RecordCode.AGENT_RUN_RECORD
-                )
-                if is_run_lock:
-                    gate_used = True
-                    race.loser_before_lock(session)
-                row = original_legacy_row(session, *args, **kwargs)
-                if is_run_lock:
-                    race.loser_after_lock()
-                return row
-
-            monkeypatch.setattr(
-                PostgresRecordAdapter,
-                "_ru_v2_write_lock_roots",
-                classmethod(hold_v2_after_run_lock),
-            )
-            monkeypatch.setattr(
-                legacy_adapter,
-                "_row_for_identity",
-                block_legacy_loser,
-            )
-
-        def apply_legacy():
-            return asyncio.run(
-                legacy_adapter.create_initial_task_graph_if_current(legacy)
-            )
-
-        def apply_v2():
-            return asyncio.run(
-                v2_adapter.create_initial_task_graph_v2_if_current(v2)
-            )
-
-        winner_call = apply_legacy if winner == "legacy" else apply_v2
-        loser_call = apply_v2 if winner == "legacy" else apply_legacy
-        winner_task = asyncio.create_task(asyncio.to_thread(winner_call))
-        assert await asyncio.to_thread(race.winner_locked.wait, 5)
-        loser_task = asyncio.create_task(asyncio.to_thread(loser_call))
-        winner_result = await asyncio.wait_for(winner_task, timeout=15)
-        winner_snapshot = _database_snapshot(v2_adapter)
-        race.winner_snapshot_taken.set()
-        loser_result = await asyncio.wait_for(loser_task, timeout=15)
-
-        assert race.block_observed.is_set()
-        assert winner_result is ConditionalWriteResult.APPLIED
-        assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
-        assert _database_snapshot(v2_adapter) == winner_snapshot
-        counts = _task_graph_family_counts(v2_adapter)
-        assert all(count == 1 for count in counts.values())
-        with session_factory() as session:
-            ru_row = session.scalar(
-                select(P0RecordModel).where(
-                    P0RecordModel.record_code
-                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
-                )
-            )
-            assert ru_row is not None
-            assert ru_row.record_schema_version == (
-                "request_understanding_record.p0.v1"
-                if winner == "legacy"
-                else "request_understanding_record.p0.v2"
-            )
-        if winner == "v2":
-            await _assert_initial_graph_closure(v2_adapter, v2)
     finally:
         race.release_waiters()
         engine.dispose()

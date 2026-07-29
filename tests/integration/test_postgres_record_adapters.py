@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
 import json
 import sys
 import threading
@@ -34,6 +36,7 @@ from mini_agent.application.records import (
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_understanding import ReferenceSourceKindV2
 from mini_agent.core.task_state import DurableResolvedReferenceCandidateV2
+from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
@@ -62,6 +65,136 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def test_postgres_request_understanding_surface_is_v2_only() -> None:
+    production_tree = ast.parse(inspect.getsource(postgres_persistence))
+    adapter_class = next(
+        node
+        for node in production_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PostgresRecordAdapter"
+    )
+    imported_identifiers = {
+        identifier
+        for node in production_tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        for identifier in (alias.name, alias.asname)
+        if identifier is not None
+    }
+    production_names = {
+        node.id for node in ast.walk(production_tree) if isinstance(node, ast.Name)
+    }
+    production_attributes = {
+        node.attr
+        for node in ast.walk(production_tree)
+        if isinstance(node, ast.Attribute)
+    }
+    production_dynamic_attribute_names = {
+        node.args[1].value
+        for node in ast.walk(production_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"delattr", "getattr", "hasattr", "setattr"}
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    }
+    adapter_methods = {
+        node.name
+        for node in adapter_class.body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+    legacy_types = {
+        "AcceptedTaskDelta",
+        "CreateInitialTaskGraphCommand",
+        "RequestUnderstandingRecord",
+    }
+    legacy_methods = {
+        "create_initial_task_graph_if_current",
+        "load_accepted_task_delta_for_owner",
+        "load_request_understanding_for_owner",
+    }
+    assert imported_identifiers.isdisjoint(legacy_types)
+    assert production_names.isdisjoint(legacy_types)
+    assert adapter_methods.isdisjoint(legacy_methods)
+    assert production_attributes.isdisjoint(legacy_methods)
+    assert production_dynamic_attribute_names.isdisjoint(legacy_methods)
+    assert {"__getattr__", "__getattribute__"}.isdisjoint(adapter_methods)
+    adapter_without_session = object.__new__(PostgresRecordAdapter)
+    for legacy_method in legacy_methods:
+        assert not hasattr(PostgresRecordAdapter, legacy_method)
+        assert not hasattr(adapter_without_session, legacy_method)
+    assert {
+        "AcceptedTaskDeltaV2",
+        "CreateInitialTaskGraphV2Command",
+        "RequestUnderstandingRecordV2",
+    } <= imported_identifiers
+    assert {
+        "create_initial_task_graph_v2_if_current",
+        "save_request_understanding_v2_no_task_if_current",
+    } <= adapter_methods
+
+    owned_test_paths = (
+        Path(__file__),
+        Path(__file__).with_name("test_postgres_atomicity.py"),
+        Path(__file__).with_name(
+            "test_postgres_v2_request_understanding_writes.py"
+        ),
+    )
+    forbidden_test_names = legacy_types | {
+        "_initial_graph",
+        "_legacy_graph_for",
+    }
+    for path in owned_test_paths:
+        tree = ast.parse(path.read_text())
+        referenced_names = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        }
+        referenced_attributes = {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+        }
+        dynamic_attribute_names = {
+            node.args[1].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"delattr", "getattr", "hasattr", "setattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        }
+        record_case_consumers = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "_record_cases"
+                for child in ast.walk(node)
+            )
+        }
+        assert referenced_names.isdisjoint(forbidden_test_names)
+        assert referenced_attributes.isdisjoint(legacy_methods)
+        assert dynamic_attribute_names.isdisjoint(legacy_methods)
+        assert record_case_consumers == (
+            {"_non_ru_record_cases"} if path == Path(__file__) else set()
+        )
+
+    assert (
+        '"request_understanding_record.p0.v1"'
+        in inspect.getsource(
+            PostgresRecordAdapter._ru_v2_write_check_metadata_rows
+        )
+    )
+    assert all(
+        envelope.record_code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        for envelope in _encoded_non_ru_record_set()
+    )
+
+
 def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
     context = CustomerContext.model_validate(
         {
@@ -75,15 +208,37 @@ def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
     return TrustedOwnerScope.from_customer_context(context)
 
 
-def _encoded_record_set():
+def _non_ru_record_cases():
     return tuple(
-        encode_persistence_record(
-            case.code,
-            case.record,
-            external_references=case.external_references,
+        case
+        for case in _record_cases()
+        if case.code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+    )
+
+
+def _encode_non_ru_record_case(
+    case,
+    *,
+    record,
+    logical_children,
+) -> P0PersistenceEnvelope:
+    assert case.code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+    return encode_persistence_record(
+        case.code,
+        record,
+        external_references=case.external_references,
+        logical_children=logical_children,
+    )
+
+
+def _encoded_non_ru_record_set() -> tuple[P0PersistenceEnvelope, ...]:
+    return tuple(
+        _encode_non_ru_record_case(
+            case,
+            record=case.record,
             logical_children=case.logical_children,
         )
-        for case in _record_cases()
+        for case in _non_ru_record_cases()
     )
 
 
@@ -100,9 +255,9 @@ def _assert_bounded_integrity_error(
     assert all(value not in projection for value in forbidden_values)
 
 
-async def _seed_all_records(adapter: PostgresRecordAdapter) -> None:
+async def _seed_non_ru_records(adapter: PostgresRecordAdapter) -> None:
     with adapter.session_factory.begin() as session:
-        adapter._persist_envelopes(session, _encoded_record_set())
+        adapter._persist_envelopes(session, _encoded_non_ru_record_set())
 
 
 _EXACT_VERSION_BY_CODE = {
@@ -530,14 +685,14 @@ def _clone_references(
     )
 
 
-async def test_all_17_records_and_five_external_references_round_trip_exactly(
+async def test_all_non_ru_records_and_five_external_references_round_trip_exactly(
     eval_postgres_namespace,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    cases = _record_cases()
+    cases = _non_ru_record_cases()
     try:
-        await _seed_all_records(adapter)
+        await _seed_non_ru_records(adapter)
 
         with adapter.session_factory() as session:
             rows = tuple(
@@ -555,9 +710,11 @@ async def test_all_17_records_and_five_external_references_round_trip_exactly(
             )
 
             assert {row.record_code for row in rows} == {
-                code.value for code in P0RecordCode
+                code.value
+                for code in P0RecordCode
+                if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
             }
-            assert len(rows) == 17
+            assert len(rows) == 16
             for row in rows:
                 decoded = decode_persistence_record(
                     row.envelope,
@@ -574,10 +731,9 @@ async def test_all_17_records_and_five_external_references_round_trip_exactly(
                     and reference.source_logical_identity == row.logical_identity
                 )
                 envelope_references = json.loads(
-                    encode_persistence_record(
-                        expected.code,
-                        expected.record,
-                        external_references=expected.external_references,
+                    _encode_non_ru_record_case(
+                        expected,
+                        record=expected.record,
                         logical_children=expected.logical_children,
                     ).model_dump_json()
                 )["record_references"]
@@ -613,7 +769,7 @@ async def test_exact_replay_is_idempotent_and_conflicting_replay_is_bounded(
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    conversation = _record_cases()[0].record
+    conversation = _non_ru_record_cases()[0].record
     insert_barrier = threading.Barrier(2)
     local_state = threading.local()
 
@@ -697,7 +853,7 @@ async def test_unknown_physical_record_code_has_no_raw_exception_context_or_secr
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    conversation = _record_cases()[0].record
+    conversation = _non_ru_record_cases()[0].record
     secret_record_code = "unknown-Cookie-p0-session-alice-customer-A"
     try:
         await adapter.save_conversation(conversation)
@@ -723,7 +879,7 @@ async def test_owner_scoped_read_bounds_malformed_physical_envelope(
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    conversation = _record_cases()[0].record
+    conversation = _non_ru_record_cases()[0].record
     raw_secret = "Cookie=p0-session-envelope-secret"
     try:
         await adapter.save_conversation(conversation)
@@ -765,7 +921,7 @@ async def test_owner_scope_is_applied_before_payload_and_stored_owner_never_gran
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    alice_case = _record_cases()[0]
+    alice_case = _non_ru_record_cases()[0]
     bob_conversation = alice_case.record.model_copy(
         update={
             "conversation_id": UUID(int=991),
@@ -812,11 +968,11 @@ async def test_owner_graph_rejects_null_scope_on_private_linked_target(
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     conversation = next(
         case.record
-        for case in _record_cases()
+        for case in _non_ru_record_cases()
         if case.code is P0RecordCode.CONVERSATION_RECORD
     )
     try:
-        await _seed_all_records(adapter)
+        await _seed_non_ru_records(adapter)
         with adapter.session_factory.begin() as session:
             result = session.execute(
                 update(P0RecordModel)
@@ -849,11 +1005,11 @@ async def test_normalized_reference_ordinals_reject_drift(
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     manifest = next(
         case.record
-        for case in _record_cases()
+        for case in _non_ru_record_cases()
         if case.code is P0RecordCode.CONTEXT_MANIFEST_RECORD
     )
     try:
-        await _seed_all_records(adapter)
+        await _seed_non_ru_records(adapter)
         with adapter.session_factory.begin() as session:
             references = tuple(
                 session.scalars(
@@ -894,7 +1050,7 @@ async def test_reference_ordinal_database_constraint_rejects_negative_tamper(
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     try:
-        await _seed_all_records(adapter)
+        await _seed_non_ru_records(adapter)
         with pytest.raises(IntegrityError):
             with adapter.session_factory.begin() as session:
                 reference_id = session.scalar(
