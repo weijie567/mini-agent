@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from uuid import UUID, uuid4
 
 import pytest
@@ -45,6 +45,17 @@ class SourceVersionSubclass(str):
 
 class StateKeySubclass(str):
     pass
+
+
+class ExplodingTzInfo(tzinfo):
+    def utcoffset(self, _value: datetime | None):
+        raise RuntimeError("raw-customer-B-secret")
+
+    def dst(self, _value: datetime | None):
+        return None
+
+    def tzname(self, _value: datetime | None):
+        return "exploding"
 
 
 class RuntimeSpy:
@@ -405,6 +416,42 @@ def test_found_with_noncanonical_recursive_state_fails_closed(
     )
     assert "raw-secret" not in str(execution)
     assert "must-not-survive" not in str(execution)
+
+
+def test_candidate_leaf_exception_becomes_raw_free_system_failure() -> None:
+    exploding_timestamp = datetime(
+        2030,
+        1,
+        1,
+        tzinfo=ExplodingTzInfo(),
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=exploding_timestamp,
+        status_updated_at=exploding_timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "ExplodingTzInfo" not in str(execution)
 
 
 @pytest.mark.parametrize(

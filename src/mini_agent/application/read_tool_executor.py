@@ -149,7 +149,7 @@ def _project_tool_call(
     return ToolCallRecord(**values)
 
 
-def _canonical_get_order_result(
+def _rebuild_canonical_get_order_result(
     value: object,
 ) -> GetOrderResult | None:
     if (
@@ -195,6 +195,15 @@ def _canonical_get_order_result(
     ):
         return None
     return rebuilt
+
+
+def _canonical_get_order_result(
+    value: object,
+) -> GetOrderResult | None:
+    try:
+        return _rebuild_canonical_get_order_result(value)
+    except Exception:
+        return None
 
 
 class ReadToolExecutor:
