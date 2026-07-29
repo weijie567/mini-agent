@@ -398,6 +398,113 @@ def _strict_rebuild_exact_model(
     )
 
 
+def _write_contract_values_match_exactly(
+    left: object,
+    right: object,
+) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, BaseModel):
+        try:
+            declared_fields = set(type(left).model_fields)
+            left_state_keys = set(left.__dict__)
+            right_state_keys = set(right.__dict__)
+            left_fields_set = set(left.model_fields_set)
+            right_fields_set = set(right.model_fields_set)
+        except (AttributeError, TypeError):
+            return False
+        if (
+            left_state_keys != right_state_keys
+            or not left_state_keys.issubset(declared_fields)
+            or not left_fields_set.issubset(declared_fields)
+            or not right_fields_set.issubset(declared_fields)
+        ):
+            return False
+        try:
+            left_extra = left.__pydantic_extra__
+            right_extra = right.__pydantic_extra__
+            left_private = left.__pydantic_private__
+            right_private = right.__pydantic_private__
+        except (AttributeError, TypeError):
+            return False
+        if not _write_contract_values_match_exactly(left_extra, right_extra):
+            return False
+        if not _write_contract_values_match_exactly(left_private, right_private):
+            return False
+        return all(
+            field_name in left.__dict__
+            and field_name in right.__dict__
+            and _write_contract_values_match_exactly(
+                left.__dict__[field_name],
+                right.__dict__[field_name],
+            )
+            for field_name in type(left).model_fields
+        )
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _write_contract_values_match_exactly(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, Mapping):
+        left_items = tuple(left.items())
+        right_items = tuple(right.items())
+        return len(left_items) == len(right_items) and all(
+            _write_contract_values_match_exactly(left_key, right_key)
+            and _write_contract_values_match_exactly(left_value, right_value)
+            for (left_key, left_value), (right_key, right_value) in zip(
+                left_items,
+                right_items,
+                strict=True,
+            )
+        )
+    if isinstance(left, StrEnum):
+        return left == right
+    if isinstance(left, datetime):
+        return type(left) is datetime and left == right
+    if isinstance(left, UUID):
+        return type(left) is UUID and left == right
+    if isinstance(left, str):
+        return type(left) is str and left == right
+    if isinstance(left, bool):
+        return type(left) is bool and left == right
+    if isinstance(left, int):
+        return type(left) is int and left == right
+    if isinstance(left, float):
+        return type(left) is float and left == right
+    if isinstance(left, bytes):
+        return type(left) is bytes and left == right
+    return left == right
+
+
+def _require_exact_write_contract_projection(
+    original: object,
+    rebuilt: _ModelT,
+    *,
+    error_message: str,
+) -> _ModelT:
+    if not _write_contract_values_match_exactly(original, rebuilt):
+        raise ValueError(error_message)
+    return rebuilt
+
+
+def _strict_rebuild_exact_write_contract_model(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> _ModelT:
+    rebuilt = _strict_rebuild_exact_model(
+        value,
+        expected_type,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
 def _strict_tuple_projection(
     value: object,
     *,
@@ -430,7 +537,7 @@ def _strict_rebuild_durable_contextualization_v2(
         error_message=error_message,
     )
     projection["resolved_reference_candidates"] = tuple(
-        _strict_rebuild_exact_model(
+        _strict_rebuild_exact_write_contract_model(
             item,
             DurableResolvedReferenceCandidateV2,
             error_message=error_message,
@@ -438,16 +545,21 @@ def _strict_rebuild_durable_contextualization_v2(
         for item in resolved
     )
     projection["uncertainties"] = tuple(
-        _strict_rebuild_exact_model(
+        _strict_rebuild_exact_write_contract_model(
             item,
             UncertaintyV2,
             error_message=error_message,
         )
         for item in uncertainties
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         DurableQueryContextualizationCandidateV2,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -466,16 +578,21 @@ def _strict_rebuild_durable_candidate_v2(
         error_message=error_message,
     )
     projection["input_candidates"] = tuple(
-        _strict_rebuild_exact_model(
+        _strict_rebuild_exact_write_contract_model(
             item,
             DurableInputCandidateV2,
             error_message=error_message,
         )
         for item in input_candidates
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         DurableTaskDeltaCandidateV2,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -511,27 +628,34 @@ def _strict_rebuild_request_understanding_record_v2(
         for candidate in candidates
     )
     projection["candidate_validation"] = tuple(
-        _strict_rebuild_exact_model(
+        _strict_rebuild_exact_write_contract_model(
             decision,
             CandidateValidationRecordV2,
             error_message=error_message,
         )
         for decision in validation
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         RequestUnderstandingRecordV2,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
 
 def _require_exact_trusted_owner_scope(value: object) -> TrustedOwnerScope:
     error_message = "TrustedOwnerScope must be an exact trusted projection"
-    _canonical_model_field_projection(
+    projection = _canonical_model_field_projection(
         value,
         TrustedOwnerScope,
         error_message=error_message,
     )
+    if type(projection["customer_id"]) is not str:
+        raise ValueError(error_message)
     return value
 
 
@@ -568,7 +692,7 @@ def _validate_v2_owner_roots_and_messages(
     record: RequestUnderstandingRecordV2,
 ) -> MessageRecord:
     owner = _require_exact_trusted_owner_scope(owner_scope)
-    canonical_conversation = _strict_rebuild_exact_model(
+    canonical_conversation = _strict_rebuild_exact_write_contract_model(
         conversation,
         ConversationRecord,
         error_message="RU-v2 Conversation must be canonical",
@@ -578,14 +702,14 @@ def _validate_v2_owner_roots_and_messages(
         error_message="RU-v2 Message closure must be canonical",
     )
     canonical_messages = tuple(
-        _strict_rebuild_exact_model(
+        _strict_rebuild_exact_write_contract_model(
             message,
             MessageRecord,
             error_message="RU-v2 Message closure must be canonical",
         )
         for message in message_values
     )
-    canonical_run = _strict_rebuild_exact_model(
+    canonical_run = _strict_rebuild_exact_write_contract_model(
         run,
         AgentRunRecord,
         error_message="RU-v2 Run must be canonical",
@@ -641,7 +765,7 @@ class SaveRequestUnderstandingV2AcceptedCommand(_StrictRuntimePrivateRecord):
     @model_validator(mode="after")
     def accepted_child_is_exact_one_candidate_projection(self) -> Self:
         record = _strict_rebuild_request_understanding_record_v2(self.record)
-        child = _strict_rebuild_exact_model(
+        child = _strict_rebuild_exact_write_contract_model(
             self.accepted_delta,
             AcceptedTaskDeltaV2,
             error_message="RU-v2 accepted child must be canonical",
@@ -698,14 +822,19 @@ def _strict_rebuild_v2_accepted_command(
     projection["record"] = _strict_rebuild_request_understanding_record_v2(
         projection["record"]
     )
-    projection["accepted_delta"] = _strict_rebuild_exact_model(
+    projection["accepted_delta"] = _strict_rebuild_exact_write_contract_model(
         projection["accepted_delta"],
         AcceptedTaskDeltaV2,
         error_message=error_message,
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         SaveRequestUnderstandingV2AcceptedCommand,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -1511,14 +1640,19 @@ def _strict_rebuild_create_task_command(
         CreateTaskCommand,
         error_message=error_message,
     )
-    projection["initial_record"] = _strict_rebuild_exact_model(
+    projection["initial_record"] = _strict_rebuild_exact_write_contract_model(
         projection["initial_record"],
         TaskRecord,
         error_message=error_message,
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         CreateTaskCommand,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -1532,14 +1666,19 @@ def _strict_rebuild_create_request_unit_command(
         CreateRequestUnitCommand,
         error_message=error_message,
     )
-    projection["initial_record"] = _strict_rebuild_exact_model(
+    projection["initial_record"] = _strict_rebuild_exact_write_contract_model(
         projection["initial_record"],
         RequestUnitRecord,
         error_message=error_message,
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         CreateRequestUnitCommand,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -1553,14 +1692,19 @@ def _strict_rebuild_save_input_binding_command(
         SaveInputBindingCommand,
         error_message=error_message,
     )
-    projection["record"] = _strict_rebuild_exact_model(
+    projection["record"] = _strict_rebuild_exact_write_contract_model(
         projection["record"],
         InputBinding,
         error_message=error_message,
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         SaveInputBindingCommand,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -1574,14 +1718,19 @@ def _strict_rebuild_create_run_task_link_command(
         CreateRunTaskLinkCommand,
         error_message=error_message,
     )
-    projection["active_record"] = _strict_rebuild_exact_model(
+    projection["active_record"] = _strict_rebuild_exact_write_contract_model(
         projection["active_record"],
         RunTaskLinkRecord,
         error_message=error_message,
     )
-    return _strict_validate_canonical_projection(
+    rebuilt = _strict_validate_canonical_projection(
         CreateRunTaskLinkCommand,
         projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
         error_message=error_message,
     )
 
@@ -1741,7 +1890,7 @@ class CreateInitialTaskGraphV2Command(_StrictRuntimePrivateRecord):
         binding_command = _strict_rebuild_save_input_binding_command(
             self.input_binding
         )
-        conversation_link = _strict_rebuild_exact_model(
+        conversation_link = _strict_rebuild_exact_write_contract_model(
             self.conversation_task_link,
             ConversationTaskLinkRecord,
             error_message="initial ConversationTaskLink must be canonical",
