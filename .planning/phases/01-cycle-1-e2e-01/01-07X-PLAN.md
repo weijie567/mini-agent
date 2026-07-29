@@ -54,6 +54,7 @@ Output: 一个四文件、单一Infrastructure writer的feature Packet。RED先�
 - `CONFIRMED`：execution-owner remediation [PR #134](https://github.com/weijie567/mini-agent/pull/134) reviewed merge为`de3b9b7795ee7d569526936da4f3f10e8e7d93e2`、tree `c2bc6495f03caf5079a8b81b928e4084fe7f7125`，只把遗漏的AA-owned integration test加入X并补全acceptance；它不替换feature base、不新增Packet、不改变42分母或`B_SU → B_X`。
 - `CONFIRMED`：`postgres.py`唯一live RU-v1 writer为`create_initial_task_graph_if_current(CreateInitialTaskGraphCommand)`；同文件还存在无仓库caller的`load_request_understanding_for_owner -> RequestUnderstandingRecord`与`load_accepted_task_delta_for_owner -> AcceptedTaskDelta`。
 - `CONFIRMED`：`test_postgres_atomicity.py`有五个legacy writer direct calls；`test_postgres_v2_request_understanding_writes.py`有三个direct calls，分布在live v1/v2顺序与lock-order coexistence tests。全仓没有其他production direct caller或dynamic string caller；Application Protocol definition与contract test归01-07W。
+- `CONFIRMED`：除上述direct callers外，`test_postgres_atomicity.py`的owner-scoped bounded-error test仍单独使用`_initial_graph()`，AA-owned v2 writer test也通过`_initial_graph` / `_legacy_graph_for`构造v1 fixture。这些依赖若由X保留，会在T/W/V删除Application codec/Port/Core v1 surface时迫使下游越界回改X-owned tests。
 - `CONFIRMED`：AA-owned v2 suite已独立覆盖v2 roundtrip/replay、legacy-chain isolation、mid-reference rollback、distinct-v2 conflict、v2-v2 concurrency、fault matrix、bounded database failure、Run-first locking、no-task/initial nonhybrid closure、v2/recovery及v2/finalization convergence。
 - `CONFIRMED`：exact B_SU三份owned integration test baseline为`136 passed`。第四个owned production file通过这些tests间接覆盖。
 - `CONFIRMED`：physical-v1 version字符串仍被`_ru_v2_write_check_metadata_rows`用于同Run collision fail-closed；它不是live v1 API，X不得以全局字符串删除破坏该guard。`test_postgres_record_adapters.py`的strict exact-v2 reader tamper oracle同样必须保留。
@@ -150,11 +151,14 @@ Application `RuntimeRecordPort`的legacy writer/readers及其DTO imports仍可�
 
 - v1-writer专属且已被AA v2 suite更强覆盖的rollback/recovery/finalization并发oracle可以删除；
 - 通用Task transition仍需以reviewed v2 initial graph建立前置状态后继续验证exact projection CAS与单一atomic child；
-- 若保留其他通用atomicity test，必须改用`create_initial_task_graph_v2_if_current`与v2 roots，不能复制AA私有writer逻辑或降低断言。
+- owner-scoped bounded-error与其他非writer用例也必须改用v2 graph或独立的owner/Run fixture；
+- 文件中不得保留`_initial_graph`、`CreateInitialTaskGraphCommand`、`RequestUnderstandingRecord`或`AcceptedTaskDelta`依赖；若保留其他通用atomicity test，必须改用`create_initial_task_graph_v2_if_current`与v2 roots，不能复制AA私有writer逻辑或降低断言。
 
-`test_postgres_v2_request_understanding_writes.py`删除live legacy writer invocation与“两种writer都可赢”的共存结论。至少保留一个显式historical fixture：直接持久化合法`request_understanding_record.p0.v1` envelope或等价预存row，再调用active v2 writer，断言`PROJECTION_CONFLICT`、完整physical snapshot不变且没有第二个Task graph。该fixture只证明历史row隔离，不重新暴露legacy writer。
+`test_postgres_v2_request_understanding_writes.py`删除live legacy writer invocation与“两种writer都可赢”的共存结论，并移除`_initial_graph` / `_legacy_graph_for`。至少保留一个codec/Core-model-independent的physical metadata fixture：先只通过v2 DTO/writer建立owner-consistent RU row，再在数据库边界把该row的`record_schema_version`置为`request_understanding_record.p0.v1`（或使用不依赖v1 codec/type的等价raw metadata seed）；随后调用active v2 writer，断言`PROJECTION_CONFLICT`、完整physical snapshot不变且没有第二个Task graph。该fixture只证明historical physical-v1 metadata隔离，不构造v1 envelope、不调用live v1 codec或重新暴露legacy writer。
 
 以下AA证据必须继续存在并通过：v2 success/replay、v2-v2 conflict/concurrency、wrong-owner isolation、mid-write/fault rollback、bounded error、Run-first lock、no-task/initial nonhybrid、v2/recovery与v2/finalization convergence。删除重复legacy oracle后允许focused test总数下降，但不得用数量下降掩盖上述命名行为缺失。
+
+GREEN完成后，三份X-owned integration tests对`_initial_graph`、`_legacy_graph_for`、`CreateInitialTaskGraphCommand`、`RequestUnderstandingRecord`、`AcceptedTaskDelta`与RU-v1 codec API的exact import/name/call依赖必须为零。允许保留的唯一RU-v1标识是raw physical metadata version literal及其fail-closed断言；这使01-07T/W/V无需越过ownership回改X文件。
 
 ## 4. Commit, replay and barrier protocol
 
@@ -185,12 +189,12 @@ Application `RuntimeRecordPort`的legacy writer/readers及其DTO imports仍可�
   <name>Task 2: GREEN — 删除legacy writer/readers并迁移owned integration callers</name>
   <files>src/mini_agent/infrastructure/persistence/postgres.py, tests/integration/test_postgres_record_adapters.py, tests/integration/test_postgres_atomicity.py, tests/integration/test_postgres_v2_request_understanding_writes.py</files>
   <action>
-    删除三个legacy imports与三个Adapter methods。移除八个direct callers和live v1/v2 coexistence oracle；通用Task transition改由v2 graph建立，历史v1 row改以非路由physical fixture证明v2 writer fail-closed/零写入。保留AA v2 writer、owner isolation、atomicity、recovery/finalization lock-order与strict reader tests。
+    删除三个legacy imports与三个Adapter methods。移除八个direct callers、`_initial_graph` / `_legacy_graph_for`及live v1/v2 coexistence oracle；owner-scoped bounded-error、通用Task transition与其他保留用例改由v2 graph/owner roots建立。historical-v1 collision只通过v2-built row的raw physical metadata version drift证明v2 writer fail-closed/零写入，不构造v1 envelope或调用v1 codec/Core DTO。保留AA v2 writer、owner isolation、atomicity、recovery/finalization lock-order与strict reader tests。
   </action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_v2_request_understanding_writes.py -q</automated>
   </verify>
-  <done>legacy executable surface与direct callers为零；v2/historical fail-closed证据通过，实际变更不出四文件。</done>
+  <done>legacy executable surface/direct callers与三测试文件的v1 fixture/type/codec依赖均为零；只保留physical-v1 metadata literal的fail-closed证据，实际变更不出四文件。</done>
 </task>
 
 <task type="auto">
@@ -228,6 +232,7 @@ exact-head与latest overlay必须额外检查：
 - first feature commit parent精确为`f037582446598512a0132a90504e24b5d701c0f6`，线性、无merge；
 - changed files是四文件allowlist的子集，禁止文件相对B_SU均不变；
 - exact legacy imports、Adapter definitions与全仓Infra direct callers为零；
+- 三份X-owned integration tests中`_initial_graph`、`_legacy_graph_for`、三个v1 DTO/type name及RU-v1 codec API依赖为零；只允许raw physical metadata version literal；
 - Application Port/records/codec与Core v1 surface保持B_SU blob，等待T/W/V；
 - historical physical-v1 collision仍fail closed且零变更；
 - v2-v2、v2/recovery、v2/finalization与strict exact-v2 reader证据仍存在；
@@ -308,4 +313,3 @@ Agent完成只表示01-07X feature可交给Integrator审查，不表示`B_X`、`
 - Graphify保持用户要求的闲置状态。
 
 </cross_file_impact>
-
