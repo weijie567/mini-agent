@@ -140,17 +140,25 @@ writer-private helper全链必须显式接收expected-version map并保持相同
 
 root规则：
 
-- query必须同时限定exact logical identity与`scope_owner_customer_id=command.owner_scope.customer_id`；零行不读取该identity的private payload并返回`NOT_APPLICABLE`。
+- Conversation / Message / Run trusted-root query必须同时限定exact logical identity与`scope_owner_customer_id=command.owner_scope.customer_id`；尤其必须先以该owner-scoped方式选中并strict-validate exact Run。任一trusted root零行时，不读取该identity或Run closure的private payload、不运行global collision probe，统一返回`NOT_APPLICABLE`。
 - 每个selected root都使用static exact-v1 pair完成physical validation，并与command expected projection byte-for-byte相同；Conversation、Messages、Run任一CAS漂移为`PROJECTION_CONFLICT`。
 - Message set必须逐项锁定且数量、identity、owner、Conversation、direction/content projection与command完全相同；不得只锁current Message、按Conversation扩大扫描或信任RU payload自报owner。
 - Run必须仍为exact clean `RUNNING` root；writer通过existing no-op recovery-anchor CAS或等价single-row fence，保证与restart recovery/finalization使用同一真实Run首锁与后续canonical锁序。
 - root选择后出现duplicate、wrong physical version、owner drift或metadata/reference corruption是bounded integrity failure，不降级为absence。
 
+只有exact owner-scoped Run已经选中并通过static-v1 physical validation后，writer才运行private metadata-only collision selectors：
+
+- same-Run selector只投影`record_id`、`record_code`、`logical_identity`、`record_schema_version`、`scope_owner_customer_id`以及用于selector的`run_id`，固定查询`request_understanding_record + exact trusted run_id`并以`ORDER BY logical_identity LIMIT 2 FOR UPDATE`检测zero/exact-one/overflow；initial closure另以同样metadata-only、bounded方式探测`run_task_link_record + exact trusted run_id`，再从locked link metadata/normalized reference identity闭合目标集合。不得选择ORM entity、`envelope`、direct payload owner、JSON path或任何payload-bearing expression。
+- 每个command目标identity也先用exact code/identity的metadata-only `LIMIT 2 FOR UPDATE`探测；selected metadata的`scope_owner_customer_id`必须等于trusted scope，version必须等于writer static map。wrong-owner/wrong-version/duplicate在不读取envelope的情况下抛最窄bounded integrity error，error不得携带observed owner/identity。
+- 只有metadata owner/version通过的row，才可再次以`record_id + exact code/identity + scope_owner_customer_id=trusted owner`执行payload-bearing read，并进入static-version decode/physical parity/owner closure；不得把metadata owner反向用作authority。
+- selector的`LIMIT 2`是P0 exact current-Run cardinality的overflow sentinel，不是truncate。第二个RU、第二个RunTaskLink、同identity duplicate sentinel或selector结果在锁前后变化都整体fail closed；不得读取第二行envelope来决定结果。
+- 所有compliant v1/v2 initial writer都先锁同一exact Run，因此Run首锁是absence/predicate serialization fence；AA不新增migration/index。Integration concurrency必须证明两个AA writer及legacy-v1 writer不能在该fence后并发提交两个RU closure。
+
 same-Run RU closure在lock后必须证明：
 
 - no-task route写入前该Run没有current RU row，或只有完整byte-identical RU-v2 no-task replay；
 - initial-graph route写入前该Run没有current RU graph，或只有完整byte-identical RU-v2 initial graph replay；
-- 任意RU-v1 row、第二个RU identity、v1/v2 mix、wrong-owner row、partial desired identities、extra accepted child/Task family或相同identity不同payload都整体`PROJECTION_CONFLICT`或最窄integrity failure；
+- 任意RU-v1 row、第二个RU identity、v1/v2 mix、wrong-owner metadata、partial desired identities、extra accepted child/Task family或相同identity不同payload都整体`PROJECTION_CONFLICT`或最窄integrity failure；wrong-owner row的payload始终不可读。
 - 不得覆盖、删除、repair、backfill、rewrite或把v1历史投影为v2。
 
 ## 4. No-task exact-v2 route
@@ -288,7 +296,7 @@ required_checks:
 - `canonical full serial gate`: `uv run pytest`；预期exit 0、zero failures，既有单个credentialed deselection可以保留，warning count须如实报告且不能新增未裁决warning。
 - `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain，v1 surface不得漂移。
 - `allowlist containment`: `git diff --name-only d704b87480f0a4252744f4c009cef9a86c08fa05...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear RED→GREEN→append-only fix history。
-- `security/atomicity matrix`: first-write、exact replay、foreign/absent、stale root、v1 collision、owner/version/closure/CAS conflict、fault injection与bounded deterministic concurrency；预期每个APPLIED都是完整closed graph，每个non-APPLIED/exception都是records/references相对baseline零变化，errors raw-free。
+- `security/atomicity matrix`: first-write、exact replay、foreign/absent、stale root、v1 collision、second-RU identity、wrong-owner same-Run/target metadata、owner/version/closure/CAS conflict、fault injection与bounded deterministic concurrency；SQL capture必须证明trusted Run通过前不运行collision probe，probe只选择allowlisted metadata columns且从不选择`envelope`，wrong-owner envelope sentinel/secret从未materialize；预期每个APPLIED都是完整closed graph，每个non-APPLIED/exception都是records/references相对baseline零变化，errors raw-free。
 - `authoritative round-trip`: 两条writer success/replay后只通过01-07K `load_exact_run_evidence_for_owner`读取；预期no-task closure无Task family，initial closure与command parent/child/Task/RequestUnit/InputBinding/links exact相等且只含RU-v2。
 - `cross-file impact scan`: 从active owner出发扫描Application/Core/Runtime/Eval/migration/status消费者；预期AA two-file实现无需owner同步；allowlist外派生状态债只报告、不混写。
 - `independent exact-head review`: reviewed local head/tree与PR head精确相等，`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`；任一finding未关闭`BLOCK`。
