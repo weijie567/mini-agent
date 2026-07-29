@@ -110,18 +110,38 @@ def test_not_found_result_cannot_disclose_payload_or_failure_difference() -> Non
         )
 
 
-def test_found_result_accepts_optional_strict_source_version_exactly() -> None:
-    legacy_result = GetOrderResult(
-        outcome=GetOrderOutcome.FOUND,
-        order_summary=_summary(),
-    )
+def test_found_result_requires_strict_source_version_exactly() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="FOUND result requires source_version",
+    ):
+        GetOrderResult(
+            outcome=GetOrderOutcome.FOUND,
+            order_summary=_summary(),
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="FOUND result requires order_summary",
+    ):
+        GetOrderResult(outcome=GetOrderOutcome.FOUND)
+
+    with pytest.raises(
+        ValidationError,
+        match="FOUND result cannot carry failure_code",
+    ):
+        GetOrderResult(
+            outcome=GetOrderOutcome.FOUND,
+            order_summary=_summary(),
+            failure_code="UNEXPECTED",
+        )
+
     versioned_result = GetOrderResult(
         outcome=GetOrderOutcome.FOUND,
         order_summary=_summary(),
         source_version=VALID_SOURCE_VERSION,
     )
 
-    assert legacy_result.source_version is None
     assert versioned_result.source_version == VALID_SOURCE_VERSION
 
 
