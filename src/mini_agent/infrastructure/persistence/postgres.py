@@ -3146,12 +3146,12 @@ class PostgresRecordAdapter:
         self,
         command: SaveRequestUnderstandingV2NoTaskCommand,
     ) -> ConditionalWriteResult:
-        envelope = self._ru_v2_write_encode(
-            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-            command.request_understanding_record,
-        )
         try:
             with self.session_factory.begin() as session:
+                envelope = self._ru_v2_write_encode(
+                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                    command.request_understanding_record,
+                )
                 self._ru_v2_write_apply(
                     session,
                     owner_scope=command.owner_scope,
@@ -3173,57 +3173,58 @@ class PostgresRecordAdapter:
         self,
         command: CreateInitialTaskGraphV2Command,
     ) -> ConditionalWriteResult:
-        request_unit = command.initial_request_unit.initial_record
-        envelopes = (
-            self._ru_v2_write_encode(
-                P0RecordCode.TASK_RECORD,
-                command.initial_task.initial_record,
-            ),
-            self._ru_v2_write_encode(
-                P0RecordCode.REQUEST_UNIT_RECORD,
-                request_unit,
-            ),
-            self._ru_v2_write_encode(
-                P0RecordCode.INPUT_BINDING_RECORD,
-                command.input_binding.record,
-                external_references=(
-                    _external_reference(
-                        "request_unit_id",
-                        P0RecordCode.REQUEST_UNIT_RECORD,
-                        "request_unit_id",
-                        command.input_binding.request_unit_id,
-                    ),
-                ),
-            ),
-            self._ru_v2_write_encode(
-                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-                command.request_understanding.record,
-                logical_children=(
-                    command.request_understanding.accepted_delta,
-                ),
-            ),
-            self._ru_v2_write_encode(
-                P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
-                command.conversation_task_link,
-            ),
-            self._ru_v2_write_encode(
-                P0RecordCode.RUN_TASK_LINK_RECORD,
-                command.run_task_link.active_record,
-            ),
-        )
-        ru_envelope = next(
-            envelope
-            for envelope in envelopes
-            if envelope.record_code
-            is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-        )
-        run_link_envelope = next(
-            envelope
-            for envelope in envelopes
-            if envelope.record_code is P0RecordCode.RUN_TASK_LINK_RECORD
-        )
         try:
             with self.session_factory.begin() as session:
+                request_unit = command.initial_request_unit.initial_record
+                envelopes = (
+                    self._ru_v2_write_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.initial_task.initial_record,
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        request_unit,
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.INPUT_BINDING_RECORD,
+                        command.input_binding.record,
+                        external_references=(
+                            _external_reference(
+                                "request_unit_id",
+                                P0RecordCode.REQUEST_UNIT_RECORD,
+                                "request_unit_id",
+                                command.input_binding.request_unit_id,
+                            ),
+                        ),
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                        command.request_understanding.record,
+                        logical_children=(
+                            command.request_understanding.accepted_delta,
+                        ),
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                        command.conversation_task_link,
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.RUN_TASK_LINK_RECORD,
+                        command.run_task_link.active_record,
+                    ),
+                )
+                ru_envelope = next(
+                    envelope
+                    for envelope in envelopes
+                    if envelope.record_code
+                    is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                )
+                run_link_envelope = next(
+                    envelope
+                    for envelope in envelopes
+                    if envelope.record_code
+                    is P0RecordCode.RUN_TASK_LINK_RECORD
+                )
                 self._ru_v2_write_apply(
                     session,
                     owner_scope=command.owner_scope,

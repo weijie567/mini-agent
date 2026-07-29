@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import threading
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -266,50 +266,21 @@ def _database_snapshot(
     adapter: PostgresRecordAdapter,
 ) -> tuple[tuple[object, ...], tuple[object, ...]]:
     with adapter.session_factory() as session:
+        record_columns = tuple(P0RecordModel.__table__.columns)
+        reference_columns = tuple(P0RecordReferenceModel.__table__.columns)
         rows = tuple(
-            (
-                str(row.record_id),
-                row.record_code,
-                row.record_schema_version,
-                json.dumps(
-                    row.logical_identity,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                row.scope_owner_customer_id,
-                str(row.run_id) if row.run_id is not None else None,
-                json.dumps(
-                    row.envelope,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                row.stored_at,
+            tuple(
+                deepcopy(getattr(row, column.name))
+                for column in record_columns
             )
             for row in session.scalars(
                 select(P0RecordModel).order_by(P0RecordModel.record_id)
             )
         )
         references = tuple(
-            (
-                str(reference.reference_id),
-                reference.source_record_code,
-                json.dumps(
-                    reference.source_logical_identity,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                reference.ordinal,
-                reference.relation,
-                reference.target_record_code,
-                json.dumps(
-                    reference.target_logical_identity,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
+            tuple(
+                deepcopy(getattr(reference, column.name))
+                for column in reference_columns
             )
             for reference in session.scalars(
                 select(P0RecordReferenceModel).order_by(
@@ -615,7 +586,7 @@ async def test_mid_reference_failure_rolls_back_every_v2_row_and_reference(
     try:
         await _seed_v2_roots(adapter, command)
         baseline = _database_snapshot(adapter)
-        event.listen(engine, "before_cursor_execute", fail_reference_insert)
+        event.listen(engine, "after_cursor_execute", fail_reference_insert)
         with pytest.raises(
             RuntimeError,
             match="injected RU-v2 reference failure",
@@ -623,14 +594,10 @@ async def test_mid_reference_failure_rolls_back_every_v2_row_and_reference(
             await adapter.create_initial_task_graph_v2_if_current(command)
         assert _database_snapshot(adapter) == baseline
     finally:
-        if event.contains(
-            engine,
-            "before_cursor_execute",
-            fail_reference_insert,
-        ):
+        if event.contains(engine, "after_cursor_execute", fail_reference_insert):
             event.remove(
                 engine,
-                "before_cursor_execute",
+                "after_cursor_execute",
                 fail_reference_insert,
             )
         engine.dispose()
@@ -988,22 +955,66 @@ async def test_private_v2_fault_matrix_rolls_back_to_exact_baseline(
         await _seed_v2_roots(adapter, command)
         baseline = _database_snapshot(adapter)
         if fault_site == "versioned_encode":
+            original_encode = (
+                postgres_persistence.encode_persistence_record_versioned
+            )
+
+            def fail_after_encode(*args, **kwargs):
+                envelope = original_encode(*args, **kwargs)
+                if envelope.record_code is P0RecordCode.TASK_RECORD:
+                    fail()
+                return envelope
+
             monkeypatch.setattr(
                 postgres_persistence,
                 "encode_persistence_record_versioned",
-                fail,
+                fail_after_encode,
             )
         elif fault_site == "versioned_decode":
+            original_encode = (
+                postgres_persistence.encode_persistence_record_versioned
+            )
+
+            def corrupt_before_decode(*args, **kwargs):
+                envelope = original_encode(*args, **kwargs)
+                if envelope.record_code is P0RecordCode.TASK_RECORD:
+                    return envelope.model_copy(
+                        update={
+                            "record_schema_version": "task_record.p0.corrupt"
+                        }
+                    )
+                return envelope
+
             monkeypatch.setattr(
                 postgres_persistence,
-                "decode_persistence_record_versioned",
-                fail,
+                "encode_persistence_record_versioned",
+                corrupt_before_decode,
             )
         elif fault_site == "physical_projection":
+            original_projection = (
+                PostgresRecordAdapter._ru_v2_write_projection_values
+            )
+
+            def fail_after_projection(
+                _cls,
+                envelope,
+                decoded,
+                *,
+                owner_customer_id,
+            ):
+                values = original_projection(
+                    envelope,
+                    decoded,
+                    owner_customer_id=owner_customer_id,
+                )
+                if envelope.record_code is P0RecordCode.TASK_RECORD:
+                    fail()
+                return values
+
             monkeypatch.setattr(
                 PostgresRecordAdapter,
                 "_ru_v2_write_projection_values",
-                classmethod(fail),
+                classmethod(fail_after_projection),
             )
         elif fault_site == "post_insert_validation":
             original_validate_row = (
@@ -1016,16 +1027,17 @@ async def test_private_v2_fault_matrix_rolls_back_to_exact_baseline(
                 row,
                 **kwargs,
             ):
-                if (
-                    row.record_code
-                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
-                ):
-                    fail()
-                return original_validate_row(
+                validated = original_validate_row(
                     session,
                     row,
                     **kwargs,
                 )
+                if (
+                    row.record_code
+                    == P0RecordCode.CONVERSATION_TASK_LINK_RECORD.value
+                ):
+                    fail()
+                return validated
 
             monkeypatch.setattr(
                 PostgresRecordAdapter,
@@ -1033,20 +1045,50 @@ async def test_private_v2_fault_matrix_rolls_back_to_exact_baseline(
                 classmethod(fail_target_row),
             )
         elif fault_site == "owner_closure":
+            original_validate_closed_rows = (
+                PostgresRecordAdapter._ru_v2_write_validate_closed_rows
+            )
+
+            def fail_after_owner_closure(
+                _cls,
+                rows,
+                *,
+                owner_customer_id,
+            ):
+                original_validate_closed_rows(
+                    rows,
+                    owner_customer_id=owner_customer_id,
+                )
+                fail()
+
             monkeypatch.setattr(
                 PostgresRecordAdapter,
                 "_ru_v2_write_validate_closed_rows",
-                classmethod(fail),
+                classmethod(fail_after_owner_closure),
             )
         else:
+            original_touch_recovery_anchor = (
+                PostgresRecordAdapter._touch_recovery_anchor
+            )
+
+            def fail_after_recovery_anchor(session, run_row):
+                original_touch_recovery_anchor(session, run_row)
+                fail()
+
             monkeypatch.setattr(
                 PostgresRecordAdapter,
                 "_touch_recovery_anchor",
-                staticmethod(fail),
+                staticmethod(fail_after_recovery_anchor),
             )
 
-        with pytest.raises(RuntimeError, match=marker):
-            await adapter.create_initial_task_graph_v2_if_current(command)
+        if fault_site == "versioned_decode":
+            with pytest.raises(P0PersistenceIntegrityError) as raised:
+                await adapter.create_initial_task_graph_v2_if_current(command)
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
+        else:
+            with pytest.raises(RuntimeError, match=marker):
+                await adapter.create_initial_task_graph_v2_if_current(command)
         assert _database_snapshot(adapter) == baseline
     finally:
         engine.dispose()
@@ -1059,6 +1101,7 @@ async def test_record_insert_database_failure_is_bounded_and_zero_write(
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     command = _initial_v2_graph()
     secret = "INJECTED_RECORD_INSERT_DATABASE_SECRET"
+    record_insert_count = 0
 
     def fail_record_insert(
         _connection,
@@ -1068,13 +1111,16 @@ async def test_record_insert_database_failure_is_bounded_and_zero_write(
         _context,
         _executemany,
     ) -> None:
+        nonlocal record_insert_count
         if "insert into p0_records" in statement.lower():
-            raise SQLAlchemyError(secret)
+            record_insert_count += 1
+            if record_insert_count == 2:
+                raise SQLAlchemyError(secret)
 
     try:
         await _seed_v2_roots(adapter, command)
         baseline = _database_snapshot(adapter)
-        event.listen(engine, "before_cursor_execute", fail_record_insert)
+        event.listen(engine, "after_cursor_execute", fail_record_insert)
         with pytest.raises(Exception) as captured:
             await adapter.create_initial_task_graph_v2_if_current(command)
         _assert_bounded_persistence_system_error(
@@ -1087,8 +1133,8 @@ async def test_record_insert_database_failure_is_bounded_and_zero_write(
         )
         assert _database_snapshot(adapter) == baseline
     finally:
-        if event.contains(engine, "before_cursor_execute", fail_record_insert):
-            event.remove(engine, "before_cursor_execute", fail_record_insert)
+        if event.contains(engine, "after_cursor_execute", fail_record_insert):
+            event.remove(engine, "after_cursor_execute", fail_record_insert)
         engine.dispose()
 
 
