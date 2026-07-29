@@ -565,7 +565,8 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
       "blocking_finding": "01-07T cannot reduce the Application executable catalog from 18 pairs to 17 inside its two-file ownership because Infrastructure SQLAlchemy metadata imports that catalog to generate the physical check constraint while migration 0003 must continue admitting both RU-v1 and RU-v2 physical rows",
       "remediation_packet": "01-07T-PHYSICAL-HANDOFF",
       "output_barrier": "B_T_PHYSICAL_HANDOFF",
-      "preserves_packet_id": "01-07T",
+      "preserves_packet_id": true,
+      "preserved_product_packet_id": "01-07T",
       "denominator_delta": 0,
       "physical_pair_count": 18,
       "application_current_pair_count_after_01_07T": 17,
@@ -1395,7 +1396,7 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
 | GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；D/H feature PR #59/#60形成`B_DH = 4a7e802...`，01-07N Plan/owner PR #62/#63形成remediation merge `a4b1edb...`，01-07O Plan/owner PR #64/#65形成`7332091...`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / S_U_REVIEWED_MERGED / B_SU_FORMED / X_NEXT` | activation PR #10生效；K/L/M/Q形成`B_DEPENDENCY → B_DEPENDENCY_M → B_Q`；execution-map r2 PR #107加入Y/Z/AA并固定42 denominator；PR #108–#124形成`B_YZ`、`B_J_READY`与scoped `B_ACTIVE = 7f92b5e...`；PR #130–#133完成S/U Plan与feature串行合并并形成`B_SU = f037582...` |
+| GSD | `ACTIVE / EFFECTIVE / S_U_X_REVIEWED_MERGED / B_X_FORMED / T_PHYSICAL_HANDOFF_NEXT` | activation PR #10生效；K/L/M/Q形成`B_DEPENDENCY → B_DEPENDENCY_M → B_Q`；execution-map r2 PR #107加入Y/Z/AA并固定42 denominator；PR #108–#124形成`B_YZ`、`B_J_READY`与scoped `B_ACTIVE = 7f92b5e...`；PR #130–#136完成S/U/X Plan与feature串行合并并形成`B_X = 9e8c70d...` |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
@@ -1403,7 +1404,7 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J_S_U_X REVIEWED_MERGED / B_X_FORMED / T_PHYSICAL_HANDOFF_NEXT` | X已从原exact `B_SU`完成review、latest-integration replay与串行merge；`B_X = 9e8c70d...`、tree `4b01798...`通过focused+neighbor 152与canonical full `1974 passed, 1 deselected, 12 warnings`。T preflight发现physical catalog ownership blocker，下一步只能从B_X执行01-07T-PHYSICAL-HANDOFF |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U/X、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为35/42；Phase目录中有40份`*-PLAN.md` artifact与24份Summary。PR #107、01-07X preflight remediation与本次01-07T physical handoff remediation只修订execution/acceptance route；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact及本次handoff均不增加target denominator。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U/X、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为35/42；Phase目录中有41份`*-PLAN.md` artifact与24份Summary。PR #107、01-07X preflight remediation与本次01-07T physical handoff remediation只修订execution/acceptance route；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact及本次handoff均不增加target denominator。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
 
 Cross-file impact scan确认S/U/X Plan与feature证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`与`README.md`；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle，也不改变reviewed `B_X`。
 
