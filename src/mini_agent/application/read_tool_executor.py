@@ -28,6 +28,7 @@ from mini_agent.core.memory import (
 from mini_agent.core.order import (
     GetOrderOutcome,
     GetOrderQuery,
+    GetOrderResult,
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
@@ -70,6 +71,28 @@ def _project_tool_call(
     }
     values.update(updates)
     return ToolCallRecord(**values)
+
+
+def _canonical_get_order_result(
+    value: object,
+) -> GetOrderResult | None:
+    if (
+        type(value) is not GetOrderResult
+        or set(vars(value)) != set(GetOrderResult.model_fields)
+    ):
+        return None
+    try:
+        payload = value.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+        rebuilt = GetOrderResult.model_validate(payload, strict=True)
+    except (TypeError, ValueError):
+        return None
+    if type(rebuilt) is not GetOrderResult or rebuilt != value:
+        return None
+    return rebuilt
 
 
 class ReadToolExecutor:
@@ -252,7 +275,7 @@ class ReadToolExecutor:
         try:
             try:
                 async with asyncio.timeout(effective_timeout_ms / 1000):
-                    result = await self._get_order_port.get_order(
+                    candidate_result = await self._get_order_port.get_order(
                         GetOrderQuery(
                             customer_id=owner_scope.customer_id,
                             order_id=order_id,
@@ -276,6 +299,13 @@ class ReadToolExecutor:
                     finalized_attempt=finalized_attempt,
                     get_order_outcome=GetOrderOutcome.SYSTEM_FAILURE,
                     effective_timeout_ms=effective_timeout_ms,
+                )
+            result = _canonical_get_order_result(candidate_result)
+            candidate_result = None
+            if result is None:
+                result = GetOrderResult(
+                    outcome=GetOrderOutcome.SYSTEM_FAILURE,
+                    failure_code="ORDER_SERVICE_UNAVAILABLE",
                 )
 
             observation: OrderObservation | None = None
@@ -330,6 +360,7 @@ class ReadToolExecutor:
                     observed_at=finished_at,
                     recorded_at=finished_at,
                     visibility=ObservationVisibility.MODEL_VISIBLE,
+                    source_version=result.source_version,
                 )
                 observation_result = (
                     await self._runtime_record_port.save_observation(
