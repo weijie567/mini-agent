@@ -2987,7 +2987,7 @@ def test_ru_v2_source_collection_duplicates_fail_but_reference_duplicates_collap
     )
 
 
-def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
+def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     codec_owner_files = {
         "src/mini_agent/application/persistence.py",
@@ -2998,7 +2998,9 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         "tests/integration/test_database_migrations.py",
     }
     versioned_encode_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
+        "tests/integration/test_postgres_v2_request_understanding_writes.py",
     }
     versioned_decode_dependency_files = {
         "src/mini_agent/infrastructure/persistence/postgres.py",
@@ -3024,6 +3026,7 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         "src/mini_agent/evaluation/harness.py",
         "tests/component/evaluation/test_e2e01_artifact_consistency.py",
         "tests/integration/evaluation/test_e2e01_offline_harness.py",
+        "tests/integration/test_postgres_v2_request_understanding_writes.py",
     }
     exact_reader_matches = files_referencing(
         "ExactRunEvidencePort",
@@ -3066,6 +3069,26 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         for parent in ast.walk(postgres_tree)
         for child in ast.iter_child_nodes(parent)
     }
+    encoder_imports = [
+        imported
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "mini_agent.application.persistence"
+        for imported in node.names
+        if imported.name == "encode_persistence_record_versioned"
+    ]
+    encoder_name_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "encode_persistence_record_versioned"
+    ]
+    encoder_attribute_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "encode_persistence_record_versioned"
+    ]
     decoder_imports = [
         imported
         for node in ast.walk(postgres_tree)
@@ -3100,6 +3123,40 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         )
     ]
     postgres_rel = postgres_path.relative_to(repository_root).as_posix()
+    if postgres_rel in versioned_encode_matches:
+        assert len(encoder_imports) == 1
+        assert encoder_imports[0].asname is None
+        assert encoder_name_references
+        assert not encoder_attribute_references
+        for reference in encoder_name_references:
+            call = parent_by_node[reference]
+            assert isinstance(call, ast.Call) and call.func is reference
+
+            enclosing_function: ast.AST | None = call
+            while enclosing_function is not None and not isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                enclosing_function = parent_by_node.get(enclosing_function)
+            assert isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+            assert enclosing_function.name == "_ru_v2_write_encode"
+
+            enclosing_class: ast.AST | None = enclosing_function
+            while enclosing_class is not None and not isinstance(
+                enclosing_class,
+                ast.ClassDef,
+            ):
+                enclosing_class = parent_by_node.get(enclosing_class)
+            assert isinstance(enclosing_class, ast.ClassDef)
+            assert enclosing_class.name == "PostgresRecordAdapter"
+    else:
+        assert not encoder_imports
+        assert not encoder_name_references
+        assert not encoder_attribute_references
+
     if postgres_rel in versioned_decode_matches:
         assert len(decoder_imports) == 1
         assert decoder_imports[0].asname is None
@@ -3120,7 +3177,10 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             )
-            assert enclosing_function.name == exact_reader_method_name
+            assert (
+                enclosing_function.name == exact_reader_method_name
+                or enclosing_function.name.startswith("_ru_v2_write_")
+            )
 
             enclosing_class: ast.AST | None = enclosing_function
             while enclosing_class is not None and not isinstance(
