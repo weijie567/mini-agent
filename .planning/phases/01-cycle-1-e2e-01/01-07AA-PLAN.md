@@ -7,6 +7,8 @@ depends_on:
   - 01-07Y
   - 01-07Z
   - 01-07AA-ORACLE-FIX
+  - 01-07AA-CODEC-HANDOFF
+  - 01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT
 files_modified:
   - src/mini_agent/infrastructure/persistence/postgres.py
   - tests/integration/test_postgres_v2_request_understanding_writes.py
@@ -33,7 +35,7 @@ must_haves:
     - "01-07Y deterministic reducer output → 01-07Z exact-v2 commands → 01-07AA static-version PostgreSQL writers。"
     - "01-07K owner-scoped exact-v2 reader → writer成功后的authoritative round-trip oracle。"
     - "Memory owner atomic graph/trusted owner/exact-version/replay → same-transaction locks、closed set、zero-partial-write与bounded failure。"
-    - "Execution map r2的产品依赖仍为exact B_YZ → 01-07AA → B_J_READY；acceptance route因reviewed Application closure remediation精确收敛为B_YZ_CLOSURE_ORACLE_FIX → 01-07AA-r1 → B_J_READY，01-07J仍只能从reviewed B_J_READY启动。"
+    - "Execution map r2的产品依赖仍为exact B_YZ → 01-07AA → B_J_READY；acceptance route经reviewed Application closure与codec dependency remediation精确收敛为B_AA_CODEC_HANDOFF → 01-07AA-r2 → B_J_READY，01-07J仍只能从reviewed B_J_READY启动。"
 ---
 
 # Phase 1 Plan 01-07AA｜PostgreSQL RU-v2 atomic writers
@@ -42,7 +44,7 @@ must_haves:
 > 本Packet只冻结Infrastructure PostgreSQL writer实现。Plan、RED test或AA feature完成都不表示Runtime已调用v2 Port、`B_ACTIVE`已形成、Case/E2E已通过或产品ready。
 
 > **ACCEPTANCE REPLAY AMENDMENT**
-> 原始B_YZ donor已形成exact RED `4f6b9befece09ac89947d5c90cb8f3b307f1c3b3`与GREEN `c28d3536a5034d5ae0c3030a561952d5d75b06e1`，但其exact head因B_YZ缺少Application closure oracle remediation而不能通过01-07K round-trip gate。原branch/worktree只保留为patch provenance，不得push、送审或merge。本r1从reviewed remediation merge `119a05737a00fde219094c5bb192ceaeae84c0ad` clean创建，以fresh commits重放同一two-file RED→GREEN patch；不新增产品Packet、不改变42分母。
+> 原始B_YZ donor已形成exact RED `4f6b9befece09ac89947d5c90cb8f3b307f1c3b3`与GREEN `c28d3536a5034d5ae0c3030a561952d5d75b06e1`，但其exact head缺少Application closure oracle remediation。r1从reviewed closure remediation merge `119a05737a00fde219094c5bb192ceaeae84c0ad` clean创建，fresh RED/GREEN为`fbc91d1a658ba3506749907502b624e8ed6e30dd` / `5345e70e696942e3b7d4eaed59eaa39b5e258458`，随后因pre-writer codec dependency guard与AA contract冲突而冻结，未push、送审或merge。reviewed codec handoff merge `9a58aa6dff9895bef3425a075bf3495b4e858b74` 已形成exact `B_AA_CODEC_HANDOFF`。本r2只从该barrier clean创建，以fresh commits重放r1的同一two-file RED→GREEN patch；所有旧branch/worktree只作read-only patch provenance，不新增产品Packet、不改变42分母。
 
 > **DERIVED / NON_NORMATIVE**
 > RU-v2 aggregate、Application command、trusted owner、exact-version、atomic write与reader语义仍由Intent、Memory、Thin Slice及已经reviewed的Y/Z/K owner拥有。本Plan只消费execution map r2的AA ownership，不创建第二套canonical语义。
@@ -234,16 +236,16 @@ Integration matrix至少覆盖：
 <packet_contract>
 repository: `https://github.com/weijie567/mini-agent`
 remote: `origin`
-head_branch: `codex/e2e01-01-ru-v2-atomic-writer-r1`
+head_branch: `codex/e2e01-01-ru-v2-atomic-writer-r2`
 base_branch: `integration/e2e01-thin`
-base_sha: `119a05737a00fde219094c5bb192ceaeae84c0ad`
-base_tree: `31ffed26d8e108bfdbb33053505104b219efad4f`
+base_sha: `9a58aa6dff9895bef3425a075bf3495b4e858b74`
+base_tree: `1f8cc68f043f33e91d3f01a4f4cc9c5a3dd03587`
 original_input_barrier: `B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05`
-acceptance_base_sha: `119a05737a00fde219094c5bb192ceaeae84c0ad`
-acceptance_base_tree: `31ffed26d8e108bfdbb33053505104b219efad4f`
-input_barrier: `B_YZ_CLOSURE_ORACLE_FIX = 119a05737a00fde219094c5bb192ceaeae84c0ad / REVIEWED QUALITY-GATE REMEDIATION DESCENDANT OF B_YZ`
+acceptance_base_sha: `9a58aa6dff9895bef3425a075bf3495b4e858b74`
+acceptance_base_tree: `1f8cc68f043f33e91d3f01a4f4cc9c5a3dd03587`
+input_barrier: `B_AA_CODEC_HANDOFF = 9a58aa6dff9895bef3425a075bf3495b4e858b74 / REVIEWED CODEC DEPENDENCY-GATE REMEDIATION DESCENDANT OF B_YZ`
 output_barrier: `B_J_READY / ONLY AFTER 01-07AA FEATURE EXACT-HEAD AND LATEST-INTEGRATION OVERLAY REVIEWED-SERIAL-MERGED`
-worktree_id: `e2e01-01-ru-v2-atomic-writer-r1`
+worktree_id: `e2e01-01-ru-v2-atomic-writer-r2`
 writer: `Infrastructure PostgreSQL v2 Request Understanding writer sole writer, supervised by /root Integrator`
 agent_role: `infra-engineer`
 active_routing: `false`
@@ -252,7 +254,8 @@ denominator_delta: `0`
 planning_and_owner_provenance:
 
 - original product input barrier/tree `B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05` / `1162ba009147c5c8cefb8a0c2bc39254b96facef`
-- replacement acceptance base/tree `B_YZ_CLOSURE_ORACLE_FIX = 119a05737a00fde219094c5bb192ceaeae84c0ad` / `31ffed26d8e108bfdbb33053505104b219efad4f`
+- first replacement acceptance base/tree `B_YZ_CLOSURE_ORACLE_FIX = 119a05737a00fde219094c5bb192ceaeae84c0ad` / `31ffed26d8e108bfdbb33053505104b219efad4f`
+- final replacement acceptance base/tree `B_AA_CODEC_HANDOFF = 9a58aa6dff9895bef3425a075bf3495b4e858b74` / `1f8cc68f043f33e91d3f01a4f4cc9c5a3dd03587`
 - 01-07Y final exact feature head/tree `04d2cfe9b1db0eba5321f389d5578b1af035ba53` / `4e3d338ab2e4735478872f77e11764a5f2072b7f`
 - 01-07Y reviewed merge `d4777ac760f67875657deefcc8df20785bd9bc2d`
 - 01-07Z final exact feature head/tree `61d47fa1c84d42c7f41da879af52e063505f31f2` / `7f8527128fcd7fabaee6b255bcf6d012ef7a8e0d`
@@ -262,10 +265,12 @@ planning_and_owner_provenance:
 - Intent / Memory / Thin Slice owner blobs `456be9c7d7884e2a58c4d07b867765ed336aa6f5` / `5c27ba3bd2ed74e5164bdd0812133041ed96f242` / `233a9c06ef6ef9300bef1a0e4f86659b0ec26a13`
 - original AA Plan reviewed head/merge/blob `a80b1b1e35509ade685b3bc3e083a51a126c9756` / `3d0d3d557960bbfd3267d321d485ad623f035924` / `a42295cb5402fbd4af6cb17679262e985cf43101`
 - original donor RED/GREEN commits `4f6b9befece09ac89947d5c90cb8f3b307f1c3b3` / `c28d3536a5034d5ae0c3030a561952d5d75b06e1`；per-commit stable patch-id `10a3ab02bf8b2dc2a9ad478fefdfa370a7faa907` / `eede66b91e3d0fda9b1b08fdd39a88e4f0b44c0a`；cumulative stable patch-id `fe8112bcddc83c9c45c94f8cc37a2c5598aff611`
+- frozen r1 donor branch/head/tree `codex/e2e01-01-ru-v2-atomic-writer-r1` / `5345e70e696942e3b7d4eaed59eaa39b5e258458` / `790564947a929ec7624974f784127b84d435ed68`；RED/GREEN commits `fbc91d1a658ba3506749907502b624e8ed6e30dd` / `5345e70e696942e3b7d4eaed59eaa39b5e258458`；subjects、per-commit与cumulative patch-id精确保持原donor值；不得push、review或merge
 - donor final source/test blobs `f3049ea9781270e6ea707f689e4adf341853f86d` / `7fc5beb5fd87dd8075804128738ad7e353449395`
 - closure oracle Plan [PR #113](https://github.com/weijie567/mini-agent/pull/113) reviewed merge/tree `02a691f0010765f4a5892d09e0ef5ae8b240ef9e` / `359e3f9faef643196d7f300b863d43a451f0ba6e`
 - closure oracle feature [PR #114](https://github.com/weijie567/mini-agent/pull/114) reviewed head/merge/tree `a968330127f47cfc5fa7ba0044af093a20a65b69` / `119a05737a00fde219094c5bb192ceaeae84c0ad` / `31ffed26d8e108bfdbb33053505104b219efad4f`；post-merge Application/Ports `373 passed`、full `1950 passed, 1 deselected`
-- official 01-07AA r1 acceptance amendment merge SHA/blob由Integrator在Plan PR reviewed merge后捕获；该planning merge不替换feature exact base `B_YZ_CLOSURE_ORACLE_FIX`
+- codec handoff Plan / scope amendment / feature PR `#116` / `#117` / `#118`；reviewed merge `8cd842cd4cc2605de506011a2f979dedc998a2ed` / `4eaf9a5a791d04494248e650ba24e75437954489` / `9a58aa6dff9895bef3425a075bf3495b4e858b74`；feature merge tree `1f8cc68f043f33e91d3f01a4f4cc9c5a3dd03587`精确等于reviewed overlay tree；post-merge focused `1 passed`、Application/Ports `251 passed`、full `1950 passed, 1 deselected, 12 warnings`
+- official 01-07AA r2 acceptance amendment merge SHA/blob由Integrator在本Plan PR reviewed merge后捕获；该planning merge不替换feature exact base `B_AA_CODEC_HANDOFF`
 
 owned_files_at_base:
 
@@ -289,7 +294,8 @@ canonical_inputs:
 - `docs/architecture/intent-design-reference.md` durable RU-v2 aggregate、accepted child、Task effect、provenance与replay。
 - `docs/architecture/memory-design-reference.md` trusted owner、exact-version、atomic graph、physical parity、conditional write与zero-partial-write。
 - `docs/implementation/e2e01-thin-slice-implementation-spec.md` scoped RU-v2 mapping、PostgreSQL order、failure matrix与recovery boundary。
-- `docs/implementation/e2e01-thin-slice-multi-agent-plan.md` reviewed r2 `B_YZ → 01-07AA → B_J_READY`、two-file ownership与barrier nonclaims；remediation只替换acceptance base，不改变该产品依赖。
+- `docs/implementation/e2e01-thin-slice-multi-agent-plan.md` reviewed r2 `B_YZ → 01-07AA → B_J_READY`、two-file ownership与barrier nonclaims；closure与codec remediation只替换acceptance base，不改变该产品依赖。
+- `.planning/phases/01-cycle-1-e2e-01/01-07AA-CODEC-HANDOFF-PLAN.md` 与 `01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT-PLAN.md`：reviewed dependency guard handoff、bounded static dependency proof与Postgres positive use-site containment。
 - 01-07Y reviewed Core reducer、01-07Z reviewed exact-v2 commands/Ports、01-07K reviewed exact-v2 owner-scoped reader、B_YZ现有PostgreSQL adapter，以及reviewed closure oracle fix。
 
 dependencies:
@@ -299,21 +305,22 @@ dependencies:
 - `01-07K`: `load_exact_run_evidence_for_owner` authoritative exact-v2 round-trip reader。
 - `01-07Q`: RU-v2 active public codec mapping；AA仍必须显式调用versioned codec，不可依赖active selection。
 - `01-07AA closure oracle remediation`: reviewed [PR #114](https://github.com/weijie567/mini-agent/pull/114)让`ExactRunEvidenceClosure`复用Z command的order-id normalizer、精确绑定source tuple并清除target error的raw input；形成replacement acceptance base `119a05737a00fde219094c5bb192ceaeae84c0ad`。
+- `01-07AA codec dependency remediation`: reviewed PR #116–#118让dependency guard接纳scoped writer/oracle依赖、明确其非Python sandbox，并正向冻结Postgres exact codec use-site；形成final acceptance base `B_AA_CODEC_HANDOFF = 9a58aa6dff9895bef3425a075bf3495b4e858b74`。
 - PostgreSQL migrations/physical v2 pair from01-07P已经存在；AA不得修改migration chain。
 
 required_checks:
 
 - `preflight containment`: actual repository/remote/head branch/base branch/worktree/base SHA/tree逐项等于本Packet；worktree clean；new test path在base为ABSENT；预期`PASS`，任一偏差`BLOCK`。
 - `adapter precheck`: collaboration runtime必须真实提供本Packet声明的`infra-engineer`能力，且唯一writer明确为执行本Packet的`/root`；只记录availability，不授权新Agent、第二writer或共享checkout写入；预期`PASS`，role缺失或writer不唯一时`BLOCK`。
-- `donor containment`: original donor branch/head `codex/e2e01-01-ru-v2-atomic-writer` / `c28d3536a5034d5ae0c3030a561952d5d75b06e1`只作read-only patch provenance，不得push、review、PR、merge、rebase或amend。两个donor commit分别只改test/source，subject、patch-id与final blobs等于本Packet冻结值。
-- `RED provenance`: r1从replacement exact base clean创建，只重放donor RED patch为fresh first commit；commit只增加`tests/integration/test_postgres_v2_request_understanding_writes.py`，patch-id等于`10a3ab02bf8b2dc2a9ad478fefdfa370a7faa907`，test blob等于`7fc5beb5fd87dd8075804128738ad7e353449395`，`postgres.py`仍为replacement base blob。focused命令预期non-zero且失败只来自两个missing methods或明确列出的static-version/atomic behavior，环境/migration/test-construction失败`BLOCK`。
-- `GREEN replay`: r1 second commit只重放donor GREEN source patch，patch-id等于`eede66b91e3d0fda9b1b08fdd39a88e4f0b44c0a`，source blob等于`f3049ea9781270e6ea707f689e4adf341853f86d`，累计patch-id等于`fe8112bcddc83c9c45c94f8cc37a2c5598aff611`；fresh SHA允许变化，两个subjects与顺序必须保持。任何差异或冲突先`BLOCK`，不得手工扩大patch。
+- `donor containment`: original donor branch/head `codex/e2e01-01-ru-v2-atomic-writer` / `c28d3536a5034d5ae0c3030a561952d5d75b06e1`与r1 donor branch/head `codex/e2e01-01-ru-v2-atomic-writer-r1` / `5345e70e696942e3b7d4eaed59eaa39b5e258458`只作read-only patch provenance，不得push、review、PR、merge、rebase或amend。r1两个donor commits `fbc91d1…` / `5345e70…`分别只改test/source，subject、patch-id与final blobs等于本Packet冻结值。
+- `RED provenance`: r2从exact `B_AA_CODEC_HANDOFF` clean创建，只重放r1 RED `fbc91d1a658ba3506749907502b624e8ed6e30dd`为fresh first commit；commit只增加`tests/integration/test_postgres_v2_request_understanding_writes.py`，patch-id等于`10a3ab02bf8b2dc2a9ad478fefdfa370a7faa907`，test blob等于`7fc5beb5fd87dd8075804128738ad7e353449395`，`postgres.py`仍为base blob `f2c79015c19e53b3a2cc75af46413e9b693568f6`。focused命令预期non-zero且失败只来自两个missing methods或明确列出的static-version/atomic behavior，环境/migration/test-construction失败`BLOCK`。
+- `GREEN replay`: r2 second commit只重放r1 GREEN `5345e70e696942e3b7d4eaed59eaa39b5e258458`，patch-id等于`eede66b91e3d0fda9b1b08fdd39a88e4f0b44c0a`，source blob等于`f3049ea9781270e6ea707f689e4adf341853f86d`，累计patch-id等于`fe8112bcddc83c9c45c94f8cc37a2c5598aff611`；fresh SHA允许变化，两个subjects与顺序必须保持。任何差异或冲突先`BLOCK`，不得手工扩大patch。
 - `focused GREEN`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q`；预期exit 0、zero failures/skip/xfail。
 - `neighbor regression`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_record_adapters.py -q`；预期exit 0、zero failures/skip/xfail。
 - `canonical environment`: `uv sync --all-groups`、`docker compose up --wait -d db`、`docker compose --profile test up --wait -d db-test`与`uv run alembic upgrade head`依次从仓库根执行；预期全部exit 0、dev/test database healthy、migration head，无dependency/lock/migration/source drift。
 - `canonical full serial gate`: `uv run pytest`；预期exit 0、zero failures，既有单个credentialed deselection可以保留，warning count须如实报告且不能新增未裁决warning。
 - `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain；v1 public signature、legacy encode/decode/persist call graph及无collision behavior不得漂移，protected method唯一允许的diff是Run锁后调用shared metadata-only collision fence。
-- `allowlist containment`: `git diff --name-only 119a05737a00fde219094c5bb192ceaeae84c0ad...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear replay RED→GREEN→append-only fix history。
+- `allowlist containment`: `git diff --name-only 9a58aa6dff9895bef3425a075bf3495b4e858b74...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear replay RED→GREEN→append-only fix history。
 - `security/atomicity matrix`: first-write、exact replay、foreign/absent、stale root、v1 collision、second-RU identity、wrong-owner same-Run/target metadata、owner/version/closure/CAS conflict、fault injection与bounded deterministic concurrency；SQL capture必须证明trusted Run通过前不运行collision probe，probe只选择allowlisted metadata columns且从不选择`envelope`，wrong-owner envelope sentinel/secret从未materialize；预期每个APPLIED都是完整closed graph，每个non-APPLIED/exception都是records/references相对baseline零变化，errors raw-free。
 - `authoritative round-trip`: 两条writer success/replay后只通过01-07K `load_exact_run_evidence_for_owner`读取；预期no-task closure无Task family，initial closure与command parent/child/Task/RequestUnit/InputBinding/links exact相等且只含RU-v2。
 - `cross-file impact scan`: 从active owner出发扫描Application/Core/Runtime/Eval/migration/status消费者；预期AA two-file实现无需owner同步；allowlist外派生状态债只报告、不混写。
@@ -324,7 +331,7 @@ required_checks:
 done_when:
 
 - RED→GREEN与任何append-only remediation均在线性feature history中可复现；
-- original donor保持未推送/未送审/未合并，r1前两个fresh commits与冻结donor逐commit及累计patch equivalence成立；
+- original donor与r1 donor保持未推送/未送审/未合并，r2前两个fresh commits与冻结r1 donor逐commit及累计patch equivalence成立；
 - actual changed-files精确等于two-file allowlist，所有required_checks达到上述预期；
 - 两个exact-v2 Port writer通过static-version、owner lock、atomic/replay/conflict、bounded failure与01-07K round-trip gate；
 - exact feature head与latest-integration overlay分别取得独立`0/0/0/0` review；
@@ -336,7 +343,7 @@ handoff_to: `/root Integrator；由Integrator执行exact-head/overlay裁决、Gi
 
 handoff_format:
 
-- `identity`: repository、remote、r1 feature branch/worktree ID、original barrier、replacement base SHA/tree、donor/r1 final head/tree、linear commit SHAs/subjects；
+- `identity`: repository、remote、r2 feature branch/worktree ID、original barrier、final replacement base SHA/tree、original/r1 donor final head/tree、r2 linear commit SHAs/subjects；
 - `scope`: expected/actual changed-files、owned/forbidden containment结果、dirty/untracked/merge-commit检查；
 - `verification`: RED失败、focused、neighbor、db health、Alembic、full、mechanical source、atomicity/concurrency/fault/replay、01-07K round-trip逐项命令/exit/count；
 - `review`: exact-head reviewer/verdict/finding resolution；latest integration SHA/tree、patch-id、synthetic tree、overlay reviewer/verdict；
@@ -346,13 +353,13 @@ handoff_format:
 contract_changes: `NONE to canonical owners and Application/Core contracts. Infrastructure implements two already-reviewed exact-v2 Port methods and adds writer-private static-version mechanics.`
 security_impact: `YES — private owner-scoped write path. Trusted owner roots remain server supplied; absence/unauthorized stays indistinguishable; all selected roots and written closure remain same-owner; bounded errors contain no raw content/SQL/secret; every non-APPLIED or exception path proves zero partial writes.`
 eval_impact: `YES — adds Integration component evidence for exact-v2 persistence, reader round-trip, replay, collision, atomic failure and concurrency. Does not activate or pass Trajectory/E2E Case lifecycle.`
-rollback: `Revert only the reviewed AA feature merge. The new test file and postgres.py implementation are additive; existing v1 writer, migration and Application/Core contracts remain. After revert B_J_READY/B_ACTIVE claims are invalid and 01-07J must remain blocked.`
+rollback: `分阶段逆序普通revert，禁止reset、force-push或直接改写integration历史：(1) r2未merge时，关闭/放弃feature PR并删除本地feature Worktree即可，B_J_READY仍未形成；(2) AA已merge但01-07J尚未merge时，普通revert reviewed AA feature merge，撤销B_J_READY claim并阻断01-07J；(3) 01-07J、B_ACTIVE或任一后继已形成时，先阻断新流量/后继签发，按依赖逆序普通revert J及所有后继，再普通revert AA feature merge，最后撤销B_ACTIVE/B_J_READY claims。AA新增test与postgres.py实现是additive，既有v1 writer、migration与Application/Core contracts保留；任何阶段都必须重跑当时适用的post-revert gates。`
 
 handoff:
 
-- report exact donor/r1 branch/head、original B_YZ、replacement base and linear commit list；
-- report donor→r1 per-commit/cumulative patch equivalence与final blob equality；
-- report actual changed files and `git diff --name-only B_YZ_CLOSURE_ORACLE_FIX...HEAD` exact equality to two-file allowlist；
+- report exact original/r1 donor branch/head、r2 branch/head、original B_YZ、final `B_AA_CODEC_HANDOFF` base and linear commit list；
+- report r1 donor→r2 per-commit/cumulative patch equivalence与final blob equality；
+- report actual changed files and `git diff --name-only B_AA_CODEC_HANDOFF...HEAD` exact equality to two-file allowlist；
 - report RED failure reason and GREEN/final command results；
 - report static expected-version map and proof that v2 routes do not call legacy persist/decode/physical-validation chain；
 - report no-task/initial graph first write, replay, collision, concurrency, fault-injection and01-07K reader round-trip evidence；
@@ -365,7 +372,7 @@ handoff:
 <task type="auto" tdd="true">
   <name>Task 1: RED replay — freeze two exact-v2 PostgreSQL writer oracles</name>
   <files>tests/integration/test_postgres_v2_request_understanding_writes.py</files>
-  <action>从exact replacement base，以普通cherry-pick重放donor RED `4f6b9befece09ac89947d5c90cb8f3b307f1c3b3`；不得携带GREEN或手工编辑。验证fresh commit只增加新owned Integration test、subject exact、patch-id与test blob等于冻结值，`postgres.py`仍为base blob。该test复用现有public fixtures/builders而不修改shared bootstrap；构造Z exact commands，覆盖Section 1–6的first-write、01-07K round-trip、exact replay、root/owner/version/closure/CAS conflicts、v1 collision、no-task/initial互斥、fault injection、bounded errors和deterministic concurrency。static source assertions/monkeypatch tripwires证明v2 methods不调用legacy encoder/persist/decode/projection/physical-validation helpers。</action>
+  <action>从exact `B_AA_CODEC_HANDOFF`，以普通cherry-pick重放r1 donor RED `fbc91d1a658ba3506749907502b624e8ed6e30dd`；不得携带GREEN或手工编辑。验证fresh commit只增加新owned Integration test、subject exact、patch-id与test blob等于冻结值，`postgres.py`仍为base blob。该test复用现有public fixtures/builders而不修改shared bootstrap；构造Z exact commands，覆盖Section 1–6的first-write、01-07K round-trip、exact replay、root/owner/version/closure/CAS conflicts、v1 collision、no-task/initial互斥、fault injection、bounded errors和deterministic concurrency。static source assertions/monkeypatch tripwires证明v2 methods不调用legacy encoder/persist/decode/projection/physical-validation helpers。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q</automated>
     RED必须非零且只因两个Port methods或writer-private exact-version behavior尚未实现；`postgres.py` blob仍等于replacement base。
@@ -376,7 +383,7 @@ handoff:
 <task type="auto" tdd="true">
   <name>Task 2: GREEN replay — implement static-version no-task and initial-graph transactions</name>
   <files>src/mini_agent/infrastructure/persistence/postgres.py</files>
-  <action>在RED已真实复现后，以普通cherry-pick重放donor GREEN `c28d3536a5034d5ae0c3030a561952d5d75b06e1`；验证fresh second commit只改`postgres.py`、subject exact、per-commit/cumulative patch-id与source/test final blobs等于冻结值。该patch只在PostgresRecordAdapter及module-private surface增加Z两个Port method imports、immutable writer version map、versioned encode/decode/projection/persist/physical parity/owner closure helpers和两个transactional methods。先稳定锁定trusted roots与same-Run closure，再执行all-new或all-exact-replay判定；按Section 4/5写入完整aggregate、touch recovery anchor并commit前重验。legacy-v1 method只增加Run锁后、target insert前的shared version-neutral metadata-only collision-fence调用，其他legacy代码、signature与codec/persist path不得修改；不得修改migration、Application/Core或其他Adapter。</action>
+  <action>在RED已真实复现后，以普通cherry-pick重放r1 donor GREEN `5345e70e696942e3b7d4eaed59eaa39b5e258458`；验证fresh second commit只改`postgres.py`、subject exact、per-commit/cumulative patch-id与source/test final blobs等于冻结值。该patch只在PostgresRecordAdapter及module-private surface增加Z两个Port method imports、immutable writer version map、versioned encode/decode/projection/persist/physical parity/owner closure helpers和两个transactional methods。先稳定锁定trusted roots与same-Run closure，再执行all-new或all-exact-replay判定；按Section 4/5写入完整aggregate、touch recovery anchor并commit前重验。legacy-v1 method只增加Run锁后、target insert前的shared version-neutral metadata-only collision-fence调用，其他legacy代码、signature与codec/persist path不得修改；不得修改migration、Application/Core或其他Adapter。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q</automated>
     两条route、static-version tripwires、reader round-trip、replay/conflict/fault/concurrency matrix全部通过。
@@ -392,7 +399,7 @@ handoff:
     <automated>uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_record_adapters.py -q</automated>
     <automated>uv run alembic upgrade head</automated>
     <automated>uv run pytest</automated>
-    <automated>git diff --check &amp;&amp; test "$(git diff --name-only 119a05737a00fde219094c5bb192ceaeae84c0ad...HEAD | sort)" = "$(printf '%s\n' src/mini_agent/infrastructure/persistence/postgres.py tests/integration/test_postgres_v2_request_understanding_writes.py | sort)"</automated>
+    <automated>git diff --check &amp;&amp; test "$(git diff --name-only 9a58aa6dff9895bef3425a075bf3495b4e858b74...HEAD | sort)" = "$(printf '%s\n' src/mini_agent/infrastructure/persistence/postgres.py tests/integration/test_postgres_v2_request_understanding_writes.py | sort)"</automated>
   </verify>
   <done>所有适用门禁通过并准确记录未执行项；feature exact head可以进入独立review。</done>
 </task>
@@ -401,8 +408,8 @@ handoff:
 
 <verification>
 
-1. Preflight精确证明r1 feature branch/worktree从`B_YZ_CLOSURE_ORACLE_FIX=119a057...`创建；Plan amendment PR merge只作为issuance evidence，不替换feature base。
-2. 原B_YZ donor保持read-only、不push/review/merge；r1两个fresh commits逐一重放exact donor RED/GREEN并证明subject、patch-id、blob与顺序等价。RED只改new Integration test且失败只因AA missing writer surface/behavior；GREEN及fix保持two-file allowlist。
+1. Preflight精确证明r2 feature branch/worktree从`B_AA_CODEC_HANDOFF=9a58aa6...`创建；本Plan amendment PR merge只作为issuance evidence，不替换feature base。
+2. 原B_YZ donor与r1 donor保持read-only、不push/review/merge；r2两个fresh commits逐一重放exact r1 RED/GREEN并证明subject、patch-id、blob与顺序等价。RED只改new Integration test且失败只因AA missing writer surface/behavior；GREEN及fix保持two-file allowlist。
 3. independent exact-head review检查`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`，所有finding append-only关闭。
 4. PR最初为draft，head SHA精确等于reviewed local head；不得direct push integration或main。
 5. merge前以latest `integration/e2e01-thin`重放同一feature patch，记录base SHA/tree、patch-id、synthetic tree、focused/neighbor/Alembic/full结果并取得第二份independent overlay PASS。
