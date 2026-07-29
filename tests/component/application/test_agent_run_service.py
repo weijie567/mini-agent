@@ -447,6 +447,7 @@ class ModelSpy:
         bound_order_id: str = "O-1001",
         proposed_order_id: str = "O-1001",
         requested_tool_name: str = "get_order",
+        task_candidate_count: int = 1,
         ru_protocol_error: bool = False,
         input_fault: bool = False,
         presentation_protocol_error: bool = False,
@@ -455,6 +456,7 @@ class ModelSpy:
         self.bound_order_id = bound_order_id
         self.proposed_order_id = proposed_order_id
         self.requested_tool_name = requested_tool_name
+        self.task_candidate_count = task_candidate_count
         self.ru_protocol_error = ru_protocol_error
         self.input_fault = input_fault
         self.presentation_protocol_error = presentation_protocol_error
@@ -489,7 +491,7 @@ class ModelSpy:
                 uncertainties=(),
                 source_message_refs=(message_ref,),
             ),
-            task_delta_candidates=(
+            task_delta_candidates=tuple(
                 TaskDeltaCandidate(
                     candidate_id=uuid4(),
                     operation=TaskDeltaOperation.ADD_GOAL,
@@ -507,7 +509,8 @@ class ModelSpy:
                         ),
                     ),
                     confidence=0.98,
-                ),
+                )
+                for _ in range(self.task_candidate_count)
             ),
             next_move_candidate=NextMove(
                 kind=NextMoveKind.CALL_TOOL,
@@ -1243,6 +1246,39 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
         result=result,
         with_task=False,
     )
+
+
+@pytest.mark.parametrize("task_candidate_count", [0, 2])
+def test_unscoped_v2_outcomes_fail_without_write_or_product_completion(
+    task_candidate_count: int,
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(
+        events,
+        task_candidate_count=task_candidate_count,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="Request Understanding outcome is not routable",
+    ):
+        _run(service)
+
+    assert "initial_graph_v2_saved" not in events
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert runtime.observation_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_no_task_completion_commits_result_message_and_run_stopped_once() -> None:
