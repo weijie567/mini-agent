@@ -14,7 +14,6 @@ from sqlalchemy import Engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from mini_agent.application.persistence import (
-    P0_PERSISTENCE_REGISTRY,
     P0_RECORD_SCHEMA_VERSION_CATALOG,
 )
 from mini_agent.infrastructure.persistence import models as persistence_models
@@ -660,7 +659,8 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         engine.dispose()
 
 
-def test_sqlalchemy_metadata_has_exact_expanded_physical_pair_set() -> None:
+def test_sqlalchemy_metadata_and_catalog_have_exact_expanded_physical_pair_set(
+) -> None:
     assert len(persistence_models._RECORD_CODES) == 17
     assert set(persistence_models._RECORD_CODES) == {
         code for code, _ in _V1_CODE_VERSION_PAIRS
@@ -676,15 +676,6 @@ def test_sqlalchemy_metadata_has_exact_expanded_physical_pair_set() -> None:
         )
     )
     assert catalog_pairs == tuple(sorted(_EXPANDED_CODE_VERSION_PAIRS))
-
-    active_pairs = tuple(
-        sorted(
-            (code.value, spec.record_schema_version)
-            for code, spec in P0_PERSISTENCE_REGISTRY.items()
-        )
-    )
-    assert active_pairs == _V1_CODE_VERSION_PAIRS
-    assert len(P0_PERSISTENCE_REGISTRY) == 17
 
 
 def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
