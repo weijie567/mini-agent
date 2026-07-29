@@ -82,6 +82,8 @@ class GetOrderResult(RuntimePrivateModel):
                 raise ValueError("FOUND result requires order_summary")
             if self.failure_code is not None:
                 raise ValueError("FOUND result cannot carry failure_code")
+            if self.source_version is None:
+                raise ValueError("FOUND result requires source_version")
         else:
             if self.order_summary is not None:
                 raise ValueError("non-FOUND result cannot carry order_summary")
