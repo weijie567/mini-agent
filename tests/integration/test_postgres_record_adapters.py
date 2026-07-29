@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
 import json
 import sys
 import threading
@@ -39,6 +41,7 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
 )
+from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
 _COMPONENT_APPLICATION_TESTS = (
@@ -60,6 +63,85 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture(scope="module")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def test_postgres_request_understanding_surface_is_v2_only() -> None:
+    production_tree = ast.parse(inspect.getsource(postgres_persistence))
+    adapter_class = next(
+        node
+        for node in production_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PostgresRecordAdapter"
+    )
+    imported_names = {
+        alias.asname or alias.name
+        for node in production_tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    adapter_methods = {
+        node.name
+        for node in adapter_class.body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+    legacy_types = {
+        "AcceptedTaskDelta",
+        "CreateInitialTaskGraphCommand",
+        "RequestUnderstandingRecord",
+    }
+    legacy_methods = {
+        "create_initial_task_graph_if_current",
+        "load_accepted_task_delta_for_owner",
+        "load_request_understanding_for_owner",
+    }
+    assert imported_names.isdisjoint(legacy_types)
+    assert adapter_methods.isdisjoint(legacy_methods)
+    assert {
+        "AcceptedTaskDeltaV2",
+        "CreateInitialTaskGraphV2Command",
+        "RequestUnderstandingRecordV2",
+    } <= imported_names
+    assert {
+        "create_initial_task_graph_v2_if_current",
+        "save_request_understanding_v2_no_task_if_current",
+    } <= adapter_methods
+
+    owned_test_paths = (
+        Path(__file__),
+        Path(__file__).with_name("test_postgres_atomicity.py"),
+        Path(__file__).with_name(
+            "test_postgres_v2_request_understanding_writes.py"
+        ),
+    )
+    forbidden_test_calls = {
+        "_initial_graph",
+        "_legacy_graph_for",
+        "create_initial_task_graph_if_current",
+    }
+    for path in owned_test_paths:
+        tree = ast.parse(path.read_text())
+        called_names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        }
+        called_attributes = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+        }
+        assert (called_names | called_attributes).isdisjoint(
+            forbidden_test_calls
+        )
+
+    assert (
+        '"request_understanding_record.p0.v1"'
+        in inspect.getsource(
+            PostgresRecordAdapter._ru_v2_write_check_metadata_rows
+        )
+    )
 
 
 def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
