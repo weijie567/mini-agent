@@ -136,20 +136,14 @@ writer-private helper全链必须显式接收expected-version map并保持相同
 
 ## 3. Trusted root locks and current-Run closure
 
-两个route在同一个`session_factory.begin()`事务内完成全部precondition、lock、write、physical validation与replay判断。锁顺序固定为canonical `(record_code, logical_identity)`：
-
-1. exact owner-scoped Conversation；
-2. command中全部且仅有的referenced Message records；
-3. exact owner-scoped active Run；
-4. same Run已有RU selector与全部目标identity；
-5. initial-graph route的Task / RequestUnit / InputBinding / link target identities。
+两个route在同一个`session_factory.begin()`事务内完成全部precondition、lock、write、physical validation与replay判断。任何会取得row lock的selector都必须先形成bounded identity set，再按canonical `(record_code, logical_identity)`排序后逐项`SELECT ... FOR UPDATE`；不能先按command field顺序锁Conversation / Message再锁Run。按当前record-code值，trusted root set中的exact owner-scoped active Run是与recovery/finalization共享的首锁，随后才是Conversation与按identity稳定排序的全部referenced Message。root set锁定后，same-Run已有RU与全部目标identity也按同一canonical row key排序锁定；initial-graph route再把Task / RequestUnit / InputBinding / link target identities纳入该稳定目标集合。不得在锁间执行无界扫描、按数据库返回顺序加锁，或让no-task与initial-graph采用不同排序。
 
 root规则：
 
 - query必须同时限定exact logical identity与`scope_owner_customer_id=command.owner_scope.customer_id`；零行不读取该identity的private payload并返回`NOT_APPLICABLE`。
 - 每个selected root都使用static exact-v1 pair完成physical validation，并与command expected projection byte-for-byte相同；Conversation、Messages、Run任一CAS漂移为`PROJECTION_CONFLICT`。
 - Message set必须逐项锁定且数量、identity、owner、Conversation、direction/content projection与command完全相同；不得只锁current Message、按Conversation扩大扫描或信任RU payload自报owner。
-- Run必须仍为exact clean `RUNNING` root；writer通过existing no-op recovery-anchor CAS或等价single-row fence，保证与restart recovery/finalization使用同一真实锁序。
+- Run必须仍为exact clean `RUNNING` root；writer通过existing no-op recovery-anchor CAS或等价single-row fence，保证与restart recovery/finalization使用同一真实Run首锁与后续canonical锁序。
 - root选择后出现duplicate、wrong physical version、owner drift或metadata/reference corruption是bounded integrity failure，不降级为absence。
 
 same-Run RU closure在lock后必须证明：
