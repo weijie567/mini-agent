@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import inspect
 from datetime import UTC, datetime
 from typing import Any
@@ -386,13 +387,6 @@ class RuntimeSpy:
             self.task_history.append(self.task)
             self.request_unit_history.append(self.request_unit)
         return self.graph_result
-
-    async def create_initial_task_graph_if_current(
-        self,
-        command: object,
-    ) -> ConditionalWriteResult:
-        del command
-        raise AssertionError("active Runtime must not call the v1 writer")
 
     async def apply_task_transition_if_current(
         self,
@@ -2262,3 +2256,55 @@ def test_active_runtime_source_has_no_v1_or_source_version_fallback() -> None:
     assert 'or "order-observation.p0.v1"' not in source
     assert ".create_initial_task_graph_v2_if_current(" in source
     assert "validate_and_reduce_initial_request_v2(" in source
+
+
+def test_active_runtime_and_owned_double_expose_only_ru_v2_symbols() -> None:
+    legacy_symbols = {
+        "ModelProvider",
+        "RequestUnderstandingOutput",
+        "validate_and_reduce_initial_request",
+        "SaveRequestUnderstandingCommand",
+        "CreateInitialTaskGraphCommand",
+        "create_initial_task_graph_if_current",
+    }
+    runtime_tree = ast.parse(inspect.getsource(agent_run_service_module))
+    runtime_symbols = {
+        symbol
+        for node in ast.walk(runtime_tree)
+        for symbol in (
+            (
+                node.id
+                if isinstance(node, ast.Name)
+                else node.attr
+                if isinstance(node, ast.Attribute)
+                else node.name.rsplit(".", 1)[-1]
+                if isinstance(node, ast.alias)
+                else node.name
+                if isinstance(
+                    node,
+                    (
+                        ast.AsyncFunctionDef,
+                        ast.ClassDef,
+                        ast.FunctionDef,
+                    ),
+                )
+                else None
+            ),
+        )
+        if symbol is not None
+    }
+    owned_double_tree = ast.parse(inspect.getsource(RuntimeSpy))
+    owned_double_methods = {
+        node.name
+        for node in ast.walk(owned_double_tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+    }
+
+    assert legacy_symbols.isdisjoint(runtime_symbols)
+    assert legacy_symbols.isdisjoint(owned_double_methods)
+    assert {
+        "ModelProviderV2",
+        "validate_and_reduce_initial_request_v2",
+        "CreateInitialTaskGraphV2Command",
+        "create_initial_task_graph_v2_if_current",
+    } <= runtime_symbols | owned_double_methods
