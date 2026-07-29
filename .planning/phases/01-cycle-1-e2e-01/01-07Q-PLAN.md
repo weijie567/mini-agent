@@ -493,18 +493,25 @@ def exact(before: str, after: str, left: ast.AST, right: ast.AST) -> None:
     )
 
 
-def assignment_names(node: ast.AST) -> set[str]:
-    targets: list[ast.AST] = []
+def single_plain_assignment_name(node: ast.AST) -> str | None:
+    if any(isinstance(item, ast.NamedExpr) for item in ast.walk(node)):
+        return None
     if isinstance(node, ast.Assign):
-        targets.extend(node.targets)
-    elif isinstance(node, ast.AnnAssign):
-        targets.append(node.target)
-    return {
-        item.id
-        for target in targets
-        for item in ast.walk(target)
-        if isinstance(item, ast.Name)
-    }
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            return node.targets[0].id
+        return None
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return node.target.id
+    return None
+
+
+def mutable_assignment_counts(tree: ast.Module) -> dict[str, int]:
+    counts = {name: 0 for name in MUTABLE_ASSIGNMENTS}
+    for node in tree.body:
+        name = single_plain_assignment_name(node)
+        if name in counts:
+            counts[name] += 1
+    return counts
 
 
 def protected_nodes(
@@ -516,7 +523,7 @@ def protected_nodes(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name in mutable_functions:
                 continue
-        if assignment_names(node) & MUTABLE_ASSIGNMENTS:
+        if single_plain_assignment_name(node) in MUTABLE_ASSIGNMENTS:
             continue
         result.append(node)
     return result
@@ -526,6 +533,26 @@ before_source = base_text(SOURCE)
 after_source = Path(SOURCE).read_text(encoding="utf-8")
 before_source_tree = ast.parse(before_source)
 after_source_tree = ast.parse(after_source)
+assert mutable_assignment_counts(before_source_tree) == {
+    "P0_PERSISTENCE_REGISTRY": 1,
+    "_P0_V1_PERSISTENCE_REGISTRY": 0,
+    "P0_RECORD_SCHEMA_VERSION_CATALOG": 1,
+}
+assert mutable_assignment_counts(after_source_tree) == {
+    "P0_PERSISTENCE_REGISTRY": 1,
+    "_P0_V1_PERSISTENCE_REGISTRY": 1,
+    "P0_RECORD_SCHEMA_VERSION_CATALOG": 1,
+}
+for mutant in (
+    "P0_PERSISTENCE_REGISTRY = alias = value",
+    "P0_PERSISTENCE_REGISTRY, alias = value",
+    "[P0_PERSISTENCE_REGISTRY, alias] = value",
+    "P0_PERSISTENCE_REGISTRY = (alias := value)",
+    "owner.P0_PERSISTENCE_REGISTRY = value",
+    "owner['P0_PERSISTENCE_REGISTRY'] = value",
+):
+    mutant_node = ast.parse(mutant).body[0]
+    assert single_plain_assignment_name(mutant_node) is None
 before_protected = protected_nodes(
     before_source_tree,
     MUTABLE_SOURCE_FUNCTIONS,
