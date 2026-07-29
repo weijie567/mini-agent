@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from uuid import UUID, uuid4
 
 import pytest
@@ -56,6 +56,42 @@ class ExplodingTzInfo(tzinfo):
 
     def tzname(self, _value: datetime | None):
         return "exploding"
+
+
+class AlwaysUtcTzInfo(tzinfo):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def utcoffset(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def dst(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def tzname(self, _value: datetime | None):
+        self.reads += 1
+        return "raw-customer-B-secret"
+
+
+class FlipTzInfo(tzinfo):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def utcoffset(self, _value: datetime | None):
+        self.reads += 1
+        if self.reads <= 4:
+            return timedelta(0)
+        return timedelta(hours=8)
+
+    def dst(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def tzname(self, _value: datetime | None):
+        self.reads += 1
+        return "raw-customer-B-secret"
 
 
 class RuntimeSpy:
@@ -452,6 +488,92 @@ def test_candidate_leaf_exception_becomes_raw_free_system_failure() -> None:
     )
     assert "raw-customer-B-secret" not in str(execution)
     assert "ExplodingTzInfo" not in str(execution)
+
+
+@pytest.mark.parametrize("timezone_type", [AlwaysUtcTzInfo, FlipTzInfo])
+def test_custom_timezone_sidecar_fails_without_method_read(
+    timezone_type: type[tzinfo],
+) -> None:
+    custom_timezone = timezone_type()
+    timestamp = datetime(
+        2030,
+        1,
+        1,
+        tzinfo=custom_timezone,
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert custom_timezone.reads == 0
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert timezone_type.__name__ not in str(execution)
+
+
+def test_poisoned_order_status_singleton_fails_before_observation() -> None:
+    status = OrderStatus.SHIPPED
+    storage = object.__getattribute__(status, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(storage, key))
+        for key in dict.__iter__(storage)
+    )
+    object.__setattr__(
+        status,
+        "hidden_raw",
+        "raw-customer-B-secret",
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=status,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=NOW,
+        status_updated_at=NOW,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    try:
+        execution, runtime, order = asyncio.run(_execute(result=candidate))
+    finally:
+        dict.clear(storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(storage, key, stored_value)
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
 
 
 @pytest.mark.parametrize(
