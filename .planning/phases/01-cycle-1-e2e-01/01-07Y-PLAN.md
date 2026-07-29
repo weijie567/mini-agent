@@ -17,12 +17,12 @@ must_haves:
   truths:
     - "01-07Y 只增加纯 Core 的 Request Understanding v2 initial decision/revalidation；它不读写数据库、不生成可信身份、不切换 Runtime，也不修改既有 v1 reducer。"
     - "canonical RequestUnderstandingOutputV2 的实际 Candidate 必须逐项得到 keyed ACCEPT/REJECT；aggregate-invalid 与 atomic-failure 不能伪装成 Candidate REJECT。"
-    - "零 Candidate、全部 REJECT、一个 ACCEPT 与一个 ACCEPT 加若干 REJECT 都形成 quote-free exact v2 closure；两个及以上同时可接受 Candidate 在本最薄切片统一 keyed REJECT 为 NEXT_MOVE_INCONSISTENT，不任意选择或静默丢弃。"
-    - "一个 ACCEPT 必须与唯一 AcceptedTaskDeltaV2、InputBinding、Task、RequestUnit 形成 exact bijection；新 Task effect 固定 base=null/result=1，父记录和 child 使用同一次可信 UTC clock sample。"
-    - "未知工具或 NextMove order_id 参数替换不在 RU 阶段改写或升级为业务事实；只要 NextMove 仍是 canonical CALL_TOOL，Reducer 保留原候选，后续 revalidate/Gateway 决定是否拒绝。"
+    - "零 Candidate、全部 REJECT、部分接受与multi-ACCEPT都按独立Candidate逐项形成quote-free exact v2 closure；Y不得仅因Candidate数量发明REJECT reason、任意选择或静默丢弃。"
+    - "每个 ACCEPT 都必须与自己的 AcceptedTaskDeltaV2、InputBinding、Task、RequestUnit 形成 exact bijection；每个新 Task effect固定base=null/result=1，父记录和全部child使用同一次可信UTC clock sample。"
+    - "只有恰好一个emitted且accepted Candidate时保留shared NextMove供active thin-slice revalidation；partial/multi时保留Task decisions/effects但保守丢弃不再唯一绑定的NextMove，Runtime用户结果继续是nonclaim。"
     - "01-07Y 不冻结 zero/all-REJECT、multi-ACCEPT 或 atomic write failure 的 Runtime 用户结果；这些路径不得被声称为 B_ACTIVE。"
   artifacts:
-    - "src/mini_agent/core/request_processing.py 中 additive InitialRequestNoTaskDecisionV2、InitialRequestTaskGraphDecisionV2、validate_and_reduce_initial_request_v2 与 revalidate_next_move_v2。"
+    - "src/mini_agent/core/request_processing.py 中 additive trusted candidate identity allocation、accepted Task graph、no-task/routable/unrouted decision types，以及validate_and_reduce_initial_request_v2与revalidate_next_move_v2。"
     - "tests/component/core/test_request_processing.py 中 candidate decision、provenance、closure、Task effect、revalidation、bounded failure与v1保护矩阵。"
   key_links:
     - "Intent owner §13.3–13.7 → canonical projection、keyed candidate decisions、accepted child exact set、Task effect和单次可信时间。"
@@ -40,7 +40,7 @@ must_haves:
 > Request Understanding durable aggregate、版本、provenance与Task effect语义仍由Intent / Memory / Thin Slice canonical owner拥有。本Plan只把execution map r2中的01-07Y映射为一个精确Task Packet，不维护第二套产品或架构合同。
 
 <objective>
-以TDD RED→GREEN在现有quote-free v2 closure builder之上增加一个纯Core initial decision：对actual `RequestUnderstandingOutputV2.task_delta_candidates`逐项给出稳定、keyed的最终裁决；合法无Task结果形成完整v2 parent closure，exact-one accepted结果同时形成一个真实`base=null/result=1` Task effect、`InputBinding`、`Task`与`RequestUnit`，并提供写入后的NextMove revalidation。
+以TDD RED→GREEN在现有quote-free v2 closure builder之上增加一个纯Core initial decision：对actual `RequestUnderstandingOutputV2.task_delta_candidates`逐项给出稳定、keyed的最终裁决；合法无Task、partial与multi结果都形成完整v2 closure，每个ACCEPT同时形成自己的真实`base=null/result=1` Task effect、`InputBinding`、`Task`与`RequestUnit`；只有exact-one emitted/accepted active thin-slice结果继续携带可写后重验的shared NextMove。
 
 Purpose: 关闭exact B_Q中“ModelProviderV2 success没有确定性v2 reducer”的真实阻断，使后续01-07Z/AA/J可以消费现有owner批准的record types，而不把v2投影回v1、把整体失败伪装成REJECT或让Runtime自行发明Task effect。
 
@@ -72,17 +72,38 @@ Output: 一个只改owned Component test的RED commit和一个只改owned Core s
 Y在`request_processing.py`的现有v2区域additive增加：
 
 ```python
+class InitialTaskIdentityAllocationV2(RuntimePrivateModel):
+    candidate_ref: UUID
+    accepted_delta_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    binding_id: UUID
+
+
+class InitialAcceptedTaskGraphV2(RuntimePrivateModel):
+    accepted_delta: AcceptedTaskDeltaV2
+    input_binding: InputBinding
+    task: TaskRecord
+    request_unit: RequestUnitRecord
+
+
 class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
     closure: RequestUnderstandingClosureV2
 
 
-class InitialRequestTaskGraphDecisionV2(RuntimePrivateModel):
+class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
     closure: RequestUnderstandingClosureV2
-    input_binding: InputBinding
-    task: TaskRecord
-    request_unit: RequestUnitRecord
+    task_graph: InitialAcceptedTaskGraphV2
     next_move_candidate_ref: UUID
     next_move_candidate: NextMove
+
+
+class InitialRequestUnroutedTaskGraphsDecisionV2(RuntimePrivateModel):
+    closure: RequestUnderstandingClosureV2
+    task_graphs: Annotated[
+        tuple[InitialAcceptedTaskGraphV2, ...],
+        Field(min_length=1),
+    ]
 
 
 def validate_and_reduce_initial_request_v2(
@@ -92,55 +113,62 @@ def validate_and_reduce_initial_request_v2(
     authoritative_messages: Mapping[UUID, str],
     customer_context: CustomerContext,
     request_understanding_record_id: UUID,
-    accepted_delta_id: UUID,
-    task_id: UUID,
-    request_unit_id: UUID,
-    binding_id: UUID,
+    candidate_identity_allocations: tuple[
+        InitialTaskIdentityAllocationV2,
+        ...,
+    ],
     next_move_candidate_ref: UUID,
     now: datetime,
-) -> InitialRequestNoTaskDecisionV2 | InitialRequestTaskGraphDecisionV2: ...
+) -> (
+    InitialRequestNoTaskDecisionV2
+    | InitialRequestRoutableTaskGraphDecisionV2
+    | InitialRequestUnroutedTaskGraphsDecisionV2
+): ...
 
 
 def revalidate_next_move_v2(
     *,
-    decision: InitialRequestTaskGraphDecisionV2,
+    decision: InitialRequestRoutableTaskGraphDecisionV2,
     current_task: TaskRecord,
     current_request_unit: RequestUnitRecord,
     current_input_binding: InputBinding,
 ) -> RevalidatedNextMove: ...
 ```
 
-两个result class必须通过model validator关闭各自shape：
+五个新增record必须通过model validator关闭各自shape：
 
+- `candidate_identity_allocations`以`candidate_ref`绑定actual emitted Candidate，引用集合必须与Candidate ID集合精确相等；每项由可信Runtime预分配，全部record/child/Task/RequestUnit/binding IDs在本invocation内唯一。REJECT对应的预分配IDs不进入closure、Trace或error。
+- `InitialAcceptedTaskGraphV2`必须让child、Task、RequestUnit、InputBinding与`base=null/result=1`精确bijective。
 - `InitialRequestNoTaskDecisionV2`只接受`accepted_task_deltas=()`、`accepted_delta_refs=()`、零个ACCEPT、`next_move_candidate_ref/proposed/validated=None`。
-- `InitialRequestTaskGraphDecisionV2`只接受exact-one accepted child；child、Task、RequestUnit、InputBinding、record、NextMove ref与`base=null/result=1`必须bijective。
-- 不增加optional/union fields来让一个实例同时表示两条route；函数返回的type union只表示两个互斥、内部闭合的exact Core results。
+- `InitialRequestRoutableTaskGraphDecisionV2`只接受“恰好一个emitted且ACCEPT”的active slice；closure、唯一task graph与NextMove ref exact闭合。
+- `InitialRequestUnroutedTaskGraphsDecisionV2`保存partial或multi-ACCEPT的全部Task graph，数量与closure全部accepted children精确相等；它没有NextMove fields，防止共享候选被错误绑定到任一Task。
+- 函数返回的type union只表示三个互斥、内部闭合的exact Core results；它不是Application persistence command union。01-07Z只消费既有Core records，不能import这些private decision types。
 - 不修改或alias `InitialRequestDecision`、`validate_and_reduce_initial_request`、`revalidate_next_move`及其他v1类型；01-07V才拥有v1 Core removal。
 
-## 2. Aggregate gate before candidate decision
+## 2. Canonical failure partition
 
 Reducer必须复用现有`build_request_understanding_closure_v2`与其canonical input/output/provenance helpers；不得复制第二套output DTO、quote matcher或closure builder。
 
-以下失败保持`RequestUnderstandingV2Error`的aggregate bucket且不返回任何decision/record：
+只有manifest列出的五个code属于`aggregate_invalid_no_record`：
 
-- input/output exact type或model schema/version不合法；
-- trusted/private undeclared state或trusted argument field；
-- output `message_ref`与current input不一致；
-- authoritative Message缺失、不是exact original query、quote非唯一、span/hash不能闭合或引用不在可见消息范围；
-- caller提供的UUID/time类型不正确或`now`不是UTC；
-- record/child/Task closure construction失败。
+- `MODEL_INPUT_SCHEMA_INVALID`
+- `MODEL_OUTPUT_SCHEMA_INVALID`
+- `MODEL_SCHEMA_VERSION_INVALID`
+- `TRUSTED_OR_PRIVATE_FIELD_PRESENT`
+- `SOURCE_PROVENANCE_INVALID`
 
-异常只携带现有稳定reason code；不得附带raw query、quote、candidate value、CustomerContext、Pydantic diagnostic、cause/context或任意caller-controlled text。Aggregate failure不得生成空Candidate、全REJECT、InputBinding或Task来伪装成功。
+Caller identity allocation、UUID/UTC clock、record/child/Task graph或closed result construction失败必须保持`atomic_failure_no_record / DURABLE_CLOSURE_COMMIT_FAILED`。Y是纯Core，不声称产生或捕获数据库`TASK_STATE_CAS_CONFLICT`、`TASK_COMMIT_FAILED`；这些由后续Application/Infrastructure/Runtime owner处理。
+
+Candidate-specific deterministic failure才进入`candidate_reject`。三个bucket不能交叉；任何aggregate或atomic failure都不返回decision/record/InputBinding/Task。异常只携带现有稳定reason code，不得附带raw query、quote、candidate value、CustomerContext、Pydantic diagnostic、cause/context或caller-controlled text。
 
 ## 3. Deterministic candidate decision matrix
 
-只在aggregate gate通过后按emitted order对actual Candidate计算稳定decision。P0 thin-slice eligibility固定为：
+只在aggregate gate通过后按emitted order独立校验actual Candidate。P0当前可接受`ADD_GOAL` Candidate固定为：
 
 1. Candidate是canonical `ADD_GOAL`，且`goal_patch`为既有non-empty canonical value；
 2. 恰有一个`order_id / TARGET_RESOURCE_IDENTIFIER / USER_CLAIM / CURRENT_MESSAGE` input；
 3. input value经现有`_normalize_order_id`得到`O-<digits>`，来源quote/provenance已经通过aggregate gate；
-4. contextualization中不存在同一`order_id`的`MISSING_REFERENCE`或`MULTIPLE_PLAUSIBLE_REFERENCES` uncertainty；
-5. shared `next_move_candidate`是canonical `CALL_TOOL`。Requested tool name与arguments仍是模型候选：未知工具、argument order_id替换或其他Gateway不变量不能在这里静默改写，也不能把候选提升为已授权命令。
+4. contextualization中不存在同一`order_id`的`MISSING_REFERENCE`或`MULTIPLE_PLAUSIBLE_REFERENCES` uncertainty。
 
 稳定reason优先级：
 
@@ -150,42 +178,45 @@ Reducer必须复用现有`build_request_understanding_closure_v2`与其canonical
 | `order_id` uncertainty = multiple plausible | `REJECT / REFERENCE_AMBIGUOUS` |
 | required `order_id` input shape不存在 | `REJECT / REQUIRED_INPUT_MISSING` |
 | value不能规范化 | `REJECT / INPUT_VALUE_INVALID` |
-| shared NextMove不是`CALL_TOOL` | `REJECT / NEXT_MOVE_INCONSISTENT` |
 
-Canonical DTO已把unsupported operation、空goal、重复input name、wrong source/authority等结构错误挡在aggregate gate；Y不得用`model_construct`绕过后再把它们降级成Candidate REJECT。
+Canonical DTO已把unsupported operation、空goal、重复input name、wrong source/authority等结构错误挡在aggregate gate；Y不得用`model_construct`绕过后再把它们降级成Candidate REJECT。Shared NextMove不是Candidate accept/reject依据；若Task decisions使它不再唯一适用，Reducer丢弃NextMove audit，而不是改写有效Goal decision。
 
 Cardinality policy：
 
 - zero Candidate → zero decision / zero child；
-- zero eligible → 每个Candidate保留自己的keyed REJECT；
-- exactly one eligible → 该Candidate ACCEPT，其他Candidate保留其稳定REJECT；
-- two or more eligible → 所有eligible Candidate均`REJECT / NEXT_MOVE_INCONSISTENT`；不按置信度、顺序或NextMove参数任意挑选，也不创建Task。
+- 每个可接受Candidate独立`ACCEPT`并形成自己的child/Task graph；
+- 每个不可接受Candidate保留自己的keyed stable `REJECT`；
+- zero/all-REJECT → `InitialRequestNoTaskDecisionV2`；
+- 恰好一个emitted且ACCEPT → `InitialRequestRoutableTaskGraphDecisionV2`，保留shared NextMove；
+- partial或multi-ACCEPT → `InitialRequestUnroutedTaskGraphsDecisionV2`，完整保留全部decision/effect并丢弃shared NextMove。
 
-置信度不是安全阈值。以上是E2E01第一最薄切片的scoped decision，不把通用Intent owner的0..n durable shape缩窄为新的canonical产品规则。
+置信度不是安全阈值。Execution map r2中的“at-most-one-accepted thin-slice decision”只约束当前可进入Z/J active route的exact-one projection；它不能覆盖Intent owner的multi/partial canonical closure。Unrouted result不决定用户结果，也不把multi路径声明为已实现Runtime。
 
-## 4. Exact-one accepted Task effect
+## 4. Per-accepted Candidate Task effect
 
-只有exactly one eligible Candidate时使用调用方提供的可信IDs和单次`now`构造：
+对每个ACCEPT，使用其keyed可信identity allocation和同一次`now`构造：
 
 - `InputBinding`：normalized order ID、`USER_CLAIM`、`source_refs=(message_ref,)`、`ACCEPTED`、`confirmed_by_user=True`、created/updated均为`now`；
 - `AcceptedTaskDeltaV2`：exact candidate/message、`ADD_GOAL`、goal、`input_binding_refs=(binding_id,)`、`task_id`、`base_task_state_version=None`、`result_task_state_version=1`、`accepted_at=now`；
 - `TaskRecord`：trusted `customer_context.customer_id`、`ACTIVE/v1`、created/updated=`now`；
 - `RequestUnitRecord`：与Task同identity/status/version，goal source与InputBinding exact，created/updated=`now`；
-- parent `RequestUnderstandingRecordV2`：独立`request_understanding_record_id`、actual model input/output versions、全部actual contextualization/Candidates/decisions、exact child ref、proposed base `None`、validated `1`、trusted `next_move_candidate_ref`、created=`now`。
+- parent `RequestUnderstandingRecordV2`：独立identity、actual model input/output versions、全部actual contextualization/Candidates/decisions、全部exact child refs与created=`now`。
 
-No-task route只使用`request_understanding_record_id`与`now`；其余预分配可信IDs不得进入record、Trace或error。它保存actual contextualization/Candidates/keyed REJECT但不创建InputBinding、Task、RequestUnit、Task version binding或NextMove audit ref。
+只有exact-one emitted/accepted result设置parent `next_move_candidate_ref`，并把`proposed_base_task_state_version`逐字取自canonical output、把`validated_task_state_version`设为新Task version `1`。当前scoped `RequestUnderstandingOutputV2`和Thin Slice明确要求首个新目标proposal为`base_task_state_version=None`；Reducer不得硬编码改写模型值。若非正常Adapter以`model_construct`注入non-null base，existing exact output rebuild在Task decision前以`MODEL_OUTPUT_SCHEMA_INVALID` fail early；它不是atomic failure，也不能作为正常Gateway test。
+
+No-task、partial或multi route的parent NextMove audit fields全部为空；未唯一绑定的shared candidate不进入result。所有REJECT allocation IDs同样不进入record/Trace/error。
 
 ## 5. Post-write revalidation
 
-`revalidate_next_move_v2`只接受exact `InitialRequestTaskGraphDecisionV2`与当前已写入的exact Task / RequestUnit / InputBinding：
+`revalidate_next_move_v2`只接受exact `InitialRequestRoutableTaskGraphDecisionV2`与当前已写入的exact Task / RequestUnit / InputBinding：
 
 - owner、identity、status、state version `1`、InputBinding与accepted child闭包必须与decision逐字段一致；
 - candidate仍必须是CALL_TOOL且不能含trusted argument field；
-- 返回现有`RevalidatedNextMove`，保留原requested tool/arguments，独立生成`validated_task_state_version=1`和`argument_binding_refs=(binding_id,)`；
+- 返回现有`RevalidatedNextMove`，保留原requested tool/arguments与canonical proposed base，独立生成`validated_task_state_version=1`和`argument_binding_refs=(binding_id,)`；
 - argument order ID只规范化为`normalized_candidate_order_id`用于Gateway exact binding comparison，不改写arguments、不替换成InputBinding；
 - mismatch、stale graph、wrong owner或noncanonical type抛现有bounded `RequestProcessingError`，不返回partial command。
 
-Y不调用Gateway、不创建GateDecision/ToolCall、不读取订单，也不决定用户结果。
+Unknown tool与argument substitution在exact-one CALL_TOOL route中仍由Gateway拒绝。Canonical proposal base为null；stale-state defense由既有受控fault seam在revalidation后、Gateway前改变current Task version来验证。Y不调用Gateway、不创建GateDecision/ToolCall、不读取订单，也不决定用户结果。
 
 </interfaces>
 
@@ -249,7 +280,7 @@ required_checks:
 
 - Gate A精确branch/worktree/base/tree/two blobs/clean state；feature必须直接从B_Q创建。
 - focused baseline `uv run pytest tests/component/core/test_request_processing.py -q`；预期B_Q为`55 passed`。
-- RED只改owned test且只因四个additive v2 symbols/behavior缺失而失败；现有v1与closure-builder tests必须保持绿色。
+- RED只改owned test且只因本Packet声明的additive v2 types/functions/behavior缺失而失败；现有v1与closure-builder tests必须保持绿色。
 - GREEN后focused Core全绿，并运行`uv run pytest tests/component/core/test_request_understanding_contract.py tests/component/core/test_task_state_contract.py -q`。
 - canonical environment可用；`uv run alembic upgrade head`与`uv run pytest` full gate通过。B_Q参考基线为`1901 passed, 1 deselected, 12 warnings`，新增Y tests允许总数只按实际新增增长。
 - exact type / undeclared state / source provenance / reason priority / zero-all-partial-multi decision / one-clock / ID binding / no-raw failure / v1 surface regression matrix。
@@ -260,20 +291,20 @@ required_checks:
 commit_protocol:
 
 1. RED `test(01-07Y): require ru v2 initial decision`只改owned test，增加success/no-task/all-reject/partial/multi、provenance、bounded failure与revalidation tests；source blob必须仍为base值，失败不得来自fixture、import cycle或环境。
-2. GREEN `feat(01-07Y): add ru v2 initial decision`只改owned Core source，复用现有v2 canonical/provenance/closure helpers并增加上述四个symbols；不得改v1函数、Core DTO owner文件或任何外部boundary。
+2. GREEN `feat(01-07Y): add ru v2 initial decision`只改owned Core source，复用现有v2 canonical/provenance/closure helpers并增加上述五个record types与两个functions；不得改v1函数、Core DTO owner文件或任何外部boundary。
 3. Review finding只用append-only `fix(01-07Y): ...`，始终限两文件；不得amend、rebase或force-push已审历史。每次新head重跑focused/full/containment并重新review。
 
 done_when:
 
 - RED/GREEN及任何fix的SHA、tree、scope、失败/通过原因可复现。
 - actual v2 output产生完整keyed decision；aggregate/atomic bucket不被伪装为REJECT。
-- zero/all-reject/no-task与exact-one/partial accepted closure分别闭合；多eligible不任意选取且不创建Task。
-- accepted route的record/child/InputBinding/Task/RequestUnit/NextMove ref与base-null/result-1精确bijective，single clock与trusted owner成立。
+- zero/all-reject/no-task与exact-one/partial/multi accepted closure分别闭合；多eligible不任意选取，每个ACCEPT都形成自己的Task graph。
+- 每个accepted route的record/child/InputBinding/Task/RequestUnit与base-null/result-1精确bijective，single clock与trusted owner成立；只有exact-one emitted/accepted result保留NextMove ref。
 - revalidate保留候选、只形成controlled binding projection；argument substitution/unknown tool留给Gateway。
 - focused、Core邻接tests、Alembic/full、two-file containment、feature/latest-overlay独立review全部通过。
 - Y与Z reviewed serial merge后才形成B_YZ；Y单独merge不解锁AA/J。
 
-contract_changes: `YES / ADDITIVE CORE V2 INITIAL DECISION` — 增加两个互斥Core result和两个v2 reducer/revalidation函数；不修改canonical owner、DTO版本、v1 surface、Application/Infra/Runtime/HTTP。
+contract_changes: `YES / ADDITIVE CORE V2 INITIAL DECISION` — 增加trusted identity allocation、accepted Task graph、三个互斥Core result和两个v2 reducer/revalidation函数；不修改canonical owner、DTO版本、v1 surface、Application/Infra/Runtime/HTTP。
 security_impact: `YES / TRUSTED IDENTITY, SOURCE AND BINDING` — customer_id/UUID/time只由caller trusted context提供；authoritative Message/provenance exact；raw quote只用于span/hash后丢弃；NextMove参数不被提升为可信binding；bounded failures无raw diagnostic。
 eval_impact: `YES / COMPONENT PREREQUISITE` — 增加Core Component regression覆盖zero/all/partial/multi与security failure；不改EvalCase、Dataset、Grader、Result、threshold、Baseline或lifecycle。
 rollback: 合并前关闭PR；合并后用普通revert PR撤销01-07Y feature commits，并阻塞B_YZ、AA、J及全部下游。不得reset/force-push、修改B_Q、回写v1 projection或让Runtime在缺少Y时继续路由v2。
@@ -299,11 +330,11 @@ handoff_format: repository/remote/branch/worktree、exact B_Q base/tree、Plan m
 |---|---|---|---|---|
 | `Y-S01` | Spoofing | model/caller → customer_id、record/Task identity、time | `MITIGATE / BLOCK` | exact CustomerContext/UUID/UTC inputs；output不得携带或覆盖trusted fields |
 | `Y-T01` | Tampering | model_construct/undeclared state → canonical output | `MITIGATE / BLOCK` | 复用exact rebuild与undeclared-state gate；aggregate invalid不创建record |
-| `Y-T02` | Tampering | candidate REJECT →伪造accepted child/Task effect | `MITIGATE / BLOCK` | candidate/decision/child exact sets、one-child bijection与result version checks |
+| `Y-T02` | Tampering | candidate REJECT →伪造accepted child/Task effect | `MITIGATE / BLOCK` | candidate/decision/child exact sets、每个ACCEPT与其唯一Task graph bijection及result version checks |
 | `Y-T03` | Tampering | NextMove arguments → InputBinding | `MITIGATE / BLOCK` | binding只由validated current-message input生成；revalidate保留candidate并独立投影binding refs |
 | `Y-R01` | Repudiation | replay/decision → 无稳定key | `MITIGATE / BLOCK` | actual emitted IDs、keyed decision、trusted record/child IDs、single clock与exact tests |
 | `Y-I01` | Information Disclosure | raw quote/query/Pydantic error → exception/Trace | `MITIGATE / BLOCK` | quote只用于span/hash；bounded stable code；cause/context/raw diagnostic不可达 |
-| `Y-D01` | Denial of Service | multi Candidate → nondeterminism/partial graph | `MITIGATE / BLOCK` | emitted-order closed validation；two+ eligible all keyed reject；无partial writes |
+| `Y-D01` | Denial of Service | multi Candidate → nondeterminism/incomplete graph | `MITIGATE / BLOCK` | emitted-order independent validation；全部decision/effect exact闭合；partial/multi保留全部Task graphs并丢弃shared NextMove；Y无I/O |
 | `Y-E01` | Elevation of Privilege | accepted user claim → business fact/authorization | `MITIGATE / BLOCK` | InputBinding保持USER_CLAIM；不读订单、不授权Tool、不创建GateDecision/ToolCall |
 
 </threat_model>
@@ -314,25 +345,25 @@ handoff_format: repository/remote/branch/worktree、exact B_Q base/tree、Plan m
   <name>Task 1: RED — freeze exact v2 decision and revalidation behavior</name>
   <files>tests/component/core/test_request_processing.py</files>
   <read_first>Intent §13.3–13.7、Thin Slice cutover manifest/failure partition、execution map Y acceptance、现有v2 closure tests与v1 reducer tests</read_first>
-  <action>只改owned test。新增两个result class和两个function的exact signature/type tests；用canonical fixtures覆盖zero、all reject、one accept、one accept + one stable reject、two eligible all NEXT_MOVE_INCONSISTENT、uncertainty、invalid value、non-CALL_TOOL、argument substitution、unknown tool、source/provenance、one-clock/trusted IDs、Task/InputBinding bijection、revalidation与raw-free bounded errors。保留现有v1行为tests，禁止skip/xfail、数据库、network或Application fake。</action>
+  <action>只改owned test。新增五个record class和两个function的exact signature/type tests；用canonical fixtures覆盖zero、all reject、one emitted/accepted、one ACCEPT + one stable REJECT、two eligible both ACCEPT、uncertainty、invalid value、non-CALL_TOOL revalidation、argument substitution、unknown tool、source/provenance、candidate/allocation exact set、one-clock/trusted IDs、per-ACCEPT Task/InputBinding bijection、revalidation与raw-free bounded errors。partial/multi断言完整保留各自decision/effect并且不携带shared NextMove；保留现有v1行为tests，禁止skip/xfail、数据库、network或Application fake。</action>
   <verify>
     <automated>uv run pytest tests/component/core/test_request_processing.py -q</automated>
     RED必须非零且只因additive Y symbols/behavior缺失；B_Q source blob保持`261c6318e60756d57d4d15bfcf62b5c2da236760`。
   </verify>
-  <done>测试把aggregate gate、candidate decision、no-task/task-graph两条shape和post-write revalidation精确冻结。</done>
+  <done>测试把aggregate gate、独立candidate decision、no-task/routable-one/unrouted-partial-multi三条shape和post-write revalidation精确冻结。</done>
 </task>
 
 <task type="auto" tdd="true">
   <name>Task 2: GREEN — implement pure v2 initial decision</name>
   <files>src/mini_agent/core/request_processing.py</files>
   <read_first>Task 1 RED、现有build_request_understanding_closure_v2、RequestUnderstanding/TaskState v2 DTO、v1 reducer/revalidation protected surface</read_first>
-  <action>只改owned Core source。增加两个closed result models、candidate reason helper、validate_and_reduce_initial_request_v2与revalidate_next_move_v2；复用现有normalization、canonical/provenance和closure helpers。构造exact zero/all/partial/one accepted closure、InputBinding、Task/RequestUnit与AcceptedTaskDeltaV2；所有failure使用既有bounded类型。不得I/O、random/clock调用、v2→v1 projection、修改DTO owner或捕获raw Exception。</action>
+  <action>只改owned Core source。增加trusted identity allocation、accepted Task graph、三个closed result models、candidate reason helper、validate_and_reduce_initial_request_v2与revalidate_next_move_v2；复用现有normalization、canonical/provenance和closure helpers。构造exact zero/all/one/partial/multi closure，并为每个ACCEPT构造自己的InputBinding、Task/RequestUnit与AcceptedTaskDeltaV2；只在exact-one emitted/accepted shape保留shared NextMove。所有failure使用既有bounded类型。不得I/O、random/clock调用、v2→v1 projection、修改DTO owner或捕获raw Exception。</action>
   <verify>
     <automated>uv run pytest tests/component/core/test_request_processing.py -q
 uv run pytest tests/component/core/test_request_understanding_contract.py tests/component/core/test_task_state_contract.py -q</automated>
     全部Y与邻接Core tests通过；v1 protected tests保持绿色。
   </verify>
-  <done>纯Core可从actual v2 input/output与trusted values形成exact no-task或one-task graph decision，并可对写入后的current graph重验NextMove。</done>
+  <done>纯Core可从actual v2 input/output与trusted values形成exact no-task、routable-one或unrouted partial/multi Task graph decision，并可只对写入后的routable exact-one current graph重验NextMove。</done>
 </task>
 
 </tasks>
@@ -404,8 +435,8 @@ scan只报告现有owner、后续Z/AA/J consumer、protected v1 surface与已知
 
 1. RED/GREEN提交、失败/通过原因、two-file scope、SHA/tree与测试输出可复现。
 2. aggregate-invalid、candidate-reject与atomic-failure bucket不交叉；错误raw-free。
-3. zero/all/partial/multi exact-set闭包通过；two+ eligible不任意选择或创建Task。
-4. exact-one accepted route形成独立RU identity、one-clock、one child、one InputBinding/Task/RequestUnit与base-null/result-1 effect。
+3. zero/all/partial/multi exact-set闭包通过；two+ eligible不任意选择，每个ACCEPT都形成且只形成一个Task graph。
+4. exact-one accepted route形成独立RU identity、one-clock、one child、one InputBinding/Task/RequestUnit与base-null/result-1 effect；partial/multi完整保留全部Task effect但不携带shared NextMove。
 5. post-write revalidation保留NextMove候选并形成独立binding/version projection；不执行Tool或授权资源。
 6. focused/Core neighbor/Alembic/full、v1 regression、containment、feature/latest-overlay exact-head review全部通过。
 7. Y单独完成不形成B_YZ；只有Y/Z串行reviewed merge才解锁01-07AA。
