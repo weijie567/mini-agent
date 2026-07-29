@@ -495,6 +495,7 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
             return False
         if (
             left_state_keys != right_state_keys
+            or left_fields_set != right_fields_set
             or not left_state_keys.issubset(declared_fields)
             or not left_fields_set.issubset(declared_fields)
             or not right_fields_set.issubset(declared_fields)
@@ -640,8 +641,9 @@ def _canonical_request_input_v2(
     payload: dict[str, Any] | None
     try:
         payload = request_input.model_dump(
-            mode="python",
+            mode="json",
             round_trip=True,
+            exclude_unset=True,
             warnings="error",
         )
     except (TypeError, ValueError, PydanticSerializationError):
@@ -760,8 +762,9 @@ def _canonical_request_output_v2(
     payload: dict[str, Any] | None
     try:
         payload = output.model_dump(
-            mode="python",
+            mode="json",
             round_trip=True,
+            exclude_unset=True,
             warnings="error",
         )
     except (TypeError, ValueError, PydanticSerializationError):
@@ -811,8 +814,9 @@ def _canonical_candidate_validation_v2(
         try:
             rebuilt = CandidateValidationRecordV2.model_validate(
                 value.model_dump(
-                    mode="python",
+                    mode="json",
                     round_trip=True,
+                    exclude_unset=True,
                     warnings="error",
                 )
             )
@@ -856,8 +860,9 @@ def _canonical_accepted_task_deltas_v2(
         try:
             rebuilt = AcceptedTaskDeltaV2.model_validate(
                 value.model_dump(
-                    mode="python",
+                    mode="json",
                     round_trip=True,
+                    exclude_unset=True,
                     warnings="error",
                 )
             )
@@ -1341,8 +1346,9 @@ def _is_exact_canonical_model_v2(
     payload: dict[str, Any] | None
     try:
         payload = value.model_dump(
-            mode="python",
+            mode="json",
             round_trip=True,
+            exclude_unset=True,
             warnings="error",
         )
     except (AttributeError, TypeError, ValueError, PydanticSerializationError):
@@ -1684,6 +1690,59 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
         return self
 
 
+def _model_fields_set_manifest_v2(
+    value: Any,
+    *,
+    active_ids: set[int] | None = None,
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    if not isinstance(value, (BaseModel, tuple, Mapping)):
+        return ()
+    visited = active_ids if active_ids is not None else set()
+    value_id = id(value)
+    if value_id in visited:
+        return None
+    visited.add(value_id)
+    try:
+        if isinstance(value, BaseModel):
+            fields_set = getattr(value, "__pydantic_fields_set__", None)
+            declared_fields = tuple(type(value).model_fields)
+            if (
+                type(fields_set) is not set
+                or not fields_set.issubset(declared_fields)
+            ):
+                return None
+            manifest: list[tuple[str, tuple[str, ...]]] = [
+                (
+                    f"{type(value).__module__}.{type(value).__qualname__}",
+                    tuple(sorted(fields_set)),
+                )
+            ]
+            for field_name in declared_fields:
+                if not hasattr(value, field_name):
+                    return None
+                child_manifest = _model_fields_set_manifest_v2(
+                    getattr(value, field_name),
+                    active_ids=visited,
+                )
+                if child_manifest is None:
+                    return None
+                manifest.extend(child_manifest)
+            return tuple(manifest)
+        manifest = []
+        values = value if isinstance(value, tuple) else value.values()
+        for child in values:
+            child_manifest = _model_fields_set_manifest_v2(
+                child,
+                active_ids=visited,
+            )
+            if child_manifest is None:
+                return None
+            manifest.extend(child_manifest)
+        return tuple(manifest)
+    finally:
+        visited.remove(value_id)
+
+
 def _initial_routable_decision_fields_payload_v2(
     *,
     closure: RequestUnderstandingClosureV2,
@@ -1707,6 +1766,9 @@ def _initial_routable_decision_fields_payload_v2(
         next_move_json = next_move_candidate.model_dump_json(
             round_trip=True, warnings="error"
         )
+        fields_set_manifest = _model_fields_set_manifest_v2(
+            (closure, task_graph, next_move_candidate)
+        )
     except (
         AttributeError,
         TypeError,
@@ -1714,6 +1776,8 @@ def _initial_routable_decision_fields_payload_v2(
         ValidationError,
         PydanticSerializationError,
     ):
+        return None
+    if fields_set_manifest is None:
         return None
     return (
         b"mini-agent:initial-routable-task-graph-decision-v2:"
@@ -1724,6 +1788,8 @@ def _initial_routable_decision_fields_payload_v2(
         + str(next_move_candidate_ref).encode("ascii")
         + b"\x00"
         + next_move_json.encode("utf-8")
+        + b"\x00"
+        + repr(fields_set_manifest).encode("utf-8")
     )
 
 
