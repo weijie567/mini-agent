@@ -25,7 +25,7 @@ must_haves:
   truths:
     - "01-07L 只执行 DEPENDENCY_EXPAND 的 Eval Provider/mapper：additive 增加 ModelProviderV2 consumers和expectation-free HTTP + ExactRunEvidenceClosure → Eval evidence mapper；现有v1 Provider/Harness surface在01-07S前保持可复现。"
     - "正确framing的Request Understanding target arguments若被RequestUnderstandingOutputV2 Pydantic拒绝，只映射为fresh RequestUnderstandingCandidateInvalidError；transport/HTTP/JSON/framing、零/多/错function call与全部Presentation validation继续只映射fresh ProviderProtocolError。"
-    - "两种bounded signal都必须在raw envelope/diagnostic已丢弃后创建，public constructor零参数、每次fresh、固定safe args，且__cause__与__context__均为None。"
+    - "两种bounded signal都必须在raw envelope/diagnostic已丢弃后创建，public constructor零参数、每次fresh、固定safe args，且__cause__、__context__和最终异常traceback的全部frame locals均不得触达raw值、可信身份、credential或Provider/mapper输入对象。"
     - "HTTP/closure mapper只接收opaque execution_ref、真实AgentRunResult、HTTP status和01-07I ExactRunEvidenceClosure；不接收case_id、expectations、script/provider capture、customer_id、raw persistence envelope或grader答案，也不从这些来源补造evidence。"
     - "RU-v2 grader evidence只来自closure中的RequestUnderstandingRecordV2与AcceptedTaskDeltaV2；不得从Provider transient output、script、expectations或accepted child逆向重建带raw source_quote的RequestUnderstandingOutputV2。"
     - "v1与v2 evidence branch显式互斥；L只additive扩展，active offline Harness仍使用既有v1 ScriptedModelProvider，直到后续01-07J active switch和01-07S v1-contract closure。"
@@ -43,11 +43,16 @@ must_haves:
 
 # Phase 1 Plan 01-07L｜Eval v2 Providers and exact-Run HTTP mapper
 
-> **ISSUED DEPENDENCY_EXPAND TASK PACKET / IMPLEMENTATION NOT STARTED**
+> **SECURITY REVIEW AMENDED DEPENDENCY_EXPAND TASK PACKET / IMPLEMENTATION IN PROGRESS**
 > 本 Packet 只冻结Eval-owned v2 Provider consumers、evidence projection与mapper。Plan、Component/In-process test或L feature完成都不表示Runtime已切换、真实HTTP/PostgreSQL纵向链已运行、Case已通过或credentialed Qwen baseline存在。
 
 > **DERIVED / NON_NORMATIVE**
 > Request Understanding、Memory、Thin Slice、Eval lifecycle与execution order仍由active canonical owner拥有。本Plan只冻结一个精确Eval/Provider Task Packet，不反向覆盖owner或把测试投影升级为产品API。
+
+> **REVIEW AMENDMENT / OWNER RULING**
+> 首个feature review candidate `5c37a09e308d646fbb13711f3cc4d74bc9765230` 证明原Packet同时要求V2 Presentation直接继承protected v1实现、v1 source/AST exact，以及最终bounded exception traceback不可触达raw Provider数据；Python传播异常时会把继承调用栈frame保留在`__traceback__`，三项不能同时满足。最小裁决是：v1 definitions继续exact；两个V2 class各增加一个只做bounded-failure sanitization的typed `plan_presentation` override，成功路径委托`super()`且不改变分类；RU与mapper raw work放入正常返回closed status的private helper，最终public frame清空输入后才创建signal。同时把原Packet已经要求的mixed-v1/v2 grader input fail-closed落实为`_validate_grader_inputs`的唯一新增mutable definition。该裁决不改变canonical产品契约、九文件allowlist、feature base、active routing或commit history，只解除Packet内部不可实现约束。
+>
+> Formal exact-head review结论为`FAIL / CRITICAL-HIGH-MEDIUM-LOW = 0/3/3/0`。除上述traceback与mixed-branch HIGH外，修复必须使七个代表性fixture真正进入mapper并形成closed root ToolCall/Gate/Observation/Manifest，更新三个V2 enum exact-set，补全mapper signature/terminal/status/independent-identity matrix，补全logical-v2 directed tamper、每类fresh failure重复与traceback扫描，并恢复v1回归后additive增加v2证据。Focused gate全绿和exact-head重新审查`0/0/0/0`前不得进入overlay。
 
 <objective>
 以TDD RED→GREEN增加两个additive `ModelProviderV2` consumers，并把真实HTTP返回边界与`ExactRunEvidenceClosure`确定性映射为case-free、grader-facing evidence。
@@ -111,7 +116,8 @@ async def plan_presentation(
 ```
 
 - v2 classes可以复用各自v1 constructor、strict script cursor、runtime-fault directive、presentation path和injected client/config，但不能修改v1 class的source/AST或返回类型。
-- 两个v2 class都必须exact单继承对应v1 class；class body除可选docstring外只能定义一个`async propose_next_move(self, request: RequestUnderstandingInput) -> RequestUnderstandingOutputV2`。该method不得有decorator、positional-only/variadic/keyword-only参数、default或union；`plan_presentation`必须直接继承v1实现，不得override。
+- 两个v2 class都必须exact单继承对应v1 class；class body除可选docstring外只能定义两个typed async methods：`propose_next_move(self, request: RequestUnderstandingInput) -> RequestUnderstandingOutputV2`和`plan_presentation(self, request: PresentationInput) -> PresentationPlan`。两者不得有decorator、positional-only/variadic/keyword-only参数、default或union。
+- `plan_presentation` override只能调用`super().plan_presentation(request)`复用现有success path和failure taxonomy；它只能捕获`ProviderProtocolError`，必须在离开捕获范围、释放caught exception并清空`self`/`request`后创建fresh protocol signal，不得复制Presentation parsing、改写request/result、吞掉其他exception或引入fallback。v1 class全部definitions、methods与behavior继续exact。
 - 现有`ScriptedModelProvider` / `QwenResponsesAdapter`继续实现v1 `ModelProvider`并返回`RequestUnderstandingOutput`；现有Offline Harness、qwen preflight和全部v1 tests继续原样可运行。
 - L不建立name alias、version parameter、union return、default/latest或自动fallback。后续01-07J/Composition Root必须显式选择v2 class；01-07S才拥有删除v1 surface的权限。
 - Scripted v2仍只保存closed execution projection和opaque UUID4 `script_execution_ref`；不得保留`model_script_ref`、case refs、expected result、fixture answer或任意oracle。
@@ -134,7 +140,7 @@ RequestUnderstandingOutputV2
 行为矩阵：
 
 - `VALID_ORDER_LOOKUP`、argument substitution与unknown tool返回canonical v2 output；candidate ID继续只由opaque `script_execution_ref + message_ref`确定，不能含script/case identity。
-- `INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA`、`INJECT_SOURCE_AUTHORITY_MISMATCH`与`INJECT_TRUSTED_FIELD_OVERRIDE`先形成不可信arguments，再在exact `RequestUnderstandingOutputV2.model_validate(..., strict=True)`边界失败；raw mapping/ValidationError立即丢弃并抛fresh candidate-invalid signal。
+- `INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA`、`INJECT_SOURCE_AUTHORITY_MISMATCH`与`INJECT_TRUSTED_FIELD_OVERRIDE`先形成不可信arguments，再在exact `RequestUnderstandingOutputV2.model_validate(..., strict=True)`边界失败；raw mapping/ValidationError只能留在正常返回closed success/failure status的private helper中。V2 public method收到status后必须清空`self`/`request`及任何step/response引用，才抛fresh candidate-invalid signal。
 - zero/multiple target function行为不进入Pydantic candidate boundary，只抛fresh `ProviderProtocolError`。
 - Presentation的zero/multiple/invalid/fact-bearing envelope全部保持fresh `ProviderProtocolError`；v2 class不得把Presentation Pydantic rejection误分为candidate-invalid。
 - 不用`model_construct`、`model_copy(update=...)`、shadow DTO、unchecked dict return、keyword routing、credential lookup或network。
@@ -156,7 +162,7 @@ failure boundary按顺序固定：
 3. 恰好一个正确`submit_next_move`且arguments object已形成后，`RequestUnderstandingOutputV2` strict Pydantic拒绝 → candidate-invalid；
 4. 恰好一个正确Presentation target后的`PresentationPlan`拒绝仍 → protocol。
 
-每次失败先使raw response、arguments、ValidationError和transport exception不可达，再创建fresh parameterless signal并显式清空cause/context。Component tests必须注入`MockTransport`，禁止真实网络、process credential或raw request/response logging。
+每次失败先使raw response、arguments、ValidationError和transport exception不可达，再创建fresh parameterless signal并显式清空cause/context。处理raw Qwen值的private helper不得直接抛最终bounded signal，只能正常返回closed status；V2 public method及Presentation sanitizer必须在最终raise前清空`self`、request和其他输入引用。Component tests必须注入`MockTransport`，禁止真实网络、process credential或raw request/response logging，并逐frame遍历最终exception traceback，证明raw sentinel、API key、request/response/step/closure对象与可信身份均不可达。
 
 ## 4. Additive RU-v2 Eval evidence surface
 
@@ -173,7 +179,7 @@ task_state_transitions: tuple[TaskStateTransition, ...] = ()
 - legacy v1 fields `request_understanding_output`、`request_understanding_records`与`accepted_task_deltas`在L保持名称、类型、default与active test behavior；
 - v1 evidence branch要求三个v2 fields全部为空；
 - v2 evidence branch要求`request_understanding_output is None`、两个v1 record/child tuples为空，只使用v2 record/child和transition fields；
-- mixed branch、v2 accepted child不闭合、v2 record多于一条、无record却有child、v1 output与v2 durable record并存都在EvalEvidence construction或grader input gate fail closed；
+- mixed branch、v2 accepted child不闭合、v2 record多于一条、无record却有child、v1 output与v2 durable record并存都在EvalEvidence construction或grader input gate fail closed；grader input gate必须对整个`EvalEvidence`做strict canonical revalidation，拒绝`model_construct`、unchecked `model_copy(update=...)`或其他绕过construction validator的mixed/non-canonical实例，不能只验证Observation；
 - v2 mapper不能重建`RequestUnderstandingOutputV2`，不能恢复raw `source_quote`，不能把`next_move_candidate_ref`反向合成为NextMove。Provider transient output也不得进入EvalEvidence。
 
 所有13个existing grader names/order保持不变。RU/InputBinding/Tool/Persistence/Trace相关grader增加显式v2 branch：
@@ -209,7 +215,7 @@ def map_exact_run_http_result_to_sut_result(
 5. `response_policy`只由closed stop reason映射：`GOAL_COMPLETED → DETERMINISTIC_ORDER_SUMMARY_V1`，`NOT_FOUND_OR_NOT_ACCESSIBLE → FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE`，`ORDER_SERVICE_UNAVAILABLE → FIXED_ORDER_SERVICE_UNAVAILABLE`，其余允许的blocked reasons → `FIXED_SAFE_PROCESSING_ERROR`。L在existing `_FIXED_MESSAGES`中additive加入`FIXED_ORDER_SERVICE_UNAVAILABLE → 订单服务暂时不可用，请稍后重试。`；固定文案必须与Agent result exact，success文案由existing RendererFactGrader对Observation校验。
 6. `ordinary_trace_shape`只由safe trace allowlist计算；`model_calls == len(context_manifests)`；不从script/expectation猜测。
 7. closure无raw persistence envelope，因此v2 `observation_persistence_envelopes=()`；不得重新encode logical record伪装physical evidence。
-8. 任何identity/outcome/HTTP/policy/trace/closure矛盾抛fresh bounded `EvalHarnessCommandError`，先丢弃raw exception/cause/context，不返回partial result。
+8. 任何identity/outcome/HTTP/policy/trace/closure矛盾抛fresh bounded `EvalHarnessCommandError`，先丢弃raw exception/cause/context，不返回partial result。Raw detachment/mapping private helper只能正常返回closed result/status；public mapper必须清空四个输入及所有detached/partial引用后才创建signal，最终traceback全部frame locals不得触达Agent result、closure、raw secret或trusted identity。
 
 mapper只产生case-free `EvalCaseSutResult`；现有Harness仍独占authenticated Case binding、expectation construction、grading、EvalCaseGraded Trace和Result/Failure persistence。
 
@@ -245,6 +251,8 @@ planning_and_owner_provenance:
 
 - final issuance/owner head `f038cad70b484621c62bcf29f89a601bc46e5123`
 - exact execution-map blob `ea2b5bcac4cb10c928a9e578c1286febb243c7d6`
+- first feature review candidate/tree `5c37a09e308d646fbb13711f3cc4d74bc9765230` / `0cbf6dd7c8080e277139e2c6b77cd5f01090a64b`; formal verdict `FAIL / 0/3/3/0`
+- security review amendment base `27d084a9eeacb4c3819b94df16e8922927fd2888`（01-07K reviewed merge）；amendment PR reviewed merge/blob由Integrator在合并后捕获，不替换feature base `B_IP`
 - L/J acceptance ownership clarification [PR #93](https://github.com/weijie567/mini-agent/pull/93) reviewed head/merge `510384c9dad24c0f229dd09cc5cf4a9deedfa292` / `726ac109514cb665386b981ac506c816d3abc310`
 - 01-07K Plan [PR #94](https://github.com/weijie567/mini-agent/pull/94) reviewed head/merge/blob `ec61275040ccbda1ddf2090bee44cf265434a89b` / `f038cad70b484621c62bcf29f89a601bc46e5123` / `45a573332136f5954358e6e077f2222b2e932259`
 - exact `B_IP` merge/tree `bbe14fadc0cd2e14ad35e19177b079fcab685dfc` / `65415ff5846892f257e95d8b8bd34f50752980a2`
@@ -284,10 +292,10 @@ forbidden_files: `ALL REPOSITORY FILES OUTSIDE THE NINE-FILE ALLOWLIST`，尤其
 
 protected_surface:
 
-- `scripted_provider.py`的14个pre-existing top-level definitions和`ScriptedModelProvider`全部9个methods source/AST exact；只允许新增imports/private helper与V2 subclass。
-- `qwen_responses.py`的`_fresh_protocol_error`和`QwenResponsesAdapter`全部4个methods source/AST exact；只允许新增imports/private helper与V2 subclass。
+- `scripted_provider.py`的14个pre-existing top-level definitions和`ScriptedModelProvider`全部9个methods source/AST exact；只允许新增imports、`_v2_` private helper与包含exact两个typed async methods的V2 subclass。
+- `qwen_responses.py`的`_fresh_protocol_error`和`QwenResponsesAdapter`全部4个methods source/AST exact；只允许新增imports、`_v2_` private helper与包含exact两个typed async methods的V2 subclass。
 - `harness.py`的54个pre-existing top-level definitions source/AST exact；只允许扩展`_UNBOUND_EVIDENCE_FIELD_ALLOWLIST` assignment并新增mapper/private helper。
-- `graders.py`只允许新增标准库`hashlib` import、修改`_FIXED_MESSAGES` assignment及`EvalEvidence`、`RequestUnderstandingGrader`、`InputBindingGrader`、`_conversation_graph_reason`、`_request_understanding_graph_reason`、`_observation_persistence_graph_reason`、`_tool_graph_is_closed`、`ToolCallGrader`、`_trace_references_match_typed_records`、`PersistenceGrader`十个definition；其他import module、pre-existing top-level definition source/AST exact，13-grader names/order/registry和Critical failure semantics不变。
+- `graders.py`只允许新增标准库`hashlib` import、修改`_FIXED_MESSAGES` assignment及`EvalEvidence`、`_validate_grader_inputs`、`RequestUnderstandingGrader`、`InputBindingGrader`、`_conversation_graph_reason`、`_request_understanding_graph_reason`、`_observation_persistence_graph_reason`、`_tool_graph_is_closed`、`ToolCallGrader`、`_trace_references_match_typed_records`、`PersistenceGrader`十一个definition；其他import module、pre-existing top-level definition source/AST exact，13-grader names/order/registry和Critical failure semantics不变。
 - 五个tracked Eval JSON、active v1 Provider/Harness behavior、Qwen baseline preflight、Application/Core/Runtime/DB全部byte-identical。
 
 commit_contract:
@@ -314,7 +322,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、九个ba
 | `L-S01` | Spoofing | raw Provider/schema failure → canonical stop class | `MITIGATE / BLOCK` | correct-framing boundary后才candidate-invalid；其他RU/Presentation failures保持protocol；J独占Runtime mapping |
 | `L-T01` | Tampering | Provider capture/script/expectation → Eval evidence | `MITIGATE / BLOCK` | mapper参数closed、v2 evidence只exact-copyclosure、mixed v1/v2拒绝、不得重建raw output/envelope |
 | `L-R01` | Repudiation | HTTP/result/Run/Trace mismatch → graded Case | `MITIGATE / BLOCK` | exact run/outcome/status/trace/policy matrix、opaque execution ref、RED/GREEN/exact review |
-| `L-I01` | Information Disclosure | raw response/Pydantic/HTTP/DB → error/Trace/Result | `MITIGATE / BLOCK` | raw discard、fresh parameterless errors、cause/context清空、case-free mapper和safe trace shape |
+| `L-I01` | Information Disclosure | raw response/Pydantic/HTTP/DB → error/Trace/Result | `MITIGATE / BLOCK` | raw helper正常返回closed status、public frame清空输入后fresh parameterless errors、cause/context与完整traceback object graph扫描、case-free mapper和safe trace shape |
 | `L-D01` | Denial of Service | malformed nested result/provider envelope | `MITIGATE / BLOCK` | strict Pydantic、closed one-call framing、closure已bounded、整体command error无partial |
 | `L-E01` | Elevation of Privilege | Eval mapper/trace_ref/provider → auth或active routing | `MITIGATE / BLOCK` | owner scope不在mapper输入、trace_ref不授权、active_routing=false、Composition Root/J另有owner |
 
@@ -325,7 +333,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、九个ba
 <task type="auto" tdd="true">
   <name>Task 1: RED — freeze v2 Provider taxonomy and exact-Run mapper</name>
   <files>tests/component/evaluation/test_e2e01_artifact_consistency.py, tests/component/evaluation/test_e2e01_graders.py, tests/component/evaluation/test_e2e01_scripted_model_provider.py, tests/component/model/test_qwen_responses_adapter.py, tests/integration/evaluation/test_e2e01_offline_harness.py</files>
-  <action>只改五份test。冻结两个V2 class及ModelProviderV2 signatures；对Scripted/Qwen正确framed invalid/trusted/source拒绝断言fresh candidate-invalid，对transport/HTTP/JSON/zero/multiple/wrong/presentation断言fresh protocol且raw/cause/context清空；证明v1 class/output/tests未漂移、Scripted零credential/network、Qwen仅MockTransport。为EvalEvidence增加v2 exact/mixed matrix与13 graders正负证据，其中至少包含一条envelope exact empty但logical Observation/ToolCall/Manifest/source_version闭合的v2 success，以及逐项破坏logical ref或source_version的directed tamper；v1 physical-envelope tamper仍保持失败。为case-free mapper建立success/not-found/ORDER_SERVICE_UNAVAILABLE/INPUT_INVALID/gateway/stale/presentation代表closure，断言unavailable严格映射`FIXED_ORDER_SERVICE_UNAVAILABLE`及canonical文案、参数surface无case/script/owner/provider/raw envelope、exact-copy、safe observable、source_version chain和mismatch bounded failure；existing Harness authenticated binding只对当前已有artifact Cases保持回归，不虚构unavailable Case。不要修改JSON、使用skip/xfail或伪装真实Runtime。</action>
+  <action>只改五份test。冻结两个V2 class及ModelProviderV2 signatures；对Scripted/Qwen正确framed invalid/trusted/source拒绝断言fresh candidate-invalid，对transport/HTTP/JSON/zero/multiple/wrong/presentation断言fresh protocol且每类至少连续触发两次、对象fresh、raw/cause/context清空，并递归遍历最终traceback全部frame locals/object graph证明raw sentinel、credential、trusted identity及Provider inputs不可达；保留原v1 class/output/credential/network回归，再additive增加v2证据，Scripted保持零credential/network、Qwen仅MockTransport。为EvalEvidence增加v2 exact/mixed matrix与13 graders正负证据，包括每个legacy/v2 mixed字段、child/cardinality mismatch、`model_construct`和unchecked `model_copy(update=...)`绕过尝试；至少包含一条envelope exact empty但logical Observation/ToolCall/Manifest/source_version闭合的v2 success，并逐边破坏Observation resource/tool、ToolCall task/unit、Gate、Manifest ref、Trace observation edge、source span/hash/version；v1 physical-envelope tamper仍保持失败。为case-free mapper冻结四个keyword-only参数和返回值的exact annotations、无default/variadic及禁止输入集合；建立success/not-found/ORDER_SERVICE_UNAVAILABLE/INPUT_INVALID/gateway/stale/presentation/provider-protocol/renderer-invariant代表closure，并拒绝PROCESS_RESTART_DETECTED及非COMPLETED Run。Fixture必须使用与execution/script无派生关系的独立canonical UUID4与真实closed root Run ToolCall/Observation/Gate/Manifest投影并以spy证明mapper已被调用；断言unavailable严格映射`FIXED_ORDER_SERVICE_UNAVAILABLE`及canonical文案、参数surface无case/script/owner/provider/raw envelope、exact-copy、safe observable、source_version chain、traceback raw-unreachability和mismatch bounded failure。Existing Harness authenticated binding只对当前已有artifact Cases保持回归，不虚构unavailable Case。更新canonical enum exact-set以包含`CandidateRejectionReasonCode`、`ReferenceSourceKindV2`、`UncertaintyReasonCodeV2`。不要修改JSON、使用skip/xfail或伪装真实Runtime。</action>
   <verify>
     <automated>uv run pytest tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/evaluation/test_e2e01_graders.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/component/model/test_qwen_responses_adapter.py tests/integration/evaluation/test_e2e01_offline_harness.py -q</automated>
     RED必须非零且仅因L surface/taxonomy/mapper尚未实现；四source blobs与五tracked artifacts仍等于B_IP。
@@ -336,7 +344,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、九个ba
 <task type="auto" tdd="true">
   <name>Task 2: GREEN — add explicit Scripted/Qwen v2 consumers</name>
   <files>src/mini_agent/evaluation/scripted_provider.py, src/mini_agent/infrastructure/model/qwen_responses.py</files>
-  <action>只追加V2 classes与所需private helpers/imports，复用现有constructor/cursor/presentation/config而不改v1 definitions。Scripted构造canonical output或在strict v2 Pydantic边界翻译；Qwen按framing→arguments→v2 validation分层。所有raw exception/envelope在创建bounded signal前清除；不得新增dependency、environment read、network path或Runtime catch。focused转绿后只提交两份Provider source，subject exact为`feat(01-07L): add v2 eval providers`。</action>
+  <action>只追加V2 classes与所需private helpers/imports，复用现有constructor/cursor/config且不改v1 definitions；两个V2 class的Presentation sanitizer只委托`super()`并在raw inherited traceback释放后重抛fresh protocol signal。Scripted/Qwen RU raw helpers只正常返回closed status，V2 public method清空`self`/request后才按framing→arguments→v2 validation分类创建bounded signal。所有raw exception/envelope在创建bounded signal前不可达；不得新增dependency、environment read、network path或Runtime catch。focused转绿后只提交两份Provider source，subject exact为`feat(01-07L): add v2 eval providers`。</action>
   <verify>
     <automated>uv run pytest tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/component/model/test_qwen_responses_adapter.py -q</automated>
     v1/v2 positive与全failure matrix、zero-network和protected definitions全部通过。
@@ -347,7 +355,7 @@ handoff_format: branch、exact B_IP/Plan provenance/head/commits/tree、九个ba
 <task type="auto" tdd="true">
   <name>Task 3: GREEN — map authoritative closure and grade durable RU-v2 evidence</name>
   <files>src/mini_agent/evaluation/harness.py, src/mini_agent/evaluation/graders.py</files>
-  <action>additive扩展EvalEvidence/Unbound allowlist并实现exact mapper；只从HTTP status、AgentRunResult和closure构造case-free result。为现有相关grader增加明确v2 branch，验证durable candidate/child/InputBinding/Task transition/Gate/Tool/Observation/Manifest/Trace graph；`_observation_persistence_graph_reason`的v1 branch保留physical envelope encode/decode/exact-reference校验，v2 branch要求envelope exact empty并以标准库`hashlib`复验logical Observation/ToolCall/Manifest/persisted source span SHA-256 chain。为mapper和`_FIXED_MESSAGES`additive加入`ORDER_SERVICE_UNAVAILABLE → FIXED_ORDER_SERVICE_UNAVAILABLE → 订单服务暂时不可用，请稍后重试。`，其他closed terminal mappings保持不变。不重建RequestUnderstandingOutputV2或P0PersistenceEnvelope，不修改13-name registry/CF/paired disclosure语义，不让Harness直接catchcandidate-invalid代替Runtime。focused转绿后只提交Harness/Graders source，subject exact为`feat(01-07L): map exact run eval evidence`。</action>
+  <action>additive扩展EvalEvidence/Unbound allowlist并实现exact mapper；只从HTTP status、AgentRunResult和closure构造case-free result。`_validate_grader_inputs`必须在任何grader执行前对完整EvalEvidence做detached strict canonical revalidation并拒绝construction-validator bypass、mixed branch、child/cardinality/non-canonical storage；为现有相关grader增加明确v2 branch，验证durable candidate/child/InputBinding/Task transition/Gate/Tool/Observation/Manifest/Trace graph。`_observation_persistence_graph_reason`的v1 branch保留physical envelope encode/decode/exact-reference校验，v2 branch要求envelope exact empty并以标准库`hashlib`复验logical Observation/ToolCall/Manifest/persisted source span SHA-256 chain。Mapper raw work放进只正常返回closed result/status的private helper，public mapper清空四个输入后才创建bounded signal。为mapper和`_FIXED_MESSAGES`additive加入`ORDER_SERVICE_UNAVAILABLE → FIXED_ORDER_SERVICE_UNAVAILABLE → 订单服务暂时不可用，请稍后重试。`，其他closed terminal mappings保持不变。不重建RequestUnderstandingOutputV2或P0PersistenceEnvelope，不修改13-name registry/CF/paired disclosure语义，不让Harness直接catchcandidate-invalid代替Runtime。focused转绿后只提交Harness/Graders source，subject exact为`feat(01-07L): map exact run eval evidence`。</action>
   <verify>
     <automated>uv run pytest tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/evaluation/test_e2e01_graders.py tests/integration/evaluation/test_e2e01_offline_harness.py -q</automated>
     no-oracle input surface、v1/v2互斥、logical-v2/physical-v1 Observation directed tamper、unavailable fixed policy、INPUT_INVALID terminal mapping与existing Harness behavior全部通过。
@@ -549,6 +557,7 @@ CONFIG = {
         "mutable_defs": frozenset(
             {
                 "EvalEvidence",
+                "_validate_grader_inputs",
                 "RequestUnderstandingGrader",
                 "InputBindingGrader",
                 "_conversation_graph_reason",
@@ -691,37 +700,118 @@ def assert_v2_class_contract(
             and isinstance(node.value.value, str)
         )
     ]
-    assert len(class_members) == 1, (path, class_name, "class members")
-    method = class_members[0]
-    assert isinstance(method, ast.AsyncFunctionDef), (path, class_name, "async")
-    assert method.name == "propose_next_move", (path, class_name, method.name)
-    assert not method.decorator_list, (path, class_name, "method decorator")
-    arguments = method.args
-    assert not arguments.posonlyargs, (path, class_name, "positional-only")
-    assert [argument.arg for argument in arguments.args] == [
-        "self",
-        "request",
-    ], (path, class_name, "arguments")
-    assert arguments.args[0].annotation is None, (path, class_name, "self annotation")
-    request_annotation = arguments.args[1].annotation
-    assert isinstance(request_annotation, ast.Name), (path, class_name, "request type")
-    assert request_annotation.id == "RequestUnderstandingInput", (
+    assert len(class_members) == 2, (path, class_name, "class members")
+    expected_methods = (
+        (
+            "propose_next_move",
+            "RequestUnderstandingInput",
+            "RequestUnderstandingOutputV2",
+        ),
+        ("plan_presentation", "PresentationInput", "PresentationPlan"),
+    )
+    assert tuple(
+        node.name if isinstance(node, ast.AsyncFunctionDef) else None
+        for node in class_members
+    ) == tuple(item[0] for item in expected_methods), (
         path,
         class_name,
-        "request type",
+        "method order",
     )
-    assert arguments.vararg is None, (path, class_name, "vararg")
-    assert not arguments.kwonlyargs, (path, class_name, "keyword-only")
-    assert not arguments.kw_defaults, (path, class_name, "keyword defaults")
-    assert arguments.kwarg is None, (path, class_name, "kwarg")
-    assert not arguments.defaults, (path, class_name, "defaults")
-    assert method.type_comment is None, (path, class_name, "type comment")
-    assert isinstance(method.returns, ast.Name), (path, class_name, "return type")
-    assert method.returns.id == "RequestUnderstandingOutputV2", (
-        path,
-        class_name,
-        "return type",
-    )
+    for method, (method_name, request_type, return_type) in zip(
+        class_members,
+        expected_methods,
+        strict=True,
+    ):
+        assert isinstance(method, ast.AsyncFunctionDef), (
+            path,
+            class_name,
+            method_name,
+            "async",
+        )
+        assert not method.decorator_list, (
+            path,
+            class_name,
+            method_name,
+            "method decorator",
+        )
+        arguments = method.args
+        assert not arguments.posonlyargs, (
+            path,
+            class_name,
+            method_name,
+            "positional-only",
+        )
+        assert [argument.arg for argument in arguments.args] == [
+            "self",
+            "request",
+        ], (path, class_name, method_name, "arguments")
+        assert arguments.args[0].annotation is None, (
+            path,
+            class_name,
+            method_name,
+            "self annotation",
+        )
+        request_annotation = arguments.args[1].annotation
+        assert isinstance(request_annotation, ast.Name), (
+            path,
+            class_name,
+            method_name,
+            "request type",
+        )
+        assert request_annotation.id == request_type, (
+            path,
+            class_name,
+            method_name,
+            "request type",
+        )
+        assert arguments.vararg is None, (
+            path,
+            class_name,
+            method_name,
+            "vararg",
+        )
+        assert not arguments.kwonlyargs, (
+            path,
+            class_name,
+            method_name,
+            "keyword-only",
+        )
+        assert not arguments.kw_defaults, (
+            path,
+            class_name,
+            method_name,
+            "keyword defaults",
+        )
+        assert arguments.kwarg is None, (
+            path,
+            class_name,
+            method_name,
+            "kwarg",
+        )
+        assert not arguments.defaults, (
+            path,
+            class_name,
+            method_name,
+            "defaults",
+        )
+        assert method.type_comment is None, (
+            path,
+            class_name,
+            method_name,
+            "type comment",
+        )
+        assert isinstance(method.returns, ast.Name), (
+            path,
+            class_name,
+            method_name,
+            "return type",
+        )
+        assert method.returns.id == return_type, (
+            path,
+            class_name,
+            method_name,
+            "return type",
+        )
 
 
 for path, config in CONFIG.items():
@@ -782,9 +872,9 @@ PY
 该oracle证明：
 
 - v1 Scripted 14 top-level defs / 9 methods与Qwen 2 defs / 4 methods exact；
-- 两个V2 class exact单继承对应v1 class，只有无decorator/default/union/variadic的typed async `propose_next_move`；Presentation path直接继承；
+- 两个V2 class exact单继承对应v1 class，只有无decorator/default/union/variadic的typed async `propose_next_move`与`plan_presentation`签名；Presentation只委托`super()`及安全重抛的行为由focused tests与独立source review验证；
 - Harness 54 pre-existing defs exact，只有approved allowlist assignment delta；
-- Graders只有protected_surface列出的10个definition与`_FIXED_MESSAGES` assignment可变，其他definition/assignment exact；
+- Graders只有protected_surface列出的11个definition与`_FIXED_MESSAGES` assignment可变，其他definition/assignment exact；
 - grader registry仍恰为13个原名原序，critical failures与E2E01-04 pair gate不变；
 - `ast.walk`覆盖top-level与local imports；只有`graders.py`可新增标准库`hashlib`以复验persisted source span SHA-256，其余三个source module import-module delta exact empty，且direct `__import__/exec/eval/globals/setattr` call计数不增加。
 
@@ -829,7 +919,7 @@ scan必须明确报告01-07J real Runtime catch、01-07S只拥有v1 Eval source/
 <success_criteria>
 
 1. RED/Provider GREEN/Mapper GREEN提交顺序、九文件scope与输出可复现；review fix只可append并逐commit受allowlist约束。
-2. Scripted/Qwen v2 consumers严格区分candidate-invalid与protocol，raw diagnostics/cause/context不可达，v1 definitions/behavior不变。
+2. Scripted/Qwen v2 consumers严格区分candidate-invalid与protocol，raw diagnostics/cause/context及最终traceback object graph不可达，v1 definitions/behavior不变。
 3. Mapper只消费exact HTTP/result/closure，无Case/Script/owner/provider/raw envelope输入；v2 evidence不重建model output，13 graders保留并显式验证durable graph。
 4. allowlist外与五tracked JSON零改动；Runtime/DB/Composition Root/active routing/lifecycle均未越权。
 5. feature与latest-overlay均通过完整门禁和独立review；只有K/L都reviewed串行merge后才形成`B_DEPENDENCY`，真实Provider→Runtime `INPUT_INVALID`仍由J证明。
