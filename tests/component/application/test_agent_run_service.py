@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -24,6 +25,7 @@ from mini_agent.application.records import (
     MessageDirection,
     ObservationWriteResult,
     ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
     ToolDispatchFenceWriteResult,
 )
 from mini_agent.core.identity import CustomerContext
@@ -49,7 +51,10 @@ from mini_agent.core.request_understanding import (
     InputSourceKind,
     NextMove,
     NextMoveKind,
-    RequestUnderstandingOutput,
+    QueryContextualizationCandidateV2,
+    ReferenceSourceKindV2,
+    RequestUnderstandingOutputV2,
+    ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
 )
@@ -140,6 +145,43 @@ class ConversationSpy:
         ):
             raise self.assistant_error
         self.messages.append(record)
+
+    async def load_conversation_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+    ):
+        self.events.append("conversation_reloaded")
+        if (
+            self.conversations
+            and self.conversations[-1].conversation_id == conversation_id
+            and self.conversations[-1].owner_customer_id
+            == owner_scope.customer_id
+        ):
+            return self.conversations[-1]
+        return None
+
+    async def list_messages_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+        limit: int,
+    ):
+        self.events.append("messages_reloaded")
+        if (
+            not self.conversations
+            or self.conversations[-1].conversation_id != conversation_id
+            or self.conversations[-1].owner_customer_id
+            != owner_scope.customer_id
+        ):
+            return ()
+        return tuple(
+            message
+            for message in self.messages[-limit:]
+            if message.conversation_id == conversation_id
+        )
 
 
 class RuntimeSpy:
@@ -256,21 +298,28 @@ class RuntimeSpy:
         self.events.append("terminal_aggregate_applied")
         return ConditionalWriteResult.APPLIED
 
-    async def create_initial_task_graph_if_current(
+    async def create_initial_task_graph_v2_if_current(
         self,
         command: object,
     ) -> ConditionalWriteResult:
-        self.events.append("initial_graph_saved")
+        self.events.append("initial_graph_v2_saved")
         if self.graph_error is not None:
             raise self.graph_error
         if self.graph_result is ConditionalWriteResult.APPLIED:
             self.task = command.initial_task.initial_record
             self.request_unit = command.initial_request_unit.initial_record
-            self.input_binding = command.input_bindings[0].record
+            self.input_binding = command.input_binding.record
             self.run_task_link = command.run_task_link.active_record
             self.task_history.append(self.task)
             self.request_unit_history.append(self.request_unit)
         return self.graph_result
+
+    async def create_initial_task_graph_if_current(
+        self,
+        command: object,
+    ) -> ConditionalWriteResult:
+        del command
+        raise AssertionError("active Runtime must not call the v1 writer")
 
     async def apply_task_transition_if_current(
         self,
@@ -419,9 +468,27 @@ class ModelSpy:
         self.next_move_requests.append(request)
         if self.ru_protocol_error:
             raise ProviderProtocolError()
+        if self.input_fault:
+            raise RequestUnderstandingCandidateInvalidError()
         message_ref = request.message_ref
-        output = RequestUnderstandingOutput(
+        output = RequestUnderstandingOutputV2(
+            schema_version="e2e01-thin-v2",
             message_ref=message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text=request.original_query,
+                resolved_reference_candidates=(
+                    ResolvedReferenceCandidateV2(
+                        name="order_id",
+                        candidate_value=self.bound_order_id,
+                        source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                        source_ref=message_ref,
+                        source_quote=self.bound_order_id,
+                        confidence=0.99,
+                    ),
+                ),
+                uncertainties=(),
+                source_message_refs=(message_ref,),
+            ),
             task_delta_candidates=(
                 TaskDeltaCandidate(
                     candidate_id=uuid4(),
@@ -449,19 +516,6 @@ class ModelSpy:
                 base_task_state_version=None,
             ),
         )
-        if self.input_fault:
-            bad_candidate = output.task_delta_candidates[0].input_candidates[
-                0
-            ].model_copy(update={"authority": "MODEL_INFERENCE"})
-            output = output.model_copy(
-                update={
-                    "task_delta_candidates": (
-                        output.task_delta_candidates[0].model_copy(
-                            update={"input_candidates": (bad_candidate,)}
-                        ),
-                    )
-                }
-            )
         return output
 
     async def plan_presentation(self, request: object) -> PresentationPlan:
@@ -901,9 +955,14 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
 
     assert _index(events, "artifact_get") < _index(events, "manifest:1")
     assert _index(events, "message:USER") < _index(
+        events, "messages_reloaded"
+    )
+    assert _index(events, "messages_reloaded") < _index(
         events, "provider:request_understanding"
     )
-    assert _index(events, "initial_graph_saved") < _index(events, "gate_saved")
+    assert _index(events, "initial_graph_v2_saved") < _index(
+        events, "gate_saved"
+    )
     assert _index(events, "gate_saved") < _index(events, "tool_call_created")
     assert _index(events, "dispatch_fence") < _index(events, "order_read")
     assert _index(events, "observation_saved") < _index(events, "manifest:2")
@@ -1844,3 +1903,14 @@ def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -
     assert service.after_revalidation_hook is not None
     assert "script" not in vars(service)
     assert "fixture" not in vars(service)
+
+
+def test_active_runtime_source_has_no_v1_or_source_version_fallback() -> None:
+    source = inspect.getsource(agent_run_service_module.AgentRunService)
+
+    assert "validate_and_reduce_initial_request(" not in source
+    assert "SaveRequestUnderstandingCommand(" not in source
+    assert ".create_initial_task_graph_if_current(" not in source
+    assert 'or "order-observation.p0.v1"' not in source
+    assert ".create_initial_task_graph_v2_if_current(" in source
+    assert "validate_and_reduce_initial_request_v2(" in source

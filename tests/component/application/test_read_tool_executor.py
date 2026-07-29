@@ -261,6 +261,54 @@ def test_found_read_is_durably_fenced_once_then_observed() -> None:
     assert execution.observation is not None
     assert execution.observation.normalized_value.order_number == "O-1001"
     assert execution.observation.normalized_value == _summary()
+    assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
+
+
+@pytest.mark.parametrize(
+    "invalid_source_version",
+    [
+        None,
+        "",
+        " mock-order-source-version.p0.v1:sha256:"
+        + ("a" * 64),
+        "mock-order-source-version.p0.v1:sha256:" + ("A" * 64),
+        b"mock-order-source-version.p0.v1:sha256:" + (b"a" * 64),
+    ],
+)
+def test_found_with_unusable_source_version_fails_before_observation(
+    invalid_source_version: object,
+) -> None:
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=invalid_source_version,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.events == [
+        "tool_call_created",
+        "dispatch_fence",
+        "order_read",
+        "tool_call_finalized",
+    ]
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert execution.finalized_attempt is not None
+    assert (
+        execution.finalized_attempt.outcome
+        is ToolResultOutcome.SYSTEM_FAILURE
+    )
+    if invalid_source_version not in {None, ""}:
+        assert repr(invalid_source_version) not in str(execution)
 
 
 @pytest.mark.parametrize(
