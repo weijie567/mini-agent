@@ -3043,41 +3043,138 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
 
     def files_referencing(*symbols: str) -> set[str]:
         symbol_set = frozenset(symbols)
+        is_versioned_codec_query = bool(
+            symbol_set
+            & {
+                "decode_persistence_record_versioned",
+                "encode_persistence_record_versioned",
+            }
+        )
         matches: set[str] = set()
         for root in ("src", "tests"):
             for path in (repository_root / root).rglob("*.py"):
                 source = path.read_text()
                 tree = ast.parse(source)
-                module_object_import = any(
-                    (
-                        isinstance(node, ast.Import)
-                        and any(
-                            imported.name
-                            == "mini_agent.application.persistence"
-                            for imported in node.names
-                        )
-                    )
-                    or (
+                parent_by_node = {
+                    child: parent
+                    for parent in ast.walk(tree)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                module_bindings: set[str] = set()
+                module_import_without_alias = False
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for imported in node.names:
+                            if (
+                                imported.name
+                                == "mini_agent.application.persistence"
+                            ):
+                                if imported.asname is None:
+                                    module_import_without_alias = True
+                                else:
+                                    module_bindings.add(imported.asname)
+                    elif (
                         isinstance(node, ast.ImportFrom)
-                        and (
-                            (
-                                node.module == "mini_agent.application"
-                                and any(
-                                    imported.name == "persistence"
-                                    for imported in node.names
+                        and node.module == "mini_agent.application"
+                    ):
+                        for imported in node.names:
+                            if imported.name == "persistence":
+                                module_bindings.add(
+                                    imported.asname or imported.name
                                 )
+                changed = True
+                while changed:
+                    changed = False
+                    for node in ast.walk(tree):
+                        value: ast.AST | None = None
+                        targets: tuple[ast.AST, ...] = ()
+                        if isinstance(node, ast.Assign):
+                            value = node.value
+                            targets = tuple(node.targets)
+                        elif isinstance(node, ast.AnnAssign):
+                            value = node.value
+                            targets = (node.target,)
+                        elif isinstance(node, ast.NamedExpr):
+                            value = node.value
+                            targets = (node.target,)
+                        if (
+                            isinstance(value, ast.Name)
+                            and value.id in module_bindings
+                        ):
+                            for target in targets:
+                                if (
+                                    isinstance(target, ast.Name)
+                                    and target.id not in module_bindings
+                                ):
+                                    module_bindings.add(target.id)
+                                    changed = True
+
+                dynamic_module_lookup = module_import_without_alias
+                for node in ast.walk(tree):
+                    if dynamic_module_lookup:
+                        break
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id
+                        in {
+                            "delattr",
+                            "getattr",
+                            "hasattr",
+                            "setattr",
+                            "vars",
+                        }
+                        and node.args
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id in module_bindings
+                    ):
+                        dynamic_module_lookup = True
+                    elif (
+                        isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in module_bindings
+                        and node.attr
+                        in {
+                            "__dict__",
+                            "__getattribute__",
+                            "__getattr__",
+                        }
+                    ):
+                        dynamic_module_lookup = True
+                    elif (
+                        isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in module_bindings
+                    ):
+                        dynamic_module_lookup = True
+                    elif (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in module_bindings
+                        and isinstance(parent_by_node[node], ast.Call)
+                        and node in parent_by_node[node].args
+                        and not (
+                            isinstance(parent_by_node[node].func, ast.Attribute)
+                            and isinstance(
+                                parent_by_node[node].func.value,
+                                ast.Name,
                             )
-                            or (
-                                node.module == "mini_agent"
-                                and any(
-                                    imported.name == "application"
-                                    for imported in node.names
-                                )
+                            and parent_by_node[node].func.value.id
+                            == "monkeypatch"
+                            and parent_by_node[node].func.attr == "setattr"
+                            and len(parent_by_node[node].args) == 3
+                            and isinstance(
+                                parent_by_node[node].args[1],
+                                ast.Constant,
                             )
+                            and parent_by_node[node].args[1].value
+                            in {
+                                "decode_persistence_record",
+                                "encode_persistence_record",
+                            }
                         )
-                    )
-                    for node in ast.walk(tree)
-                )
+                    ):
+                        dynamic_module_lookup = True
                 dynamic_import_surface = any(
                     (
                         isinstance(node, ast.Import)
@@ -3123,8 +3220,10 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                         folded_string(node) in symbol_set
                         for node in ast.walk(tree)
                     )
-                    or module_object_import
-                    or dynamic_import_surface
+                    or (
+                        is_versioned_codec_query
+                        and (dynamic_module_lookup or dynamic_import_surface)
+                    )
                 ):
                     matches.add(path.relative_to(repository_root).as_posix())
         return matches
