@@ -1684,6 +1684,57 @@ async def test_exact_run_reader_two_discovery_channels_reject_evasive_extras(
         engine.dispose()
 
 
+async def test_exact_run_reader_queries_reverse_selector_before_projection(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture_selector_order(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(" ".join(statement.lower().split()))
+
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    closure = _minimal_exact_run_evidence()
+    try:
+        await _seed_exact_closure(adapter, closure)
+        statements.clear()
+
+        loaded = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(),
+            run_id=closure.run_record.run_id,
+        )
+
+        assert loaded is not None
+        reverse_positions = tuple(
+            index
+            for index, statement in enumerate(statements)
+            if statement.startswith(
+                "select distinct "
+                "p0_record_references.source_logical_identity"
+            )
+        )
+        projection_positions = tuple(
+            index
+            for index, statement in enumerate(statements)
+            if statement.startswith("select p0_records.logical_identity")
+            and "p0_records.run_id =" in statement
+        )
+        assert reverse_positions
+        assert projection_positions
+        assert reverse_positions[0] < projection_positions[0]
+    finally:
+        engine.dispose()
+
+
 async def test_exact_run_reader_uses_one_repeatable_read_read_only_snapshot(
     eval_postgres_namespace,
 ) -> None:

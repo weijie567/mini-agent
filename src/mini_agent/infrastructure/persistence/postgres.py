@@ -1048,6 +1048,55 @@ class PostgresRecordAdapter:
 
                 while True:
                     selected_count_before = len(selected)
+                    anchor_identities = {
+                        record_code: tuple(
+                            row.logical_identity
+                            for row in rows_for_code(record_code)
+                        )
+                        for record_code in _EXACT_RUN_FAMILY_CAP
+                    }
+                    for (
+                        source_code,
+                        reverse_edges,
+                    ) in _EXACT_RUN_REVERSE_RELATIONS.items():
+                        edge_filters = [
+                            and_(
+                                P0RecordReferenceModel.relation == relation,
+                                P0RecordReferenceModel.target_record_code
+                                == target_code.value,
+                                P0RecordReferenceModel.target_logical_identity
+                                == target_identity,
+                            )
+                            for relation, target_code in reverse_edges
+                            for target_identity in anchor_identities[target_code]
+                        ]
+                        if not edge_filters:
+                            continue
+                        family_cap = _EXACT_RUN_FAMILY_CAP[source_code]
+                        identities = tuple(
+                            session.scalars(
+                                select(
+                                    P0RecordReferenceModel.source_logical_identity
+                                )
+                                .distinct()
+                                .where(
+                                    P0RecordReferenceModel.source_record_code
+                                    == source_code.value,
+                                    or_(*edge_filters),
+                                )
+                                .order_by(
+                                    P0RecordReferenceModel.source_logical_identity
+                                )
+                                .limit(family_cap + 1)
+                            )
+                        )
+                        if len(identities) > family_cap:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                            )
+                        for identity in identities:
+                            add_identity(source_code, identity)
+
                     task_ids = tuple(
                         sorted(
                             {
@@ -1107,55 +1156,6 @@ class PostgresRecordAdapter:
                             )
                         for identity in identities:
                             add_identity(record_code, identity)
-
-                    anchor_identities = {
-                        record_code: tuple(
-                            row.logical_identity
-                            for row in rows_for_code(record_code)
-                        )
-                        for record_code in _EXACT_RUN_FAMILY_CAP
-                    }
-                    for (
-                        source_code,
-                        reverse_edges,
-                    ) in _EXACT_RUN_REVERSE_RELATIONS.items():
-                        edge_filters = [
-                            and_(
-                                P0RecordReferenceModel.relation == relation,
-                                P0RecordReferenceModel.target_record_code
-                                == target_code.value,
-                                P0RecordReferenceModel.target_logical_identity
-                                == target_identity,
-                            )
-                            for relation, target_code in reverse_edges
-                            for target_identity in anchor_identities[target_code]
-                        ]
-                        if not edge_filters:
-                            continue
-                        family_cap = _EXACT_RUN_FAMILY_CAP[source_code]
-                        identities = tuple(
-                            session.scalars(
-                                select(
-                                    P0RecordReferenceModel.source_logical_identity
-                                )
-                                .distinct()
-                                .where(
-                                    P0RecordReferenceModel.source_record_code
-                                    == source_code.value,
-                                    or_(*edge_filters),
-                                )
-                                .order_by(
-                                    P0RecordReferenceModel.source_logical_identity
-                                )
-                                .limit(family_cap + 1)
-                            )
-                        )
-                        if len(identities) > family_cap:
-                            raise _integrity(
-                                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
-                            )
-                        for identity in identities:
-                            add_identity(source_code, identity)
 
                     for key, row in tuple(selected.items()):
                         source_code = key[0]
