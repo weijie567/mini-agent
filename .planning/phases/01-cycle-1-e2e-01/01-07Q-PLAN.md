@@ -44,7 +44,7 @@ must_haves:
 
 Purpose: 让后续01-07J可以从唯一public active mapping观察到RU-v2 current selection，同时保证Q/J之间的串行集成窗口和后续01-07T contract closure之前，既有v1调用方仍可复现且不会被静默推断、升级或fallback。
 
-Output: 一个只改owned Component test的RED commit和一个只改Application persistence codec的GREEN commit；不创建Summary，不修改共享State、canonical owner或任何Runtime/Infrastructure/Eval consumer。
+Output: 一个只改owned Component test的RED commit、一个只改Application persistence codec的GREEN commit，以及一个只修正两个既有category oracle的append-only test fix commit；不创建Summary，不修改共享State、canonical owner或任何Runtime/Infrastructure/Eval consumer。
 </objective>
 
 <execution_context>
@@ -132,7 +132,7 @@ def decode_persistence_record(
 
 `encode_persistence_record_versioned`与`decode_persistence_record_versioned`的签名、exact pair选择与strict closure保持。`P0_RECORD_SCHEMA_VERSION_CATALOG`是唯一pair lookup source。
 
-`_classify_outer_versioned`的known-version分类必须始终来自完整18-pair catalog，不能因expected spec恰为public active entry而缩窄到17项active mapping；否则RU-v2 expected + RU-v1 envelope会从既有`RECORD_SCHEMA_VERSION_MISMATCH`漂移为`UNKNOWN_RECORD_SCHEMA_VERSION`。Q必须冻结该category parity。
+`_classify_outer_versioned`的known-version分类必须始终来自完整18-pair catalog，不能因expected spec恰为public active entry而缩窄到17项active mapping。对explicit versioned API，catalog中已知但不等于expected pair的版本一律为`RECORD_SCHEMA_VERSION_MISMATCH`：既包括RU-v2 expected + RU-v1 envelope，也包括RU-v1 expected + RU-v2 envelope。Legacy v1 compatibility lane仍可把RU-v2 envelope分类为`UNKNOWN_RECORD_SCHEMA_VERSION`；这是两个入口的有意边界，不是fallback或category drift。Q必须冻结该directed category matrix。
 
 不得：
 
@@ -223,7 +223,7 @@ dependencies:
 required_checks:
 
 - Gate A exact branch/worktree/base/tree/two-blob/clean-state preflight before RED edit。
-- focused baseline `233 passed`；RED必须只因public active mapping仍是RU-v1而非零；GREEN focused必须恢复`233 passed`，test collection count不得变化。
+- focused baseline `233 passed`；首个RED必须只因public active mapping仍是RU-v1而非零。Source-only active-switch commit后，允许且只允许既有两个category oracle暴露full-catalog与legacy lane的分类差异；append-only test fix后focused必须恢复`233 passed`，test collection count不得变化。
 - current-v1 isolation Integration gate `50 passed`。
 - reviewed migration-oracle Integration gate `48 passed`；Q不得重新引入Application active-registry ownership或放松physical pair/downgrade/locking检查。
 - canonical environment：`uv sync --all-groups`、dev/test PostgreSQL healthy、`uv run alembic upgrade head`。
@@ -235,13 +235,13 @@ required_checks:
 
 commit_protocol:
 
-1. RED `test(01-07Q): require ru v2 active codec`只改owned test。保持233个test collection不变：新增一个non-test `_v1_registry()` helper，把既有v1 registry/projection/parity assertions改为从18-pair catalog显式选择17个v1 spec；更新`test_registry_is_exact_immutable_and_closed`与`test_version_catalog_is_exact_immutable_and_only_ru_is_dual`冻结16-v1+RU-v2 active mapping/object identity；把`test_legacy_codec_remains_v1_only_after_codec_expand`重命名为`test_active_switch_preserves_v1_compatibility_until_contract`并同时冻结active-v2、legacy-v1与explicit v1/v2；把`test_codec_expand_has_no_active_consumer_or_authority_claim`重命名为`test_codec_active_switch_has_no_runtime_or_authority_claim`。Source blob仍等于base；focused只能因active RU仍为v1失败。
+1. RED `test(01-07Q): require ru v2 active codec`只改owned test。保持233个test collection不变：新增一个non-test `_v1_registry()` helper，把既有v1 registry/projection/parity assertions改为从18-pair catalog显式选择17个v1 spec；更新`test_registry_is_exact_immutable_and_closed`与`test_version_catalog_is_exact_immutable_and_only_ru_is_dual`冻结16-v1+RU-v2 active mapping/object identity；把`test_legacy_codec_remains_v1_only_after_codec_expand`重命名为`test_active_switch_preserves_v1_compatibility_until_contract`并同时冻结active-v2、legacy-v1与explicit v1/v2；把`test_codec_expand_has_no_active_consumer_or_authority_claim`重命名为`test_codec_active_switch_has_no_runtime_or_authority_claim`。Source blob仍等于base；focused只能因public active RU仍为v1失败。
 2. GREEN `feat(01-07Q): switch ru v2 active codec`只改`src/mini_agent/application/persistence.py`。把原17-v1 mapping保存在private immutable `_P0_V1_PERSISTENCE_REGISTRY`，所有legacy helper固定使用它；18-pair catalog也由它构造。Catalog定义后构造public `P0_PERSISTENCE_REGISTRY`，只把RU替换为既有v2 spec。`_classify_outer_versioned`的known versions统一取完整catalog。不得修改imports、Pydantic models、projection rules、public signatures、error enum或其他module。
-3. 正常history相对B_Q_ORACLE_FIX恰为以上两个commit。Review finding只用append-only `fix(01-07Q): ...` commit，仍限两文件，并对新exact head重跑全部checks/review；不得amend、rebase或force-push已审历史。
+3. Implementation feedback已确认base test把RU-v1 expected + RU-v2 envelope误写为unknown，且17项legacy/category parity误把两个入口的分类强制相等。保留以上两个sealed commit，随后以append-only `fix(01-07Q): align full-catalog category expectations`只改owned test中的`test_versioned_decode_rejects_cross_version_and_metadata_confusion`与`test_all_17_v1_versioned_decode_outer_version_categories_match_legacy`：前者冻结explicit known mismatch；后者改为directed matrix，冻结legacy v1 lane unknown与versioned full-catalog mismatch。其他review finding仍只用append-only `fix(01-07Q): ...` commit，始终限两文件并对新exact head重跑全部checks/review；不得amend、rebase或force-push已审历史。
 
 done_when:
 
-- RED/GREEN原因、输出、SHA、tree和两文件containment可复现。
+- RED/source-only GREEN/category-oracle fix的原因、输出、SHA、tree和两文件containment可复现。
 - active mapping恰为16-v1+RU-v2；catalog恰为17-v1+RU-v2；legacy v1与explicit versioned v1/v2均保持预期且无推断/fallback。
 - 01-07K v2-only isolation、focused、canonical migration/full suite、protected surface全部通过。
 - feature和latest-integration overlay均取得exact-head独立`0/0/0/0` review。
@@ -303,9 +303,22 @@ handoff_format: repository/remote/branch/worktree、exact base/planning/head/tre
   <verify>
     <automated>uv run pytest tests/component/application/test_persistence_contract.py -q
 uv run pytest tests/integration/test_postgres_record_adapters.py -q</automated>
-    focused恢复233，K isolation保持50；active/current、catalog、legacy、exact-pair与error category全部通过。
+    Source行为切换完成；intermediate focused只允许两个既有category oracle（含17项参数化）暴露full-catalog/legacy分类差异，随后由Task 3恢复233。K isolation保持50。
   </verify>
   <done>public current mapping只把RU切到v2；v1 compatibility被private固定且不会污染active/versioned selection。</done>
+</task>
+
+<task type="auto" tdd="true">
+  <name>Task 3: FIX — align full-catalog and legacy category expectations</name>
+  <files>tests/component/application/test_persistence_contract.py</files>
+  <read_first>Task 2 intermediate focused output、§4 directed category matrix、exact catalog与legacy private registry</read_first>
+  <action>只改`test_versioned_decode_rejects_cross_version_and_metadata_confusion`与`test_all_17_v1_versioned_decode_outer_version_categories_match_legacy`。Explicit versioned RU-v1 expected + RU-v2 envelope改为`RECORD_SCHEMA_VERSION_MISMATCH`；17项matrix分别断言missing、other-v1、RU-v2与unknown-future在legacy/versioned两个入口的directed category，不再强制全量相等。不得修改source、其他test、collection count、fixture或公共合同。</action>
+  <verify>
+    <automated>uv run pytest tests/component/application/test_persistence_contract.py -q
+uv run pytest tests/integration/test_postgres_record_adapters.py -q</automated>
+    focused恢复233，K isolation保持50；active/current、catalog、legacy、exact-pair与directed error category全部通过。
+  </verify>
+  <done>stale category oracle已在append-only test commit中修正，source与初始RED历史未被重写。</done>
 </task>
 
 </tasks>
@@ -380,22 +393,209 @@ uv run pytest tests/integration/test_database_migrations.py -q
 uv run pytest
 
 git diff --check "$base_sha...HEAD"
-test "$(git rev-list --count "$base_sha..HEAD")" -ge 2
+test "$(git rev-list --count "$base_sha..HEAD")" -ge 3
 test "$(git rev-list --merges --count "$base_sha..HEAD")" -eq 0
 red_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '1p')"
 green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '2p')"
+category_fix_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '3p')"
 test "$(git show -s --format=%s "$red_sha")" = \
   "test(01-07Q): require ru v2 active codec"
 test "$(git show -s --format=%s "$green_sha")" = \
   "feat(01-07Q): switch ru v2 active codec"
+test "$(git show -s --format=%s "$category_fix_sha")" = \
+  "fix(01-07Q): align full-catalog category expectations"
 test "$(git diff-tree --no-commit-id --name-only -r "$red_sha")" = \
   tests/component/application/test_persistence_contract.py
 test "$(git diff-tree --no-commit-id --name-only -r "$green_sha")" = \
   src/mini_agent/application/persistence.py
+test "$(git diff-tree --no-commit-id --name-only -r "$category_fix_sha")" = \
+  tests/component/application/test_persistence_contract.py
+uv run python - "$green_sha" "$category_fix_sha" <<'PY'
+import ast
+import subprocess
+import sys
+
+path = "tests/component/application/test_persistence_contract.py"
+allowed = {
+    "test_versioned_decode_rejects_cross_version_and_metadata_confusion",
+    "test_all_17_v1_versioned_decode_outer_version_categories_match_legacy",
+}
+
+
+def load(revision: str) -> ast.Module:
+    source = subprocess.run(
+        ["git", "show", f"{revision}:{path}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return ast.parse(source)
+
+
+def separate(
+    tree: ast.Module,
+) -> tuple[ast.Module, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    selected: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    retained: list[ast.stmt] = []
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in allowed
+        ):
+            assert node.name not in selected
+            selected[node.name] = node
+        else:
+            retained.append(node)
+    assert set(selected) == allowed
+    tree.body = retained
+    return tree, selected
+
+
+before_tree, before_functions = separate(load(sys.argv[1]))
+after_tree, after_functions = separate(load(sys.argv[2]))
+assert ast.dump(before_tree, include_attributes=False) == ast.dump(
+    after_tree,
+    include_attributes=False,
+)
+for name in allowed:
+    before = before_functions[name]
+    after = after_functions[name]
+    assert ast.dump(before, include_attributes=False) != ast.dump(
+        after,
+        include_attributes=False,
+    )
+    before.body = [ast.Pass()]
+    after.body = [ast.Pass()]
+    assert ast.dump(before, include_attributes=False) == ast.dump(
+        after,
+        include_attributes=False,
+    )
+PY
+uv run python - <<'PY'
+from uuid import UUID
+
+from mini_agent.application.persistence import (
+    P0_RECORD_SCHEMA_VERSION_CATALOG,
+    P0PersistenceIntegrityCategory,
+    P0PersistenceIntegrityError,
+    P0RecordCode,
+    decode_persistence_record,
+    decode_persistence_record_versioned,
+)
+
+expected_code_values = (
+    "conversation_record",
+    "message_record",
+    "request_understanding_record",
+    "task_record",
+    "request_unit_record",
+    "conversation_task_link_record",
+    "run_task_link_record",
+    "input_binding_record",
+    "model_visible_toolset_artifact",
+    "agent_run_record",
+    "gate_decision_record",
+    "tool_call_record",
+    "observation_record",
+    "context_manifest_record",
+    "trace_event_record",
+    "eval_result_record",
+    "eval_execution_failure_record",
+)
+codes = tuple(P0RecordCode)
+assert tuple(code.value for code in codes) == expected_code_values
+v1_versions = {
+    code: f"{code.value}.p0.v1"
+    for code in codes
+}
+ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+ru_v2_schema_version = "request_understanding_record.p0.v2"
+expected_pairs = {
+    (code, version)
+    for code, version in v1_versions.items()
+} | {(ru_code, ru_v2_schema_version)}
+assert len(P0_RECORD_SCHEMA_VERSION_CATALOG) == 18
+assert set(P0_RECORD_SCHEMA_VERSION_CATALOG) == expected_pairs
+for pair, spec in P0_RECORD_SCHEMA_VERSION_CATALOG.items():
+    assert spec.record_code is pair[0]
+    assert spec.record_schema_version == pair[1]
+
+
+def decode_category(call):
+    try:
+        call()
+    except P0PersistenceIntegrityError as error:
+        return error.category
+    raise AssertionError("directed category oracle unexpectedly decoded")
+
+
+expected = (
+    (
+        "missing",
+        P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+    ),
+    (
+        "other_v1",
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+    ),
+    (
+        "ru_v2",
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+    ),
+    (
+        "future",
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+    ),
+)
+correlation_ref = UUID(int=299)
+for index, code in enumerate(codes):
+    raws = {
+        "missing": {
+            "record_code": code.value,
+        },
+        "other_v1": {
+            "record_code": code.value,
+            "record_schema_version": v1_versions[
+                codes[(index + 1) % len(codes)]
+            ],
+        },
+        "ru_v2": {
+            "record_code": code.value,
+            "record_schema_version": ru_v2_schema_version,
+        },
+        "future": {
+            "record_code": code.value,
+            "record_schema_version": "unknown-future-record.p0.v99",
+        },
+    }
+    for label, expected_legacy, expected_versioned in expected:
+        raw = raws[label]
+        actual_legacy = decode_category(
+            lambda raw=raw, code=code: decode_persistence_record(
+                raw,
+                expected_record_code=code,
+                correlation_ref=correlation_ref,
+            )
+        )
+        actual_versioned = decode_category(
+            lambda raw=raw, code=code: decode_persistence_record_versioned(
+                raw,
+                expected_record_code=code,
+                expected_schema_version=v1_versions[code],
+                correlation_ref=correlation_ref,
+            )
+        )
+        assert actual_legacy is expected_legacy, (code, label)
+        assert actual_versioned is expected_versioned, (code, label)
+PY
 test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
-  sed '1,2d' |
+  sed '1,3d' |
   rg -v '^fix\(01-07Q\): .+$' || true)"
-for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,2d'); do
+for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,3d'); do
   test -z "$(git diff-tree --no-commit-id --name-only -r "$fix_sha" |
     rg -v '^(src/mini_agent/application/persistence\.py|tests/component/application/test_persistence_contract\.py)$' ||
     true)"
@@ -441,6 +641,7 @@ MUTABLE_BASE_TEST_FUNCTIONS = {
     "test_all_projection_decision_signatures_match_the_canonical_matrix",
     "test_version_catalog_is_exact_immutable_and_only_ru_is_dual",
     "test_all_17_v1_pairs_have_legacy_semantic_parity",
+    "test_versioned_decode_rejects_cross_version_and_metadata_confusion",
     "test_legacy_codec_remains_v1_only_after_codec_expand",
     "test_codec_expand_has_no_active_consumer_or_authority_claim",
     "test_codec_expand_preserves_all_legacy_projection_counts",
@@ -452,6 +653,7 @@ MUTABLE_AFTER_TEST_FUNCTIONS = {
     "test_all_projection_decision_signatures_match_the_canonical_matrix",
     "test_version_catalog_is_exact_immutable_and_only_ru_is_dual",
     "test_all_17_v1_pairs_have_legacy_semantic_parity",
+    "test_versioned_decode_rejects_cross_version_and_metadata_confusion",
     "test_active_switch_preserves_v1_compatibility_until_contract",
     "test_codec_active_switch_has_no_runtime_or_authority_claim",
     "test_codec_expand_preserves_all_legacy_projection_counts",
@@ -740,9 +942,9 @@ scan只报告canonical alignment、existing v1 compatibility consumers、已知d
 
 <success_criteria>
 
-1. RED/GREEN两提交的失败/通过原因、scope、SHA与输出可复现；review fix只可append并保持两文件allowlist。
+1. RED/source-only GREEN/category-oracle fix三提交的失败/通过原因、scope、SHA与输出可复现；其他review fix只可append并保持两文件allowlist。
 2. Public active registry恰为16-v1+RU-v2，18-pair catalog与private 17-v1 compatibility均immutable且object identity精确。
-3. Legacy API继续v1-only；versioned API继续explicit exact pair；无default/latest/inference/fallback/rewrite，cross-version category不漂移。
+3. Legacy API继续v1-only；versioned API继续explicit exact pair；无default/latest/inference/fallback/rewrite。Explicit RU-v1↔RU-v2 cross-version均为known mismatch，legacy v1 lane中的RU-v2仍为unknown。
 4. 01-07K current-v1 isolation 50、focused 233、reviewed migration oracle 48、canonical migration upgrade/full 1901、protected oracle、two-file containment与feature/latest-overlay独立review全部通过。
 5. Reviewed feature merge形成exact `B_Q`并只解锁01-07J；不宣告B_ACTIVE、v1 contract removal、01-08或产品完成。
 
