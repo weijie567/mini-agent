@@ -2352,6 +2352,7 @@ def test_v2_routable_decision_rejects_self_issued_provenance_seals() -> None:
         request_processing_module,
         "_INITIAL_ROUTABLE_DECISION_TOKEN",
     )
+    assert not hasattr(request_processing_module, "token_bytes")
 
 
 @pytest.mark.parametrize(
