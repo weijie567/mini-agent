@@ -472,23 +472,59 @@ for name in allowed:
     )
 PY
 uv run python - <<'PY'
-import json
-import runpy
+from uuid import UUID
 
-namespace = runpy.run_path(
-    "tests/component/application/test_persistence_contract.py"
+from mini_agent.application.persistence import (
+    P0_RECORD_SCHEMA_VERSION_CATALOG,
+    P0PersistenceIntegrityCategory,
+    P0PersistenceIntegrityError,
+    P0RecordCode,
+    decode_persistence_record,
+    decode_persistence_record_versioned,
 )
-persistence = namespace["persistence_module"]
-category_enum = namespace["P0PersistenceIntegrityCategory"]
-integrity_error = namespace["P0PersistenceIntegrityError"]
-ru_v2_schema_version = namespace["RU_V2_SCHEMA_VERSION"]
-v1_registry = namespace["_v1_registry"]()
+
+expected_code_values = (
+    "conversation_record",
+    "message_record",
+    "request_understanding_record",
+    "task_record",
+    "request_unit_record",
+    "conversation_task_link_record",
+    "run_task_link_record",
+    "input_binding_record",
+    "model_visible_toolset_artifact",
+    "agent_run_record",
+    "gate_decision_record",
+    "tool_call_record",
+    "observation_record",
+    "context_manifest_record",
+    "trace_event_record",
+    "eval_result_record",
+    "eval_execution_failure_record",
+)
+codes = tuple(P0RecordCode)
+assert tuple(code.value for code in codes) == expected_code_values
+v1_versions = {
+    code: f"{code.value}.p0.v1"
+    for code in codes
+}
+ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+ru_v2_schema_version = "request_understanding_record.p0.v2"
+expected_pairs = {
+    (code, version)
+    for code, version in v1_versions.items()
+} | {(ru_code, ru_v2_schema_version)}
+assert len(P0_RECORD_SCHEMA_VERSION_CATALOG) == 18
+assert set(P0_RECORD_SCHEMA_VERSION_CATALOG) == expected_pairs
+for pair, spec in P0_RECORD_SCHEMA_VERSION_CATALOG.items():
+    assert spec.record_code is pair[0]
+    assert spec.record_schema_version == pair[1]
 
 
 def decode_category(call):
     try:
         call()
-    except integrity_error as error:
+    except P0PersistenceIntegrityError as error:
         return error.category
     raise AssertionError("directed category oracle unexpectedly decoded")
 
@@ -496,75 +532,65 @@ def decode_category(call):
 expected = (
     (
         "missing",
-        category_enum.MISSING_RECORD_SCHEMA_VERSION,
-        category_enum.MISSING_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
     ),
     (
         "other_v1",
-        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
-        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
     ),
     (
         "ru_v2",
-        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
-        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
     ),
     (
         "future",
-        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
-        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
     ),
 )
-for case in namespace["_record_cases"]():
-    envelope = namespace["encode_persistence_record"](
-        case.code,
-        case.record,
-        external_references=case.external_references,
-        logical_children=case.logical_children,
-    )
-    other_v1 = next(
-        spec.record_schema_version
-        for code, spec in v1_registry.items()
-        if code is not case.code
-    )
-    raws = {}
-    missing = json.loads(envelope.model_dump_json())
-    missing.pop("record_schema_version")
-    raws["missing"] = missing
-    for label, version in (
-        ("other_v1", other_v1),
-        ("ru_v2", ru_v2_schema_version),
-        ("future", "unknown-future-record.p0.v99"),
-    ):
-        raw = json.loads(envelope.model_dump_json())
-        raw["record_schema_version"] = version
-        raws[label] = raw
-
+correlation_ref = UUID(int=299)
+for index, code in enumerate(codes):
+    raws = {
+        "missing": {
+            "record_code": code.value,
+        },
+        "other_v1": {
+            "record_code": code.value,
+            "record_schema_version": v1_versions[
+                codes[(index + 1) % len(codes)]
+            ],
+        },
+        "ru_v2": {
+            "record_code": code.value,
+            "record_schema_version": ru_v2_schema_version,
+        },
+        "future": {
+            "record_code": code.value,
+            "record_schema_version": "unknown-future-record.p0.v99",
+        },
+    }
     for label, expected_legacy, expected_versioned in expected:
         raw = raws[label]
         actual_legacy = decode_category(
-            lambda raw=raw, code=case.code: namespace[
-                "decode_persistence_record"
-            ](
+            lambda raw=raw, code=code: decode_persistence_record(
                 raw,
                 expected_record_code=code,
-                correlation_ref=namespace["_uuid"](299),
+                correlation_ref=correlation_ref,
             )
         )
         actual_versioned = decode_category(
-            lambda raw=raw, code=case.code: (
-                persistence.decode_persistence_record_versioned(
-                    raw,
-                    expected_record_code=code,
-                    expected_schema_version=v1_registry[
-                        code
-                    ].record_schema_version,
-                    correlation_ref=namespace["_uuid"](299),
-                )
+            lambda raw=raw, code=code: decode_persistence_record_versioned(
+                raw,
+                expected_record_code=code,
+                expected_schema_version=v1_versions[code],
+                correlation_ref=correlation_ref,
             )
         )
-        assert actual_legacy is expected_legacy, (case.code, label)
-        assert actual_versioned is expected_versioned, (case.code, label)
+        assert actual_legacy is expected_legacy, (code, label)
+        assert actual_versioned is expected_versioned, (code, label)
 PY
 test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
   sed '1,3d' |
