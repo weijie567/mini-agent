@@ -277,6 +277,44 @@ dependencies:
 - `01-07Q`: RU-v2 active public codec mapping；AA仍必须显式调用versioned codec，不可依赖active selection。
 - PostgreSQL migrations/physical v2 pair from01-07P已经存在；AA不得修改migration chain。
 
+required_checks:
+
+- `preflight containment`: actual repository/remote/head branch/base branch/worktree/base SHA/tree逐项等于本Packet；worktree clean；new test path在base为ABSENT；预期`PASS`，任一偏差`BLOCK`。
+- `RED provenance`: RED commit只增加`tests/integration/test_postgres_v2_request_understanding_writes.py`，`postgres.py`仍为base blob；focused命令预期non-zero且失败只来自两个missing methods或明确列出的static-version/atomic behavior，环境/migration/test-construction失败`BLOCK`。
+- `focused GREEN`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q`；预期exit 0、zero failures/skip/xfail。
+- `neighbor regression`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_record_adapters.py -q`；预期exit 0、zero failures/skip/xfail。
+- `database environment`: `docker compose --profile test up --wait -d db-test`与`uv run alembic upgrade head`从仓库根执行；预期exit 0、healthy test database、migration head，无migration/source改动。
+- `canonical full serial gate`: `uv run pytest`；预期exit 0、zero failures，既有单个credentialed deselection可以保留，warning count须如实报告且不能新增未裁决warning。
+- `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain，v1 surface不得漂移。
+- `allowlist containment`: `git diff --name-only d704b87480f0a4252744f4c009cef9a86c08fa05...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear RED→GREEN→append-only fix history。
+- `security/atomicity matrix`: first-write、exact replay、foreign/absent、stale root、v1 collision、owner/version/closure/CAS conflict、fault injection与bounded deterministic concurrency；预期每个APPLIED都是完整closed graph，每个non-APPLIED/exception都是records/references相对baseline零变化，errors raw-free。
+- `authoritative round-trip`: 两条writer success/replay后只通过01-07K `load_exact_run_evidence_for_owner`读取；预期no-task closure无Task family，initial closure与command parent/child/Task/RequestUnit/InputBinding/links exact相等且只含RU-v2。
+- `cross-file impact scan`: 从active owner出发扫描Application/Core/Runtime/Eval/migration/status消费者；预期AA two-file实现无需owner同步；allowlist外派生状态债只报告、不混写。
+- `independent exact-head review`: reviewed local head/tree与PR head精确相等，`CRITICAL/HIGH/MEDIUM/LOW = 0/0/0/0`；任一finding未关闭`BLOCK`。
+- `latest-integration overlay`: 在当时latest integration base上重放exact feature patch并记录base SHA/tree、patch-id、synthetic tree、focused/neighbor/Alembic/full；预期全部PASS且第二份independent overlay review为`0/0/0/0`。
+- `serial merge/post-merge`: reviewed overlay tree精确等于squash merge tree，integration从previous exact head单步串行前进；post-merge focused/neighbor/Alembic/full与clean status预期PASS，之后才实例化`B_J_READY`。
+
+done_when:
+
+- RED→GREEN与任何append-only remediation均在线性feature history中可复现；
+- actual changed-files精确等于two-file allowlist，所有required_checks达到上述预期；
+- 两个exact-v2 Port writer通过static-version、owner lock、atomic/replay/conflict、bounded failure与01-07K round-trip gate；
+- exact feature head与latest-integration overlay分别取得独立`0/0/0/0` review；
+- draft PR head等于reviewed head并由Integrator串行squash merge，merge tree等于reviewed overlay tree；
+- exact post-merge integration gate通过并记录`B_J_READY` SHA/tree；01-07J仅从该exact barrier另行签发；
+- Runtime active routing、`B_ACTIVE`、Case/E2E lifecycle与readiness仍保持未声明。
+
+handoff_to: `/root Integrator；由Integrator执行exact-head/overlay裁决、GitHub PR串行merge、post-merge gate与B_J_READY命名。`
+
+handoff_format:
+
+- `identity`: repository、remote、feature branch、worktree ID、base SHA/tree、final head/tree、linear commit SHAs/subjects；
+- `scope`: expected/actual changed-files、owned/forbidden containment结果、dirty/untracked/merge-commit检查；
+- `verification`: RED失败、focused、neighbor、db health、Alembic、full、mechanical source、atomicity/concurrency/fault/replay、01-07K round-trip逐项命令/exit/count；
+- `review`: exact-head reviewer/verdict/finding resolution；latest integration SHA/tree、patch-id、synthetic tree、overlay reviewer/verdict；
+- `contract_and_risk`: `contract_changes`、`security_impact`、`eval_impact`、raw/PII检查、cross-file scan、未执行项、known/open risks；
+- `integration`: PR URL/number/head、recommended serial order、reviewed merge SHA/tree、post-merge checks、rollback；未merge前不得填写或claim `B_J_READY`。
+
 contract_changes: `NONE to canonical owners and Application/Core contracts. Infrastructure implements two already-reviewed exact-v2 Port methods and adds writer-private static-version mechanics.`
 security_impact: `YES — private owner-scoped write path. Trusted owner roots remain server supplied; absence/unauthorized stays indistinguishable; all selected roots and written closure remain same-owner; bounded errors contain no raw content/SQL/secret; every non-APPLIED or exception path proves zero partial writes.`
 eval_impact: `YES — adds Integration component evidence for exact-v2 persistence, reader round-trip, replay, collision, atomic failure and concurrency. Does not activate or pass Trajectory/E2E Case lifecycle.`
