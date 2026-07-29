@@ -1883,7 +1883,7 @@ def test_v2_initial_decision_maps_reference_uncertainty_to_stable_reject(
     assert result.closure.record.candidate_validation[0].reason_code is expected
 
 
-def test_v2_initial_decision_rejects_missing_required_input_shape() -> None:
+def test_v2_initial_decision_does_not_downgrade_bypassed_input_shape() -> None:
     message_ref = uuid4()
     candidate_id = uuid4()
     malformed_shape = _task_delta_v2(
@@ -1906,17 +1906,17 @@ def test_v2_initial_decision_rejects_missing_required_input_shape() -> None:
         }
     )
 
-    result = _reduce_initial_v2(
-        message="请查询订单 O-4242",
-        output=_initial_output_v2(
-            message_ref=message_ref,
-            candidates=(malformed_shape,),
-        ),
-    )
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _reduce_initial_v2(
+            message="请查询订单 O-4242",
+            output=_initial_output_v2(
+                message_ref=message_ref,
+                candidates=(malformed_shape,),
+            ),
+        )
 
-    assert type(result) is InitialRequestNoTaskDecisionV2
-    assert result.closure.record.candidate_validation[0].reason_code is (
-        CandidateRejectionReasonCode.REQUIRED_INPUT_MISSING
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
     )
 
 
