@@ -3061,6 +3061,8 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     for child in ast.iter_child_nodes(parent)
                 }
                 module_bindings: set[str] = set()
+                sys_bindings: set[str] = set()
+                sys_modules_bindings: set[str] = set()
                 module_import_without_alias = False
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
@@ -3073,6 +3075,8 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                     module_import_without_alias = True
                                 else:
                                     module_bindings.add(imported.asname)
+                            elif imported.name == "sys":
+                                sys_bindings.add(imported.asname or "sys")
                     elif (
                         isinstance(node, ast.ImportFrom)
                         and node.module == "mini_agent.application"
@@ -3082,99 +3086,64 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                 module_bindings.add(
                                     imported.asname or imported.name
                                 )
-                changed = True
-                while changed:
-                    changed = False
-                    for node in ast.walk(tree):
-                        value: ast.AST | None = None
-                        targets: tuple[ast.AST, ...] = ()
-                        if isinstance(node, ast.Assign):
-                            value = node.value
-                            targets = tuple(node.targets)
-                        elif isinstance(node, ast.AnnAssign):
-                            value = node.value
-                            targets = (node.target,)
-                        elif isinstance(node, ast.NamedExpr):
-                            value = node.value
-                            targets = (node.target,)
-                        if (
-                            isinstance(value, ast.Name)
-                            and value.id in module_bindings
-                        ):
-                            for target in targets:
-                                if (
-                                    isinstance(target, ast.Name)
-                                    and target.id not in module_bindings
-                                ):
-                                    module_bindings.add(target.id)
-                                    changed = True
+                    elif (
+                        isinstance(node, ast.ImportFrom)
+                        and node.module == "sys"
+                    ):
+                        for imported in node.names:
+                            if imported.name == "modules":
+                                sys_modules_bindings.add(
+                                    imported.asname or imported.name
+                                )
 
-                dynamic_module_lookup = module_import_without_alias
-                for node in ast.walk(tree):
-                    if dynamic_module_lookup:
-                        break
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id
+                def is_allowed_legacy_monkeypatch_reference(
+                    node: ast.Name,
+                ) -> bool:
+                    parent = parent_by_node[node]
+                    return (
+                        isinstance(parent, ast.Call)
+                        and node in parent.args
+                        and isinstance(parent.func, ast.Attribute)
+                        and isinstance(parent.func.value, ast.Name)
+                        and parent.func.value.id == "monkeypatch"
+                        and parent.func.attr == "setattr"
+                        and len(parent.args) == 3
+                        and isinstance(parent.args[1], ast.Constant)
+                        and parent.args[1].value
                         in {
-                            "delattr",
-                            "getattr",
-                            "hasattr",
-                            "setattr",
-                            "vars",
+                            "decode_persistence_record",
+                            "encode_persistence_record",
                         }
-                        and node.args
-                        and isinstance(node.args[0], ast.Name)
-                        and node.args[0].id in module_bindings
-                    ):
-                        dynamic_module_lookup = True
-                    elif (
-                        isinstance(node, ast.Attribute)
-                        and isinstance(node.value, ast.Name)
-                        and node.value.id in module_bindings
-                        and node.attr
-                        in {
-                            "__dict__",
-                            "__getattribute__",
-                            "__getattr__",
-                        }
-                    ):
-                        dynamic_module_lookup = True
-                    elif (
-                        isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
-                        and isinstance(node.value, ast.Name)
-                        and node.value.id in module_bindings
-                    ):
-                        dynamic_module_lookup = True
-                    elif (
+                    )
+
+                dynamic_module_lookup = (
+                    module_import_without_alias
+                    or any(
                         isinstance(node, ast.Name)
                         and isinstance(node.ctx, ast.Load)
                         and node.id in module_bindings
-                        and isinstance(parent_by_node[node], ast.Call)
-                        and node in parent_by_node[node].args
+                        and not is_allowed_legacy_monkeypatch_reference(node)
+                        for node in ast.walk(tree)
+                    )
+                )
+                unsafe_sys_module_use = any(
+                    (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in sys_bindings
                         and not (
-                            isinstance(parent_by_node[node].func, ast.Attribute)
-                            and isinstance(
-                                parent_by_node[node].func.value,
-                                ast.Name,
-                            )
-                            and parent_by_node[node].func.value.id
-                            == "monkeypatch"
-                            and parent_by_node[node].func.attr == "setattr"
-                            and len(parent_by_node[node].args) == 3
-                            and isinstance(
-                                parent_by_node[node].args[1],
-                                ast.Constant,
-                            )
-                            and parent_by_node[node].args[1].value
-                            in {
-                                "decode_persistence_record",
-                                "encode_persistence_record",
-                            }
+                            isinstance(parent_by_node[node], ast.Attribute)
+                            and parent_by_node[node].value is node
+                            and parent_by_node[node].attr == "path"
                         )
-                    ):
-                        dynamic_module_lookup = True
+                    )
+                    or (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in sys_modules_bindings
+                    )
+                    for node in ast.walk(tree)
+                )
                 dynamic_import_surface = any(
                     (
                         isinstance(node, ast.Import)
@@ -3203,17 +3172,10 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     )
                     or (
                         isinstance(node, ast.Attribute)
-                        and (
-                            node.attr == "import_module"
-                            or (
-                                node.attr == "modules"
-                                and isinstance(node.value, ast.Name)
-                                and node.value.id == "sys"
-                            )
-                        )
+                        and node.attr == "import_module"
                     )
                     for node in ast.walk(tree)
-                )
+                ) or unsafe_sys_module_use
                 if (
                     any(symbol in source for symbol in symbol_set)
                     or any(
