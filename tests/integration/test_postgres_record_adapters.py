@@ -89,6 +89,16 @@ def test_postgres_request_understanding_surface_is_v2_only() -> None:
         for node in ast.walk(production_tree)
         if isinstance(node, ast.Attribute)
     }
+    production_dynamic_attribute_names = {
+        node.args[1].value
+        for node in ast.walk(production_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"delattr", "getattr", "hasattr", "setattr"}
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    }
     adapter_methods = {
         node.name
         for node in adapter_class.body
@@ -108,6 +118,12 @@ def test_postgres_request_understanding_surface_is_v2_only() -> None:
     assert production_names.isdisjoint(legacy_types)
     assert adapter_methods.isdisjoint(legacy_methods)
     assert production_attributes.isdisjoint(legacy_methods)
+    assert production_dynamic_attribute_names.isdisjoint(legacy_methods)
+    assert {"__getattr__", "__getattribute__"}.isdisjoint(adapter_methods)
+    adapter_without_session = object.__new__(PostgresRecordAdapter)
+    for legacy_method in legacy_methods:
+        assert not hasattr(PostgresRecordAdapter, legacy_method)
+        assert not hasattr(adapter_without_session, legacy_method)
     assert {
         "AcceptedTaskDeltaV2",
         "CreateInitialTaskGraphV2Command",
