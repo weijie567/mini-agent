@@ -341,7 +341,7 @@ def revalidate_next_move(
 from datetime import datetime
 from hashlib import sha256
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, PrivateAttr, ValidationError, model_validator
 from pydantic_core import PydanticSerializationError
 
 from .common import require_utc
@@ -609,9 +609,12 @@ def _canonical_request_input_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
         )
+    request_input_fields_set: set[str] | None = None
     try:
         request_input_fields_set = set(request_input.model_fields_set)
     except (AttributeError, TypeError):
+        pass
+    if request_input_fields_set is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_INPUT_SCHEMA_INVALID
         )
@@ -796,11 +799,23 @@ def _canonical_candidate_validation_v2(
             _fail_request_understanding_v2(
                 RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
             )
+        rebuilt: CandidateValidationRecordV2 | None = None
         try:
             rebuilt = CandidateValidationRecordV2.model_validate(
-                value.model_dump(mode="python", round_trip=True)
+                value.model_dump(
+                    mode="python",
+                    round_trip=True,
+                    warnings="error",
+                )
             )
-        except (TypeError, ValueError, ValidationError):
+        except (
+            TypeError,
+            ValueError,
+            ValidationError,
+            PydanticSerializationError,
+        ):
+            pass
+        if rebuilt is None:
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
@@ -829,11 +844,23 @@ def _canonical_accepted_task_deltas_v2(
             _fail_request_understanding_v2(
                 RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
             )
+        rebuilt: AcceptedTaskDeltaV2 | None = None
         try:
             rebuilt = AcceptedTaskDeltaV2.model_validate(
-                value.model_dump(mode="python", round_trip=True)
+                value.model_dump(
+                    mode="python",
+                    round_trip=True,
+                    warnings="error",
+                )
             )
-        except (TypeError, ValueError, ValidationError):
+        except (
+            TypeError,
+            ValueError,
+            ValidationError,
+            PydanticSerializationError,
+        ):
+            pass
+        if rebuilt is None:
             _fail_request_understanding_v2(
                 RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
             )
@@ -849,12 +876,11 @@ def _authoritative_message_v2(
     authoritative_messages: Mapping[UUID, str],
     source_ref: UUID,
 ) -> str:
+    message: object | None = None
     try:
         message = authoritative_messages[source_ref]
     except (KeyError, TypeError):
-        _fail_request_understanding_v2(
-            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
-        )
+        pass
     if type(message) is not str or not message:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
@@ -928,8 +954,9 @@ def _project_resolved_reference_v2(
         source_quote=candidate.source_quote,
         candidate_value=candidate.candidate_value,
     )
+    projected: DurableResolvedReferenceCandidateV2 | None = None
     try:
-        return DurableResolvedReferenceCandidateV2(
+        projected = DurableResolvedReferenceCandidateV2(
             name=candidate.name,
             candidate_value=candidate.candidate_value,
             source_kind=candidate.source_kind,
@@ -940,9 +967,12 @@ def _project_resolved_reference_v2(
             confidence=candidate.confidence,
         )
     except (TypeError, ValueError, ValidationError):
+        pass
+    if projected is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
+    return projected
 
 
 def _project_input_candidate_v2(
@@ -958,8 +988,9 @@ def _project_input_candidate_v2(
         source_quote=candidate.source_quote,
         candidate_value=candidate.candidate_value,
     )
+    projected: DurableInputCandidateV2 | None = None
     try:
-        return DurableInputCandidateV2(
+        projected = DurableInputCandidateV2(
             name=candidate.name,
             candidate_value=candidate.candidate_value,
             semantic_role=candidate.semantic_role,
@@ -972,9 +1003,12 @@ def _project_input_candidate_v2(
             confidence=candidate.confidence,
         )
     except (TypeError, ValueError, ValidationError):
+        pass
+    if projected is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
+    return projected
 
 
 def _project_contextualization_v2(
@@ -990,17 +1024,21 @@ def _project_contextualization_v2(
         )
         for candidate in contextualization.resolved_reference_candidates
     )
+    projected: DurableQueryContextualizationCandidateV2 | None = None
     try:
-        return DurableQueryContextualizationCandidateV2(
+        projected = DurableQueryContextualizationCandidateV2(
             text=contextualization.text,
             resolved_reference_candidates=projected_references,
             uncertainties=contextualization.uncertainties,
             source_message_refs=contextualization.source_message_refs,
         )
     except (TypeError, ValueError, ValidationError):
+        pass
+    if projected is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
+    return projected
 
 
 def _project_task_delta_v2(
@@ -1014,8 +1052,9 @@ def _project_task_delta_v2(
         )
         for input_candidate in candidate.input_candidates
     )
+    projected: DurableTaskDeltaCandidateV2 | None = None
     try:
-        return DurableTaskDeltaCandidateV2(
+        projected = DurableTaskDeltaCandidateV2(
             candidate_id=candidate.candidate_id,
             operation=candidate.operation,
             goal_patch=candidate.goal_patch,
@@ -1023,9 +1062,12 @@ def _project_task_delta_v2(
             confidence=candidate.confidence,
         )
     except (TypeError, ValueError, ValidationError):
+        pass
+    if projected is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
         )
+    return projected
 
 
 def _validate_input_visible_source_scope_v2(
@@ -1182,9 +1224,12 @@ def build_request_understanding_closure_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
         )
+    now_is_utc = True
     try:
         require_utc(now, field_name="now")
     except (TypeError, ValueError):
+        now_is_utc = False
+    if not now_is_utc:
         _fail_request_understanding_v2(
             RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
         )
@@ -1523,6 +1568,8 @@ class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
 class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
     """Exact-one emitted/accepted result retaining the shared NextMove."""
 
+    _reducer_next_move_candidate: NextMove = PrivateAttr()
+
     closure: RequestUnderstandingClosureV2
     task_graph: InitialAcceptedTaskGraphV2
     next_move_candidate_ref: UUID
@@ -1572,6 +1619,7 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
             record=record,
             graphs=(self.task_graph,),
         )
+        self._reducer_next_move_candidate = self.next_move_candidate
         return self
 
 
