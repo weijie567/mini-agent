@@ -2349,6 +2349,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         private_state = getattr(value, "__pydantic_private__", None)
         if (
             type(private_state) is not dict
+            or any(type(key) is not str for key in private_state)
             or set(private_state) != {"_reducer_decision_seal"}
         ):
             return False
