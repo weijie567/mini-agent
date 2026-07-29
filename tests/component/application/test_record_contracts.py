@@ -2634,6 +2634,85 @@ def test_v2_commands_reject_subclass_and_undeclared_nested_state() -> None:
         _rebuild(graph, request_understanding=poisoned_wrapper)
 
 
+def test_v2_no_task_command_rejects_poisoned_primitive_subclasses() -> None:
+    command = _v2_no_task_command()
+    record = command.request_understanding_record
+
+    class StringSubclass(str):
+        pass
+
+    class DateTimeSubclass(datetime):
+        pass
+
+    poisoned_schema_version = record.model_copy(
+        update={
+            "model_input_schema_version": StringSubclass(
+                record.model_input_schema_version
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="canonical"):
+        _rebuild(
+            command,
+            request_understanding_record=poisoned_schema_version,
+        )
+
+    poisoned_created_at = record.model_copy(
+        update={
+            "created_at": DateTimeSubclass.fromtimestamp(
+                record.created_at.timestamp(),
+                tz=record.created_at.tzinfo,
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="canonical"):
+        _rebuild(
+            command,
+            request_understanding_record=poisoned_created_at,
+        )
+
+
+def test_v2_initial_graph_rejects_poisoned_primitive_subclasses() -> None:
+    graph = _initial_v2_graph()
+    child = graph.request_understanding.accepted_delta
+    task = graph.initial_task.initial_record
+
+    class StringSubclass(str):
+        pass
+
+    class DateTimeSubclass(datetime):
+        pass
+
+    poisoned_child = child.model_copy(
+        update={"goal_text": StringSubclass(child.goal_text)}
+    )
+    poisoned_understanding = graph.request_understanding.model_copy(
+        update={"accepted_delta": poisoned_child}
+    )
+    with pytest.raises(ValidationError, match="canonical"):
+        _rebuild(
+            graph,
+            request_understanding=poisoned_understanding,
+        )
+
+    poisoned_task = task.model_copy(
+        update={
+            "created_at": DateTimeSubclass.fromtimestamp(
+                task.created_at.timestamp(),
+                tz=task.created_at.tzinfo,
+            )
+        }
+    )
+    poisoned_task_command = graph.initial_task.model_copy(
+        update={"initial_record": poisoned_task}
+    )
+    with pytest.raises(ValidationError, match="canonical"):
+        _rebuild(
+            graph,
+            initial_task=poisoned_task_command,
+        )
+
+
 def test_task_transition_command_is_one_exact_task_request_unit_aggregate() -> None:
     command = _task_transition_command()
 
