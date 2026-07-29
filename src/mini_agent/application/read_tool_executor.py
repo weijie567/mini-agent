@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -172,12 +172,15 @@ def _canonical_enum_member_is_closed(value: object) -> bool:
 def _is_closed_utc_datetime(value: object) -> bool:
     if type(value) is not datetime:
         return False
-    timezone = object.__getattribute__(value, "tzinfo")
-    if timezone is UTC:
+    timezone_value = object.__getattribute__(value, "tzinfo")
+    if timezone_value is UTC:
         return True
-    if type(timezone) is not TzInfo:
+    if type(timezone_value) is timezone:
+        offset = timezone.utcoffset(timezone_value, value)
+        return type(offset) is timedelta and offset == timedelta(0)
+    if type(timezone_value) is not TzInfo:
         return False
-    offset = TzInfo.utcoffset(timezone, value)
+    offset = TzInfo.utcoffset(timezone_value, value)
     return type(offset) is timedelta and offset == timedelta(0)
 
 

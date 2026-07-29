@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from uuid import UUID, uuid4
 
 import pytest
@@ -329,6 +329,41 @@ def test_found_read_is_durably_fenced_once_then_observed() -> None:
     assert execution.observation is not None
     assert execution.observation.normalized_value.order_number == "O-1001"
     assert execution.observation.normalized_value == _summary()
+    assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
+
+
+def test_exact_builtin_named_utc_timezone_is_preserved() -> None:
+    named_utc = timezone(timedelta(0), "Z")
+    timestamp = datetime(2030, 1, 1, tzinfo=named_utc)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+
+    execution, runtime, order = asyncio.run(
+        _execute(
+            result=GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=summary,
+                source_version=SYNTHETIC_SOURCE_VERSION,
+            )
+        )
+    )
+
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert execution.get_order_outcome is GetOrderOutcome.FOUND
+    assert execution.observation is not None
+    assert (
+        object.__getattribute__(
+            execution.observation.normalized_value.ordered_at,
+            "tzinfo",
+        )
+        is named_utc
+    )
     assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
 
 
