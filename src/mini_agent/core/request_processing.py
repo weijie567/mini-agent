@@ -486,14 +486,18 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
     if isinstance(left, BaseModel):
         try:
             declared_fields = set(type(left).model_fields)
-            left_state_keys = set(left.__dict__)
-            right_state_keys = set(right.__dict__)
+            left_state = left.__dict__
+            right_state = right.__dict__
+            left_state_keys = set(left_state)
+            right_state_keys = set(right_state)
             left_fields_set = left.__pydantic_fields_set__
             right_fields_set = right.__pydantic_fields_set__
         except (AttributeError, TypeError):
             return False
         if (
-            type(left_fields_set) is not set
+            type(left_state) is not dict
+            or type(right_state) is not dict
+            or type(left_fields_set) is not set
             or type(right_fields_set) is not set
             or any(type(key) is not str for key in left_state_keys)
             or any(type(key) is not str for key in right_state_keys)
@@ -1814,9 +1818,11 @@ def _initial_routable_decision_payload_v2(
     declared_fields = set(type(value).model_fields)
     try:
         fields_set = value.__pydantic_fields_set__
-        state_keys = set(value.__dict__)
+        state = value.__dict__
+        state_keys = set(state)
         if (
-            state_keys != declared_fields
+            type(state) is not dict
+            or state_keys != declared_fields
             or type(fields_set) is not set
             or any(type(key) is not str for key in state_keys)
             or any(type(field) is not str for field in fields_set)
