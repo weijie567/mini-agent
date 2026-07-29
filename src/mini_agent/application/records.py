@@ -27,11 +27,19 @@ from mini_agent.core.common import (
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, OrderObservation
+from mini_agent.core.request_processing import _normalize_order_id
+from mini_agent.core.request_understanding import UncertaintyV2
 from mini_agent.core.task_state import (
     AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
+    CandidateValidationRecordV2,
+    DurableInputCandidateV2,
+    DurableQueryContextualizationCandidateV2,
+    DurableResolvedReferenceCandidateV2,
+    DurableTaskDeltaCandidateV2,
     InputBinding,
+    InputValidationStatus,
     RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
@@ -347,11 +355,28 @@ def _canonical_model_field_projection(
     if type(value) is not expected_type:
         raise ValueError(error_message)
     field_names = frozenset(expected_type.model_fields)
+    required_field_names = frozenset(
+        field_name
+        for field_name, field in expected_type.model_fields.items()
+        if field.is_required()
+    )
+    try:
+        state = value.__dict__
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
+    except (AttributeError, TypeError):
+        raise ValueError(error_message) from None
     if (
-        frozenset(vars(value)) != field_names
-        or not value.model_fields_set.issubset(field_names)
-        or value.__pydantic_extra__ is not None
-        or value.__pydantic_private__ is not None
+        type(state) is not dict
+        or any(type(field_name) is not str for field_name in state)
+        or frozenset(state) != field_names
+        or type(fields_set) is not set
+        or any(type(field_name) is not str for field_name in fields_set)
+        or not required_field_names.issubset(fields_set)
+        or not fields_set.issubset(field_names)
+        or extra is not None
+        or private is not None
     ):
         raise ValueError(error_message)
     return {
@@ -385,9 +410,511 @@ def _strict_rebuild_exact_model(
     )
     return _strict_validate_canonical_projection(
         expected_type,
+        {
+            field_name: projection[field_name]
+            for field_name in value.__pydantic_fields_set__
+        },
+        error_message=error_message,
+    )
+
+
+def _write_contract_values_match_exactly(
+    left: object,
+    right: object,
+) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, BaseModel):
+        try:
+            declared_fields = set(type(left).model_fields)
+            left_state = left.__dict__
+            right_state = right.__dict__
+            left_state_keys = set(left_state)
+            right_state_keys = set(right_state)
+            left_fields_set = left.__pydantic_fields_set__
+            right_fields_set = right.__pydantic_fields_set__
+        except (AttributeError, TypeError):
+            return False
+        if (
+            type(left_state) is not dict
+            or type(right_state) is not dict
+            or any(type(field_name) is not str for field_name in left_state)
+            or any(type(field_name) is not str for field_name in right_state)
+            or left_state_keys != declared_fields
+            or right_state_keys != declared_fields
+            or type(left_fields_set) is not set
+            or type(right_fields_set) is not set
+            or any(
+                type(field_name) is not str
+                for field_name in left_fields_set
+            )
+            or any(
+                type(field_name) is not str
+                for field_name in right_fields_set
+            )
+            or left_fields_set != right_fields_set
+            or not left_fields_set.issubset(declared_fields)
+            or not right_fields_set.issubset(declared_fields)
+        ):
+            return False
+        try:
+            left_extra = left.__pydantic_extra__
+            right_extra = right.__pydantic_extra__
+            left_private = left.__pydantic_private__
+            right_private = right.__pydantic_private__
+        except (AttributeError, TypeError):
+            return False
+        if not _write_contract_values_match_exactly(left_extra, right_extra):
+            return False
+        if not _write_contract_values_match_exactly(left_private, right_private):
+            return False
+        return all(
+            field_name in left.__dict__
+            and field_name in right.__dict__
+            and _write_contract_values_match_exactly(
+                left.__dict__[field_name],
+                right.__dict__[field_name],
+            )
+            for field_name in type(left).model_fields
+        )
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _write_contract_values_match_exactly(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, Mapping):
+        left_items = tuple(left.items())
+        right_items = tuple(right.items())
+        return len(left_items) == len(right_items) and all(
+            _write_contract_values_match_exactly(left_key, right_key)
+            and _write_contract_values_match_exactly(left_value, right_value)
+            for (left_key, left_value), (right_key, right_value) in zip(
+                left_items,
+                right_items,
+                strict=True,
+            )
+        )
+    if isinstance(left, StrEnum):
+        return left == right
+    if isinstance(left, datetime):
+        return type(left) is datetime and left == right
+    if isinstance(left, UUID):
+        return type(left) is UUID and left == right
+    if isinstance(left, str):
+        return type(left) is str and left == right
+    if isinstance(left, bool):
+        return type(left) is bool and left == right
+    if isinstance(left, int):
+        return type(left) is int and left == right
+    if isinstance(left, float):
+        return type(left) is float and left == right
+    if isinstance(left, bytes):
+        return type(left) is bytes and left == right
+    return left == right
+
+
+def _require_exact_write_contract_projection(
+    original: object,
+    rebuilt: _ModelT,
+    *,
+    error_message: str,
+) -> _ModelT:
+    if not _write_contract_values_match_exactly(original, rebuilt):
+        raise ValueError(error_message)
+    return rebuilt
+
+
+def _strict_rebuild_exact_write_contract_model(
+    value: object,
+    expected_type: type[_ModelT],
+    *,
+    error_message: str,
+) -> _ModelT:
+    rebuilt = _strict_rebuild_exact_model(
+        value,
+        expected_type,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_tuple_projection(
+    value: object,
+    *,
+    error_message: str,
+) -> tuple[object, ...]:
+    if type(value) is not tuple:
+        raise ValueError(error_message)
+    return value
+
+
+def _strict_rebuild_durable_contextualization_v2(
+    value: object,
+) -> DurableQueryContextualizationCandidateV2:
+    error_message = "RU-v2 contextualization must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        DurableQueryContextualizationCandidateV2,
+        error_message=error_message,
+    )
+    resolved = _strict_tuple_projection(
+        projection["resolved_reference_candidates"],
+        error_message=error_message,
+    )
+    uncertainties = _strict_tuple_projection(
+        projection["uncertainties"],
+        error_message=error_message,
+    )
+    _strict_tuple_projection(
+        projection["source_message_refs"],
+        error_message=error_message,
+    )
+    projection["resolved_reference_candidates"] = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            item,
+            DurableResolvedReferenceCandidateV2,
+            error_message=error_message,
+        )
+        for item in resolved
+    )
+    projection["uncertainties"] = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            item,
+            UncertaintyV2,
+            error_message=error_message,
+        )
+        for item in uncertainties
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        DurableQueryContextualizationCandidateV2,
         projection,
         error_message=error_message,
     )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_durable_candidate_v2(
+    value: object,
+) -> DurableTaskDeltaCandidateV2:
+    error_message = "RU-v2 Candidate must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        DurableTaskDeltaCandidateV2,
+        error_message=error_message,
+    )
+    input_candidates = _strict_tuple_projection(
+        projection["input_candidates"],
+        error_message=error_message,
+    )
+    projection["input_candidates"] = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            item,
+            DurableInputCandidateV2,
+            error_message=error_message,
+        )
+        for item in input_candidates
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        DurableTaskDeltaCandidateV2,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_request_understanding_record_v2(
+    value: object,
+) -> RequestUnderstandingRecordV2:
+    error_message = "RU-v2 record must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        RequestUnderstandingRecordV2,
+        error_message=error_message,
+    )
+    candidates = _strict_tuple_projection(
+        projection["task_delta_candidates"],
+        error_message=error_message,
+    )
+    validation = _strict_tuple_projection(
+        projection["candidate_validation"],
+        error_message=error_message,
+    )
+    _strict_tuple_projection(
+        projection["accepted_delta_refs"],
+        error_message=error_message,
+    )
+    projection["contextualization"] = (
+        _strict_rebuild_durable_contextualization_v2(
+            projection["contextualization"]
+        )
+    )
+    projection["task_delta_candidates"] = tuple(
+        _strict_rebuild_durable_candidate_v2(candidate)
+        for candidate in candidates
+    )
+    projection["candidate_validation"] = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            decision,
+            CandidateValidationRecordV2,
+            error_message=error_message,
+        )
+        for decision in validation
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        RequestUnderstandingRecordV2,
+        {
+            field_name: projection[field_name]
+            for field_name in value.__pydantic_fields_set__
+        },
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _require_exact_trusted_owner_scope(value: object) -> TrustedOwnerScope:
+    error_message = "TrustedOwnerScope must be an exact trusted projection"
+    projection = _canonical_model_field_projection(
+        value,
+        TrustedOwnerScope,
+        error_message=error_message,
+    )
+    if type(projection["customer_id"]) is not str:
+        raise ValueError(error_message)
+    return value
+
+
+def _referenced_message_ids_v2(
+    record: RequestUnderstandingRecordV2,
+) -> frozenset[UUID]:
+    references = {
+        record.message_ref,
+        *record.contextualization.source_message_refs,
+    }
+    references.update(
+        candidate.source_ref
+        for candidate in record.contextualization.resolved_reference_candidates
+    )
+    references.update(
+        source_ref
+        for uncertainty in record.contextualization.uncertainties
+        for source_ref in uncertainty.source_message_refs
+    )
+    references.update(
+        candidate_input.source_ref
+        for candidate in record.task_delta_candidates
+        for candidate_input in candidate.input_candidates
+    )
+    return frozenset(references)
+
+
+def _validate_v2_owner_roots_and_messages(
+    *,
+    owner_scope: object,
+    conversation: object,
+    messages: object,
+    run: object,
+    record: RequestUnderstandingRecordV2,
+) -> MessageRecord:
+    owner = _require_exact_trusted_owner_scope(owner_scope)
+    canonical_conversation = _strict_rebuild_exact_write_contract_model(
+        conversation,
+        ConversationRecord,
+        error_message="RU-v2 Conversation must be canonical",
+    )
+    message_values = _strict_tuple_projection(
+        messages,
+        error_message="RU-v2 Message closure must be canonical",
+    )
+    canonical_messages = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            message,
+            MessageRecord,
+            error_message="RU-v2 Message closure must be canonical",
+        )
+        for message in message_values
+    )
+    canonical_run = _strict_rebuild_exact_write_contract_model(
+        run,
+        AgentRunRecord,
+        error_message="RU-v2 Run must be canonical",
+    )
+    message_ids = tuple(message.message_id for message in canonical_messages)
+    if len(message_ids) != len(set(message_ids)):
+        raise ValueError("RU-v2 expected Message identities must be unique")
+    if canonical_conversation.owner_customer_id != owner.customer_id:
+        raise ValueError("RU-v2 Conversation must match trusted owner scope")
+    if any(
+        message.conversation_id != canonical_conversation.conversation_id
+        for message in canonical_messages
+    ):
+        raise ValueError("RU-v2 Messages must belong to the exact Conversation")
+    if set(message_ids) != set(_referenced_message_ids_v2(record)):
+        raise ValueError("RU-v2 requires the exact referenced Message set")
+    current_messages = tuple(
+        message
+        for message in canonical_messages
+        if message.message_id == record.message_ref
+    )
+    if (
+        len(current_messages) != 1
+        or current_messages[0].direction is not MessageDirection.USER
+    ):
+        raise ValueError("RU-v2 current Message must be exactly one USER Message")
+    if (
+        canonical_run.status is not AgentRunStatus.RUNNING
+        or canonical_run.incomplete_reason is not None
+    ):
+        raise ValueError("RU-v2 requires a clean RUNNING Run")
+    if canonical_run.conversation_id != canonical_conversation.conversation_id:
+        raise ValueError("RU-v2 Run must belong to the exact Conversation")
+    if record.run_id != canonical_run.run_id:
+        raise ValueError("RU-v2 record must bind the exact Run")
+    current_message = current_messages[0]
+    if (
+        record.created_at < current_message.received_at
+        or record.created_at < canonical_run.started_at
+    ):
+        raise ValueError(
+            "RU-v2 creation timestamp cannot precede current Message or Run"
+        )
+    return current_message
+
+
+class SaveRequestUnderstandingV2AcceptedCommand(_StrictRuntimePrivateRecord):
+    """One exact RU-v2 parent/accepted-child logical aggregate."""
+
+    record: RequestUnderstandingRecordV2
+    accepted_delta: AcceptedTaskDeltaV2
+
+    @model_validator(mode="after")
+    def accepted_child_is_exact_one_candidate_projection(self) -> Self:
+        record = _strict_rebuild_request_understanding_record_v2(self.record)
+        child = _strict_rebuild_exact_write_contract_model(
+            self.accepted_delta,
+            AcceptedTaskDeltaV2,
+            error_message="RU-v2 accepted child must be canonical",
+        )
+        if (
+            len(record.task_delta_candidates) != 1
+            or len(record.candidate_validation) != 1
+        ):
+            raise ValueError(
+                "RU-v2 accepted command requires exactly one emitted Candidate"
+            )
+        candidate = record.task_delta_candidates[0]
+        decision = record.candidate_validation[0]
+        if (
+            decision.candidate_ref != candidate.candidate_id
+            or decision.decision is not CandidateValidationDecision.ACCEPT
+            or record.accepted_delta_refs != (child.accepted_delta_id,)
+            or child.candidate_ref != candidate.candidate_id
+            or child.message_ref != record.message_ref
+            or child.operation is not candidate.operation
+            or child.goal_text != candidate.goal_patch
+        ):
+            raise ValueError(
+                "RU-v2 accepted child must preserve its candidate projection"
+            )
+        if (
+            len(child.input_binding_refs) != 1
+            or len(set(child.input_binding_refs)) != 1
+            or child.base_task_state_version is not None
+            or child.result_task_state_version != 1
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version != 1
+            or record.next_move_candidate_ref is None
+        ):
+            raise ValueError(
+                "RU-v2 accepted command requires one initial Task effect"
+            )
+        if record.created_at != child.accepted_at:
+            raise ValueError(
+                "RU-v2 parent and accepted child must share one timestamp"
+            )
+        return self
+
+
+def _strict_rebuild_v2_accepted_command(
+    value: object,
+) -> SaveRequestUnderstandingV2AcceptedCommand:
+    error_message = "RU-v2 accepted command must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        SaveRequestUnderstandingV2AcceptedCommand,
+        error_message=error_message,
+    )
+    projection["record"] = _strict_rebuild_request_understanding_record_v2(
+        projection["record"]
+    )
+    projection["accepted_delta"] = _strict_rebuild_exact_write_contract_model(
+        projection["accepted_delta"],
+        AcceptedTaskDeltaV2,
+        error_message=error_message,
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        SaveRequestUnderstandingV2AcceptedCommand,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+class SaveRequestUnderstandingV2NoTaskCommand(_StrictRuntimePrivateRecord):
+    """Conditional RU-v2 parent write with no accepted Task effect."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_message_records: Annotated[
+        tuple[MessageRecord, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    expected_active_run_record: AgentRunRecord
+    request_understanding_record: RequestUnderstandingRecordV2
+
+    @model_validator(mode="after")
+    def graph_is_exact_owner_bound_no_task_closure(self) -> Self:
+        record = _strict_rebuild_request_understanding_record_v2(
+            self.request_understanding_record
+        )
+        _validate_v2_owner_roots_and_messages(
+            owner_scope=self.owner_scope,
+            conversation=self.expected_conversation_record,
+            messages=self.expected_message_records,
+            run=self.expected_active_run_record,
+            record=record,
+        )
+        if (
+            record.accepted_delta_refs
+            or any(
+                decision.decision is CandidateValidationDecision.ACCEPT
+                for decision in record.candidate_validation
+            )
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version is not None
+            or record.next_move_candidate_ref is not None
+        ):
+            raise ValueError("RU-v2 no-task command must carry no Task effect")
+        return self
 
 
 def _strict_rebuild_terminal_trace_event(value: object) -> TraceEvent:
@@ -1144,6 +1671,110 @@ class CreateRunTaskLinkCommand(_StrictRuntimePrivateRecord):
         return self
 
 
+def _strict_rebuild_create_task_command(
+    value: object,
+) -> CreateTaskCommand:
+    error_message = "initial Task command must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        CreateTaskCommand,
+        error_message=error_message,
+    )
+    projection["initial_record"] = _strict_rebuild_exact_write_contract_model(
+        projection["initial_record"],
+        TaskRecord,
+        error_message=error_message,
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        CreateTaskCommand,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_create_request_unit_command(
+    value: object,
+) -> CreateRequestUnitCommand:
+    error_message = "initial RequestUnit command must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        CreateRequestUnitCommand,
+        error_message=error_message,
+    )
+    projection["initial_record"] = _strict_rebuild_exact_write_contract_model(
+        projection["initial_record"],
+        RequestUnitRecord,
+        error_message=error_message,
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        CreateRequestUnitCommand,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_save_input_binding_command(
+    value: object,
+) -> SaveInputBindingCommand:
+    error_message = "initial InputBinding command must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        SaveInputBindingCommand,
+        error_message=error_message,
+    )
+    projection["record"] = _strict_rebuild_exact_write_contract_model(
+        projection["record"],
+        InputBinding,
+        error_message=error_message,
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        SaveInputBindingCommand,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
+def _strict_rebuild_create_run_task_link_command(
+    value: object,
+) -> CreateRunTaskLinkCommand:
+    error_message = "initial RunTaskLink command must be recursively canonical"
+    projection = _canonical_model_field_projection(
+        value,
+        CreateRunTaskLinkCommand,
+        error_message=error_message,
+    )
+    projection["active_record"] = _strict_rebuild_exact_write_contract_model(
+        projection["active_record"],
+        RunTaskLinkRecord,
+        error_message=error_message,
+    )
+    rebuilt = _strict_validate_canonical_projection(
+        CreateRunTaskLinkCommand,
+        projection,
+        error_message=error_message,
+    )
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
 class CreateInitialTaskGraphCommand(_StrictRuntimePrivateRecord):
     """One conditional write for the accepted initial goal and all projections."""
 
@@ -1258,6 +1889,172 @@ class CreateInitialTaskGraphCommand(_StrictRuntimePrivateRecord):
             or run_link.base_task_state_version is not None
         ):
             raise ValueError("RunTaskLink must bind the Run to its newly created Task")
+        return self
+
+
+class CreateInitialTaskGraphV2Command(_StrictRuntimePrivateRecord):
+    """One conditional RU-v2 exact-one initial graph write."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_message_records: Annotated[
+        tuple[MessageRecord, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    expected_active_run_record: AgentRunRecord
+    request_understanding: SaveRequestUnderstandingV2AcceptedCommand
+    initial_task: CreateTaskCommand
+    initial_request_unit: CreateRequestUnitCommand
+    input_binding: SaveInputBindingCommand
+    conversation_task_link: ConversationTaskLinkRecord
+    run_task_link: CreateRunTaskLinkCommand
+
+    @model_validator(mode="after")
+    def graph_is_exact_clean_initial_projection(self) -> Self:
+        understanding = _strict_rebuild_v2_accepted_command(
+            self.request_understanding
+        )
+        record = understanding.record
+        child = understanding.accepted_delta
+        _validate_v2_owner_roots_and_messages(
+            owner_scope=self.owner_scope,
+            conversation=self.expected_conversation_record,
+            messages=self.expected_message_records,
+            run=self.expected_active_run_record,
+            record=record,
+        )
+        task_command = _strict_rebuild_create_task_command(self.initial_task)
+        unit_command = _strict_rebuild_create_request_unit_command(
+            self.initial_request_unit
+        )
+        binding_command = _strict_rebuild_save_input_binding_command(
+            self.input_binding
+        )
+        conversation_link = _strict_rebuild_exact_write_contract_model(
+            self.conversation_task_link,
+            ConversationTaskLinkRecord,
+            error_message="initial ConversationTaskLink must be canonical",
+        )
+        run_link_command = _strict_rebuild_create_run_task_link_command(
+            self.run_task_link
+        )
+        task = task_command.initial_record
+        unit = unit_command.initial_record
+        binding = binding_command.record
+        run_link = run_link_command.active_record
+        conversation = self.expected_conversation_record
+        run = self.expected_active_run_record
+        candidate = record.task_delta_candidates[0]
+        candidate_input = candidate.input_candidates[0]
+
+        try:
+            normalized_candidate_value = _normalize_order_id(
+                candidate_input.candidate_value
+            )
+        except ValueError:
+            raise ValueError(
+                "RU-v2 accepted candidate InputBinding is invalid"
+            ) from None
+        if (
+            binding.name != candidate_input.name
+            or binding.normalized_value != normalized_candidate_value
+            or binding.authority is not candidate_input.authority
+            or binding.source_refs != (candidate_input.source_ref,)
+        ):
+            raise ValueError(
+                "RU-v2 accepted candidate InputBinding projection mismatch"
+            )
+        if task.owner_customer_id != self.owner_scope.customer_id:
+            raise ValueError("initial Task must match the trusted owner scope")
+        if (
+            task.status is not TaskStatus.ACTIVE
+            or task.state_version != 1
+            or task.last_outcome_ref is not None
+        ):
+            raise ValueError("RU-v2 requires a clean initial Task")
+        if (
+            unit.task_id != task.task_id
+            or unit.goal_text != child.goal_text
+            or unit.goal_source_refs != (record.message_ref,)
+            or unit.input_binding_refs != (binding.binding_id,)
+            or unit.status is not TaskStatus.ACTIVE
+            or unit.state_version != 1
+            or unit.contextualization_ref is not None
+            or unit.constraint_refs
+            or unit.dependency_refs
+            or unit.open_questions
+            or unit.observation_refs
+            or unit.evidence_binding_refs
+            or unit.pending_action_ref is not None
+            or unit.result_refs
+        ):
+            raise ValueError("RU-v2 requires a clean initial RequestUnit")
+        if (
+            binding_command.request_unit_id != unit.request_unit_id
+            or binding.validation_status is not InputValidationStatus.ACCEPTED
+            or binding.confirmed_by_user is not True
+            or binding.supersedes is not None
+        ):
+            raise ValueError("RU-v2 requires a clean initial InputBinding")
+        if (
+            child.task_id != task.task_id
+            or child.input_binding_refs != (binding.binding_id,)
+            or child.base_task_state_version is not None
+            or child.result_task_state_version != task.state_version
+            or child.result_task_state_version != unit.state_version
+        ):
+            raise ValueError("RU-v2 accepted child must bind the initial Task effect")
+        generated_ids = (
+            record.request_understanding_record_id,
+            record.next_move_candidate_ref,
+            child.accepted_delta_id,
+            task.task_id,
+            unit.request_unit_id,
+            binding.binding_id,
+        )
+        if len(generated_ids) != len(set(generated_ids)):
+            raise ValueError("RU-v2 initial graph identities must be unique")
+        if (
+            conversation_link.conversation_id != conversation.conversation_id
+            or conversation_link.task_id != task.task_id
+            or conversation_link.ended_at is not None
+        ):
+            raise ValueError(
+                "ConversationTaskLink must be the active initial Task link"
+            )
+        if (
+            run_link.run_id != run.run_id
+            or run_link.task_id != task.task_id
+            or run_link.base_task_state_version is not None
+            or run_link.result_task_state_version is not None
+        ):
+            raise ValueError("RunTaskLink must bind the Run to its new Task")
+        timestamps = {
+            record.created_at,
+            child.accepted_at,
+            task.created_at,
+            task.updated_at,
+            unit.created_at,
+            unit.updated_at,
+            binding.created_at,
+            binding.updated_at,
+            conversation_link.linked_at,
+        }
+        if len(timestamps) != 1:
+            raise ValueError("RU-v2 initial graph must use one trusted timestamp")
+        initial_at = next(iter(timestamps))
+        current_message = next(
+            message
+            for message in self.expected_message_records
+            if message.message_id == record.message_ref
+        )
+        if (
+            initial_at < current_message.received_at
+            or initial_at < run.started_at
+        ):
+            raise ValueError(
+                "RU-v2 initial timestamp cannot precede current Message or Run"
+            )
         return self
 
 
