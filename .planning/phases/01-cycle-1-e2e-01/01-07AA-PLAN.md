@@ -353,7 +353,7 @@ handoff_format:
 contract_changes: `NONE to canonical owners and Application/Core contracts. Infrastructure implements two already-reviewed exact-v2 Port methods and adds writer-private static-version mechanics.`
 security_impact: `YES — private owner-scoped write path. Trusted owner roots remain server supplied; absence/unauthorized stays indistinguishable; all selected roots and written closure remain same-owner; bounded errors contain no raw content/SQL/secret; every non-APPLIED or exception path proves zero partial writes.`
 eval_impact: `YES — adds Integration component evidence for exact-v2 persistence, reader round-trip, replay, collision, atomic failure and concurrency. Does not activate or pass Trajectory/E2E Case lifecycle.`
-rollback: `Revert only the reviewed AA feature merge. The new test file and postgres.py implementation are additive; existing v1 writer, migration and Application/Core contracts remain. After revert B_J_READY/B_ACTIVE claims are invalid and 01-07J must remain blocked.`
+rollback: `分阶段逆序普通revert，禁止reset、force-push或直接改写integration历史：(1) r2未merge时，关闭/放弃feature PR并删除本地feature Worktree即可，B_J_READY仍未形成；(2) AA已merge但01-07J尚未merge时，普通revert reviewed AA feature merge，撤销B_J_READY claim并阻断01-07J；(3) 01-07J、B_ACTIVE或任一后继已形成时，先阻断新流量/后继签发，按依赖逆序普通revert J及所有后继，再普通revert AA feature merge，最后撤销B_ACTIVE/B_J_READY claims。AA新增test与postgres.py实现是additive，既有v1 writer、migration与Application/Core contracts保留；任何阶段都必须重跑当时适用的post-revert gates。`
 
 handoff:
 
