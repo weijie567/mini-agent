@@ -9,11 +9,15 @@ from typing import TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from mini_agent.application.records import ProviderProtocolError
+from mini_agent.application.records import (
+    ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
+)
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
     RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 
 
@@ -21,6 +25,9 @@ QWEN_MODEL_SNAPSHOT = "qwen3.7-plus-2026-05-26"
 _OutputModel = TypeVar("_OutputModel", bound=BaseModel)
 _REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = RequestUnderstandingOutput.model_json_schema()
 _PRESENTATION_PLAN_SCHEMA = PresentationPlan.model_json_schema()
+_V2_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = (
+    RequestUnderstandingOutputV2.model_json_schema()
+)
 
 
 def _fresh_protocol_error() -> ProviderProtocolError:
@@ -162,3 +169,128 @@ class QwenResponsesAdapter:
         if failed or parsed_output is None:
             raise _fresh_protocol_error()
         return parsed_output
+
+
+def _v2_fresh_candidate_invalid_error(
+) -> RequestUnderstandingCandidateInvalidError:
+    error = RequestUnderstandingCandidateInvalidError()
+    error.__cause__ = None
+    error.__context__ = None
+    return error
+
+
+async def _v2_invoke_request_understanding(
+    adapter: QwenResponsesAdapter,
+    request: RequestUnderstandingInput,
+) -> tuple[str, RequestUnderstandingOutputV2 | None]:
+    target_name = "submit_next_move"
+    target_tool = {
+        "type": "function",
+        "name": target_name,
+        "description": "Submit one Request Understanding candidate.",
+        "parameters": deepcopy(_V2_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA),
+    }
+    body = {
+        "model": QWEN_MODEL_SNAPSHOT,
+        "input": request.model_dump(mode="json"),
+        "tools": [target_tool],
+        "tool_choice": {
+            "type": "function",
+            "name": target_name,
+        },
+        "store": False,
+        "stream": False,
+    }
+    raw_arguments: str | None = None
+    try:
+        response = await adapter._client.post(
+            adapter._endpoint,
+            headers={
+                "Authorization": f"Bearer {adapter._api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        response.raise_for_status()
+        candidate_envelope = response.json()
+        if not isinstance(candidate_envelope, dict):
+            raise ValueError
+        candidate_output = candidate_envelope.get("output")
+        if not isinstance(candidate_output, list):
+            raise ValueError
+        function_calls = [
+            item
+            for item in candidate_output
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        ]
+        if len(function_calls) != 1:
+            raise ValueError
+        function_call = function_calls[0]
+        if function_call.get("name") != target_name:
+            raise ValueError
+        candidate_arguments = function_call.get("arguments")
+        if not isinstance(candidate_arguments, str):
+            raise ValueError
+        raw_arguments = candidate_arguments
+        decoded_arguments = json.loads(raw_arguments)
+        if not isinstance(decoded_arguments, dict):
+            raise ValueError
+        if decoded_arguments is None:
+            raise ValueError
+    except (
+        httpx.HTTPError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        return "PROTOCOL_ERROR", None
+    except Exception:
+        return "PROTOCOL_ERROR", None
+
+    parsed_output: RequestUnderstandingOutputV2 | None = None
+    try:
+        parsed_output = RequestUnderstandingOutputV2.model_validate_json(
+            raw_arguments,
+            strict=True,
+        )
+    except ValidationError:
+        return "CANDIDATE_INVALID", None
+    except Exception:
+        return "PROTOCOL_ERROR", None
+    if parsed_output is None:
+        return "PROTOCOL_ERROR", None
+    return "SUCCESS", parsed_output
+
+
+class QwenResponsesAdapterV2(QwenResponsesAdapter):
+    async def propose_next_move(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> RequestUnderstandingOutputV2:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        status, output = await _v2_invoke_request_understanding(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if status == "CANDIDATE_INVALID":
+            raise _v2_fresh_candidate_invalid_error()
+        if status != "SUCCESS" or output is None:
+            raise _fresh_protocol_error()
+        return output
+
+    async def plan_presentation(
+        self,
+        request: PresentationInput,
+    ) -> PresentationPlan:
+        plan: PresentationPlan | None = None
+        failed = False
+        try:
+            plan = await super().plan_presentation(request)
+        except ProviderProtocolError:
+            failed = True
+        if failed:
+            self = None  # type: ignore[assignment]
+            request = None  # type: ignore[assignment]
+            raise _fresh_protocol_error()
+        assert plan is not None
+        return plan

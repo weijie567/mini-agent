@@ -11,8 +11,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from mini_agent.application.ports import ModelProvider
-from mini_agent.application.records import ProviderProtocolError
+from mini_agent.application.ports import ModelProvider, ModelProviderV2
+from mini_agent.application.records import (
+    ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
+)
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
@@ -26,6 +29,7 @@ from mini_agent.core.presentation import (
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
     RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 from mini_agent.core.tool_system import ToolSpec, compute_model_visible_toolset_hash
 from mini_agent.evaluation.artifacts import (
@@ -33,6 +37,7 @@ from mini_agent.evaluation.artifacts import (
     ModelScriptArtifact,
     load_e2e01_artifacts,
 )
+import mini_agent.evaluation.scripted_provider as scripted_provider_module
 from mini_agent.evaluation.scripted_provider import ScriptedModelProvider
 
 
@@ -91,6 +96,22 @@ def _provider(script_ref: str) -> ScriptedModelProvider:
         script_execution_ref=SCRIPT_EXECUTION_REF,
     )
     assert isinstance(provider, ModelProvider)
+    return provider
+
+
+def _provider_v2(script_ref: str) -> ModelProviderV2:
+    provider_type = getattr(
+        scripted_provider_module,
+        "ScriptedModelProviderV2",
+    )
+    provider = provider_type(
+        load_e2e01_artifacts(
+            REPO_ROOT,
+            candidate_version="candidate",
+        ).script_by_ref(script_ref),
+        script_execution_ref=SCRIPT_EXECUTION_REF,
+    )
+    assert isinstance(provider, ModelProviderV2)
     return provider
 
 
@@ -188,6 +209,23 @@ def _reachable_state(
         frozenset(strings),
         frozenset(types),
     )
+
+
+def _implementation_traceback_state(
+    error: BaseException,
+) -> tuple[tuple[str, ...], _ReachableState]:
+    frame_names: list[str] = []
+    frame_locals: list[dict[str, object]] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_globals.get("__name__") == (
+            "mini_agent.evaluation.scripted_provider"
+        ):
+            frame_names.append(frame.f_code.co_name)
+            frame_locals.append(dict(frame.f_locals))
+        traceback = traceback.tb_next
+    return tuple(frame_names), _reachable_state(tuple(frame_locals))
 
 
 def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> None:
@@ -331,6 +369,44 @@ def test_explicit_scripts_return_canonical_request_understanding(
     provider.assert_exhausted()
 
 
+@pytest.mark.parametrize(
+    ("script_ref", "expected_order", "expected_tool"),
+    [
+        ("script:e2e01-01:success", "O-1001", "get_order"),
+        ("script:e2e01-04-a:foreign-order", "O-2001", "get_order"),
+        ("script:fault-provider:unknown-tool-name", "O-1001", "get_any_order"),
+    ],
+)
+def test_v2_scripts_return_canonical_contextualized_candidates(
+    script_ref: str,
+    expected_order: str,
+    expected_tool: str,
+) -> None:
+    output = asyncio.run(
+        _provider_v2(script_ref).propose_next_move(
+            _request("请查一下这个订单"),
+        )
+    )
+
+    assert type(output) is RequestUnderstandingOutputV2
+    assert output.schema_version == "e2e01-thin-v2"
+    assert output.message_ref == MESSAGE_REF
+    assert output.contextualization.text == "请查一下这个订单"
+    assert output.contextualization.source_message_refs == (MESSAGE_REF,)
+    assert output.contextualization.uncertainties == ()
+    assert len(output.contextualization.resolved_reference_candidates) == 1
+    resolved = output.contextualization.resolved_reference_candidates[0]
+    assert resolved.candidate_value == expected_order
+    assert resolved.source_ref == MESSAGE_REF
+    assert resolved.source_quote == expected_order
+    assert output.task_delta_candidates[0].candidate_id == uuid5(
+        NAMESPACE_URL,
+        f"script-execution:{SCRIPT_EXECUTION_REF}:{MESSAGE_REF}",
+    )
+    assert output.next_move_candidate.requested_tool_name == expected_tool
+    assert output.next_move_candidate.arguments == {"order_id": expected_order}
+
+
 def test_script_cursor_is_strict_and_does_not_keyword_route() -> None:
     provider = _provider("script:e2e01-01:success")
     with pytest.raises(ProviderProtocolError) as caught:
@@ -376,6 +452,40 @@ def test_invalid_request_candidates_fail_canonical_validation(
 @pytest.mark.parametrize(
     "script_ref",
     [
+        "script:fault-provider:invalid-request-understanding-schema",
+        "script:fault-provider:source-authority-mismatch",
+        "script:fault-provider:trusted-field-override",
+    ],
+)
+def test_v2_invalid_candidates_expose_fresh_bounded_candidate_errors(
+    script_ref: str,
+) -> None:
+    errors = []
+    for _ in range(2):
+        with pytest.raises(
+            RequestUnderstandingCandidateInvalidError
+        ) as caught:
+            asyncio.run(
+                _provider_v2(script_ref).propose_next_move(_request())
+            )
+        errors.append(caught.value)
+        assert caught.value.args == (
+            "REQUEST_UNDERSTANDING_CANDIDATE_INVALID",
+        )
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert script_ref not in str(caught.value)
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("propose_next_move",)
+        assert "customer-B" not in reachable.string_values
+        assert RequestUnderstandingInput not in reachable.value_types
+        assert type(_provider_v2(script_ref)) not in reachable.value_types
+    assert errors[0] is not errors[1]
+
+
+@pytest.mark.parametrize(
+    "script_ref",
+    [
         "script:fault-provider:zero-target-functions",
         "script:fault-provider:multiple-target-functions",
     ],
@@ -392,6 +502,36 @@ def test_request_protocol_faults_expose_fresh_parameterless_errors(
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert script_ref not in str(caught.value)
+    assert errors[0] is not errors[1]
+
+
+@pytest.mark.parametrize(
+    "script_ref",
+    [
+        "script:fault-provider:zero-target-functions",
+        "script:fault-provider:multiple-target-functions",
+    ],
+)
+def test_v2_request_framing_faults_remain_fresh_protocol_errors(
+    script_ref: str,
+) -> None:
+    errors = []
+    for _ in range(2):
+        provider_type = type(_provider_v2(script_ref))
+        with pytest.raises(ProviderProtocolError) as caught:
+            asyncio.run(_provider_v2(script_ref).propose_next_move(_request()))
+        errors.append(caught.value)
+        assert not isinstance(
+            caught.value,
+            RequestUnderstandingCandidateInvalidError,
+        )
+        assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("propose_next_move",)
+        assert RequestUnderstandingInput not in reachable.value_types
+        assert provider_type not in reachable.value_types
     assert errors[0] is not errors[1]
 
 
@@ -415,6 +555,37 @@ def test_presentation_protocol_faults_discard_raw_envelopes(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert "O-1001 已发货" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "script_ref",
+    [
+        "script:fault-presentation:zero-target-functions",
+        "script:fault-presentation:multiple-target-functions",
+        "script:fault-presentation:invalid-schema",
+        "script:fault-presentation:fact-bearing-envelope",
+    ],
+)
+def test_v2_presentation_faults_remain_protocol_errors(
+    script_ref: str,
+) -> None:
+    errors = []
+    for _ in range(2):
+        provider = _provider_v2(script_ref)
+        provider_type = type(provider)
+        asyncio.run(provider.propose_next_move(_request()))
+        with pytest.raises(ProviderProtocolError) as caught:
+            asyncio.run(provider.plan_presentation(_presentation_input()))
+        errors.append(caught.value)
+        assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("plan_presentation",)
+        assert "O-1001 已发货" not in reachable.string_values
+        assert PresentationInput not in reachable.value_types
+        assert provider_type not in reachable.value_types
+    assert errors[0] is not errors[1]
 
 
 def test_stale_state_directive_is_separate_closed_and_one_shot() -> None:
@@ -441,7 +612,17 @@ def test_scripted_provider_reads_no_credentials_and_opens_no_network(
 
     monkeypatch.setattr(os, "getenv", forbidden_getenv)
     monkeypatch.setattr(socket.socket, "connect", forbidden_connect)
-    output = asyncio.run(
-        _provider("script:e2e01-04-b:nonexistent-order").propose_next_move(_request())
+    legacy_output = asyncio.run(
+        _provider(
+            "script:e2e01-04-b:nonexistent-order"
+        ).propose_next_move(_request())
     )
+    output = asyncio.run(
+        _provider_v2(
+            "script:e2e01-04-b:nonexistent-order"
+        ).propose_next_move(_request())
+    )
+    assert type(legacy_output) is RequestUnderstandingOutput
+    assert legacy_output.next_move_candidate.arguments == {"order_id": "O-9999"}
+    assert type(output) is RequestUnderstandingOutputV2
     assert output.next_move_candidate.arguments == {"order_id": "O-9999"}

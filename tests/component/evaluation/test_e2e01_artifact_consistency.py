@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from inspect import signature
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -10,12 +11,17 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from mini_agent.application.ports import ModelProviderV2
 from mini_agent.application.records import ConditionalWriteResult
 from mini_agent.core.presentation import PresentationPlan
 from mini_agent.core.request_understanding import (
     NextMove,
     RequestUnderstandingOutput,
 )
+import mini_agent.evaluation.graders as graders_module
+import mini_agent.evaluation.harness as harness_module
+import mini_agent.evaluation.scripted_provider as scripted_provider_module
+import mini_agent.infrastructure.model.qwen_responses as qwen_responses_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -1099,3 +1105,57 @@ def test_artifacts_contain_only_declared_synthetic_data_and_no_secrets() -> None
                 pattern.search(string_value) for pattern in SECRET_VALUE_PATTERNS
             )
             assert not string_value.startswith(("http://", "https://"))
+
+
+def test_v2_eval_dependency_is_additive_and_not_an_artifact_activation() -> None:
+    serialized_artifacts = "\n".join(
+        path.read_text(encoding="utf-8") for path in ARTIFACT_PATHS
+    )
+    assert "ORDER_SERVICE_UNAVAILABLE" not in serialized_artifacts
+    assert "FIXED_ORDER_SERVICE_UNAVAILABLE" not in serialized_artifacts
+
+    scripted_v2 = getattr(
+        scripted_provider_module,
+        "ScriptedModelProviderV2",
+    )
+    qwen_v2 = getattr(
+        qwen_responses_module,
+        "QwenResponsesAdapterV2",
+    )
+    for provider_type, legacy_type in (
+        (scripted_v2, scripted_provider_module.ScriptedModelProvider),
+        (qwen_v2, qwen_responses_module.QwenResponsesAdapter),
+    ):
+        assert provider_type.__bases__ == (legacy_type,)
+        assert issubclass(provider_type, ModelProviderV2)
+        assert {
+            name
+            for name in provider_type.__dict__
+            if not name.startswith("__")
+        } == {"propose_next_move", "plan_presentation"}
+        method_signature = signature(provider_type.propose_next_move)
+        assert tuple(method_signature.parameters) == ("self", "request")
+        presentation_signature = signature(provider_type.plan_presentation)
+        assert tuple(presentation_signature.parameters) == ("self", "request")
+
+    assert tuple(graders_module.EvalEvidence.model_fields)[-3:] == (
+        "request_understanding_records_v2",
+        "accepted_task_deltas_v2",
+        "task_state_transitions",
+    )
+    mapper_signature = signature(
+        getattr(
+            harness_module,
+            "map_exact_run_http_result_to_sut_result",
+        )
+    )
+    assert tuple(mapper_signature.parameters) == (
+        "execution_ref",
+        "http_status",
+        "agent_result",
+        "closure",
+    )
+    assert all(
+        parameter.kind.name == "KEYWORD_ONLY"
+        for parameter in mapper_signature.parameters.values()
+    )
