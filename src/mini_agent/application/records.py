@@ -3692,9 +3692,20 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     raise ValueError(
                         "accepted child bindings must match candidate inputs"
                     )
+                try:
+                    normalized_expected_inputs = {
+                        name: _normalize_order_id(
+                            candidate_input.candidate_value
+                        )
+                        for name, candidate_input in expected_inputs.items()
+                    }
+                except ValueError:
+                    raise ValueError(
+                        "accepted child bindings must preserve validated input values"
+                    ) from None
                 if any(
                     binding.normalized_value
-                    != expected_inputs[name].candidate_value
+                    != normalized_expected_inputs[name]
                     or binding.authority is not expected_inputs[name].authority
                     or expected_inputs[name].source_ref not in binding.source_refs
                     for name, binding in actual_bindings.items()
