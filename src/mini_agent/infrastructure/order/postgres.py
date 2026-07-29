@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -15,6 +16,31 @@ from mini_agent.core.order import (
     OrderSummaryProjection,
 )
 from mini_agent.infrastructure.persistence.models import MockOrderModel
+
+
+def _mock_order_source_version(
+    *,
+    owner_customer_id: str,
+    order_id: str,
+    safe_projection: OrderSummaryProjection,
+) -> str:
+    canonical_payload = {
+        "source_version_schema": "mock-order-source-version.p0.v1",
+        "owner_customer_id": owner_customer_id,
+        "order_id": order_id,
+        "safe_projection": safe_projection.model_dump(mode="json"),
+    }
+    canonical_bytes = json.dumps(
+        canonical_payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return (
+        "mock-order-source-version.p0.v1:sha256:"
+        f"{sha256(canonical_bytes).hexdigest()}"
+    )
 
 
 class PostgresGetOrderAdapter:
@@ -74,6 +100,11 @@ class PostgresGetOrderAdapter:
             return GetOrderResult(
                 outcome=GetOrderOutcome.FOUND,
                 order_summary=projection,
+                source_version=_mock_order_source_version(
+                    owner_customer_id=query.customer_id,
+                    order_id=query.order_id,
+                    safe_projection=projection,
+                ),
             )
         except (SQLAlchemyError, ValidationError, TypeError, ValueError):
             return GetOrderResult(
