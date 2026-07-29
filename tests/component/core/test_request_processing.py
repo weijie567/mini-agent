@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+import mini_agent.core.request_processing as request_processing_module
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
     InitialAcceptedTaskGraphV2,
@@ -2262,6 +2263,95 @@ def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
                 current_request_unit=result.task_graph.request_unit,
                 current_input_binding=result.task_graph.input_binding,
             )
+
+
+def test_v2_routable_decision_rejects_self_issued_provenance_seals() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(kind=NextMoveKind.ASK_USER),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    replacement = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_order",
+        arguments={"order_id": "O-4242"},
+        base_task_state_version=None,
+    )
+    replacement_fingerprint = sha256(
+        replacement.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        ).encode("utf-8")
+    ).hexdigest()
+
+    substituted = result.model_copy(
+        update={"next_move_candidate": replacement}
+    )
+    substituted.__pydantic_private__[
+        "_reducer_next_move_fingerprint"
+    ] = replacement_fingerprint
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=substituted,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    constructed = InitialRequestRoutableTaskGraphDecisionV2.model_construct(
+        closure=result.closure,
+        task_graph=result.task_graph,
+        next_move_candidate_ref=result.next_move_candidate_ref,
+        next_move_candidate=replacement,
+    )
+    constructed.__pydantic_private__[
+        "_reducer_next_move_fingerprint"
+    ] = replacement_fingerprint
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=constructed,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    payload = result.model_dump(mode="python")
+    payload["next_move_candidate"] = replacement
+    context_key = getattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_CONTEXT_KEY",
+        "retired-internal-context-key",
+    )
+    context_token = getattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_TOKEN",
+        object(),
+    )
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2.model_validate(
+            payload,
+            context={context_key: context_token},
+        )
+    assert not hasattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_CONTEXT_KEY",
+    )
+    assert not hasattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_TOKEN",
+    )
 
 
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
