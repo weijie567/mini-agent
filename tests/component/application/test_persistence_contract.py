@@ -3007,12 +3007,53 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         "tests/integration/test_postgres_record_adapters.py",
     }
 
+    def folded_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = folded_string(node.left)
+            right = folded_string(node.right)
+            return left + right if left is not None and right is not None else None
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for value in node.values:
+                if isinstance(value, ast.FormattedValue):
+                    part = folded_string(value.value)
+                else:
+                    part = folded_string(value)
+                if part is None:
+                    return None
+                parts.append(part)
+            return "".join(parts)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], (ast.List, ast.Tuple))
+        ):
+            separator = folded_string(node.func.value)
+            parts = tuple(folded_string(item) for item in node.args[0].elts)
+            if separator is not None and all(part is not None for part in parts):
+                return separator.join(
+                    part for part in parts if part is not None
+                )
+        return None
+
     def files_referencing(*symbols: str) -> set[str]:
+        symbol_set = frozenset(symbols)
         return {
             path.relative_to(repository_root).as_posix()
             for root in ("src", "tests")
             for path in (repository_root / root).rglob("*.py")
-            if any(symbol in path.read_text() for symbol in symbols)
+            if (
+                any(symbol in path.read_text() for symbol in symbol_set)
+                or any(
+                    folded_string(node) in symbol_set
+                    for node in ast.walk(ast.parse(path.read_text()))
+                )
+            )
         }
 
     exact_reader_owner_files = {
@@ -3069,6 +3110,143 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         for parent in ast.walk(postgres_tree)
         for child in ast.iter_child_nodes(parent)
     }
+    versioned_codec_symbols = frozenset(
+        {
+            "encode_persistence_record_versioned",
+            "decode_persistence_record_versioned",
+        }
+    )
+    persistence_module_object_imports = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(
+                imported.name == "mini_agent"
+                or imported.name.startswith("mini_agent.application")
+                for imported in node.names
+            )
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and (
+                (
+                    node.module == "mini_agent"
+                    and any(
+                        imported.name == "application"
+                        for imported in node.names
+                    )
+                )
+                or (
+                    node.module == "mini_agent.application"
+                    and any(
+                        imported.name == "persistence"
+                        for imported in node.names
+                    )
+                )
+            )
+        )
+    ]
+    dynamic_imports = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(
+                imported.name.split(".", maxsplit=1)[0]
+                in {"builtins", "importlib", "sys"}
+                for imported in node.names
+            )
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.split(".", maxsplit=1)[0]
+            in {"builtins", "importlib", "sys"}
+        )
+    ]
+    dynamic_namespace_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Name)
+            and node.id
+            in {
+                "__builtins__",
+                "__import__",
+                "compile",
+                "eval",
+                "exec",
+            }
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr
+            in {
+                "__dict__",
+                "__getattribute__",
+                "__globals__",
+            }
+        )
+    ]
+    constructed_codec_symbols = [
+        node
+        for node in ast.walk(postgres_tree)
+        if folded_string(node) in versioned_codec_symbols
+    ]
+    shadowing_bindings: list[ast.AST] = []
+    for node in ast.walk(postgres_tree):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif isinstance(node, ast.arg) and node.arg in versioned_codec_symbols:
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.alias)
+            and node.asname in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.alias)
+            and node.name in versioned_codec_symbols
+            and not (
+                isinstance(parent_by_node[node], ast.ImportFrom)
+                and parent_by_node[node].module
+                == "mini_agent.application.persistence"
+                and node.asname is None
+            )
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.ExceptHandler)
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, (ast.MatchAs, ast.MatchStar))
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.MatchMapping)
+            and node.rest in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+
+    assert not persistence_module_object_imports
+    assert not dynamic_imports
+    assert not dynamic_namespace_references
+    assert not constructed_codec_symbols
+    assert not shadowing_bindings
+
     encoder_imports = [
         imported
         for node in ast.walk(postgres_tree)
@@ -3137,6 +3315,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             ):
+                assert not isinstance(enclosing_function, ast.Lambda)
                 enclosing_function = parent_by_node.get(enclosing_function)
             assert isinstance(
                 enclosing_function,
@@ -3152,6 +3331,16 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 enclosing_class = parent_by_node.get(enclosing_class)
             assert isinstance(enclosing_class, ast.ClassDef)
             assert enclosing_class.name == "PostgresRecordAdapter"
+            assert parent_by_node[enclosing_function] is enclosing_class
+        encoder_methods = [
+            node
+            for node in ast.walk(postgres_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_ru_v2_write_encode"
+            and isinstance(parent_by_node[node], ast.ClassDef)
+            and parent_by_node[node].name == "PostgresRecordAdapter"
+        ]
+        assert len(encoder_methods) == 1
     else:
         assert not encoder_imports
         assert not encoder_name_references
@@ -3172,6 +3361,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             ):
+                assert not isinstance(enclosing_function, ast.Lambda)
                 enclosing_function = parent_by_node.get(enclosing_function)
             assert isinstance(
                 enclosing_function,
@@ -3190,6 +3380,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 enclosing_class = parent_by_node.get(enclosing_class)
             assert isinstance(enclosing_class, ast.ClassDef)
             assert enclosing_class.name == "PostgresRecordAdapter"
+            assert parent_by_node[enclosing_function] is enclosing_class
     else:
         assert not decoder_imports
         assert not decoder_name_references
