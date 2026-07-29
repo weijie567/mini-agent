@@ -41,6 +41,9 @@ must_haves:
 > **DERIVED / NON_NORMATIVE**
 > 业务、Memory、Thin Slice source-version语义与execution order仍由active canonical owner拥有。本Plan只把现行最终矩阵映射为一个精确Core Task Packet，不维护第二套产品、Memory或Eval合同。
 
+> **EXECUTION PREFLIGHT AMENDMENT / ZSH REVISION SYNTAX**
+> 首次feature Gate A在clean exact-base Worktree复现：zsh会把未加花括号的`base_sha` revision插值解析为parameter modifier，导致错误revision。四处blob preflight已统一使用braced parameter expansion；本修订不改变feature base、两文件ownership、RED/GREEN、合同、安全、Eval、active routing或barrier顺序。
+
 <objective>
 以TDD RED→GREEN把`GetOrderResult.FOUND.source_version`从01-07H的strict optional迁移态闭合为non-empty exact-pattern必填，同时完整保留所有non-FOUND prohibition与边界非暴露规则。
 
@@ -293,9 +296,9 @@ test "$(git worktree list --porcelain | awk -v root="$current_root" '
 ')" = "refs/heads/$expected_branch"
 test "$(git rev-parse HEAD^0)" = "$base_sha"
 test "$(git rev-parse "$base_sha^{tree}")" = "$base_tree"
-test "$(git rev-parse "$base_sha:src/mini_agent/core/order.py")" = \
+test "$(git rev-parse "${base_sha}:src/mini_agent/core/order.py")" = \
   6f6188d6b848d4d628b5933df36580c21c84c024
-test "$(git rev-parse "$base_sha:tests/component/core/test_memory_trace_presentation_contract.py")" = \
+test "$(git rev-parse "${base_sha}:tests/component/core/test_memory_trace_presentation_contract.py")" = \
   22a3ac0744bcf0bb01d9d98c1bf2c38f235bcb76
 test -z "$(git status --short --untracked-files=all)"
 uv run pytest tests/component/core/test_memory_trace_presentation_contract.py -q
@@ -322,9 +325,9 @@ test "$(git worktree list --porcelain | awk -v root="$current_root" '
 ')" = "refs/heads/$expected_branch"
 test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
 test "$(git rev-parse "$base_sha^{tree}")" = "$base_tree"
-test "$(git rev-parse "$base_sha:src/mini_agent/core/order.py")" = \
+test "$(git rev-parse "${base_sha}:src/mini_agent/core/order.py")" = \
   6f6188d6b848d4d628b5933df36580c21c84c024
-test "$(git rev-parse "$base_sha:tests/component/core/test_memory_trace_presentation_contract.py")" = \
+test "$(git rev-parse "${base_sha}:tests/component/core/test_memory_trace_presentation_contract.py")" = \
   22a3ac0744bcf0bb01d9d98c1bf2c38f235bcb76
 
 uv sync --all-groups
