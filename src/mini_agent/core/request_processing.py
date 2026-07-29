@@ -1236,6 +1236,7 @@ def build_request_understanding_closure_v2(
         accepted_task_deltas=canonical_children,
         now=now,
     )
+    closure: RequestUnderstandingClosureV2 | None = None
     try:
         record = RequestUnderstandingRecordV2(
             request_understanding_record_id=request_understanding_record_id,
@@ -1255,14 +1256,17 @@ def build_request_understanding_closure_v2(
             next_move_candidate_ref=next_move_candidate_ref,
             created_at=now,
         )
-        return RequestUnderstandingClosureV2(
+        closure = RequestUnderstandingClosureV2(
             record=record,
             accepted_task_deltas=canonical_children,
         )
     except (TypeError, ValueError, ValidationError):
+        pass
+    if closure is None:
         _fail_request_understanding_v2(
             RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
         )
+    return closure
 
 
 def _is_exact_canonical_model_v2(
@@ -1450,6 +1454,44 @@ def _validate_initial_graph_candidate_projection_v2(
         )
 
 
+def _validate_initial_graph_identity_closure_v2(
+    *,
+    record: RequestUnderstandingRecordV2,
+    graphs: tuple[InitialAcceptedTaskGraphV2, ...],
+) -> None:
+    identities = [
+        record.request_understanding_record_id,
+        *(
+            identity
+            for graph in graphs
+            for identity in (
+                graph.accepted_delta.accepted_delta_id,
+                graph.task.task_id,
+                graph.request_unit.request_unit_id,
+                graph.input_binding.binding_id,
+            )
+        ),
+    ]
+    if record.next_move_candidate_ref is not None:
+        identities.append(record.next_move_candidate_ref)
+    if len(identities) != len(set(identities)):
+        raise ValueError(
+            "initial decision record identities must be globally unique"
+        )
+    if any(
+        graph.accepted_delta.base_task_state_version is not None
+        or graph.accepted_delta.result_task_state_version != 1
+        or graph.accepted_delta.task_id != graph.task.task_id
+        or graph.task.state_version != 1
+        or graph.request_unit.state_version != 1
+        for graph in graphs
+    ):
+        raise ValueError(
+            "each initial accepted Candidate requires one independent "
+            "base-null/result-1 Task effect"
+        )
+
+
 class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
     """A valid zero/all-reject closure with no Task effect."""
 
@@ -1526,6 +1568,10 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
             record=record,
             graph=self.task_graph,
         )
+        _validate_initial_graph_identity_closure_v2(
+            record=record,
+            graphs=(self.task_graph,),
+        )
         return self
 
 
@@ -1575,6 +1621,10 @@ class InitialRequestUnroutedTaskGraphsDecisionV2(RuntimePrivateModel):
             )
         ):
             raise ValueError("unrouted decision must close partial or multi effects")
+        _validate_initial_graph_identity_closure_v2(
+            record=record,
+            graphs=self.task_graphs,
+        )
         for graph in self.task_graphs:
             _validate_initial_graph_candidate_projection_v2(
                 record=record,
