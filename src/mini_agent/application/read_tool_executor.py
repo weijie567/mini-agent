@@ -187,11 +187,11 @@ def _is_closed_utc_datetime(value: object) -> bool:
         )
     if type(timezone_value) is ZoneInfo:
         key = object.__getattribute__(timezone_value, "key")
+        if type(key) is not str or key != "UTC":
+            return False
         offset = ZoneInfo.utcoffset(timezone_value, value)
         return (
-            type(key) is str
-            and key == "UTC"
-            and type(offset) is timedelta
+            type(offset) is timedelta
             and offset == timedelta(0)
         )
     if type(timezone_value) is not TzInfo:

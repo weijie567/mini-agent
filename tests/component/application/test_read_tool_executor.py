@@ -1,7 +1,8 @@
 import asyncio
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
+from zoneinfo import TZPATH, ZoneInfo
 
 import pytest
 
@@ -409,6 +410,49 @@ def test_builtin_timezone_name_sidecar_fails_before_observation() -> None:
         "raw-customer-B-secret",
     )
     timestamp = datetime(2030, 1, 1, tzinfo=raw_timezone)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+
+
+def test_zoneinfo_key_sidecar_fails_before_observation() -> None:
+    utc_tzif_path = next(
+        (
+            candidate
+            for root in TZPATH
+            if (candidate := Path(root) / "UTC").is_file()
+        ),
+        None,
+    )
+    assert utc_tzif_path is not None
+    with utc_tzif_path.open("rb") as utc_tzif:
+        raw_zone = ZoneInfo.from_file(
+            utc_tzif,
+            key="raw-customer-B-secret",
+        )
+    timestamp = datetime(2030, 1, 1, tzinfo=raw_zone)
     summary = OrderSummaryProjection(
         order_number="O-1001",
         status=OrderStatus.SHIPPED,
