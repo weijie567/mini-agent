@@ -23,6 +23,7 @@ from mini_agent.application.records import (
     FinalizeRunCommand,
     InsertOnlyWriteResult,
     MessageDirection,
+    MessageRecord,
     ObservationWriteResult,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
@@ -182,6 +183,58 @@ class ConversationSpy:
             for message in self.messages[-limit:]
             if message.conversation_id == conversation_id
         )
+
+
+class MessageReadOverrideConversationSpy(ConversationSpy):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        read_mode: str,
+    ) -> None:
+        super().__init__(events)
+        self.read_mode = read_mode
+
+    async def list_messages_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+        limit: int,
+    ):
+        messages = await super().list_messages_for_owner(
+            owner_scope=owner_scope,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+        if self.read_mode == "empty":
+            return ()
+        message = messages[0]
+        if self.read_mode == "duplicate":
+            return (message, message)
+        if self.read_mode == "foreign_conversation":
+            return (
+                MessageRecord(
+                    schema_version=message.schema_version,
+                    message_id=message.message_id,
+                    conversation_id=uuid4(),
+                    direction=message.direction,
+                    content=message.content,
+                    received_at=message.received_at,
+                ),
+            )
+        if self.read_mode == "stale_content":
+            return (
+                MessageRecord(
+                    schema_version=message.schema_version,
+                    message_id=message.message_id,
+                    conversation_id=message.conversation_id,
+                    direction=message.direction,
+                    content="请查询订单 O-9999",
+                    received_at=message.received_at,
+                ),
+            )
+        raise AssertionError("unsupported test read mode")
 
 
 class RuntimeSpy:
@@ -1246,6 +1299,47 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
         result=result,
         with_task=False,
     )
+
+
+@pytest.mark.parametrize(
+    "read_mode",
+    [
+        "empty",
+        "duplicate",
+        "foreign_conversation",
+        "stale_content",
+    ],
+)
+def test_untrusted_authoritative_message_reads_fail_before_provider(
+    read_mode: str,
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(events)
+    conversation = MessageReadOverrideConversationSpy(
+        events,
+        read_mode=read_mode,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model,
+        conversation=conversation,
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="authoritative current Message unavailable",
+    ):
+        _run(service)
+
+    assert model.next_move_calls == 0
+    assert "initial_graph_v2_saved" not in events
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert runtime.observation_commands == []
+    assert order.queries == []
+    assert runtime.run_record is None
+    assert runtime.finalize_run_commands == []
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 @pytest.mark.parametrize("task_candidate_count", [0, 2])
