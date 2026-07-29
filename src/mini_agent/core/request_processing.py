@@ -495,6 +495,10 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
         if (
             type(left_fields_set) is not set
             or type(right_fields_set) is not set
+            or any(type(key) is not str for key in left_state_keys)
+            or any(type(key) is not str for key in right_state_keys)
+            or any(type(field) is not str for field in left_fields_set)
+            or any(type(field) is not str for field in right_fields_set)
             or left_state_keys != right_state_keys
             or left_fields_set != right_fields_set
             or not left_state_keys.issubset(declared_fields)
@@ -520,11 +524,18 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
             for field_name in type(left).model_fields
         )
     if isinstance(left, Mapping):
-        return (
-            tuple(left) == tuple(right)
-            and all(
-                _runtime_values_match_exactly_v2(left[key], right[key])
-                for key in left
+        left_keys = tuple(left)
+        right_keys = tuple(right)
+        return len(left_keys) == len(right_keys) and all(
+            _runtime_values_match_exactly_v2(left_key, right_key)
+            and _runtime_values_match_exactly_v2(
+                left[left_key],
+                right[right_key],
+            )
+            for left_key, right_key in zip(
+                left_keys,
+                right_keys,
+                strict=True,
             )
         )
     if isinstance(left, tuple):
@@ -1709,6 +1720,7 @@ def _model_fields_set_manifest_v2(
             declared_fields = tuple(type(value).model_fields)
             if (
                 type(fields_set) is not set
+                or any(type(field) is not str for field in fields_set)
                 or not fields_set.issubset(declared_fields)
             ):
                 return None
@@ -1802,9 +1814,12 @@ def _initial_routable_decision_payload_v2(
     declared_fields = set(type(value).model_fields)
     try:
         fields_set = value.__pydantic_fields_set__
+        state_keys = set(value.__dict__)
         if (
-            set(value.__dict__) != declared_fields
+            state_keys != declared_fields
             or type(fields_set) is not set
+            or any(type(key) is not str for key in state_keys)
+            or any(type(field) is not str for field in fields_set)
             or fields_set != declared_fields
             or value.__pydantic_extra__ is not None
         ):
@@ -2265,7 +2280,8 @@ def _validate_and_reduce_initial_request_v2_impl(
 
 def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
     construction_capability = object()
-    seal_registry: dict[int, tuple[Any, bytes]] = {}
+    seal_registry: dict[int, tuple[Any, bytes, Any]] = {}
+    pickle_ticket_registry: dict[int, tuple[object, bytes]] = {}
 
     class ReducerDecisionSeal:
         __slots__ = ("_digest", "__weakref__")
@@ -2285,12 +2301,6 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         def __deepcopy__(self, _memo: dict[int, Any]) -> Self:
             return self
 
-        def __reduce__(self) -> tuple[Any, tuple[int]]:
-            return (
-                restore_initial_routable_decision_seal,
-                (id(self),),
-            )
-
         def __eq__(self, other: object) -> bool:
             return (
                 type(other) is ReducerDecisionSeal
@@ -2301,26 +2311,6 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
 
         def __repr__(self) -> str:
             return "<ReducerDecisionSeal>"
-
-    def restore_initial_routable_decision_seal(
-        seal_id: int,
-    ) -> ReducerDecisionSeal:
-        if type(seal_id) is not int:
-            raise ValueError("unknown Reducer decision seal")
-        registered = seal_registry.get(seal_id)
-        if registered is None:
-            raise ValueError("unknown Reducer decision seal")
-        seal = registered[0]()
-        if type(seal) is not ReducerDecisionSeal:
-            raise ValueError("unknown Reducer decision seal")
-        return seal
-
-    restore_initial_routable_decision_seal.__name__ = (
-        "_restore_initial_routable_decision_seal_v2"
-    )
-    restore_initial_routable_decision_seal.__qualname__ = (
-        "_restore_initial_routable_decision_seal_v2"
-    )
 
     def issue_initial_routable_decision_seal(
         value: object,
@@ -2347,6 +2337,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         seal_registry[seal_id] = (
             ref(seal, discard_seal),
             seal_digest,
+            ref(value, discard_seal),
         )
         return seal
 
@@ -2368,7 +2359,11 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         if seal_payload is None:
             return False
         registered = seal_registry.get(id(actual_seal))
-        if registered is None or registered[0]() is not actual_seal:
+        if (
+            registered is None
+            or registered[0]() is not actual_seal
+            or registered[2]() is not value
+        ):
             return False
         expected_digest = sha256(
             b"sealed:\x00" + seal_payload
@@ -2392,6 +2387,157 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
             actual_permit is construction_capability
             and _initial_routable_decision_payload_v2(value) is not None
         )
+
+    def copy_initial_routable_decision(
+        self: InitialRequestRoutableTaskGraphDecisionV2,
+    ) -> InitialRequestRoutableTaskGraphDecisionV2:
+        if not initial_routable_decision_seal_matches(self):
+            raise ValueError("canonical Reducer decision required")
+        copied = BaseModel.__copy__(self)
+        seal_payload = _initial_routable_decision_payload_v2(copied)
+        if seal_payload is None:
+            raise ValueError("canonical Reducer decision required")
+        copied.__pydantic_private__["_reducer_decision_seal"] = (
+            issue_initial_routable_decision_seal(copied, seal_payload)
+        )
+        return copied
+
+    def deepcopy_initial_routable_decision(
+        self: InitialRequestRoutableTaskGraphDecisionV2,
+        memo: dict[int, Any] | None = None,
+    ) -> InitialRequestRoutableTaskGraphDecisionV2:
+        if not initial_routable_decision_seal_matches(self):
+            raise ValueError("canonical Reducer decision required")
+        copied = BaseModel.__deepcopy__(self, memo)
+        seal_payload = _initial_routable_decision_payload_v2(copied)
+        if seal_payload is None:
+            raise ValueError("canonical Reducer decision required")
+        copied.__pydantic_private__["_reducer_decision_seal"] = (
+            issue_initial_routable_decision_seal(copied, seal_payload)
+        )
+        return copied
+
+    def restore_pickled_initial_routable_decision(
+        ticket_id: int,
+        state: object,
+    ) -> InitialRequestRoutableTaskGraphDecisionV2:
+        expected_state_keys = {
+            "__dict__",
+            "__pydantic_extra__",
+            "__pydantic_fields_set__",
+            "__pydantic_private__",
+        }
+        if (
+            type(ticket_id) is not int
+            or type(state) is not dict
+            or any(type(key) is not str for key in state)
+            or set(state) != expected_state_keys
+        ):
+            raise ValueError("unknown Reducer decision pickle")
+        registered_ticket = pickle_ticket_registry.get(ticket_id)
+        if (
+            registered_ticket is None
+            or id(registered_ticket[0]) != ticket_id
+            or type(registered_ticket[1]) is not bytes
+        ):
+            raise ValueError("unknown Reducer decision pickle")
+
+        model_state = state["__dict__"]
+        fields_set = state["__pydantic_fields_set__"]
+        private_state = state["__pydantic_private__"]
+        declared_fields = set(
+            InitialRequestRoutableTaskGraphDecisionV2.model_fields
+        )
+        if (
+            type(model_state) is not dict
+            or any(type(key) is not str for key in model_state)
+            or set(model_state) != declared_fields
+            or state["__pydantic_extra__"] is not None
+            or type(fields_set) is not set
+            or any(type(field) is not str for field in fields_set)
+            or fields_set != declared_fields
+            or type(private_state) is not dict
+            or private_state
+        ):
+            raise ValueError("invalid Reducer decision pickle")
+
+        restored = InitialRequestRoutableTaskGraphDecisionV2.__new__(
+            InitialRequestRoutableTaskGraphDecisionV2
+        )
+        BaseModel.__setstate__(
+            restored,
+            {
+                "__dict__": dict(model_state),
+                "__pydantic_extra__": None,
+                "__pydantic_fields_set__": set(fields_set),
+                "__pydantic_private__": {},
+            },
+        )
+        seal_payload = _initial_routable_decision_payload_v2(restored)
+        expected_digest = (
+            sha256(b"sealed:\x00" + seal_payload).digest()
+            if seal_payload is not None
+            else None
+        )
+        if expected_digest != registered_ticket[1]:
+            raise ValueError("invalid Reducer decision pickle")
+        if pickle_ticket_registry.pop(ticket_id, None) is not registered_ticket:
+            raise ValueError("unknown Reducer decision pickle")
+        restored.__pydantic_private__["_reducer_decision_seal"] = (
+            issue_initial_routable_decision_seal(restored, seal_payload)
+        )
+        return restored
+
+    restore_pickled_initial_routable_decision.__name__ = (
+        "_restore_pickled_initial_routable_decision_v2"
+    )
+    restore_pickled_initial_routable_decision.__qualname__ = (
+        "_restore_pickled_initial_routable_decision_v2"
+    )
+
+    def reduce_pickled_initial_routable_decision(
+        self: InitialRequestRoutableTaskGraphDecisionV2,
+        protocol: int,
+    ) -> tuple[Any, tuple[int, dict[str, Any]]]:
+        if (
+            type(protocol) is not int
+            or not initial_routable_decision_seal_matches(self)
+        ):
+            raise ValueError("canonical Reducer decision required")
+        seal_payload = _initial_routable_decision_payload_v2(self)
+        if seal_payload is None:
+            raise ValueError("canonical Reducer decision required")
+        state = BaseModel.__getstate__(self)
+        ticket = object()
+        ticket_id = id(ticket)
+        pickle_ticket_registry[ticket_id] = (
+            ticket,
+            sha256(b"sealed:\x00" + seal_payload).digest(),
+        )
+        return (
+            restore_pickled_initial_routable_decision,
+            (
+                ticket_id,
+                {
+                    "__dict__": state["__dict__"],
+                    "__pydantic_extra__": state["__pydantic_extra__"],
+                    "__pydantic_fields_set__": (
+                        state["__pydantic_fields_set__"]
+                    ),
+                    "__pydantic_private__": {},
+                },
+            ),
+        )
+
+    InitialRequestRoutableTaskGraphDecisionV2.__copy__ = (
+        copy_initial_routable_decision
+    )
+    InitialRequestRoutableTaskGraphDecisionV2.__deepcopy__ = (
+        deepcopy_initial_routable_decision
+    )
+    InitialRequestRoutableTaskGraphDecisionV2.__reduce_ex__ = (
+        reduce_pickled_initial_routable_decision
+    )
 
     def validate_and_reduce_initial_request_v2(
         *,
@@ -2430,7 +2576,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         validate_and_reduce_initial_request_v2,
         initial_routable_decision_seal_matches,
         initial_routable_decision_construction_is_authorized,
-        restore_initial_routable_decision_seal,
+        restore_pickled_initial_routable_decision,
     )
 
 
@@ -2438,7 +2584,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
     validate_and_reduce_initial_request_v2,
     _initial_routable_decision_seal_matches_v2,
     _initial_routable_decision_construction_is_authorized_v2,
-    _restore_initial_routable_decision_seal_v2,
+    _restore_pickled_initial_routable_decision_v2,
 ) = _build_initial_request_reducer_v2()
 del _build_initial_request_reducer_v2
 
