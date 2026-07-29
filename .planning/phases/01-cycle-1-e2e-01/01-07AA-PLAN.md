@@ -96,7 +96,7 @@ async def create_initial_task_graph_v2_if_current(
 - root或closure physical corruption、unknown/wrong version、owner drift、reference/metadata/payload mismatch使用现有最窄bounded `P0PersistenceIntegrityError`；SQLAlchemy/database failure继续经现有bounded system-error boundary清除raw context。
 - 返回结果、exception或日志不得携带customer/message/payload、SQL、secret、raw token或第二份authority。
 
-existing `create_initial_task_graph_if_current(CreateInitialTaskGraphCommand)`的signature、legacy-v1 encode/decode/persist path和行为保持不变；v1 writer只作为未路由compatibility surface保留到01-07X，绝不作为v2 writer fallback。
+existing `create_initial_task_graph_if_current(CreateInitialTaskGraphCommand)`的public signature、legacy-v1 encode/decode/persist path与无same-Run collision时的既有成功/冲突语义保持不变；v1 writer只作为未路由compatibility surface保留到01-07X，绝不作为v2 writer fallback。AA唯一获准触及legacy method的改动，是在它已经锁定并验证exact Run后、任何target insert前调用Section 3同一个version-neutral metadata-only same-Run RU/RunTaskLink collision fence；该guard只让此前可能形成第二个不同identity RU closure的状态fail closed，不读取或解释v2 payload，也不把v1 method改造成v2 route。
 
 ## 2. Writer-owned static exact-version chain
 
@@ -152,7 +152,7 @@ root规则：
 - 每个command目标identity也先用exact code/identity的metadata-only `LIMIT 2 FOR UPDATE`探测；selected metadata的`scope_owner_customer_id`必须等于trusted scope，version必须等于writer static map。wrong-owner/wrong-version/duplicate在不读取envelope的情况下抛最窄bounded integrity error，error不得携带observed owner/identity。
 - 只有metadata owner/version通过的row，才可再次以`record_id + exact code/identity + scope_owner_customer_id=trusted owner`执行payload-bearing read，并进入static-version decode/physical parity/owner closure；不得把metadata owner反向用作authority。
 - selector的`LIMIT 2`是P0 exact current-Run cardinality的overflow sentinel，不是truncate。第二个RU、第二个RunTaskLink、同identity duplicate sentinel或selector结果在锁前后变化都整体fail closed；不得读取第二行envelope来决定结果。
-- 所有compliant v1/v2 initial writer都先锁同一exact Run，因此Run首锁是absence/predicate serialization fence；AA不新增migration/index。Integration concurrency必须证明两个AA writer及legacy-v1 writer不能在该fence后并发提交两个RU closure。
+- 所有compliant v1/v2 initial writer都先锁同一exact Run，并且都在获得Run锁后、insert前重跑同一个version-neutral metadata-only same-Run RU/RunTaskLink selector；Run首锁加双侧predicate recheck共同形成serialization fence，单独持有row lock不能替代recheck。AA不新增migration/index。legacy-v1 writer发现任意existing same-Run RU或RunTaskLink都保留其`PROJECTION_CONFLICT`/零写语义；AA writers再按static expected-version map区分legal exact replay与collision。Integration concurrency必须覆盖legacy先锁/AA后锁与AA先锁/legacy后锁两个顺序，证明最多一个完整RU closure提交。
 
 same-Run RU closure在lock后必须证明：
 
@@ -294,7 +294,7 @@ required_checks:
 - `neighbor regression`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_record_adapters.py -q`；预期exit 0、zero failures/skip/xfail。
 - `canonical environment`: `uv sync --all-groups`、`docker compose up --wait -d db`、`docker compose --profile test up --wait -d db-test`与`uv run alembic upgrade head`依次从仓库根执行；预期全部exit 0、dev/test database healthy、migration head，无dependency/lock/migration/source drift。
 - `canonical full serial gate`: `uv run pytest`；预期exit 0、zero failures，既有单个credentialed deselection可以保留，warning count须如实报告且不能新增未裁决warning。
-- `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain，v1 surface不得漂移。
+- `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain；v1 public signature、legacy encode/decode/persist call graph及无collision behavior不得漂移，protected method唯一允许的diff是Run锁后调用shared metadata-only collision fence。
 - `allowlist containment`: `git diff --name-only d704b87480f0a4252744f4c009cef9a86c08fa05...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear RED→GREEN→append-only fix history。
 - `security/atomicity matrix`: first-write、exact replay、foreign/absent、stale root、v1 collision、second-RU identity、wrong-owner same-Run/target metadata、owner/version/closure/CAS conflict、fault injection与bounded deterministic concurrency；SQL capture必须证明trusted Run通过前不运行collision probe，probe只选择allowlisted metadata columns且从不选择`envelope`，wrong-owner envelope sentinel/secret从未materialize；预期每个APPLIED都是完整closed graph，每个non-APPLIED/exception都是records/references相对baseline零变化，errors raw-free。
 - `authoritative round-trip`: 两条writer success/replay后只通过01-07K `load_exact_run_evidence_for_owner`读取；预期no-task closure无Task family，initial closure与command parent/child/Task/RequestUnit/InputBinding/links exact相等且只含RU-v2。
@@ -356,7 +356,7 @@ handoff:
 <task type="auto" tdd="true">
   <name>Task 2: GREEN — implement static-version no-task and initial-graph transactions</name>
   <files>src/mini_agent/infrastructure/persistence/postgres.py</files>
-  <action>只在PostgresRecordAdapter及module-private surface增加Z两个Port method imports、immutable writer version map、versioned encode/decode/projection/persist/physical parity/owner closure helpers和两个transactional methods。先稳定锁定trusted roots与same-Run closure，再执行all-new或all-exact-replay判定；按Section 4/5写入完整aggregate、touch recovery anchor并commit前重验。不得修改legacy-v1 method、migration、Application/Core或其他Adapter。提交subject exact为`feat(01-07AA): add atomic ru v2 postgres writers`。</action>
+  <action>只在PostgresRecordAdapter及module-private surface增加Z两个Port method imports、immutable writer version map、versioned encode/decode/projection/persist/physical parity/owner closure helpers和两个transactional methods。先稳定锁定trusted roots与same-Run closure，再执行all-new或all-exact-replay判定；按Section 4/5写入完整aggregate、touch recovery anchor并commit前重验。legacy-v1 method只增加Run锁后、target insert前的shared version-neutral metadata-only collision-fence调用，其他legacy代码、signature与codec/persist path不得修改；不得修改migration、Application/Core或其他Adapter。提交subject exact为`feat(01-07AA): add atomic ru v2 postgres writers`。</action>
   <verify>
     <automated>uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q</automated>
     两条route、static-version tripwires、reader round-trip、replay/conflict/fault/concurrency matrix全部通过。
