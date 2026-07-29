@@ -97,11 +97,13 @@ SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaa
 class CandidateInvalidSignalSubclass(
     RequestUnderstandingCandidateInvalidError
 ):
-    pass
+    def __init__(self) -> None:
+        Exception.__init__(self, "raw-customer-B-secret")
 
 
 class ProviderProtocolSignalSubclass(ProviderProtocolError):
-    pass
+    def __init__(self) -> None:
+        Exception.__init__(self, "raw-customer-B-secret")
 
 
 class SourceVersionSubclass(str):
@@ -546,6 +548,7 @@ class ModelSpy:
         input_fault: bool = False,
         ru_exception: Exception | None = None,
         presentation_protocol_error: bool = False,
+        presentation_exception: Exception | None = None,
     ) -> None:
         self.events = events
         self.bound_order_id = bound_order_id
@@ -557,6 +560,7 @@ class ModelSpy:
         self.input_fault = input_fault
         self.ru_exception = ru_exception
         self.presentation_protocol_error = presentation_protocol_error
+        self.presentation_exception = presentation_exception
         self.next_move_calls = 0
         self.presentation_calls = 0
         self.next_move_requests: list[object] = []
@@ -638,6 +642,8 @@ class ModelSpy:
         self.presentation_calls += 1
         if self.presentation_protocol_error:
             raise ProviderProtocolError()
+        if self.presentation_exception is not None:
+            raise self.presentation_exception
         return PresentationPlan(
             template_id="ORDER_STATUS_SUMMARY_V1",
             tone=PresentationTone.WARM,
@@ -1379,9 +1385,12 @@ def test_provider_signal_subclasses_fail_without_product_classification(
     with pytest.raises(
         AgentRunExecutionError,
         match="noncanonical Provider signal",
-    ):
+    ) as captured:
         _run(service)
 
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "raw-customer-B-secret" not in repr(captured.value)
     assert runtime.task_history == []
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
@@ -1412,9 +1421,11 @@ def test_atomic_request_understanding_failure_is_not_input_invalid(
     with pytest.raises(
         AgentRunExecutionError,
         match="Request Understanding internal failure",
-    ):
+    ) as captured:
         _run(service)
 
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
     assert runtime.task_history == []
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
@@ -1741,6 +1752,36 @@ def test_presentation_protocol_failure_retains_observation_without_plan_trace() 
         result=result,
         with_task=True,
     )
+
+
+def test_presentation_protocol_subclass_fails_without_raw_context() -> None:
+    events: list[str] = []
+    model = ModelSpy(
+        events,
+        presentation_exception=ProviderProtocolSignalSubclass(),
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="noncanonical Presentation Provider signal",
+    ) as captured:
+        _run(service)
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "raw-customer-B-secret" not in repr(captured.value)
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert model.presentation_calls == 1
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_presentation_policy_rejection_never_reaches_renderer(

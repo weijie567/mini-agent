@@ -435,31 +435,33 @@ class AgentRunService:
                 "Never provide trusted identity fields.",
             ),
         )
+        noncanonical_provider_signal = False
         try:
             output = await self._model_provider.propose_next_move(request)
         except RequestUnderstandingCandidateInvalidError as error:
             if type(error) is not RequestUnderstandingCandidateInvalidError:
-                raise AgentRunExecutionError(
-                    "noncanonical Provider signal"
-                ) from None
-            return await self._finish_without_task(
-                running_run=running_run,
-                conversation=conversation,
-                stop_reason=StopReason.INPUT_INVALID,
-                failure_state=failure_state,
-            )
+                noncanonical_provider_signal = True
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.INPUT_INVALID,
+                    failure_state=failure_state,
+                )
         except ProviderProtocolError as error:
             if type(error) is not ProviderProtocolError:
-                raise AgentRunExecutionError(
-                    "noncanonical Provider signal"
-                ) from None
-            return await self._finish_without_task(
-                running_run=running_run,
-                conversation=conversation,
-                stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
-                failure_state=failure_state,
-            )
+                noncanonical_provider_signal = True
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+                    failure_state=failure_state,
+                )
+        if noncanonical_provider_signal:
+            raise AgentRunExecutionError("noncanonical Provider signal")
 
+        reduction_internal_error: str | None = None
         try:
             reduced_at = self._clock()
             decision = validate_and_reduce_initial_request_v2(
@@ -490,22 +492,25 @@ class AgentRunService:
                 or type(error.reason_code)
                 is RequestUnderstandingAtomicFailureCodeV2
             ):
-                raise AgentRunExecutionError(
+                reduction_internal_error = (
                     "Request Understanding internal failure"
-                ) from None
-            if (
+                )
+            elif (
                 type(error.reason_code)
                 is not RequestUnderstandingAggregateFailureCodeV2
             ):
-                raise AgentRunExecutionError(
+                reduction_internal_error = (
                     "Request Understanding failure category unavailable"
-                ) from None
-            return await self._finish_without_task(
-                running_run=running_run,
-                conversation=conversation,
-                stop_reason=StopReason.INPUT_INVALID,
-                failure_state=failure_state,
-            )
+                )
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.INPUT_INVALID,
+                    failure_state=failure_state,
+                )
+        if reduction_internal_error is not None:
+            raise AgentRunExecutionError(reduction_internal_error)
         if type(decision) is not InitialRequestRoutableTaskGraphDecisionV2:
             raise AgentRunExecutionError(
                 "scoped Request Understanding outcome is not routable"
@@ -764,6 +769,7 @@ class AgentRunService:
                 version=observation.source_version,
             ),
         )
+        noncanonical_presentation_signal = False
         try:
             plan = await self._model_provider.plan_presentation(
                 PresentationInput(
@@ -771,18 +777,25 @@ class AgentRunService:
                     order_summary=observation.normalized_value,
                 )
             )
-        except ProviderProtocolError:
-            return await self._finish_with_task(
-                running_run=running_run,
-                conversation=conversation,
-                current_task=current_task,
-                current_unit=current_unit,
-                active_link=initial_run_task_link,
-                stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
-                target_status=TaskStatus.BLOCKED,
-                reason_ref=self._uuid_factory(),
-                observation_ref=observation.observation_id,
-                failure_state=failure_state,
+        except ProviderProtocolError as error:
+            if type(error) is not ProviderProtocolError:
+                noncanonical_presentation_signal = True
+            else:
+                return await self._finish_with_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    current_task=current_task,
+                    current_unit=current_unit,
+                    active_link=initial_run_task_link,
+                    stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+                    target_status=TaskStatus.BLOCKED,
+                    reason_ref=self._uuid_factory(),
+                    observation_ref=observation.observation_id,
+                    failure_state=failure_state,
+                )
+        if noncanonical_presentation_signal:
+            raise AgentRunExecutionError(
+                "noncanonical Presentation Provider signal"
             )
 
         presentation_plan_ref = self._uuid_factory()
