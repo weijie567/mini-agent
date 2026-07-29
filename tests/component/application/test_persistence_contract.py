@@ -3055,6 +3055,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
             for path in (repository_root / root).rglob("*.py"):
                 source = path.read_text()
                 tree = ast.parse(source)
+                relative_path = path.relative_to(repository_root).as_posix()
                 parent_by_node = {
                     child: parent
                     for parent in ast.walk(tree)
@@ -3077,12 +3078,22 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                     module_bindings.add(imported.asname)
                             elif imported.name == "sys":
                                 sys_bindings.add(imported.asname or "sys")
-                    elif (
-                        isinstance(node, ast.ImportFrom)
-                        and node.module == "mini_agent.application"
-                    ):
+                    elif isinstance(node, ast.ImportFrom):
                         for imported in node.names:
-                            if imported.name == "persistence":
+                            if (
+                                imported.name == "persistence"
+                                and (
+                                    node.module == "mini_agent.application"
+                                    or (
+                                        node.level > 0
+                                        and (
+                                            node.module is None
+                                            or node.module.split(".")[-1]
+                                            == "application"
+                                        )
+                                    )
+                                )
+                            ):
                                 module_bindings.add(
                                     imported.asname or imported.name
                                 )
@@ -3096,24 +3107,55 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                     imported.asname or imported.name
                                 )
 
+                legacy_monkeypatch_calls = [
+                    node
+                    for node in ast.walk(tree)
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "monkeypatch"
+                        and node.func.attr == "setattr"
+                        and len(node.args) == 3
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id in module_bindings
+                        and isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value
+                        in {
+                            "decode_persistence_record",
+                            "encode_persistence_record",
+                        }
+                        and isinstance(node.args[2], ast.Name)
+                        and node.args[2].id == "forbidden"
+                        and not node.keywords
+                    )
+                ]
+                exact_legacy_monkeypatch_calls = (
+                    relative_path
+                    == (
+                        "tests/integration/"
+                        "test_postgres_v2_request_understanding_writes.py"
+                    )
+                    and len(legacy_monkeypatch_calls) == 2
+                    and {
+                        call.args[1].value
+                        for call in legacy_monkeypatch_calls
+                    }
+                    == {
+                        "decode_persistence_record",
+                        "encode_persistence_record",
+                    }
+                )
+
                 def is_allowed_legacy_monkeypatch_reference(
                     node: ast.Name,
                 ) -> bool:
                     parent = parent_by_node[node]
                     return (
-                        isinstance(parent, ast.Call)
-                        and node in parent.args
-                        and isinstance(parent.func, ast.Attribute)
-                        and isinstance(parent.func.value, ast.Name)
-                        and parent.func.value.id == "monkeypatch"
-                        and parent.func.attr == "setattr"
-                        and len(parent.args) == 3
-                        and isinstance(parent.args[1], ast.Constant)
-                        and parent.args[1].value
-                        in {
-                            "decode_persistence_record",
-                            "encode_persistence_record",
-                        }
+                        exact_legacy_monkeypatch_calls
+                        and isinstance(parent, ast.Call)
+                        and parent in legacy_monkeypatch_calls
+                        and parent.args[0] is node
                     )
 
                 dynamic_module_lookup = (
