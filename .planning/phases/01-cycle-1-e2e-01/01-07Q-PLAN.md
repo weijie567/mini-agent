@@ -223,7 +223,7 @@ dependencies:
 required_checks:
 
 - Gate A exact branch/worktree/base/tree/two-blob/clean-state preflight before RED edit。
-- focused baseline `233 passed`；RED必须只因public active mapping仍是RU-v1而非零；GREEN focused必须恢复`233 passed`，test collection count不得变化。
+- focused baseline `233 passed`；首个RED必须只因public active mapping仍是RU-v1而非零。Source-only active-switch commit后，允许且只允许既有两个category oracle暴露full-catalog与legacy lane的分类差异；append-only test fix后focused必须恢复`233 passed`，test collection count不得变化。
 - current-v1 isolation Integration gate `50 passed`。
 - reviewed migration-oracle Integration gate `48 passed`；Q不得重新引入Application active-registry ownership或放松physical pair/downgrade/locking检查。
 - canonical environment：`uv sync --all-groups`、dev/test PostgreSQL healthy、`uv run alembic upgrade head`。
@@ -235,13 +235,13 @@ required_checks:
 
 commit_protocol:
 
-1. RED `test(01-07Q): require ru v2 active codec`只改owned test。保持233个test collection不变：新增一个non-test `_v1_registry()` helper，把既有v1 registry/projection/parity assertions改为从18-pair catalog显式选择17个v1 spec；更新`test_registry_is_exact_immutable_and_closed`与`test_version_catalog_is_exact_immutable_and_only_ru_is_dual`冻结16-v1+RU-v2 active mapping/object identity；把`test_legacy_codec_remains_v1_only_after_codec_expand`重命名为`test_active_switch_preserves_v1_compatibility_until_contract`并同时冻结active-v2、legacy-v1与explicit v1/v2；把`test_codec_expand_has_no_active_consumer_or_authority_claim`重命名为`test_codec_active_switch_has_no_runtime_or_authority_claim`；更新`test_versioned_decode_rejects_cross_version_and_metadata_confusion`及17项category matrix，冻结explicit RU-v1 expected + RU-v2 envelope为known mismatch、legacy v1 lane中的同一envelope为unknown。Source blob仍等于base；focused只能因public active RU仍为v1失败。
+1. RED `test(01-07Q): require ru v2 active codec`只改owned test。保持233个test collection不变：新增一个non-test `_v1_registry()` helper，把既有v1 registry/projection/parity assertions改为从18-pair catalog显式选择17个v1 spec；更新`test_registry_is_exact_immutable_and_closed`与`test_version_catalog_is_exact_immutable_and_only_ru_is_dual`冻结16-v1+RU-v2 active mapping/object identity；把`test_legacy_codec_remains_v1_only_after_codec_expand`重命名为`test_active_switch_preserves_v1_compatibility_until_contract`并同时冻结active-v2、legacy-v1与explicit v1/v2；把`test_codec_expand_has_no_active_consumer_or_authority_claim`重命名为`test_codec_active_switch_has_no_runtime_or_authority_claim`。Source blob仍等于base；focused只能因public active RU仍为v1失败。
 2. GREEN `feat(01-07Q): switch ru v2 active codec`只改`src/mini_agent/application/persistence.py`。把原17-v1 mapping保存在private immutable `_P0_V1_PERSISTENCE_REGISTRY`，所有legacy helper固定使用它；18-pair catalog也由它构造。Catalog定义后构造public `P0_PERSISTENCE_REGISTRY`，只把RU替换为既有v2 spec。`_classify_outer_versioned`的known versions统一取完整catalog。不得修改imports、Pydantic models、projection rules、public signatures、error enum或其他module。
-3. 正常history相对B_Q_ORACLE_FIX恰为以上两个commit。Review finding只用append-only `fix(01-07Q): ...` commit，仍限两文件，并对新exact head重跑全部checks/review；不得amend、rebase或force-push已审历史。
+3. Implementation feedback已确认base test把RU-v1 expected + RU-v2 envelope误写为unknown，且17项legacy/category parity误把两个入口的分类强制相等。保留以上两个sealed commit，随后以append-only `fix(01-07Q): align full-catalog category expectations`只改owned test中的`test_versioned_decode_rejects_cross_version_and_metadata_confusion`与`test_all_17_v1_versioned_decode_outer_version_categories_match_legacy`：前者冻结explicit known mismatch；后者改为directed matrix，冻结legacy v1 lane unknown与versioned full-catalog mismatch。其他review finding仍只用append-only `fix(01-07Q): ...` commit，始终限两文件并对新exact head重跑全部checks/review；不得amend、rebase或force-push已审历史。
 
 done_when:
 
-- RED/GREEN原因、输出、SHA、tree和两文件containment可复现。
+- RED/source-only GREEN/category-oracle fix的原因、输出、SHA、tree和两文件containment可复现。
 - active mapping恰为16-v1+RU-v2；catalog恰为17-v1+RU-v2；legacy v1与explicit versioned v1/v2均保持预期且无推断/fallback。
 - 01-07K v2-only isolation、focused、canonical migration/full suite、protected surface全部通过。
 - feature和latest-integration overlay均取得exact-head独立`0/0/0/0` review。
@@ -287,7 +287,7 @@ handoff_format: repository/remote/branch/worktree、exact base/planning/head/tre
   <name>Task 1: RED — freeze RU-v2 current mapping and isolated v1 compatibility</name>
   <files>tests/component/application/test_persistence_contract.py</files>
   <read_first>Thin Slice cutover manifest/§10.1.4、execution map Q slot及preflight remediation、01-07E tests、exact B_Q_ORACLE_FIX codec source/test blobs</read_first>
-  <action>只改owned test。增加non-test `_v1_registry()`，通过`P0_RECORD_SCHEMA_VERSION_CATALOG[(code, f"{code.value}.p0.v1")]`显式构造legacy 17-spec view；把十个现有使用`P0_PERSISTENCE_REGISTRY`表达v1 baseline或cross-version category的test分别改为active、explicit-v1或directed category语义。Active assertions要求MappingProxyType、17 enum-order entries、RU exact v2 spec/source/identity、其余16 exact v1、catalog object identity与无runtime register；legacy projection/signature/17 round-trip assertions全部使用explicit v1 view；category assertions精确区分full-catalog versioned known mismatch与legacy v1 unknown。重命名两项stage oracle，冻结legacy API仍v1、versioned API exact v1/v2、active mapping无Runtime/authority claim。不得新增test count、skip/xfail、source修改、network或数据库fixture。</action>
+  <action>只改owned test。增加non-test `_v1_registry()`，通过`P0_RECORD_SCHEMA_VERSION_CATALOG[(code, f"{code.value}.p0.v1")]`显式构造legacy 17-spec view；把九个现有使用`P0_PERSISTENCE_REGISTRY`表达v1 baseline的test分别改为active或explicit-v1语义。Active assertions要求MappingProxyType、17 enum-order entries、RU exact v2 spec/source/identity、其余16 exact v1、catalog object identity与无runtime register；legacy projection/signature/17 round-trip/category assertions全部使用explicit v1 view。重命名两项stage oracle，冻结legacy API仍v1、versioned API exact v1/v2、active mapping无Runtime/authority claim。不得新增test count、skip/xfail、source修改、network或数据库fixture。</action>
   <verify>
     <automated>uv run pytest tests/component/application/test_persistence_contract.py -q</automated>
     RED必须非零且只因public active RU spec仍为v1；collection仍为233，source blob仍为`1e085e066847b69fd4f49e6b8ce6c732391644b3`。
@@ -303,9 +303,22 @@ handoff_format: repository/remote/branch/worktree、exact base/planning/head/tre
   <verify>
     <automated>uv run pytest tests/component/application/test_persistence_contract.py -q
 uv run pytest tests/integration/test_postgres_record_adapters.py -q</automated>
-    focused恢复233，K isolation保持50；active/current、catalog、legacy、exact-pair与error category全部通过。
+    Source行为切换完成；intermediate focused只允许两个既有category oracle（含17项参数化）暴露full-catalog/legacy分类差异，随后由Task 3恢复233。K isolation保持50。
   </verify>
   <done>public current mapping只把RU切到v2；v1 compatibility被private固定且不会污染active/versioned selection。</done>
+</task>
+
+<task type="auto" tdd="true">
+  <name>Task 3: FIX — align full-catalog and legacy category expectations</name>
+  <files>tests/component/application/test_persistence_contract.py</files>
+  <read_first>Task 2 intermediate focused output、§4 directed category matrix、exact catalog与legacy private registry</read_first>
+  <action>只改`test_versioned_decode_rejects_cross_version_and_metadata_confusion`与`test_all_17_v1_versioned_decode_outer_version_categories_match_legacy`。Explicit versioned RU-v1 expected + RU-v2 envelope改为`RECORD_SCHEMA_VERSION_MISMATCH`；17项matrix分别断言missing、other-v1、RU-v2与unknown-future在legacy/versioned两个入口的directed category，不再强制全量相等。不得修改source、其他test、collection count、fixture或公共合同。</action>
+  <verify>
+    <automated>uv run pytest tests/component/application/test_persistence_contract.py -q
+uv run pytest tests/integration/test_postgres_record_adapters.py -q</automated>
+    focused恢复233，K isolation保持50；active/current、catalog、legacy、exact-pair与directed error category全部通过。
+  </verify>
+  <done>stale category oracle已在append-only test commit中修正，source与初始RED历史未被重写。</done>
 </task>
 
 </tasks>
@@ -742,7 +755,7 @@ scan只报告canonical alignment、existing v1 compatibility consumers、已知d
 
 <success_criteria>
 
-1. RED/GREEN两提交的失败/通过原因、scope、SHA与输出可复现；review fix只可append并保持两文件allowlist。
+1. RED/source-only GREEN/category-oracle fix三提交的失败/通过原因、scope、SHA与输出可复现；其他review fix只可append并保持两文件allowlist。
 2. Public active registry恰为16-v1+RU-v2，18-pair catalog与private 17-v1 compatibility均immutable且object identity精确。
 3. Legacy API继续v1-only；versioned API继续explicit exact pair；无default/latest/inference/fallback/rewrite。Explicit RU-v1↔RU-v2 cross-version均为known mismatch，legacy v1 lane中的RU-v2仍为unknown。
 4. 01-07K current-v1 isolation 50、focused 233、reviewed migration oracle 48、canonical migration upgrade/full 1901、protected oracle、two-file containment与feature/latest-overlay独立review全部通过。
