@@ -716,6 +716,7 @@ class AgentRunService:
         await self._append_trace(
             event_type=TraceEventType.OBSERVATION_RECORDED,
             run_id=running_run.run_id,
+            occurred_at=observation.recorded_at,
             task_id=current_task.task_id,
             request_unit_id=current_unit.request_unit_id,
             tool_call_id=execution.terminal_tool_call.tool_call_id,

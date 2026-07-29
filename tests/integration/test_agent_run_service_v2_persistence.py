@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -24,7 +24,7 @@ from mini_agent.core.tool_system import (
     ToolRegistration,
     get_order_tool_spec,
 )
-from mini_agent.core.trace import AgentOutcome, StopReason
+from mini_agent.core.trace import AgentOutcome, StopReason, TraceEventType
 from mini_agent.evaluation.artifacts import load_e2e01_artifacts
 from mini_agent.evaluation.scripted_provider import ScriptedModelProviderV2
 from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
@@ -44,6 +44,16 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture(scope="module")
 def anyio_backend() -> str:
     return "asyncio"
+
+
+class _MonotonicClock:
+    def __init__(self) -> None:
+        self._next = NOW
+
+    def __call__(self) -> datetime:
+        value = self._next
+        self._next += timedelta(microseconds=1)
+        return value
 
 
 def _context() -> CustomerContext:
@@ -102,6 +112,7 @@ async def _run_script(
     session_factory = build_session_factory(engine)
     records = PostgresRecordAdapter(session_factory)
     orders = PostgresGetOrderAdapter(session_factory)
+    clock = _MonotonicClock()
     provider = ScriptedModelProviderV2(
         load_e2e01_artifacts(
             REPO_ROOT,
@@ -123,11 +134,11 @@ async def _run_script(
             read_tool_executor=ReadToolExecutor(
                 runtime_record_port=records,
                 get_order_port=orders,
-                clock=lambda: NOW,
+                clock=clock,
                 uuid_factory=uuid4,
             ),
             deterministic_renderer=DeterministicRenderer(),
-            clock=lambda: NOW,
+            clock=clock,
             uuid_factory=uuid4,
             provider_lane="scripted-v2",
             redaction_policy_version="redaction-v1",
@@ -161,6 +172,14 @@ async def test_actual_v2_runtime_persists_exact_one_graph_before_tool_use(
     assert evidence.request_understanding_record is not None
     assert (
         evidence.request_understanding_record.schema_version
+        == "request_understanding_record.p0.v2"
+    )
+    assert (
+        evidence.request_understanding_record.model_input_schema_version
+        == "e2e01-thin-v1"
+    )
+    assert (
+        evidence.request_understanding_record.model_output_schema_version
         == "e2e01-thin-v2"
     )
     assert len(evidence.accepted_task_deltas) == 1
@@ -174,9 +193,26 @@ async def test_actual_v2_runtime_persists_exact_one_graph_before_tool_use(
     assert len(evidence.tool_calls) == 1
     assert len(evidence.observation_records) == 1
     assert evidence.observation_records[0].source_version == SOURCE_VERSION_A
-    assert len(evidence.context_manifests) == 2
+    observation_trace = next(
+        event
+        for event in evidence.trace_events
+        if event.observation_ref
+        == evidence.observation_records[0].observation_id
+        and event.event_type is TraceEventType.OBSERVATION_RECORDED
+    )
     assert (
-        evidence.context_manifests[1]
+        observation_trace.occurred_at
+        == evidence.observation_records[0].recorded_at
+    )
+    assert len(evidence.context_manifests) == 2
+    observation_manifests = tuple(
+        manifest
+        for manifest in evidence.context_manifests
+        if manifest.observation_refs_and_versions
+    )
+    assert len(observation_manifests) == 1
+    assert (
+        observation_manifests[0]
         .observation_refs_and_versions[0]
         .version
         == SOURCE_VERSION_A
