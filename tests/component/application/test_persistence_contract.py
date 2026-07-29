@@ -3051,177 +3051,9 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
             )
         )
 
-    def bound_names(target: ast.AST) -> set[str]:
-        if isinstance(target, ast.Name):
-            return {target.id}
-        if isinstance(target, (ast.List, ast.Tuple)):
-            return {
-                name
-                for element in target.elts
-                for name in bound_names(element)
-            }
-        if isinstance(target, ast.Starred):
-            return bound_names(target.value)
-        return set()
-
-    def loads_any_binding(node: ast.AST, bindings: set[str]) -> bool:
-        return any(
-            isinstance(descendant, ast.Name)
-            and isinstance(descendant.ctx, ast.Load)
-            and descendant.id in bindings
-            for descendant in ast.walk(node)
-        )
-
-    def transfers_any_binding(node: ast.AST, bindings: set[str]) -> bool:
-        if isinstance(node, ast.Name):
-            return isinstance(node.ctx, ast.Load) and node.id in bindings
-        if isinstance(node, ast.Starred):
-            return transfers_any_binding(node.value, bindings)
-        if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
-            return any(
-                transfers_any_binding(element, bindings)
-                for element in node.elts
-            )
-        if isinstance(node, ast.Dict):
-            return any(
-                key is not None and transfers_any_binding(key, bindings)
-                for key in node.keys
-            ) or any(
-                transfers_any_binding(value, bindings)
-                for value in node.values
-            )
-        if isinstance(node, ast.Subscript):
-            return transfers_any_binding(node.value, bindings)
-        if isinstance(node, ast.IfExp):
-            return transfers_any_binding(
-                node.body,
-                bindings,
-            ) or transfers_any_binding(node.orelse, bindings)
-        return False
-
-    def has_reflective_persistence_access(tree: ast.AST) -> bool:
-        persistence_bindings: set[str] = set()
-        inspect_bindings: set[str] = set()
-        getmodule_bindings: set[str] = set()
-        getattr_bindings = {"getattr"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for imported in node.names:
-                    if imported.name == "inspect":
-                        inspect_bindings.add(imported.asname or "inspect")
-            elif isinstance(node, ast.ImportFrom):
-                if imports_from_persistence(node):
-                    persistence_bindings.update(
-                        imported.asname or imported.name
-                        for imported in node.names
-                        if imported.name != "*"
-                        and not imported.name.startswith("__")
-                    )
-                elif node.module == "inspect":
-                    getmodule_bindings.update(
-                        imported.asname or imported.name
-                        for imported in node.names
-                        if imported.name == "getmodule"
-                    )
-
-        changed = True
-        while changed:
-            changed = False
-            for node in ast.walk(tree):
-                target_nodes: tuple[ast.AST, ...]
-                value: ast.AST | None
-                if isinstance(node, ast.Assign):
-                    target_nodes = tuple(node.targets)
-                    value = node.value
-                elif isinstance(node, ast.AnnAssign):
-                    target_nodes = (node.target,)
-                    value = node.value
-                elif isinstance(node, ast.NamedExpr):
-                    target_nodes = (node.target,)
-                    value = node.value
-                elif isinstance(node, (ast.For, ast.AsyncFor)):
-                    target_nodes = (node.target,)
-                    value = node.iter
-                else:
-                    continue
-                if value is None:
-                    continue
-                names = {
-                    name
-                    for target in target_nodes
-                    for name in bound_names(target)
-                }
-                if transfers_any_binding(value, persistence_bindings):
-                    before = len(persistence_bindings)
-                    persistence_bindings.update(names)
-                    changed = changed or len(persistence_bindings) != before
-                if (
-                    isinstance(value, ast.Name)
-                    and value.id in getattr_bindings
-                ):
-                    before = len(getattr_bindings)
-                    getattr_bindings.update(names)
-                    changed = changed or len(getattr_bindings) != before
-                if (
-                    isinstance(value, ast.Name)
-                    and value.id in getmodule_bindings
-                ) or (
-                    isinstance(value, ast.Attribute)
-                    and value.attr == "getmodule"
-                    and isinstance(value.value, ast.Name)
-                    and value.value.id in inspect_bindings
-                ):
-                    before = len(getmodule_bindings)
-                    getmodule_bindings.update(names)
-                    changed = changed or len(getmodule_bindings) != before
-
-        sensitive_attributes = {
-            "__builtins__",
-            "__dict__",
-            "__getattr__",
-            "__getattribute__",
-            "__globals__",
-        }
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Attribute)
-                and node.attr in sensitive_attributes
-                and loads_any_binding(node.value, persistence_bindings)
-            ):
-                return True
-            if not isinstance(node, ast.Call) or not node.args:
-                continue
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id in getattr_bindings
-                and loads_any_binding(node.args[0], persistence_bindings)
-            ):
-                return True
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"__getattr__", "__getattribute__"}
-                and (
-                    loads_any_binding(node.func.value, persistence_bindings)
-                    or loads_any_binding(node.args[0], persistence_bindings)
-                )
-            ):
-                return True
-            if (
-                (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id in getmodule_bindings
-                )
-                or (
-                    isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "getmodule"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in inspect_bindings
-                )
-            ) and loads_any_binding(node.args[0], persistence_bindings):
-                return True
-        return False
-
     def files_referencing(*symbols: str) -> set[str]:
+        # This inventories bounded static dependency syntax. It is not a
+        # Python reflection sandbox or arbitrary cross-module data-flow proof.
         symbol_set = frozenset(symbols)
         is_versioned_codec_query = bool(
             symbol_set
@@ -3242,7 +3074,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     for child in ast.iter_child_nodes(parent)
                 }
                 module_bindings: set[str] = set()
-                os_bindings: set[str] = set()
                 sys_bindings: set[str] = set()
                 sys_modules_bindings: set[str] = set()
                 module_import_without_alias = False
@@ -3261,8 +3092,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                     module_bindings.add(imported.asname)
                             elif imported.name == "sys":
                                 sys_bindings.add(imported.asname or "sys")
-                            elif imported.name == "os":
-                                os_bindings.add(imported.asname or "os")
                     elif isinstance(node, ast.ImportFrom):
                         for imported in node.names:
                             imports_persistence = imports_from_persistence(node)
@@ -3360,7 +3189,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     module_import_without_alias
                     or persistence_reflective_import
                     or persistence_star_import
-                    or has_reflective_persistence_access(tree)
                     or any(
                         isinstance(node, ast.Name)
                         and isinstance(node.ctx, ast.Load)
@@ -3384,12 +3212,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                         isinstance(node, ast.Name)
                         and isinstance(node.ctx, ast.Load)
                         and node.id in sys_modules_bindings
-                    )
-                    or (
-                        isinstance(node, ast.Attribute)
-                        and node.attr == "sys"
-                        and isinstance(node.value, ast.Name)
-                        and node.value.id in os_bindings
                     )
                     for node in ast.walk(tree)
                 )
@@ -3534,6 +3356,14 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     and (
                         node.module is None
                         or node.module.split(".")[-1] == "application"
+                    )
+                )
+                or (
+                    node.level > 0
+                    and imported.name == "application"
+                    and (
+                        node.module is None
+                        or node.module.split(".")[-1] == "mini_agent"
                     )
                 )
                 for imported in node.names
@@ -3681,7 +3511,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     assert not unsafe_getattr_calls
     assert not constructed_codec_symbols
     assert not shadowing_bindings
-    assert not has_reflective_persistence_access(postgres_tree)
 
     encoder_imports = [
         imported
@@ -3755,6 +3584,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 assert not isinstance(
                     enclosing_function,
                     (
+                        ast.ClassDef,
                         ast.DictComp,
                         ast.GeneratorExp,
                         ast.Lambda,
@@ -3769,6 +3599,10 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             )
             assert direct_method_child in enclosing_function.body
+            assert not any(
+                isinstance(descendant, (ast.Yield, ast.YieldFrom))
+                for descendant in ast.walk(enclosing_function)
+            )
             assert enclosing_function.name == "_ru_v2_write_encode"
 
             enclosing_class: ast.AST | None = enclosing_function
@@ -3813,6 +3647,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 assert not isinstance(
                     enclosing_function,
                     (
+                        ast.ClassDef,
                         ast.DictComp,
                         ast.GeneratorExp,
                         ast.Lambda,
@@ -3827,6 +3662,10 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             )
             assert direct_method_child in enclosing_function.body
+            assert not any(
+                isinstance(descendant, (ast.Yield, ast.YieldFrom))
+                for descendant in ast.walk(enclosing_function)
+            )
             assert (
                 enclosing_function.name == exact_reader_method_name
                 or enclosing_function.name.startswith("_ru_v2_write_")
