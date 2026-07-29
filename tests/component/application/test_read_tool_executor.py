@@ -403,6 +403,39 @@ def test_exact_zoneinfo_utc_is_preserved() -> None:
     assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
 
 
+def test_builtin_timezone_name_sidecar_fails_before_observation() -> None:
+    raw_timezone = timezone(
+        timedelta(0),
+        "raw-customer-B-secret",
+    )
+    timestamp = datetime(2030, 1, 1, tzinfo=raw_timezone)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+
+
 @pytest.mark.parametrize(
     "invalid_source_version",
     [

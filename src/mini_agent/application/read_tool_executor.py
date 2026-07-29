@@ -178,10 +178,22 @@ def _is_closed_utc_datetime(value: object) -> bool:
         return True
     if type(timezone_value) is timezone:
         offset = timezone.utcoffset(timezone_value, value)
-        return type(offset) is timedelta and offset == timedelta(0)
+        name = timezone.tzname(timezone_value, value)
+        return (
+            type(offset) is timedelta
+            and offset == timedelta(0)
+            and type(name) is str
+            and name in {"UTC", "Z"}
+        )
     if type(timezone_value) is ZoneInfo:
+        key = object.__getattribute__(timezone_value, "key")
         offset = ZoneInfo.utcoffset(timezone_value, value)
-        return type(offset) is timedelta and offset == timedelta(0)
+        return (
+            type(key) is str
+            and key == "UTC"
+            and type(offset) is timedelta
+            and offset == timedelta(0)
+        )
     if type(timezone_value) is not TzInfo:
         return False
     offset = TzInfo.utcoffset(timezone_value, value)
