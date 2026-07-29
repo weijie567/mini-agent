@@ -26,7 +26,7 @@ must_haves:
   truths:
     - "Eval与Provider active source只消费ModelProviderV2、RequestUnderstandingOutputV2、RequestUnderstandingRecordV2和AcceptedTaskDeltaV2；不得保留v1 Provider实现、v1 RU output/evidence branch、union/fallback或dynamic version selection。"
     - "ScriptedModelProviderV2与QwenResponsesAdapterV2必须成为独立canonical Provider实现，不得再继承或委托legacy Provider；既有bounded candidate-invalid/protocol taxonomy、raw-data detachment与traceback-local安全保证保持。"
-    - "Offline Harness必须显式构造并向真实EvalCaseSut传入ScriptedModelProviderV2；case/script expectations仍只在authenticated Harness边界绑定，不得进入Provider、case-free mapper或EvalEvidence。"
+    - "Offline Harness必须显式构造并向injected EvalCaseSut边界传入ScriptedModelProviderV2；case/script expectations仍只在authenticated Harness边界绑定，不得进入Provider、case-free mapper或EvalEvidence；S不宣称real EvalCaseSut已经存在。"
     - "EvalEvidence与13个grader只接受durable v2 RU record/accepted child/task transition闭包；删去transient v1 RequestUnderstandingOutput、v1 durable record/child与伪造physical envelope分支，bypass/mixed/noncanonical输入继续fail closed。"
     - "tracked evals/*.v1.json文件及其中稳定artifact/provider标签保持byte-identical；它们是Dataset/fixture版本标识，不得被解释为仍存在的Python v1 Provider合同，也不得由S越权修改。"
     - "01-07S不得修改Application Runtime、Application Port/records、Core、PostgreSQL、migration、Composition Root、tracked Eval artifacts、canonical owner或lifecycle；S单独merge不形成B_SU。"
@@ -255,7 +255,7 @@ exact-head与latest overlay必须额外检查：
 
 <rollback>
 
-若exact-head或overlay失败，不合并feature，保留branch/commit/test输出供审查；修复必须追加allowlist内线性commit。若merge后发现回归，以普通revert S merge恢复，不reset/force，不修改S/U原exact base或冻结execution map。
+若exact-head或overlay失败，不合并feature，保留branch/commit/test输出供审查；修复必须追加allowlist内线性commit。若S merge后、`B_SU`形成前发现回归，可以普通revert S merge恢复；若`B_SU`或任一下游barrier已经形成，必须按`V → W → T → X → U/S`的实际依赖逆序先撤销下游merge，再revert S。任何场景都不得reset/force，不修改S/U原exact base或冻结execution map。
 
 </rollback>
 
