@@ -9,14 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
 
-from mini_agent.application.persistence import (
-    P0PersistenceEnvelope,
-    P0RecordCode,
-    P0RecordReference,
-    encode_persistence_record,
-)
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
@@ -45,20 +38,13 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.request_understanding import (
     InputAuthority,
-    InputCandidate,
     InputSourceKind,
-    NextMove,
-    NextMoveKind,
     ReferenceSourceKindV2,
-    RequestUnderstandingOutput,
-    TaskDeltaCandidate,
     TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
-    CandidateValidationRecord,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
@@ -66,7 +52,6 @@ from mini_agent.core.task_state import (
     DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -251,43 +236,6 @@ def _expectations(**overrides: object) -> EvalCaseExpectations:
     return EvalCaseExpectations(**values)
 
 
-def _request_understanding(
-    *,
-    binding_value: str = "O-1001",
-    next_move_value: str = "O-1001",
-    source_quote: str | None = None,
-) -> RequestUnderstandingOutput:
-    return RequestUnderstandingOutput(
-        message_ref=MESSAGE_REF,
-        task_delta_candidates=(
-            TaskDeltaCandidate(
-                candidate_id=CANDIDATE_ID,
-                operation=TaskDeltaOperation.ADD_GOAL,
-                goal_patch="查询指定订单状态",
-                input_candidates=(
-                    InputCandidate(
-                        name="order_id",
-                        candidate_value=binding_value,
-                        semantic_role="TARGET_RESOURCE_IDENTIFIER",
-                        authority=InputAuthority.USER_CLAIM,
-                        source_kind=InputSourceKind.CURRENT_MESSAGE,
-                        source_ref=MESSAGE_REF,
-                        source_quote=source_quote or binding_value,
-                        confidence=1.0,
-                    ),
-                ),
-                confidence=1.0,
-            ),
-        ),
-        next_move_candidate=NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name="get_order",
-            arguments={"order_id": next_move_value},
-            base_task_state_version=None,
-        ),
-    )
-
-
 def _observation(
     *,
     order_id: str = "O-1001",
@@ -311,54 +259,6 @@ def _observation(
         recorded_at=NOW,
         supersedes=supersedes,
         visibility=visibility,
-    )
-
-
-def _record_reference(
-    relation: str,
-    target_record_code: P0RecordCode,
-    identity_field: str,
-    identity_value: UUID,
-) -> P0RecordReference:
-    return P0RecordReference(
-        relation=relation,
-        target_record_code=target_record_code,
-        target_logical_identity=((identity_field, str(identity_value)),),
-    )
-
-
-def _observation_envelope(
-    observation: OrderObservation,
-) -> P0PersistenceEnvelope:
-    return encode_persistence_record(
-        P0RecordCode.OBSERVATION_RECORD,
-        observation,
-        external_references=(
-            _record_reference(
-                "source_tool_call_id",
-                P0RecordCode.TOOL_CALL_RECORD,
-                "tool_call_id",
-                TOOL_CALL_ID,
-            ),
-            _record_reference(
-                "source_run_id",
-                P0RecordCode.AGENT_RUN_RECORD,
-                "run_id",
-                RUN_ID,
-            ),
-            _record_reference(
-                "source_task_id",
-                P0RecordCode.TASK_RECORD,
-                "task_id",
-                TASK_ID,
-            ),
-            _record_reference(
-                "source_request_unit_id",
-                P0RecordCode.REQUEST_UNIT_RECORD,
-                "request_unit_id",
-                REQUEST_UNIT_ID,
-            ),
-        ),
     )
 
 
@@ -1197,9 +1097,9 @@ def _variant_evidence(
     if variant.task_status is None:
         common.update(
             {
-                "request_understanding_output": None,
-                "request_understanding_records": (),
-                "accepted_task_deltas": (),
+                "request_understanding_records_v2": (),
+                "accepted_task_deltas_v2": (),
+                "task_state_transitions": (),
                 "input_bindings": (),
                 "task_records": (),
                 "request_units": (),
@@ -1209,7 +1109,6 @@ def _variant_evidence(
                 "tool_calls": (),
                 "tool_attempts": (),
                 "observations": (),
-                "observation_persistence_envelopes": (),
             }
         )
         return _evidence(**common)
@@ -1233,6 +1132,37 @@ def _variant_evidence(
     run_link = base.run_task_links[0].model_copy(
         update={"result_task_state_version": variant.task_state_version}
     )
+    transitions: tuple[TaskStateTransition, ...]
+    if variant.task_state_version == 2:
+        transitions = (
+            base.task_state_transitions[0].model_copy(
+                update={"to_status": variant.task_status}
+            ),
+        )
+    else:
+        assert variant.task_state_version == 3
+        transitions = (
+            TaskStateTransition(
+                task_id=TASK_ID,
+                request_unit_id=REQUEST_UNIT_ID,
+                from_status=TaskStatus.ACTIVE,
+                to_status=TaskStatus.WAITING_USER,
+                base_state_version=1,
+                result_state_version=2,
+                reason_ref=UUID(int=954),
+                changed_at=NOW + timedelta(milliseconds=500),
+            ),
+            TaskStateTransition(
+                task_id=TASK_ID,
+                request_unit_id=REQUEST_UNIT_ID,
+                from_status=TaskStatus.WAITING_USER,
+                to_status=variant.task_status,
+                base_state_version=2,
+                result_state_version=3,
+                reason_ref=GATE_ID,
+                changed_at=task.updated_at,
+            ),
+        )
     gate_decisions: tuple[GateDecision, ...] = ()
     if variant.gate_decision is not None:
         failed_check_by_reason = {
@@ -1287,16 +1217,12 @@ def _variant_evidence(
             "task_records": (task,),
             "request_units": (unit,),
             "run_task_links": (run_link,),
+            "task_state_transitions": transitions,
             "gate_decisions": gate_decisions,
             "tool_calls": tool_calls,
             "tool_attempts": tool_attempts,
             "observations": (
                 base.observations if variant.observations == 1 else ()
-            ),
-            "observation_persistence_envelopes": (
-                base.observation_persistence_envelopes
-                if variant.observations == 1
-                else ()
             ),
         }
     )
@@ -1324,7 +1250,7 @@ def _rendered_message(observation: OrderObservation) -> str:
     )
 
 
-def _evidence(**overrides: object) -> EvalEvidence:
+def _base_evidence_values() -> dict[str, object]:
     observation = _observation()
     trace_events = _trace_events()
     values: dict[str, object] = {
@@ -1370,35 +1296,6 @@ def _evidence(**overrides: object) -> EvalEvidence:
                 direction=MessageDirection.USER,
                 content="订单 O-1001 状态怎么样？",
                 received_at=NOW,
-            ),
-        ),
-        "request_understanding_output": _request_understanding(),
-        "request_understanding_records": (
-            RequestUnderstandingRecord(
-                run_id=RUN_ID,
-                message_ref=MESSAGE_REF,
-                schema_version="request_understanding_record.p0.v1",
-                candidate_validation=(
-                    CandidateValidationRecord(
-                        candidate_ref=CANDIDATE_ID,
-                        decision=CandidateValidationDecision.ACCEPT,
-                    ),
-                ),
-                accepted_delta_refs=(ACCEPTED_DELTA_ID,),
-                proposed_base_task_state_version=None,
-                validated_task_state_version=1,
-                next_move_candidate_ref=NEXT_MOVE_REF,
-            ),
-        ),
-        "accepted_task_deltas": (
-            AcceptedTaskDelta(
-                accepted_delta_id=ACCEPTED_DELTA_ID,
-                candidate_ref=CANDIDATE_ID,
-                message_ref=MESSAGE_REF,
-                operation=TaskDeltaOperation.ADD_GOAL,
-                goal_text="查询指定订单状态",
-                input_binding_refs=(BINDING_ID,),
-                accepted_at=NOW,
             ),
         ),
         "input_bindings": (
@@ -1512,7 +1409,6 @@ def _evidence(**overrides: object) -> EvalEvidence:
             ),
         ),
         "observations": (observation,),
-        "observation_persistence_envelopes": (_observation_envelope(observation),),
         "context_manifests": (
             _manifest(
                 context_id=CONTEXT_1,
@@ -1533,16 +1429,15 @@ def _evidence(**overrides: object) -> EvalEvidence:
         ),
     }
     values.update({field: True for field in LEGACY_ASSERTION_FIELDS})
-    values.update(overrides)
-    return EvalEvidence(**values)
+    return values
 
 
 def _v2_evidence(**overrides: object) -> EvalEvidence:
-    legacy = _evidence()
-    message = legacy.message_records[0]
-    task = legacy.task_records[0]
-    request_unit = legacy.request_units[0]
-    binding = legacy.input_bindings[0]
+    base_values = _base_evidence_values()
+    message = base_values["message_records"][0]  # type: ignore[index]
+    task = base_values["task_records"][0]  # type: ignore[index]
+    request_unit = base_values["request_units"][0]  # type: ignore[index]
+    binding = base_values["input_bindings"][0]  # type: ignore[index]
     source_start = message.content.index("O-1001")
     source_end = source_start + len("O-1001")
     source_hash = hashlib.sha256(
@@ -1629,15 +1524,12 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
         changed_at=task.updated_at,
     )
     values = {
-        field_name: getattr(legacy, field_name)
-        for field_name in EvalEvidence.model_fields
+        field_name: field_value
+        for field_name, field_value in base_values.items()
+        if field_name in EvalEvidence.model_fields
     }
     values.update(
         {
-            "request_understanding_output": None,
-            "request_understanding_records": (),
-            "accepted_task_deltas": (),
-            "observation_persistence_envelopes": (),
             "request_understanding_records_v2": (understanding,),
             "accepted_task_deltas_v2": (accepted,),
             "task_state_transitions": (transition,),
@@ -1645,6 +1537,10 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
     )
     values.update(overrides)
     return EvalEvidence(**values)
+
+
+def _evidence(**overrides: object) -> EvalEvidence:
+    return _v2_evidence(**overrides)
 
 
 def _minimal_self_attested_evidence() -> EvalEvidence:
@@ -1700,9 +1596,22 @@ def _tampered(grader_name: str) -> EvalEvidence:
         )
         return _evidence(task_records=(task,))
     if grader_name == "RequestUnderstandingGrader":
+        understanding = evidence.request_understanding_records_v2[0]
+        candidate = understanding.task_delta_candidates[0]
+        tampered_input = candidate.input_candidates[0].model_copy(
+            update={"candidate_value": "O-2001"}
+        )
         return _evidence(
-            request_understanding_output=_request_understanding(
-                next_move_value="O-2001"
+            request_understanding_records_v2=(
+                understanding.model_copy(
+                    update={
+                        "task_delta_candidates": (
+                            candidate.model_copy(
+                                update={"input_candidates": (tampered_input,)}
+                            ),
+                        )
+                    }
+                ),
             )
         )
     if grader_name == "InputBindingGrader":
@@ -2440,48 +2349,22 @@ def test_registry_membership_is_exactly_the_13_artifact_names() -> None:
     assert all(registry[name].name == name for name in GRADER_NAMES)
 
 
-def test_v1_and_v2_request_understanding_evidence_are_explicitly_mutually_exclusive() -> None:
+def test_eval_evidence_exposes_only_durable_v2_request_understanding_graph() -> None:
     v2 = _v2_evidence()
-    assert v2.request_understanding_output is None
-    assert v2.request_understanding_records == ()
-    assert v2.accepted_task_deltas == ()
+    assert {
+        "request_understanding_output",
+        "request_understanding_records",
+        "accepted_task_deltas",
+        "observation_persistence_envelopes",
+    }.isdisjoint(EvalEvidence.model_fields)
     assert len(v2.request_understanding_records_v2) == 1
     assert len(v2.accepted_task_deltas_v2) == 1
     assert len(v2.task_state_transitions) == 1
-    assert v2.observation_persistence_envelopes == ()
-
-    legacy = _evidence()
-    with pytest.raises(ValidationError):
-        _v2_evidence(
-            request_understanding_output=legacy.request_understanding_output,
-        )
-    with pytest.raises(ValidationError):
-        _v2_evidence(
-            request_understanding_records=legacy.request_understanding_records,
-        )
-    with pytest.raises(ValidationError):
-        _v2_evidence(
-            accepted_task_deltas=legacy.accepted_task_deltas,
-        )
-    with pytest.raises(ValidationError):
-        _v2_evidence(
-            observation_persistence_envelopes=(
-                legacy.observation_persistence_envelopes
-            ),
-        )
-    with pytest.raises(ValidationError):
-        _v2_evidence(request_understanding_records_v2=())
-    with pytest.raises(ValidationError):
-        _v2_evidence(accepted_task_deltas_v2=())
 
 
 @pytest.mark.parametrize(
     "bypass",
     (
-        "v1_output",
-        "v1_record",
-        "v1_child",
-        "physical_envelope",
         "missing_v2_record_with_child",
         "missing_v2_record_with_transition",
         "duplicate_v2_record",
@@ -2495,27 +2378,8 @@ def test_every_noncanonical_mixed_v2_bypass_fails_before_grading(
     construction: str,
 ) -> None:
     canonical = _v2_evidence()
-    legacy = _evidence()
     update: dict[str, object]
-    if bypass == "v1_output":
-        update = {
-            "request_understanding_output": legacy.request_understanding_output
-        }
-    elif bypass == "v1_record":
-        update = {
-            "request_understanding_records": (
-                legacy.request_understanding_records
-            )
-        }
-    elif bypass == "v1_child":
-        update = {"accepted_task_deltas": legacy.accepted_task_deltas}
-    elif bypass == "physical_envelope":
-        update = {
-            "observation_persistence_envelopes": (
-                legacy.observation_persistence_envelopes
-            )
-        }
-    elif bypass == "missing_v2_record_with_child":
+    if bypass == "missing_v2_record_with_child":
         update = {"request_understanding_records_v2": ()}
     elif bypass == "missing_v2_record_with_transition":
         update = {
@@ -2779,12 +2643,9 @@ def test_each_grader_rejects_directed_typed_evidence_tamper(
 @pytest.mark.parametrize(
     "field_name",
     (
-        "request_understanding_records",
-        "accepted_task_deltas",
         "conversation_task_links",
         "run_task_links",
         "tool_attempts",
-        "observation_persistence_envelopes",
     ),
 )
 def test_persistence_grader_requires_complete_authoritative_record_graph(
@@ -2802,7 +2663,7 @@ def test_persistence_grader_requires_complete_authoritative_record_graph(
 def test_persistence_and_trace_resolve_accepted_delta_refs_authoritatively() -> None:
     evidence = _evidence()
     foreign_ref = UUID(int=930)
-    understanding = evidence.request_understanding_records[0].model_copy(
+    understanding = evidence.request_understanding_records_v2[0].model_copy(
         update={"accepted_delta_refs": (foreign_ref,)}
     )
     events = tuple(
@@ -2811,9 +2672,11 @@ def test_persistence_and_trace_resolve_accepted_delta_refs_authoritatively() -> 
         else event
         for event in evidence.trace_events
     )
-    tampered = _evidence(
-        request_understanding_records=(understanding,),
-        trace_events=events,
+    tampered = evidence.model_copy(
+        update={
+            "request_understanding_records_v2": (understanding,),
+            "trace_events": events,
+        }
     )
 
     for grader_name in ("PersistenceGrader", "TraceCompletenessGrader"):
@@ -2838,27 +2701,6 @@ def test_persistence_rejects_foreign_request_unit_observation_ref() -> None:
 
     assert result.status is EvalGraderStatus.FAIL
     assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
-
-
-def _assert_observation_provenance_fails(evidence: EvalEvidence) -> None:
-    for grader_name in (
-        "ObservationGrader",
-        "PersistenceGrader",
-        "TraceCompletenessGrader",
-    ):
-        result = grader_registry()[grader_name].grade(
-            evidence,
-            _expectations(),
-        )
-        assert result.status is EvalGraderStatus.FAIL
-        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
-
-    canonical = grade_evidence(
-        GRADER_NAMES,
-        evidence,
-        _expectations(),
-    )
-    assert canonical.status is EvalResultStatus.FAIL
 
 
 def test_observation_provenance_uses_canonical_refs_not_tool_result_ref() -> None:
@@ -2886,9 +2728,24 @@ def test_observation_provenance_uses_canonical_refs_not_tool_result_ref() -> Non
 
 
 def test_payload_correlation_ref_does_not_imply_an_observation_record() -> None:
+    canonical = _evidence()
+    request_unit = canonical.request_units[0].model_copy(
+        update={"observation_refs": ()}
+    )
+    manifests = tuple(
+        manifest.model_copy(update={"observation_refs_and_versions": ()})
+        for manifest in canonical.context_manifests
+    )
+    trace_events = tuple(
+        event
+        for event in canonical.trace_events
+        if event.event_type is not TraceEventType.OBSERVATION_RECORDED
+    )
     evidence = _evidence(
         observations=(),
-        observation_persistence_envelopes=(),
+        request_units=(request_unit,),
+        context_manifests=manifests,
+        trace_events=trace_events,
     )
 
     assert evidence.tool_calls[0].result_ref == TOOL_RESULT_REF
@@ -2913,10 +2770,7 @@ def test_raw_string_audit_only_observation_fails_every_canonical_grader() -> Non
     raw_values = _observation_field_values(canonical)
     raw_values["visibility"] = "AUDIT_ONLY"
     raw_observation = OrderObservation.model_construct(**raw_values)
-    evidence = _evidence(
-        observations=(raw_observation,),
-        observation_persistence_envelopes=(_observation_envelope(canonical),),
-    )
+    evidence = _evidence(observations=(raw_observation,))
 
     results = tuple(
         grader_registry()[grader_name].grade(
@@ -2943,10 +2797,7 @@ def test_nested_raw_enum_observation_projection_fails_closed() -> None:
     canonical = _observation()
     raw_projection = canonical.normalized_value.model_copy(update={"status": "SHIPPED"})
     raw_observation = canonical.model_copy(update={"normalized_value": raw_projection})
-    evidence = _evidence(
-        observations=(raw_observation,),
-        observation_persistence_envelopes=(_observation_envelope(canonical),),
-    )
+    evidence = _evidence(observations=(raw_observation,))
 
     results = tuple(
         grader_registry()[grader_name].grade(
@@ -2984,7 +2835,6 @@ def test_leaky_datetime_subclass_fails_closed_before_renderer_use(
     untrusted_message = _rendered_message(leaky_observation)
     evidence = _evidence(
         observations=(leaky_observation,),
-        observation_persistence_envelopes=(_observation_envelope(leaky_observation),),
         agent_result=AgentRunResult(
             run_id=RUN_ID,
             outcome=AgentOutcome.COMPLETED,
@@ -3028,10 +2878,7 @@ def test_uuid_subclass_observation_storage_fails_every_canonical_grader() -> Non
             )
         }
     )
-    evidence = _evidence(
-        observations=(derived_observation,),
-        observation_persistence_envelopes=(_observation_envelope(canonical),),
-    )
+    evidence = _evidence(observations=(derived_observation,))
 
     results = tuple(
         grader_registry()[grader_name].grade(
@@ -3071,10 +2918,7 @@ def test_hidden_observation_storage_fails_closed(
             storage_attribute,
             {"hidden_secret": "must-not-be-serialized"},
         )
-    evidence = _evidence(
-        observations=(hidden,),
-        observation_persistence_envelopes=(_observation_envelope(canonical),),
-    )
+    evidence = _evidence(observations=(hidden,))
 
     results = tuple(
         grader_registry()[grader_name].grade(
@@ -3092,10 +2936,7 @@ def test_hidden_observation_storage_fails_closed(
 
 def test_valid_enum_audit_only_observation_cannot_be_rendered() -> None:
     observation = _observation(visibility=ObservationVisibility.AUDIT_ONLY)
-    evidence = _evidence(
-        observations=(observation,),
-        observation_persistence_envelopes=(_observation_envelope(observation),),
-    )
+    evidence = _evidence(observations=(observation,))
 
     for grader_name in ("ObservationGrader", "RendererFactGrader"):
         result = grader_registry()[grader_name].grade(
@@ -3111,229 +2952,6 @@ def test_valid_enum_audit_only_observation_cannot_be_rendered() -> None:
         _expectations(),
     )
     assert canonical.status is EvalResultStatus.FAIL
-
-
-@pytest.mark.parametrize(
-    "relation",
-    (
-        "source_tool_call_id",
-        "source_run_id",
-        "source_task_id",
-        "source_request_unit_id",
-    ),
-)
-def test_observation_provenance_rejects_foreign_external_owner_ref(
-    relation: str,
-) -> None:
-    evidence = _evidence()
-    envelope = evidence.observation_persistence_envelopes[0]
-    references = tuple(
-        reference.model_copy(
-            update={
-                "target_logical_identity": (
-                    (
-                        reference.target_logical_identity[0][0],
-                        str(UUID(int=940)),
-                    ),
-                )
-            }
-        )
-        if reference.relation == relation
-        else reference
-        for reference in envelope.record_references
-    )
-    forged = envelope.model_copy(update={"record_references": references})
-
-    _assert_observation_provenance_fails(
-        _evidence(observation_persistence_envelopes=(forged,))
-    )
-
-
-@pytest.mark.parametrize(
-    ("field_name", "field_value"),
-    (
-        ("relation", "source_untrusted_id"),
-        ("target_record_code", P0RecordCode.MESSAGE_RECORD),
-        ("direct_owner_customer_id", "customer-A"),
-    ),
-)
-def test_observation_provenance_rejects_envelope_contract_tamper(
-    field_name: str,
-    field_value: object,
-) -> None:
-    evidence = _evidence()
-    envelope = evidence.observation_persistence_envelopes[0]
-    if field_name == "direct_owner_customer_id":
-        forged = envelope.model_copy(update={field_name: field_value})
-    else:
-        first_reference = envelope.record_references[0].model_copy(
-            update={field_name: field_value}
-        )
-        forged = envelope.model_copy(
-            update={
-                "record_references": (
-                    first_reference,
-                    *envelope.record_references[1:],
-                )
-            }
-        )
-
-    _assert_observation_provenance_fails(
-        _evidence(observation_persistence_envelopes=(forged,))
-    )
-
-
-@pytest.mark.parametrize(
-    "reference_mutation",
-    (
-        lambda references: references[:-1],
-        lambda references: (*references, references[-1]),
-    ),
-    ids=("missing-reference", "duplicate-reference"),
-)
-def test_observation_provenance_requires_exactly_four_external_refs(
-    reference_mutation: Callable[
-        [tuple[P0RecordReference, ...]],
-        tuple[P0RecordReference, ...],
-    ],
-) -> None:
-    evidence = _evidence()
-    envelope = evidence.observation_persistence_envelopes[0]
-    forged = envelope.model_copy(
-        update={
-            "record_references": reference_mutation(envelope.record_references),
-        }
-    )
-
-    _assert_observation_provenance_fails(
-        _evidence(observation_persistence_envelopes=(forged,))
-    )
-
-
-def test_canonical_supersedes_reference_is_additive_to_four_external_refs() -> None:
-    observation = _observation(supersedes=UUID(int=942))
-    envelope = _observation_envelope(observation)
-    evidence = _evidence(
-        observations=(observation,),
-        observation_persistence_envelopes=(envelope,),
-    )
-
-    assert len(envelope.record_references) == 5
-    assert (
-        sum(
-            reference.relation == "supersedes"
-            for reference in envelope.record_references
-        )
-        == 1
-    )
-    for grader_name in GRADER_NAMES:
-        result = grader_registry()[grader_name].grade(
-            evidence,
-            _expectations(),
-        )
-        assert result.status is EvalGraderStatus.PASS
-
-    canonical = grade_evidence(
-        GRADER_NAMES,
-        evidence,
-        _expectations(),
-    )
-    assert canonical.status is EvalResultStatus.PASS
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    ("missing", "foreign", "tampered"),
-)
-def test_supersedes_reference_must_match_canonical_source_projection(
-    mutation: str,
-) -> None:
-    observation = _observation(supersedes=UUID(int=942))
-    envelope = _observation_envelope(observation)
-    supersedes = next(
-        reference
-        for reference in envelope.record_references
-        if reference.relation == "supersedes"
-    )
-    if mutation == "missing":
-        references = tuple(
-            reference
-            for reference in envelope.record_references
-            if reference.relation != "supersedes"
-        )
-    elif mutation == "foreign":
-        references = tuple(
-            reference.model_copy(
-                update={
-                    "target_logical_identity": (("observation_id", str(UUID(int=943))),)
-                }
-            )
-            if reference is supersedes
-            else reference
-            for reference in envelope.record_references
-        )
-    else:
-        references = tuple(
-            reference.model_copy(
-                update={"target_record_code": P0RecordCode.MESSAGE_RECORD}
-            )
-            if reference is supersedes
-            else reference
-            for reference in envelope.record_references
-        )
-    forged = envelope.model_copy(update={"record_references": references})
-
-    _assert_observation_provenance_fails(
-        _evidence(
-            observations=(observation,),
-            observation_persistence_envelopes=(forged,),
-        )
-    )
-
-
-def test_coordinated_observation_id_swap_cannot_replace_persistence_owner() -> None:
-    evidence = _evidence()
-    foreign_observation_id = UUID(int=941)
-    observation = evidence.observations[0].model_copy(
-        update={"observation_id": foreign_observation_id}
-    )
-    request_unit = evidence.request_units[0].model_copy(
-        update={"observation_refs": (foreign_observation_id,)}
-    )
-    tool_call = evidence.tool_calls[0].model_copy(
-        update={"result_ref": foreign_observation_id}
-    )
-    manifests = tuple(
-        manifest.model_copy(
-            update={
-                "observation_refs_and_versions": (
-                    VersionedRecordRef(
-                        record_ref=foreign_observation_id,
-                        version=observation.source_version,
-                    ),
-                )
-            }
-        )
-        if manifest.observation_refs_and_versions
-        else manifest
-        for manifest in evidence.context_manifests
-    )
-    trace_events = tuple(
-        event.model_copy(update={"observation_ref": foreign_observation_id})
-        if event.event_type is TraceEventType.OBSERVATION_RECORDED
-        else event
-        for event in evidence.trace_events
-    )
-
-    _assert_observation_provenance_fails(
-        _evidence(
-            observations=(observation,),
-            request_units=(request_unit,),
-            tool_calls=(tool_call,),
-            context_manifests=manifests,
-            trace_events=trace_events,
-        )
-    )
 
 
 @pytest.mark.parametrize(
@@ -3463,24 +3081,6 @@ def test_nonempty_alternative_conversation_task_link_reason_is_legal() -> None:
         _expectations(),
     )
     assert canonical.status is EvalResultStatus.PASS
-
-
-@pytest.mark.parametrize(
-    "grader_name",
-    ("RequestUnderstandingGrader", "PersistenceGrader"),
-)
-def test_source_quote_must_resolve_against_authoritative_message_and_observation(
-    grader_name: str,
-) -> None:
-    result = grader_registry()[grader_name].grade(
-        _evidence(
-            request_understanding_output=_request_understanding(source_quote="O-2001")
-        ),
-        _expectations(),
-    )
-
-    assert result.status is EvalGraderStatus.FAIL
-    assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
 @pytest.mark.parametrize(
@@ -3725,15 +3325,20 @@ def test_message_refs_resolve_only_from_authoritative_message_record(
 ) -> None:
     evidence = _evidence()
     foreign_message_ref = UUID(int=924)
-    assert evidence.request_understanding_output is not None
-    output = evidence.request_understanding_output
-    delta = output.task_delta_candidates[0]
+    understanding = evidence.request_understanding_records_v2[0]
+    delta = understanding.task_delta_candidates[0]
     input_candidate = delta.input_candidates[0].model_copy(
         update={"source_ref": foreign_message_ref}
     )
-    foreign_output = output.model_copy(
+    contextualization = understanding.contextualization.model_copy(
+        update={
+            "source_message_refs": (foreign_message_ref,),
+        }
+    )
+    foreign_understanding = understanding.model_copy(
         update={
             "message_ref": foreign_message_ref,
+            "contextualization": contextualization,
             "task_delta_candidates": (
                 delta.model_copy(update={"input_candidates": (input_candidate,)}),
             ),
@@ -3758,7 +3363,7 @@ def test_message_refs_resolve_only_from_authoritative_message_record(
 
     result = grader_registry()[grader_name].grade(
         _evidence(
-            request_understanding_output=foreign_output,
+            request_understanding_records_v2=(foreign_understanding,),
             input_bindings=(binding,),
             request_units=(request_unit,),
             context_manifests=manifests,

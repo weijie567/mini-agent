@@ -14,13 +14,7 @@ from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid5
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from mini_agent.application.persistence import (
-    P0PersistenceEnvelope,
-    P0RecordCode,
-    P0RecordReference,
-    encode_persistence_record,
-)
-from mini_agent.application.ports import EvalResultPort, ModelProvider
+from mini_agent.application.ports import EvalResultPort, ModelProviderV2
 from mini_agent.application.records import (
     AgentRunResult,
     ConversationRecord,
@@ -68,10 +62,8 @@ from mini_agent.core.request_understanding import (
     TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
-    CandidateValidationRecord,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
@@ -79,7 +71,6 @@ from mini_agent.core.task_state import (
     DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -146,7 +137,7 @@ from mini_agent.evaluation.harness import (
 )
 from mini_agent.evaluation.scripted_provider import (
     RuntimeFaultDirective,
-    ScriptedModelProvider,
+    ScriptedModelProviderV2,
 )
 
 
@@ -706,59 +697,6 @@ def _case_uuid(case_id: str, label: str) -> UUID:
     return uuid5(NAMESPACE_URL, f"synthetic:{case_id}:{label}")
 
 
-def _record_reference(
-    relation: str,
-    target_record_code: P0RecordCode,
-    identity_field: str,
-    identity_value: UUID,
-) -> P0RecordReference:
-    return P0RecordReference(
-        relation=relation,
-        target_record_code=target_record_code,
-        target_logical_identity=((identity_field, str(identity_value)),),
-    )
-
-
-def _observation_envelope(
-    *,
-    observation: OrderObservation,
-    run_id: UUID,
-    task: TaskRecord,
-    request_unit: RequestUnitRecord,
-    tool_call: ToolCallRecord,
-) -> P0PersistenceEnvelope:
-    return encode_persistence_record(
-        P0RecordCode.OBSERVATION_RECORD,
-        observation,
-        external_references=(
-            _record_reference(
-                "source_tool_call_id",
-                P0RecordCode.TOOL_CALL_RECORD,
-                "tool_call_id",
-                tool_call.tool_call_id,
-            ),
-            _record_reference(
-                "source_run_id",
-                P0RecordCode.AGENT_RUN_RECORD,
-                "run_id",
-                run_id,
-            ),
-            _record_reference(
-                "source_task_id",
-                P0RecordCode.TASK_RECORD,
-                "task_id",
-                task.task_id,
-            ),
-            _record_reference(
-                "source_request_unit_id",
-                P0RecordCode.REQUEST_UNIT_RECORD,
-                "request_unit_id",
-                request_unit.request_unit_id,
-            ),
-        ),
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class _SyntheticActualProfile:
     customer_id: str
@@ -961,7 +899,7 @@ def _synthetic_trace(
     identity_seed: str,
     run_id: UUID,
     message_ref: UUID,
-    accepted_delta: AcceptedTaskDelta,
+    accepted_delta: AcceptedTaskDeltaV2,
     binding: InputBinding,
     task: TaskRecord,
     request_unit: RequestUnitRecord,
@@ -1126,7 +1064,7 @@ class SyntheticSut:
         self,
         *,
         execution_input: EvalCaseExecutionInput,
-        scripted_provider: ScriptedModelProvider,
+        scripted_provider: ScriptedModelProviderV2,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None:
         self.calls += 1
@@ -1135,7 +1073,7 @@ class SyntheticSut:
             raise RuntimeError("raw-sut-secret customer-A O-1001")
         if self.fault == "missing":
             return None
-        assert isinstance(scripted_provider, ModelProvider)
+        assert isinstance(scripted_provider, ModelProviderV2)
         request = _request(execution_input)
         request_output = await scripted_provider.propose_next_move(request)
         proposed_delta = request_output.task_delta_candidates[0]
@@ -1204,7 +1142,7 @@ class SyntheticSut:
             created_at=NOW,
             updated_at=NOW + timedelta(seconds=1),
         )
-        accepted_delta = AcceptedTaskDelta(
+        accepted_delta = AcceptedTaskDeltaV2(
             accepted_delta_id=_case_uuid(identity_seed, "accepted-delta"),
             candidate_ref=proposed_delta.candidate_id,
             message_ref=message_ref,
@@ -1212,13 +1150,65 @@ class SyntheticSut:
             goal_text=proposed_delta.goal_patch,
             input_binding_refs=(binding.binding_id,),
             accepted_at=NOW,
+            task_id=task.task_id,
+            base_task_state_version=None,
+            result_task_state_version=1,
         )
-        request_understanding_record = RequestUnderstandingRecord(
+        source_text = execution_input.messages[0].content
+        source_start = source_text.index(message_order_id)
+        source_end = source_start + len(message_order_id)
+        source_hash = hashlib.sha256(
+            source_text[source_start:source_end].encode("utf-8")
+        ).hexdigest()
+        durable_input = DurableInputCandidateV2(
+            name="order_id",
+            candidate_value=message_order_id,
+            semantic_role="TARGET_RESOURCE_IDENTIFIER",
+            authority=InputAuthority.USER_CLAIM,
+            source_kind=InputSourceKind.CURRENT_MESSAGE,
+            source_ref=message_ref,
+            source_span_start=source_start,
+            source_span_end_exclusive=source_end,
+            source_quote_sha256=source_hash,
+            confidence=1.0,
+        )
+        durable_candidate = DurableTaskDeltaCandidateV2(
+            candidate_id=proposed_delta.candidate_id,
+            operation=proposed_delta.operation,
+            goal_patch=proposed_delta.goal_patch,
+            input_candidates=(durable_input,),
+            confidence=proposed_delta.confidence,
+        )
+        request_understanding_record = RequestUnderstandingRecordV2(
+            request_understanding_record_id=_case_uuid(
+                identity_seed,
+                "request-understanding-record",
+            ),
             run_id=run_id,
             message_ref=message_ref,
-            schema_version="request_understanding_record.p0.v1",
+            schema_version="request_understanding_record.p0.v2",
+            model_input_schema_version="e2e01-thin-v1",
+            model_output_schema_version="e2e01-thin-v2",
+            contextualization=DurableQueryContextualizationCandidateV2(
+                text=request_output.contextualization.text,
+                resolved_reference_candidates=(
+                    DurableResolvedReferenceCandidateV2(
+                        name="order_id",
+                        candidate_value=message_order_id,
+                        source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                        source_ref=message_ref,
+                        source_span_start=source_start,
+                        source_span_end_exclusive=source_end,
+                        source_quote_sha256=source_hash,
+                        confidence=1.0,
+                    ),
+                ),
+                uncertainties=(),
+                source_message_refs=(message_ref,),
+            ),
+            task_delta_candidates=(durable_candidate,),
             candidate_validation=(
-                CandidateValidationRecord(
+                CandidateValidationRecordV2(
                     candidate_ref=proposed_delta.candidate_id,
                     decision=CandidateValidationDecision.ACCEPT,
                 ),
@@ -1229,7 +1219,46 @@ class SyntheticSut:
             ),
             validated_task_state_version=1,
             next_move_candidate_ref=_case_uuid(identity_seed, "next-move"),
+            created_at=NOW,
         )
+        transitions: tuple[TaskStateTransition, ...]
+        if task.state_version == 2:
+            transitions = (
+                TaskStateTransition(
+                    task_id=task.task_id,
+                    request_unit_id=request_unit.request_unit_id,
+                    from_status=TaskStatus.ACTIVE,
+                    to_status=task.status,
+                    base_state_version=1,
+                    result_state_version=2,
+                    reason_ref=_case_uuid(identity_seed, "transition-reason"),
+                    changed_at=task.updated_at,
+                ),
+            )
+        else:
+            assert task.state_version == 3
+            transitions = (
+                TaskStateTransition(
+                    task_id=task.task_id,
+                    request_unit_id=request_unit.request_unit_id,
+                    from_status=TaskStatus.ACTIVE,
+                    to_status=TaskStatus.WAITING_USER,
+                    base_state_version=1,
+                    result_state_version=2,
+                    reason_ref=_case_uuid(identity_seed, "state-advanced"),
+                    changed_at=NOW + timedelta(milliseconds=500),
+                ),
+                TaskStateTransition(
+                    task_id=task.task_id,
+                    request_unit_id=request_unit.request_unit_id,
+                    from_status=TaskStatus.WAITING_USER,
+                    to_status=task.status,
+                    base_state_version=2,
+                    result_state_version=3,
+                    reason_ref=_case_uuid(identity_seed, "gate"),
+                    changed_at=task.updated_at,
+                ),
+            )
         conversation_task_link = ConversationTaskLinkRecord(
             schema_version="conversation_task_link_record.p0.v1",
             conversation_id=conversation_id,
@@ -1402,26 +1431,9 @@ class SyntheticSut:
             observation=observation,
             manifests=manifests,
         )
-        observation_envelopes: tuple[P0PersistenceEnvelope, ...] = ()
-        if observation is not None:
-            assert task is not None
-            assert request_unit is not None
-            assert tool_call is not None
-            observation_envelopes = (
-                _observation_envelope(
-                    observation=observation,
-                    run_id=run_id,
-                    task=task,
-                    request_unit=request_unit,
-                    tool_call=tool_call,
-                ),
-            )
         evidence_observations = (observation,) if observation is not None else ()
         if self.fault == "raw_observation_visibility":
             assert observation is not None
-            assert task is not None
-            assert request_unit is not None
-            assert tool_call is not None
             canonical_audit = observation.model_copy(
                 update={"visibility": ObservationVisibility.AUDIT_ONLY}
             )
@@ -1432,20 +1444,8 @@ class SyntheticSut:
             raw_values["visibility"] = "AUDIT_ONLY"
             raw_observation = OrderObservation.model_construct(**raw_values)
             evidence_observations = (raw_observation,)
-            observation_envelopes = (
-                _observation_envelope(
-                    observation=canonical_audit,
-                    run_id=run_id,
-                    task=task,
-                    request_unit=request_unit,
-                    tool_call=tool_call,
-                ),
-            )
         elif self.fault == "observation_supersedes":
             assert observation is not None
-            assert task is not None
-            assert request_unit is not None
-            assert tool_call is not None
             superseding = observation.model_copy(
                 update={
                     "supersedes": _case_uuid(
@@ -1455,15 +1455,6 @@ class SyntheticSut:
                 }
             )
             evidence_observations = (superseding,)
-            observation_envelopes = (
-                _observation_envelope(
-                    observation=superseding,
-                    run_id=run_id,
-                    task=task,
-                    request_unit=request_unit,
-                    tool_call=tool_call,
-                ),
-            )
         self.traces.seed(trace_ref, initial_trace)
         observable_values: dict[str, object] = {
             "http_status": profile.http_status,
@@ -1510,15 +1501,11 @@ class SyntheticSut:
                     received_at=NOW,
                 ),
             ),
-            "request_understanding_output": request_output,
-            "request_understanding_records": (
-                (request_understanding_record,)
-                if request_understanding_record is not None
-                else ()
+            "request_understanding_records_v2": (
+                request_understanding_record,
             ),
-            "accepted_task_deltas": (
-                (accepted_delta,) if accepted_delta is not None else ()
-            ),
+            "accepted_task_deltas_v2": (accepted_delta,),
+            "task_state_transitions": transitions,
             "input_bindings": (binding,) if binding is not None else (),
             "task_records": (task,) if task is not None else (),
             "request_units": ((request_unit,) if request_unit is not None else ()),
@@ -1530,7 +1517,6 @@ class SyntheticSut:
             "tool_calls": (tool_call,) if tool_call is not None else (),
             "tool_attempts": ((tool_attempt,) if tool_attempt is not None else ()),
             "observations": evidence_observations,
-            "observation_persistence_envelopes": observation_envelopes,
             "context_manifests": manifests,
             "model_visible_toolset_artifacts": (
                 ModelVisibleToolsetArtifact(
@@ -1555,6 +1541,33 @@ class SyntheticSut:
             "persistence_assertions_pass": True,
             "toolset_replay_assertions_pass": True,
         }
+        if self.fault == "request_candidate_mismatch":
+            candidate = request_understanding_record.task_delta_candidates[0]
+            mismatched_input = candidate.input_candidates[0].model_copy(
+                update={"candidate_value": "O-2001"}
+            )
+            evidence_values["request_understanding_records_v2"] = (
+                request_understanding_record.model_copy(
+                    update={
+                        "task_delta_candidates": (
+                            candidate.model_copy(
+                                update={
+                                    "input_candidates": (
+                                        mismatched_input,
+                                    )
+                                }
+                            ),
+                        )
+                    }
+                ),
+            )
+        elif self.fault == "missing_observation_manifest_ref":
+            evidence_values["context_manifests"] = tuple(
+                manifest.model_copy(
+                    update={"observation_refs_and_versions": ()}
+                )
+                for manifest in manifests
+            )
         evidence_values.update(self.evidence_overrides)
         evidence = UnboundEvalEvidence(**evidence_values)
         return EvalCaseSutResult(
@@ -1583,143 +1596,25 @@ def _exact_closure_from_synthetic_result(
 ) -> ExactRunEvidenceClosure:
     evidence = result.evidence
     assert evidence.run_record is not None
-    assert evidence.request_understanding_output is not None
     assert len(evidence.conversation_records) == 1
     assert len(evidence.message_records) == 1
-    assert len(evidence.request_understanding_records) == 1
-    assert len(evidence.accepted_task_deltas) == 1
+    assert len(evidence.request_understanding_records_v2) == 1
+    assert len(evidence.accepted_task_deltas_v2) == 1
     assert len(evidence.input_bindings) == 1
     assert len(evidence.task_records) == 1
     assert len(evidence.request_units) == 1
     conversation = evidence.conversation_records[0]
-    message = evidence.message_records[0]
-    legacy_output = evidence.request_understanding_output
-    legacy_understanding = evidence.request_understanding_records[0]
-    legacy_child = evidence.accepted_task_deltas[0]
-    binding = evidence.input_bindings[0]
     task = evidence.task_records[0]
     unit = evidence.request_units[0]
-    proposed = legacy_output.task_delta_candidates[0]
-    candidate_input = proposed.input_candidates[0]
-    source_start = message.content.index(candidate_input.candidate_value)
-    source_end = source_start + len(candidate_input.candidate_value)
-    source_hash = hashlib.sha256(
-        message.content[source_start:source_end].encode("utf-8")
-    ).hexdigest()
-    durable_input = DurableInputCandidateV2(
-        name="order_id",
-        candidate_value=candidate_input.candidate_value,
-        semantic_role="TARGET_RESOURCE_IDENTIFIER",
-        authority=InputAuthority.USER_CLAIM,
-        source_kind=InputSourceKind.CURRENT_MESSAGE,
-        source_ref=message.message_id,
-        source_span_start=source_start,
-        source_span_end_exclusive=source_end,
-        source_quote_sha256=source_hash,
-        confidence=candidate_input.confidence,
+    understanding = evidence.request_understanding_records_v2[0].model_copy(
+        update={
+            "request_understanding_record_id": (
+                request_understanding_record_id
+            )
+        }
     )
-    durable_candidate = DurableTaskDeltaCandidateV2(
-        candidate_id=proposed.candidate_id,
-        operation=TaskDeltaOperation.ADD_GOAL,
-        goal_patch=proposed.goal_patch,
-        input_candidates=(durable_input,),
-        confidence=proposed.confidence,
-    )
-    understanding = RequestUnderstandingRecordV2(
-        request_understanding_record_id=request_understanding_record_id,
-        run_id=evidence.run_record.run_id,
-        message_ref=message.message_id,
-        schema_version="request_understanding_record.p0.v2",
-        model_input_schema_version="e2e01-thin-v1",
-        model_output_schema_version="e2e01-thin-v2",
-        contextualization=DurableQueryContextualizationCandidateV2(
-            text=message.content,
-            resolved_reference_candidates=(
-                DurableResolvedReferenceCandidateV2(
-                    name="order_id",
-                    candidate_value=candidate_input.candidate_value,
-                    source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
-                    source_ref=message.message_id,
-                    source_span_start=source_start,
-                    source_span_end_exclusive=source_end,
-                    source_quote_sha256=source_hash,
-                    confidence=candidate_input.confidence,
-                ),
-            ),
-            uncertainties=(),
-            source_message_refs=(message.message_id,),
-        ),
-        task_delta_candidates=(durable_candidate,),
-        candidate_validation=(
-            CandidateValidationRecordV2(
-                candidate_ref=proposed.candidate_id,
-                decision=CandidateValidationDecision.ACCEPT,
-            ),
-        ),
-        accepted_delta_refs=(legacy_child.accepted_delta_id,),
-        proposed_base_task_state_version=(
-            legacy_understanding.proposed_base_task_state_version
-        ),
-        validated_task_state_version=(
-            legacy_understanding.validated_task_state_version
-        ),
-        next_move_candidate_ref=legacy_understanding.next_move_candidate_ref,
-        created_at=legacy_child.accepted_at,
-    )
-    child = AcceptedTaskDeltaV2(
-        accepted_delta_id=legacy_child.accepted_delta_id,
-        candidate_ref=legacy_child.candidate_ref,
-        message_ref=legacy_child.message_ref,
-        operation=legacy_child.operation,
-        goal_text=legacy_child.goal_text,
-        input_binding_refs=legacy_child.input_binding_refs,
-        accepted_at=legacy_child.accepted_at,
-        task_id=task.task_id,
-        base_task_state_version=None,
-        result_task_state_version=1,
-    )
-    transition_events = tuple(
-        event
-        for event in evidence.trace_events
-        if event.event_type is TraceEventType.TASK_STATE_CHANGED
-    )
-    if task.state_version == 2:
-        transitions = (
-            TaskStateTransition(
-                task_id=task.task_id,
-                request_unit_id=unit.request_unit_id,
-                from_status=TaskStatus.ACTIVE,
-                to_status=task.status,
-                base_state_version=1,
-                result_state_version=2,
-                reason_ref=transition_events[-1].trace_event_id,
-                changed_at=task.updated_at,
-            ),
-        )
-    else:
-        assert task.state_version == 3
-        transitions = (
-            TaskStateTransition(
-                task_id=task.task_id,
-                request_unit_id=unit.request_unit_id,
-                from_status=TaskStatus.ACTIVE,
-                to_status=TaskStatus.WAITING_USER,
-                base_state_version=1,
-                result_state_version=2,
-                reason_ref=transition_events[-2].trace_event_id,
-                changed_at=task.created_at + timedelta(milliseconds=500),
-            ),
-            TaskStateTransition(
-                task_id=task.task_id,
-                request_unit_id=unit.request_unit_id,
-                from_status=TaskStatus.WAITING_USER,
-                to_status=task.status,
-                base_state_version=2,
-                result_state_version=3,
-                reason_ref=transition_events[-1].trace_event_id,
-                changed_at=task.updated_at,
-            ),
-        )
+    child = evidence.accepted_task_deltas_v2[0]
+    transitions = evidence.task_state_transitions
 
     trace_events = list(evidence.trace_events)
     run_stopped_index = next(
@@ -1863,7 +1758,7 @@ def _exact_closure_for_script(
 
     async def execute() -> EvalCaseSutResult:
         traces = InMemoryTraceCallbacks()
-        provider = ScriptedModelProvider(
+        provider = ScriptedModelProviderV2(
             ARTIFACTS.script_by_ref(script_ref),
             script_execution_ref=script_execution_ref,
         )
@@ -2117,6 +2012,40 @@ class ResultBoundaryMutationSut:
             }
         )
 
+    def _replace_schema_payload(
+        self,
+        result: EvalCaseSutResult,
+        payload: object,
+    ) -> EvalCaseSutResult:
+        artifact = result.evidence.model_visible_toolset_artifacts[0]
+        spec = artifact.provider_visible_tool_specs[0].model_copy(
+            update={"input_schema": payload}
+        )
+        updated_artifact = artifact.model_copy(
+            update={"provider_visible_tool_specs": (spec,)}
+        )
+        evidence = result.evidence.model_copy(
+            update={
+                "model_visible_toolset_artifacts": (updated_artifact,)
+            }
+        )
+        return result.model_copy(update={"evidence": evidence})
+
+    def _schema_with_extra(
+        self,
+        result: EvalCaseSutResult,
+        key: object,
+        value: object,
+    ) -> EvalCaseSutResult:
+        artifact = result.evidence.model_visible_toolset_artifacts[0]
+        schema = artifact.provider_visible_tool_specs[0].input_schema
+        payload = tuple.__new__(
+            FrozenJsonDict,
+            (*tuple(schema.items()), (key, value)),
+        )
+        self.injected_arguments = payload
+        return self._replace_schema_payload(result, payload)
+
     async def execute_case(self, **kwargs: object) -> EvalCaseSutResult | None:
         result = await self._delegate.execute_case(**kwargs)
         assert type(result) is EvalCaseSutResult
@@ -2166,12 +2095,11 @@ class ResultBoundaryMutationSut:
             )
             return result
         if self._mutation == "nested_payload_cycle":
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
+            understanding = result.evidence.request_understanding_records_v2[0]
             object.__setattr__(
-                request_output,
+                understanding,
                 "task_delta_candidates",
-                (request_output,),
+                (understanding,),
             )
             return result
         if self._mutation.startswith("pydantic_sidecar:"):
@@ -2179,12 +2107,8 @@ class ResultBoundaryMutationSut:
             target: BaseModel = result
             storage_field = "safe_observable"
             if location == "nested":
-                request_output = (
-                    result.evidence.request_understanding_output
-                )
-                assert request_output is not None
-                target = request_output
-                storage_field = "next_move_candidate"
+                target = result.evidence.request_understanding_records_v2[0]
+                storage_field = "contextualization"
             else:
                 assert location == "root"
             if sidecar_kind == "fields-set":
@@ -2257,159 +2181,112 @@ class ResultBoundaryMutationSut:
             return result
         if self._mutation.startswith("positional_type_substitution:"):
             substitution = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            if substitution in {
-                "arguments-tuple",
-                "arguments-model",
-            }:
-                if substitution == "arguments-tuple":
-                    replacement: object = ("ordinary-value",)
-                else:
-                    replacement = TokenCounts(
-                        input_tokens=1,
-                        output_tokens=1,
-                    )
-                next_move = request_output.next_move_candidate.model_copy(
-                    update={"arguments": replacement}
+            if substitution == "arguments-tuple":
+                return self._replace_schema_payload(
+                    result,
+                    ("ordinary-value",),
                 )
-                request_output = request_output.model_copy(
-                    update={"next_move_candidate": next_move}
-                )
-                return result.model_copy(
-                    update={
-                        "evidence": result.evidence.model_copy(
-                            update={
-                                "request_understanding_output": (
-                                    request_output
-                                ),
-                            }
-                        )
-                    }
-                )
-            if substitution in {
-                "shared-frozen-dag",
-                "deep-frozen",
-                "wide-frozen",
-            }:
-                if substitution == "shared-frozen-dag":
-                    payload: object = tuple.__new__(
-                        FrozenJsonList,
-                        ("ordinary-value",),
-                    )
-                    for _ in range(20):
-                        payload = tuple.__new__(
-                            FrozenJsonList,
-                            (payload, payload),
-                        )
-                elif substitution == "deep-frozen":
-                    payload = "ordinary-value"
-                    for _ in range(_MAX_PAYLOAD_DEPTH + 1):
-                        payload = tuple.__new__(
-                            FrozenJsonList,
-                            (payload,),
-                        )
-                else:
-                    payload = tuple.__new__(
-                        FrozenJsonList,
-                        ("ordinary-value",)
-                        * (_MAX_PAYLOAD_EDGES + 1),
-                    )
-                current_arguments = (
-                    request_output.next_move_candidate.arguments
-                )
-                assert type(current_arguments) is FrozenJsonDict
-                replacement = tuple.__new__(
-                    FrozenJsonDict,
-                    (
-                        *tuple(tuple.__iter__(current_arguments)),
-                        ("metadata", payload),
-                    ),
-                )
-                next_move = request_output.next_move_candidate.model_copy(
-                    update={"arguments": replacement}
-                )
-                request_output = request_output.model_copy(
-                    update={"next_move_candidate": next_move}
-                )
-                return result.model_copy(
-                    update={
-                        "evidence": result.evidence.model_copy(
-                            update={
-                                "request_understanding_output": (
-                                    request_output
-                                ),
-                            }
-                        )
-                    }
+            if substitution == "arguments-model":
+                return self._replace_schema_payload(
+                    result,
+                    TokenCounts(input_tokens=1, output_tokens=1),
                 )
             if substitution == "cross-enum":
-                assert result.evidence.task_records
                 task_records = (
                     result.evidence.task_records[0].model_copy(
                         update={"status": AgentOutcome.COMPLETED}
                     ),
-                    *result.evidence.task_records[1:],
                 )
-                return result.model_copy(
+                evidence = result.evidence.model_copy(
+                    update={"task_records": task_records}
+                )
+                return result.model_copy(update={"evidence": evidence})
+            if substitution == "typed-tuple-model":
+                evidence = result.evidence.model_copy(
                     update={
-                        "evidence": result.evidence.model_copy(
-                            update={"task_records": task_records}
+                        "trace_events": (
+                            result.evidence.task_records[0],
                         )
                     }
                 )
-            assert substitution == "typed-tuple-model"
-            assert result.evidence.task_records
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "trace_events": (
-                                result.evidence.task_records[0],
-                            )
-                        }
+                return result.model_copy(update={"evidence": evidence})
+            if substitution == "shared-frozen-dag":
+                payload: object = tuple.__new__(
+                    FrozenJsonList,
+                    ("ordinary-value",),
+                )
+                for _ in range(20):
+                    payload = tuple.__new__(
+                        FrozenJsonList,
+                        (payload, payload),
                     )
-                }
+            elif substitution == "deep-frozen":
+                payload = "ordinary-value"
+                for _ in range(_MAX_PAYLOAD_DEPTH + 1):
+                    payload = tuple.__new__(FrozenJsonList, (payload,))
+            else:
+                assert substitution == "wide-frozen"
+                payload = tuple.__new__(
+                    FrozenJsonList,
+                    ("ordinary-value",) * (_MAX_PAYLOAD_EDGES + 1),
+                )
+            return self._schema_with_extra(
+                result,
+                "metadata",
+                payload,
             )
         if self._mutation.startswith("nested_argument_business_value:"):
             identity_key = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
-            arguments[identity_key] = "business-opaque-value"
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
+            return self._schema_with_extra(
+                result,
+                identity_key,
+                "business-opaque-value",
             )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
+        if self._mutation.startswith("nested_argument_identity:"):
+            identity_key = self._mutation.partition(":")[2]
+            identity_value = (
+                "script:e2e01-01:success"
+                if "script" in identity_key.casefold()
+                else "E2E01-01"
             )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                identity_key,
+                identity_value,
+            )
+        if self._mutation.startswith(
+            "nested_argument_authenticated_bundle_identity:"
+        ):
+            identity_kind = self._mutation.partition(":")[2]
+            identity_field, identity_value = {
+                "other-case": (
+                    "customer_case_id",
+                    "E2E01-04-A",
+                ),
+                "other-script": (
+                    "script_owner_id",
+                    "script:e2e01-04-a:foreign-order",
+                ),
+            }[identity_kind]
+            return self._schema_with_extra(
+                result,
+                identity_field,
+                identity_value,
             )
         if self._mutation.startswith("nested_argument_enum_identity:"):
             identity_kind = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
             if identity_kind == "cycle":
                 cyclic_enum = Enum(
                     "CyclicSmuggledIdentity",
                     {"VALUE": "opaque-cycle-value"},
                 )
-                cyclic_member = cyclic_enum.VALUE
+                identity_value = cyclic_enum.VALUE
                 object.__setattr__(
-                    cyclic_member,
+                    identity_value,
                     "_value_",
-                    cyclic_member,
+                    identity_value,
                 )
                 identity_field = "customer_case_id"
-                identity_value = cyclic_member
             else:
                 identity_field, identity_value = {
                     "case": (
@@ -2437,60 +2314,13 @@ class ResultBoundaryMutationSut:
                         WrappedBundleIdentity.VALUE,
                     ),
                 }[identity_kind]
-            arguments[identity_field] = identity_value
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
-        if self._mutation.startswith(
-            "nested_argument_authenticated_bundle_identity:"
-        ):
-            identity_kind = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
-            identity_field, identity_value = {
-                "other-case": (
-                    "customer_case_id",
-                    "E2E01-04-A",
-                ),
-                "other-script": (
-                    "script_owner_id",
-                    "script:e2e01-04-a:foreign-order",
-                ),
-            }[identity_kind]
-            arguments[identity_field] = identity_value
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                identity_field,
+                identity_value,
             )
         if self._mutation.startswith("nested_argument_enum_key:"):
             key_kind = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
             if key_kind == "cycle":
                 cyclic_enum = Enum(
                     "CyclicSmuggledKey",
@@ -2502,34 +2332,22 @@ class ResultBoundaryMutationSut:
                 enum_key = {
                     "plain-semantic": SemanticCaseCodeKey.VALUE,
                     "nested-semantic": OuterSemanticScriptUuidKey.VALUE,
-                    "subclass-semantic": SubclassSemanticCaseNumberKey.VALUE,
+                    "subclass-semantic": (
+                        SubclassSemanticCaseNumberKey.VALUE
+                    ),
                     "ordinary-business": OrdinaryBusinessKey.VALUE,
                     "ordinary-lexical": OrdinaryLexicalKey.VALUE,
                     "ordinary-subclass": (
                         SubclassOrdinaryLexicalKey.VALUE
                     ),
                 }[key_kind]
-            arguments[enum_key] = "business-opaque-value"
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                enum_key,
+                "business-opaque-value",
             )
         if self._mutation.startswith("nested_argument_bytes_identity:"):
             identity_kind = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
             identity_field, identity_value = {
                 "selected-case": (
                     "customer_case_id",
@@ -2540,28 +2358,15 @@ class ResultBoundaryMutationSut:
                     b"script:e2e01-04-a:foreign-order",
                 ),
             }[identity_kind]
-            arguments[identity_field] = identity_value
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                identity_field,
+                identity_value,
             )
         if self._mutation.startswith(
             "nested_argument_noncanonical_container:"
         ):
             container_kind = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
             container = {
                 "dict": {"value": "ordinary-value"},
                 "list": ["ordinary-value"],
@@ -2574,209 +2379,70 @@ class ResultBoundaryMutationSut:
                 "flip-set": FlipSet(),
             }[container_kind]
             self.injected_container = container
-            arguments = tuple.__new__(
-                FrozenJsonDict,
-                (
-                    ("order_id", "O-1001"),
-                    ("metadata", container),
-                ),
-            )
-            self.injected_arguments = arguments
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": arguments}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                "metadata",
+                container,
             )
         if self._mutation == "nested_argument_duplicate_frozen_identity":
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = tuple.__new__(
+            artifact = result.evidence.model_visible_toolset_artifacts[0]
+            schema = artifact.provider_visible_tool_specs[0].input_schema
+            payload = tuple.__new__(
                 FrozenJsonDict,
                 (
-                    ("order_id", "O-1001"),
+                    *tuple(schema.items()),
                     ("metadata", "ordinary-value"),
                     ("metadata", "E2E01-04-A"),
                 ),
             )
-            self.injected_arguments = arguments
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": arguments}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
+            self.injected_arguments = payload
+            return self._replace_schema_payload(result, payload)
         if self._mutation == "nested_argument_canonical_frozen_json":
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = freeze_json_value(
-                {
-                    "order_id": "O-1001",
-                    "metadata": {
-                        "label": "ordinary-value",
-                        "items": [1, "two"],
-                    },
-                }
+            artifact = result.evidence.model_visible_toolset_artifacts[0]
+            schema = dict(
+                artifact.provider_visible_tool_specs[0].input_schema
             )
-            self.injected_arguments = arguments
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": arguments}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
+            schema["metadata"] = {
+                "label": "ordinary-value",
+                "items": [1, "two"],
+            }
+            payload = freeze_json_value(schema)
+            self.injected_arguments = payload
+            return self._replace_schema_payload(result, payload)
         if self._mutation.startswith("nested_argument_flip_enum:"):
             enum_location = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
             FLIP_ENUM_VALUE_READ_COUNTER.reads = 0
             if enum_location == "key":
-                arguments = tuple.__new__(
-                    FrozenJsonDict,
-                    (
-                        ("order_id", "O-1001"),
-                        (FlipValueEnum.VALUE, "ordinary-value"),
-                    ),
+                return self._schema_with_extra(
+                    result,
+                    FlipValueEnum.VALUE,
+                    "ordinary-value",
                 )
-            else:
-                arguments = tuple.__new__(
-                    FrozenJsonDict,
-                    (
-                        ("order_id", "O-1001"),
-                        ("metadata", FlipValueEnum.VALUE),
-                    ),
-                )
-            self.injected_arguments = arguments
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": arguments}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
+            return self._schema_with_extra(
+                result,
+                "metadata",
+                FlipValueEnum.VALUE,
             )
         if self._mutation.startswith("nested_argument_str_subclass:"):
             string_location = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
             FLIP_STRING_METHOD_READ_COUNTER.reads = 0
             if string_location == "key":
-                raw_pair = (
+                return self._schema_with_extra(
+                    result,
                     FlipString("metadata"),
                     "ordinary-value",
                 )
-            elif string_location == "ordinary-value":
-                raw_pair = (
-                    "metadata",
-                    FlipString("ordinary-value"),
-                )
-            else:
-                raw_pair = (
-                    "metadata",
-                    IdentityString("E2E01-01"),
-                )
-            arguments = tuple.__new__(
-                FrozenJsonDict,
+            return self._schema_with_extra(
+                result,
+                "metadata",
                 (
-                    ("order_id", "O-1001"),
-                    raw_pair,
+                    FlipString("ordinary-value")
+                    if string_location == "ordinary-value"
+                    else IdentityString("E2E01-01")
                 ),
             )
-            self.injected_arguments = arguments
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": arguments}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
-        if self._mutation.startswith("nested_argument_identity:"):
-            identity_key = self._mutation.partition(":")[2]
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
-            arguments[identity_key] = (
-                "script:e2e01-01:success"
-                if "script" in identity_key.casefold()
-                else "E2E01-01"
-            )
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
         if self._mutation == "allowed_business_identity_keys":
-            request_output = result.evidence.request_understanding_output
-            assert request_output is not None
-            arguments = dict(request_output.next_move_candidate.arguments)
-            assert arguments == {"order_id": "O-1001"}
-            next_move = request_output.next_move_candidate.model_copy(
-                update={"arguments": freeze_json_value(arguments)}
-            )
-            request_output = request_output.model_copy(
-                update={"next_move_candidate": next_move}
-            )
-            return result.model_copy(
-                update={
-                    "evidence": result.evidence.model_copy(
-                        update={
-                            "request_understanding_output": request_output,
-                        }
-                    )
-                }
-            )
+            return result
         if self._mutation.startswith("normalized_outcome:"):
             outcome_name = self._mutation.partition(":")[2]
             normalized_outcome = (
@@ -3396,9 +3062,6 @@ def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
         closure.conversation_record,
     )
     assert result.evidence.message_records == closure.message_records
-    assert result.evidence.request_understanding_output is None
-    assert result.evidence.request_understanding_records == ()
-    assert result.evidence.accepted_task_deltas == ()
     assert result.evidence.request_understanding_records_v2 == (
         closure.request_understanding_record,
     )
@@ -3410,7 +3073,6 @@ def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
         result.evidence.task_state_transitions
         == closure.task_state_transitions
     )
-    assert result.evidence.observation_persistence_envelopes == ()
     assert result.evidence.trace_events == closure.trace_events
     assert result.safe_observable.response_policy == expected_policy
     assert result.safe_observable.user_outcome is agent_result.outcome
@@ -3436,7 +3098,6 @@ def test_exact_run_mapper_projects_logical_observation_source_version_chain() ->
     observation = result.evidence.observations[0]
     call = result.evidence.tool_calls[0]
     presentation_manifest = result.evidence.context_manifests[1]
-    assert result.evidence.observation_persistence_envelopes == ()
     assert observation.source_tool == call.canonical_tool_name
     assert presentation_manifest.observation_refs_and_versions == (
         VersionedRecordRef(
@@ -4921,46 +4582,6 @@ def test_duplicate_raw_frozen_json_key_fails_completeness() -> None:
     assert port.results == {}
 
 
-def test_canonical_frozen_json_reaches_case_grading() -> None:
-    traces = InMemoryTraceCallbacks()
-    delegate = SyntheticSut(traces)
-    sut = ResultBoundaryMutationSut(
-        delegate,
-        mutation="nested_argument_canonical_frozen_json",
-    )
-    grader_calls = 0
-
-    def recording_grader(
-        configured: Sequence[str],
-        evidence: EvalEvidence,
-        expectations: EvalCaseExpectations,
-    ) -> GradingOutcome:
-        nonlocal grader_calls
-        grader_calls += 1
-        return grade_evidence(configured, evidence, expectations)
-
-    harness, _sut, _traces, _port = _harness(
-        sut=sut,
-        traces=traces,
-        grader_runner=recording_grader,
-        nonce_factory=NonceFactorySpy(
-            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
-        ),
-    )
-
-    outcome = _run(harness)
-
-    arguments = sut.injected_arguments
-    assert type(arguments) is FrozenJsonDict
-    metadata = arguments["metadata"]
-    assert type(metadata) is FrozenJsonDict
-    assert type(metadata["items"]) is FrozenJsonList
-    assert grader_calls == 2
-    assert outcome.execution_failures == ()
-    assert len(outcome.results) == 1
-    assert outcome.results[0].status is EvalResultStatus.FAIL
-
-
 @pytest.mark.parametrize("enum_location", ("key", "value"))
 def test_behaviorful_unknown_enum_is_rejected_without_value_read(
     enum_location: str,
@@ -5106,11 +4727,8 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
         "InputSourceKind",
         "InputValidationStatus",
         "MessageDirection",
-        "NextMoveKind",
         "ObservationVisibility",
         "OrderStatus",
-        "P0LogicalChildCode",
-        "P0RecordCode",
         "ReferenceSourceKindV2",
         "StopReason",
         "TaskDeltaOperation",
@@ -5122,63 +4740,6 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
         "TraceEventType",
         "UncertaintyReasonCodeV2",
     }
-
-
-@pytest.mark.parametrize(
-    "business_identity_key",
-    (
-        "customer_case_id",
-        "use_case_id",
-        "show_case_id",
-        "script_owner_id",
-        "case_status",
-        "use_case_label",
-        "script_version",
-        "description",
-        "showcasecode",
-        "transcriptuuid",
-        "javascriptuuid",
-        "casefold",
-        "scripture",
-    ),
-)
-def test_business_named_key_with_ordinary_value_reaches_case_grading(
-    business_identity_key: str,
-) -> None:
-    traces = InMemoryTraceCallbacks()
-    delegate = SyntheticSut(traces)
-    sut = ResultBoundaryMutationSut(
-        delegate,
-        mutation=(
-            f"nested_argument_business_value:{business_identity_key}"
-        ),
-    )
-    grader_calls = 0
-
-    def recording_grader(
-        configured: Sequence[str],
-        evidence: EvalEvidence,
-        expectations: EvalCaseExpectations,
-    ) -> GradingOutcome:
-        nonlocal grader_calls
-        grader_calls += 1
-        return grade_evidence(configured, evidence, expectations)
-
-    harness, _sut, _traces, _port = _harness(
-        sut=sut,
-        traces=traces,
-        grader_runner=recording_grader,
-        nonce_factory=NonceFactorySpy(
-            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
-        ),
-    )
-
-    outcome = _run(harness)
-
-    assert grader_calls == 2
-    assert outcome.execution_failures == ()
-    assert len(outcome.results) == 1
-    assert outcome.results[0].status is EvalResultStatus.FAIL
 
 
 def test_nested_business_identity_key_is_allowed_by_result_boundary() -> None:
@@ -5831,7 +5392,7 @@ def test_sut_nonce_copies_cannot_corrupt_private_correlation_state() -> None:
                 kwargs["execution_input"],
             )
             provider = cast(
-                ScriptedModelProvider,
+                ScriptedModelProviderV2,
                 kwargs["scripted_provider"],
             )
             object.__setattr__(
@@ -5919,41 +5480,10 @@ def test_nonce_reuse_across_attempts_fails_before_second_sut_call(
 
 
 def test_actual_mismatch_reaches_graders_and_persists_fail() -> None:
-    case = ARTIFACTS.case_by_id("E2E01-01")
-    execution_input = EvalCaseExecutionInput(
-        execution_ref=EXECUTION_REF_1,
-        messages=(
-            {
-                "role": "user",
-                "content": case.input["messages"][0]["content"],
-            },
-        ),
-        trusted_context_fixture_ref=case.input[
-            "trusted_context_fixture_ref"
-        ],
-    )
-    provider = ScriptedModelProvider(
-        ARTIFACTS.script_by_ref("script:e2e01-01:success"),
-        script_execution_ref=SCRIPT_EXECUTION_REF_1,
-    )
-    actual = asyncio.run(
-        provider.propose_next_move(_request(execution_input))
-    )
-    mismatched_move = actual.next_move_candidate.model_copy(
-        update={
-            "arguments": freeze_json_value(
-                {"order_id": "O-2001"}
-            )
-        }
-    )
     traces = InMemoryTraceCallbacks()
     sut = SyntheticSut(
         traces,
-        evidence_overrides={
-            "request_understanding_output": actual.model_copy(
-                update={"next_move_candidate": mismatched_move}
-            )
-        },
+        fault="request_candidate_mismatch",
     )
     nonce_factory = NonceFactorySpy(
         (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
@@ -6040,7 +5570,7 @@ def test_missing_observation_provenance_fails_canonical_harness_grading() -> Non
     traces = InMemoryTraceCallbacks()
     sut = SyntheticSut(
         traces,
-        evidence_overrides={"observation_persistence_envelopes": ()},
+        fault="missing_observation_manifest_ref",
     )
     harness, *_ = _harness(sut=sut, traces=traces)
 
@@ -6165,8 +5695,6 @@ def test_missing_typed_record_cannot_be_masked_by_true_self_assertions() -> None
 @pytest.mark.parametrize(
     "field_name",
     (
-        "request_understanding_records",
-        "accepted_task_deltas",
         "conversation_task_links",
         "run_task_links",
         "tool_attempts",
