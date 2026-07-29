@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+import gc
+import pickle
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import warnings
 from uuid import UUID, uuid4
@@ -6,16 +8,24 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+import mini_agent.core.request_processing as request_processing_module
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
+    InitialAcceptedTaskGraphV2,
     InitialRequestDecision,
+    InitialRequestNoTaskDecisionV2,
+    InitialRequestRoutableTaskGraphDecisionV2,
+    InitialRequestUnroutedTaskGraphsDecisionV2,
+    InitialTaskIdentityAllocationV2,
     RequestProcessingError,
     RequestUnderstandingClosureV2,
     RequestUnderstandingV2Error,
     RevalidatedNextMove,
     build_request_understanding_closure_v2,
     revalidate_next_move,
+    revalidate_next_move_v2,
     validate_and_reduce_initial_request,
+    validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
     InputAuthority,
@@ -31,6 +41,8 @@ from mini_agent.core.request_understanding import (
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
+    UncertaintyReasonCodeV2,
+    UncertaintyV2,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
@@ -465,13 +477,14 @@ def _accepted_delta_v2(
     base_version: int | None = None,
     result_version: int = 1,
     accepted_at: datetime = NOW,
+    goal_text: str = "查询订单状态",
 ) -> AcceptedTaskDeltaV2:
     return AcceptedTaskDeltaV2(
         accepted_delta_id=accepted_delta_id or uuid4(),
         candidate_ref=candidate_ref,
         message_ref=message_ref,
         operation=TaskDeltaOperation.ADD_GOAL,
-        goal_text="查询订单状态",
+        goal_text=goal_text,
         input_binding_refs=(uuid4(),),
         accepted_at=accepted_at,
         task_id=task_id or uuid4(),
@@ -533,6 +546,7 @@ def test_v2_builder_projects_unicode_quotes_to_safe_exact_provenance() -> None:
     child = _accepted_delta_v2(
         candidate_ref=candidate_id,
         message_ref=message_ref,
+        goal_text="查询 O-4242 的状态",
     )
 
     closure = _build_v2(
@@ -695,6 +709,7 @@ def test_v2_builder_preserves_child_order_but_chains_by_emitted_candidates() -> 
         task_id=task_id,
         base_version=None,
         result_version=1,
+        goal_text="查询 O-4242 的状态",
     )
     second_child = _accepted_delta_v2(
         candidate_ref=second_id,
@@ -702,6 +717,7 @@ def test_v2_builder_preserves_child_order_but_chains_by_emitted_candidates() -> 
         task_id=task_id,
         base_version=1,
         result_version=2,
+        goal_text="查询 O-4343 的状态",
     )
 
     closure = _build_v2(
@@ -753,6 +769,7 @@ def test_v2_builder_supports_partial_acceptance() -> None:
     child = _accepted_delta_v2(
         candidate_ref=accepted_id,
         message_ref=message_ref,
+        goal_text="查询 O-4242 的状态",
     )
 
     closure = _build_v2(
@@ -1499,3 +1516,1428 @@ def test_v2_builder_rejects_any_undeclared_model_instance_state(
         )
 
     assert caught.value.reason_code is expected_reason
+
+
+def _identity_allocation_v2(
+    candidate_ref: UUID,
+) -> InitialTaskIdentityAllocationV2:
+    return InitialTaskIdentityAllocationV2(
+        candidate_ref=candidate_ref,
+        accepted_delta_id=uuid4(),
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        binding_id=uuid4(),
+    )
+
+
+def _initial_output_v2(
+    *,
+    message_ref: UUID,
+    candidates: tuple[TaskDeltaCandidate, ...],
+    uncertainties: tuple[UncertaintyV2, ...] = (),
+    next_move: NextMove | None = None,
+) -> RequestUnderstandingOutputV2:
+    return RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="确定性处理当前订单查询",
+            resolved_reference_candidates=(),
+            uncertainties=uncertainties,
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=candidates,
+        next_move_candidate=next_move
+        or NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-4242"},
+            base_task_state_version=None,
+        ),
+    )
+
+
+def _reduce_initial_v2(
+    *,
+    message: str,
+    output: RequestUnderstandingOutputV2,
+    allocations: tuple[InitialTaskIdentityAllocationV2, ...] | None = None,
+    request_understanding_record_id: UUID | None = None,
+    next_move_candidate_ref: UUID | None = None,
+    now: datetime = NOW,
+) -> (
+    InitialRequestNoTaskDecisionV2
+    | InitialRequestRoutableTaskGraphDecisionV2
+    | InitialRequestUnroutedTaskGraphsDecisionV2
+):
+    return validate_and_reduce_initial_request_v2(
+        request_input=_request_input_v2(
+            message_ref=output.message_ref,
+            message=message,
+        ),
+        output=output,
+        authoritative_messages={output.message_ref: message},
+        customer_context=_customer_context(),
+        request_understanding_record_id=(
+            request_understanding_record_id or uuid4()
+        ),
+        candidate_identity_allocations=(
+            allocations
+            if allocations is not None
+            else tuple(
+                _identity_allocation_v2(candidate.candidate_id)
+                for candidate in output.task_delta_candidates
+            )
+        ),
+        next_move_candidate_ref=next_move_candidate_ref or uuid4(),
+        now=now,
+    )
+
+
+def test_v2_initial_decision_adds_only_the_declared_exact_core_surface() -> None:
+    assert set(InitialTaskIdentityAllocationV2.model_fields) == {
+        "candidate_ref",
+        "accepted_delta_id",
+        "task_id",
+        "request_unit_id",
+        "binding_id",
+    }
+    assert set(InitialAcceptedTaskGraphV2.model_fields) == {
+        "accepted_delta",
+        "input_binding",
+        "task",
+        "request_unit",
+    }
+    assert set(InitialRequestNoTaskDecisionV2.model_fields) == {"closure"}
+    assert set(InitialRequestRoutableTaskGraphDecisionV2.model_fields) == {
+        "closure",
+        "task_graph",
+        "next_move_candidate_ref",
+        "next_move_candidate",
+    }
+    assert set(InitialRequestUnroutedTaskGraphsDecisionV2.model_fields) == {
+        "closure",
+        "task_graphs",
+    }
+
+
+def test_v2_initial_decision_closes_zero_and_all_reject_without_task() -> None:
+    message_ref = uuid4()
+    zero = _reduce_initial_v2(
+        message="请帮我看看订单",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(),
+        ),
+    )
+
+    assert type(zero) is InitialRequestNoTaskDecisionV2
+    assert zero.closure.record.candidate_validation == ()
+    assert zero.closure.record.accepted_delta_refs == ()
+    assert zero.closure.accepted_task_deltas == ()
+    assert zero.closure.record.next_move_candidate_ref is None
+    assert zero.closure.record.proposed_base_task_state_version is None
+    assert zero.closure.record.validated_task_state_version is None
+
+    invalid_id = uuid4()
+    rejected = _reduce_initial_v2(
+        message="请查询订单 not-an-order",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=invalid_id,
+                    message_ref=message_ref,
+                    order_id="not-an-order",
+                    source_quote="订单 not-an-order",
+                ),
+            ),
+        ),
+    )
+
+    assert type(rejected) is InitialRequestNoTaskDecisionV2
+    assert rejected.closure.record.candidate_validation == (
+        CandidateValidationRecordV2(
+            candidate_ref=invalid_id,
+            decision=CandidateValidationDecision.REJECT,
+            reason_code=CandidateRejectionReasonCode.INPUT_VALUE_INVALID,
+        ),
+    )
+    assert rejected.closure.accepted_task_deltas == ()
+
+
+def test_v2_initial_decision_builds_exact_one_routable_initial_graph() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    next_move_ref = uuid4()
+    output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(
+            _task_delta_v2(
+                candidate_id=candidate_id,
+                message_ref=message_ref,
+                order_id="o-4242",
+                source_quote="订单 o-4242",
+            ),
+        ),
+        next_move=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="unknown_provider_tool",
+            arguments={"order_id": "O-9999"},
+            base_task_state_version=None,
+        ),
+    )
+
+    result = _reduce_initial_v2(
+        message="请查询订单 o-4242",
+        output=output,
+        next_move_candidate_ref=next_move_ref,
+    )
+
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    graph = result.task_graph
+    record = result.closure.record
+    assert record.candidate_validation == (
+        CandidateValidationRecordV2(
+            candidate_ref=candidate_id,
+            decision=CandidateValidationDecision.ACCEPT,
+        ),
+    )
+    assert result.closure.accepted_task_deltas == (graph.accepted_delta,)
+    assert record.accepted_delta_refs == (
+        graph.accepted_delta.accepted_delta_id,
+    )
+    assert graph.accepted_delta.task_id == graph.task.task_id
+    assert graph.accepted_delta.base_task_state_version is None
+    assert graph.accepted_delta.result_task_state_version == 1
+    assert graph.accepted_delta.input_binding_refs == (
+        graph.input_binding.binding_id,
+    )
+    assert graph.request_unit.task_id == graph.task.task_id
+    assert graph.request_unit.input_binding_refs == (
+        graph.input_binding.binding_id,
+    )
+    assert graph.input_binding.normalized_value == "O-4242"
+    assert graph.task.owner_customer_id == "customer-A"
+    assert graph.task.status is TaskStatus.ACTIVE
+    assert graph.task.state_version == 1
+    assert graph.task.last_outcome_ref is None
+    assert graph.request_unit.contextualization_ref is None
+    assert graph.request_unit.constraint_refs == ()
+    assert graph.request_unit.dependency_refs == ()
+    assert graph.request_unit.open_questions == ()
+    assert graph.request_unit.observation_refs == ()
+    assert graph.request_unit.evidence_binding_refs == ()
+    assert graph.request_unit.pending_action_ref is None
+    assert graph.request_unit.result_refs == ()
+    assert graph.input_binding.supersedes is None
+    assert {
+        record.created_at,
+        graph.accepted_delta.accepted_at,
+        graph.input_binding.created_at,
+        graph.input_binding.updated_at,
+        graph.task.created_at,
+        graph.task.updated_at,
+        graph.request_unit.created_at,
+        graph.request_unit.updated_at,
+    } == {NOW}
+    assert result.next_move_candidate_ref == next_move_ref
+    assert result.next_move_candidate == output.next_move_candidate
+    assert record.next_move_candidate_ref == next_move_ref
+    assert record.proposed_base_task_state_version is None
+    assert record.validated_task_state_version == 1
+
+
+def test_v2_initial_decision_preserves_partial_effect_but_discards_next_move() -> None:
+    message_ref = uuid4()
+    accepted_id = uuid4()
+    rejected_id = uuid4()
+    result = _reduce_initial_v2(
+        message="比较订单 O-4242 与订单 invalid-order",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=accepted_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+                _task_delta_v2(
+                    candidate_id=rejected_id,
+                    message_ref=message_ref,
+                    order_id="invalid-order",
+                    source_quote="订单 invalid-order",
+                ),
+            ),
+        ),
+    )
+
+    assert type(result) is InitialRequestUnroutedTaskGraphsDecisionV2
+    assert tuple(
+        decision.decision
+        for decision in result.closure.record.candidate_validation
+    ) == (
+        CandidateValidationDecision.ACCEPT,
+        CandidateValidationDecision.REJECT,
+    )
+    assert result.closure.record.candidate_validation[1].reason_code is (
+        CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+    )
+    assert len(result.task_graphs) == 1
+    assert (
+        result.task_graphs[0].accepted_delta.candidate_ref == accepted_id
+    )
+    assert result.closure.record.next_move_candidate_ref is None
+    assert result.closure.record.proposed_base_task_state_version is None
+    assert result.closure.record.validated_task_state_version is None
+    assert "next_move_candidate" not in type(result).model_fields
+
+
+def test_v2_initial_decision_accepts_each_independent_multi_candidate() -> None:
+    message_ref = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    result = _reduce_initial_v2(
+        message="比较订单 O-4242 与订单 O-4343",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=first_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+                _task_delta_v2(
+                    candidate_id=second_id,
+                    message_ref=message_ref,
+                    order_id="O-4343",
+                    source_quote="订单 O-4343",
+                ),
+            ),
+        ),
+    )
+
+    assert type(result) is InitialRequestUnroutedTaskGraphsDecisionV2
+    assert tuple(
+        decision.decision
+        for decision in result.closure.record.candidate_validation
+    ) == (
+        CandidateValidationDecision.ACCEPT,
+        CandidateValidationDecision.ACCEPT,
+    )
+    assert tuple(
+        graph.accepted_delta.candidate_ref for graph in result.task_graphs
+    ) == (first_id, second_id)
+    assert len({graph.task.task_id for graph in result.task_graphs}) == 2
+    assert all(
+        graph.accepted_delta.base_task_state_version is None
+        and graph.accepted_delta.result_task_state_version == 1
+        for graph in result.task_graphs
+    )
+    assert result.closure.accepted_task_deltas == tuple(
+        graph.accepted_delta for graph in result.task_graphs
+    )
+    assert result.closure.record.next_move_candidate_ref is None
+
+
+@pytest.mark.parametrize(
+    ("reason", "candidate_values", "expected"),
+    [
+        (
+            UncertaintyReasonCodeV2.MISSING_REFERENCE,
+            (),
+            CandidateRejectionReasonCode.REFERENCE_UNRESOLVED,
+        ),
+        (
+            UncertaintyReasonCodeV2.MULTIPLE_PLAUSIBLE_REFERENCES,
+            ("O-4242", "O-4343"),
+            CandidateRejectionReasonCode.REFERENCE_AMBIGUOUS,
+        ),
+    ],
+)
+def test_v2_initial_decision_maps_reference_uncertainty_to_stable_reject(
+    reason: UncertaintyReasonCodeV2,
+    candidate_values: tuple[str, ...],
+    expected: CandidateRejectionReasonCode,
+) -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            uncertainties=(
+                UncertaintyV2(
+                    name="order_id",
+                    candidate_values=candidate_values,
+                    reason_code=reason,
+                    source_message_refs=(message_ref,),
+                ),
+            ),
+        ),
+    )
+
+    assert type(result) is InitialRequestNoTaskDecisionV2
+    assert result.closure.record.candidate_validation[0].reason_code is expected
+
+
+def test_v2_initial_decision_does_not_downgrade_bypassed_input_shape() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    malformed_shape = _task_delta_v2(
+        candidate_id=candidate_id,
+        message_ref=message_ref,
+        order_id="O-4242",
+        source_quote="订单 O-4242",
+    ).model_copy(
+        update={
+            "input_candidates": (
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ).input_candidates[0].model_copy(
+                    update={"semantic_role": "OTHER_ROLE"}
+                ),
+            )
+        }
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _reduce_initial_v2(
+            message="请查询订单 O-4242",
+            output=_initial_output_v2(
+                message_ref=message_ref,
+                candidates=(malformed_shape,),
+            ),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+    )
+
+
+def test_v2_initial_decision_identity_allocation_failure_is_atomic() -> None:
+    message_ref = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(
+            _task_delta_v2(
+                candidate_id=first_id,
+                message_ref=message_ref,
+                order_id="O-4242",
+                source_quote="订单 O-4242",
+            ),
+            _task_delta_v2(
+                candidate_id=second_id,
+                message_ref=message_ref,
+                order_id="O-4343",
+                source_quote="订单 O-4343",
+            ),
+        ),
+    )
+    first = _identity_allocation_v2(first_id)
+    colliding = _identity_allocation_v2(second_id).model_copy(
+        update={"task_id": first.task_id}
+    )
+
+    for allocations in ((first,), (first, colliding)):
+        with pytest.raises(RequestUnderstandingV2Error) as caught:
+            _reduce_initial_v2(
+                message="比较订单 O-4242 与订单 O-4343",
+                output=output,
+                allocations=allocations,
+            )
+        assert caught.value.reason_code is (
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+
+
+def test_v2_initial_decision_noncanonical_base_remains_aggregate_invalid() -> None:
+    message_ref = uuid4()
+    output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(),
+    )
+    invalid_next_move = output.next_move_candidate.model_copy(
+        update={"base_task_state_version": 1}
+    )
+    bypassed = RequestUnderstandingOutputV2.model_construct(
+        **{
+            **output.model_dump(),
+            "next_move_candidate": invalid_next_move,
+        }
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _reduce_initial_v2(
+            message="请帮我看看订单",
+            output=bypassed,
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+    )
+
+
+def test_v2_next_move_revalidation_preserves_unknown_tool_and_substitution() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="unknown_provider_tool",
+                arguments={"order_id": "O-9999"},
+                base_task_state_version=None,
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    move = revalidate_next_move_v2(
+        decision=result,
+        current_task=result.task_graph.task,
+        current_request_unit=result.task_graph.request_unit,
+        current_input_binding=result.task_graph.input_binding,
+    )
+
+    assert move.requested_provider_tool_name == "unknown_provider_tool"
+    assert move.candidate_arguments["order_id"] == "O-9999"
+    assert move.normalized_candidate_order_id == "O-9999"
+    assert move.binding_normalized_value == "O-4242"
+    assert move.argument_binding_refs == (
+        result.task_graph.input_binding.binding_id,
+    )
+    assert move.proposed_base_task_state_version is None
+    assert move.validated_task_state_version == 1
+
+
+def test_v2_next_move_revalidation_rejects_stale_owner_or_non_call_tool() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    with pytest.raises(RequestProcessingError, match="owner"):
+        revalidate_next_move_v2(
+            decision=result,
+            current_task=result.task_graph.task.model_copy(
+                update={"owner_customer_id": "customer-B"}
+            ),
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+    with pytest.raises(RequestProcessingError, match="ACTIVE/v1"):
+        revalidate_next_move_v2(
+            decision=result,
+            current_task=result.task_graph.task.model_copy(
+                update={"state_version": 2}
+            ),
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    ask_user = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(kind=NextMoveKind.ASK_USER),
+        ),
+    )
+    assert type(ask_user) is InitialRequestRoutableTaskGraphDecisionV2
+    with pytest.raises(RequestProcessingError, match="CALL_TOOL"):
+        revalidate_next_move_v2(
+            decision=ask_user,
+            current_task=ask_user.task_graph.task,
+            current_request_unit=ask_user.task_graph.request_unit,
+            current_input_binding=ask_user.task_graph.input_binding,
+        )
+
+
+def test_v2_initial_task_graph_model_rejects_non_initial_state() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    with pytest.raises(ValidationError, match="initial"):
+        InitialAcceptedTaskGraphV2(
+            accepted_delta=result.task_graph.accepted_delta,
+            input_binding=result.task_graph.input_binding.model_copy(
+                update={"supersedes": uuid4()}
+            ),
+            task=result.task_graph.task,
+            request_unit=result.task_graph.request_unit,
+        )
+
+
+def test_v2_routable_decision_rejects_joint_binding_and_next_move_substitution() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    binding_values = result.task_graph.input_binding.model_dump(mode="python")
+    binding_values["normalized_value"] = "O-9999"
+    tampered_binding = type(result.task_graph.input_binding)(**binding_values)
+    tampered_graph = InitialAcceptedTaskGraphV2(
+        accepted_delta=result.task_graph.accepted_delta,
+        input_binding=tampered_binding,
+        task=result.task_graph.task,
+        request_unit=result.task_graph.request_unit,
+    )
+    tampered_next_move = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_order",
+        arguments={"order_id": "O-9999"},
+        base_task_state_version=None,
+    )
+
+    with pytest.raises(ValidationError, match="Candidate InputBinding"):
+        InitialRequestRoutableTaskGraphDecisionV2(
+            closure=result.closure,
+            task_graph=tampered_graph,
+            next_move_candidate_ref=result.next_move_candidate_ref,
+            next_move_candidate=tampered_next_move,
+        )
+
+    bypassed = result.model_copy(
+        update={
+            "task_graph": tampered_graph,
+            "next_move_candidate": tampered_next_move,
+        }
+    )
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=bypassed,
+            current_task=tampered_graph.task,
+            current_request_unit=tampered_graph.request_unit,
+            current_input_binding=tampered_binding,
+        )
+
+
+def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(kind=NextMoveKind.ASK_USER),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    replacement = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_order",
+        arguments={"order_id": "O-4242"},
+        base_task_state_version=None,
+    )
+    substituted = result.model_copy(
+        update={"next_move_candidate": replacement}
+    )
+
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=substituted,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2(
+            closure=result.closure,
+            task_graph=result.task_graph,
+            next_move_candidate_ref=result.next_move_candidate_ref,
+            next_move_candidate=replacement,
+        )
+
+    payload = result.model_dump(mode="python")
+    payload["next_move_candidate"] = replacement
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2.model_validate(payload)
+
+    with pytest.raises(TypeError, match="immutable"):
+        substituted._reducer_next_move_fingerprint = "forged"
+
+    nested_poisoned = result.model_copy(deep=True)
+    nested_poisoned.next_move_candidate.__dict__.update(
+        replacement.__dict__
+    )
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=nested_poisoned,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    for copied in (
+        result.model_copy(deep=True),
+        pickle.loads(pickle.dumps(result)),
+    ):
+        with pytest.raises(RequestProcessingError, match="CALL_TOOL"):
+            revalidate_next_move_v2(
+                decision=copied,
+                current_task=result.task_graph.task,
+                current_request_unit=result.task_graph.request_unit,
+                current_input_binding=result.task_graph.input_binding,
+            )
+
+
+def test_v2_routable_decision_rejects_self_issued_provenance_seals() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(kind=NextMoveKind.ASK_USER),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    replacement = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_order",
+        arguments={"order_id": "O-4242"},
+        base_task_state_version=None,
+    )
+    replacement_fingerprint = sha256(
+        replacement.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        ).encode("utf-8")
+    ).hexdigest()
+
+    substituted = result.model_copy(
+        update={"next_move_candidate": replacement}
+    )
+    substituted.__pydantic_private__[
+        "_reducer_next_move_fingerprint"
+    ] = replacement_fingerprint
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=substituted,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    constructed = InitialRequestRoutableTaskGraphDecisionV2.model_construct(
+        closure=result.closure,
+        task_graph=result.task_graph,
+        next_move_candidate_ref=result.next_move_candidate_ref,
+        next_move_candidate=replacement,
+    )
+    constructed.__pydantic_private__[
+        "_reducer_next_move_fingerprint"
+    ] = replacement_fingerprint
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=constructed,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+    payload = result.model_dump(mode="python")
+    payload["next_move_candidate"] = replacement
+    context_key = getattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_CONTEXT_KEY",
+        "retired-internal-context-key",
+    )
+    context_token = getattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_TOKEN",
+        object(),
+    )
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2.model_validate(
+            payload,
+            context={context_key: context_token},
+        )
+    assert not hasattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_CONTEXT_KEY",
+    )
+    assert not hasattr(
+        request_processing_module,
+        "_INITIAL_ROUTABLE_DECISION_TOKEN",
+    )
+    assert not hasattr(request_processing_module, "token_bytes")
+
+
+@pytest.mark.parametrize(
+    ("target_name", "field_name", "operation"),
+    (
+        ("task", "owner_customer_id", "discard"),
+        ("task", "last_outcome_ref", "add"),
+        ("request_unit", "task_id", "discard"),
+        ("input_binding", "authority", "discard"),
+        ("next_move", "kind", "discard"),
+    ),
+)
+def test_v2_routable_decision_rejects_nested_fields_set_mutation(
+    target_name: str,
+    field_name: str,
+    operation: str,
+) -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    poisoned = result.model_copy(deep=True)
+    targets = {
+        "task": poisoned.task_graph.task,
+        "request_unit": poisoned.task_graph.request_unit,
+        "input_binding": poisoned.task_graph.input_binding,
+        "next_move": poisoned.next_move_candidate,
+    }
+    target = targets[target_name]
+    if operation == "add":
+        target.__pydantic_fields_set__.add(field_name)
+    else:
+        target.__pydantic_fields_set__.discard(field_name)
+
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=poisoned,
+            current_task=poisoned.task_graph.task,
+            current_request_unit=poisoned.task_graph.request_unit,
+            current_input_binding=poisoned.task_graph.input_binding,
+        )
+
+
+def test_v2_routable_decision_rejects_nested_scalar_subclasses() -> None:
+    class DatetimeSubclass(datetime):
+        pass
+
+    class UUIDSubclass(UUID):
+        pass
+
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    poisoned_clock = result.model_copy(deep=True)
+    poisoned_now = DatetimeSubclass.fromtimestamp(
+        poisoned_clock.task_graph.task.created_at.timestamp(),
+        tz=UTC,
+    )
+    poisoned_clock.task_graph.task.__dict__["created_at"] = poisoned_now
+    poisoned_clock.task_graph.task.__dict__["updated_at"] = poisoned_now
+
+    poisoned_binding = result.model_copy(deep=True)
+    poisoned_binding.task_graph.input_binding.__dict__["binding_id"] = (
+        UUIDSubclass(str(poisoned_binding.task_graph.input_binding.binding_id))
+    )
+
+    for poisoned in (poisoned_clock, poisoned_binding):
+        with pytest.raises(RequestProcessingError, match="canonical"):
+            revalidate_next_move_v2(
+                decision=poisoned,
+                current_task=poisoned.task_graph.task,
+                current_request_unit=poisoned.task_graph.request_unit,
+                current_input_binding=poisoned.task_graph.input_binding,
+            )
+
+
+def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> None:
+    class StrSubclass(str):
+        pass
+
+    class DictSubclass(dict):
+        pass
+
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    poisoned_fields_set = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_fields_set,
+        "__pydantic_fields_set__",
+        tuple(poisoned_fields_set.model_fields_set),
+    )
+
+    poisoned_json_leaf = result.model_copy(deep=True)
+    original_arguments = poisoned_json_leaf.next_move_candidate.arguments
+    poisoned_arguments = tuple.__new__(
+        type(original_arguments),
+        (
+            (
+                "order_id",
+                StrSubclass(original_arguments["order_id"]),
+            ),
+        ),
+    )
+    poisoned_json_leaf.next_move_candidate.__dict__["arguments"] = (
+        poisoned_arguments
+    )
+
+    poisoned_mapping_key = result.model_copy(deep=True)
+    mapping_arguments = poisoned_mapping_key.next_move_candidate.arguments
+    poisoned_mapping_key.next_move_candidate.__dict__["arguments"] = (
+        tuple.__new__(
+            type(mapping_arguments),
+            (
+                (
+                    StrSubclass("order_id"),
+                    mapping_arguments["order_id"],
+                ),
+            ),
+        )
+    )
+
+    poisoned_nested_fields_member = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_nested_fields_member.next_move_candidate,
+        "__pydantic_fields_set__",
+        {
+            StrSubclass(field_name)
+            for field_name in (
+                poisoned_nested_fields_member.next_move_candidate.model_fields_set
+            )
+        },
+    )
+
+    poisoned_top_fields_member = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_top_fields_member,
+        "__pydantic_fields_set__",
+        {
+            StrSubclass(field_name)
+            for field_name in poisoned_top_fields_member.model_fields_set
+        },
+    )
+
+    poisoned_private_key = result.model_copy(deep=True)
+    decision_seal = poisoned_private_key.__pydantic_private__.pop(
+        "_reducer_decision_seal"
+    )
+    poisoned_private_key.__pydantic_private__[
+        StrSubclass("_reducer_decision_seal")
+    ] = decision_seal
+
+    poisoned_top_state = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_top_state,
+        "__dict__",
+        DictSubclass(poisoned_top_state.__dict__),
+    )
+
+    poisoned_nested_state = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_nested_state.task_graph.task,
+        "__dict__",
+        DictSubclass(poisoned_nested_state.task_graph.task.__dict__),
+    )
+
+    for poisoned in (
+        poisoned_fields_set,
+        poisoned_json_leaf,
+        poisoned_mapping_key,
+        poisoned_nested_fields_member,
+        poisoned_top_fields_member,
+        poisoned_private_key,
+        poisoned_top_state,
+        poisoned_nested_state,
+    ):
+        with pytest.raises(RequestProcessingError, match="canonical"):
+            revalidate_next_move_v2(
+                decision=poisoned,
+                current_task=poisoned.task_graph.task,
+                current_request_unit=poisoned.task_graph.request_unit,
+                current_input_binding=poisoned.task_graph.input_binding,
+            )
+
+
+def test_v2_routable_decision_rejects_reused_witness_on_direct_clone() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    clone = InitialRequestRoutableTaskGraphDecisionV2.model_construct(
+        **result.__dict__
+    )
+    clone.__pydantic_private__["_reducer_decision_seal"] = (
+        result.__pydantic_private__["_reducer_decision_seal"]
+    )
+
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=clone,
+            current_task=clone.task_graph.task,
+            current_request_unit=clone.task_graph.request_unit,
+            current_input_binding=clone.task_graph.input_binding,
+        )
+
+
+def test_v2_routable_decision_pickle_survives_source_collection() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    blob = pickle.dumps(result)
+    del result
+    gc.collect()
+
+    restored = pickle.loads(blob)
+    move = revalidate_next_move_v2(
+        decision=restored,
+        current_task=restored.task_graph.task,
+        current_request_unit=restored.task_graph.request_unit,
+        current_input_binding=restored.task_graph.input_binding,
+    )
+    assert move.requested_provider_tool_name == "get_order"
+
+
+def test_v2_routable_decision_pickle_ticket_stays_consumed() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    consumed_blob = pickle.dumps(result)
+    current = pickle.loads(consumed_blob)
+
+    for _ in range(32):
+        successor_blob = pickle.dumps(current)
+        with pytest.raises(ValueError, match="unknown Reducer decision pickle"):
+            pickle.loads(consumed_blob)
+        current = pickle.loads(successor_blob)
+
+
+def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
+    message_ref = uuid4()
+    accepted_id = uuid4()
+    rejected_id = uuid4()
+    result = _reduce_initial_v2(
+        message="比较订单 O-4242 与订单 invalid-order",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=accepted_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+                _task_delta_v2(
+                    candidate_id=rejected_id,
+                    message_ref=message_ref,
+                    order_id="invalid-order",
+                    source_quote="订单 invalid-order",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestUnroutedTaskGraphsDecisionV2
+    original_child = result.closure.accepted_task_deltas[0]
+    child_values = original_child.model_dump(mode="python")
+    child_values["candidate_ref"] = rejected_id
+    tampered_child = AcceptedTaskDeltaV2(**child_values)
+
+    with pytest.raises(ValidationError, match="accepted Candidate set"):
+        RequestUnderstandingClosureV2(
+            record=result.closure.record,
+            accepted_task_deltas=(tampered_child,),
+        )
+
+
+def test_v2_decision_closure_rejects_parent_child_clock_drift() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    record_values = result.closure.record.model_dump(mode="python")
+    record_values["created_at"] = (
+        result.closure.record.created_at + timedelta(seconds=1)
+    )
+    drifted_record = type(result.closure.record)(**record_values)
+
+    with pytest.raises(ValidationError, match="trusted timestamp"):
+        RequestUnderstandingClosureV2(
+            record=drifted_record,
+            accepted_task_deltas=result.closure.accepted_task_deltas,
+        )
+
+
+def test_v2_builder_discards_semantic_projection_validation_context() -> None:
+    marker = "LEAK-MARKER-WRONG-GOAL"
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    message = "请查询订单 O-4242"
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _output_v2(
+        message_ref=message_ref,
+        candidates=(
+            _task_delta_v2(
+                candidate_id=candidate_id,
+                message_ref=message_ref,
+                order_id="O-4242",
+                source_quote="订单 O-4242",
+            ),
+        ),
+    )
+    child = _accepted_delta_v2(
+        candidate_ref=candidate_id,
+        message_ref=message_ref,
+        goal_text=marker,
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: message},
+            candidate_validation=(_validation_v2(candidate_id, accept=True),),
+            accepted_task_deltas=(child,),
+            validated_task_state_version=1,
+            next_move_candidate_ref=uuid4(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_canonical_validation_diagnostics() -> None:
+    marker = "LEAK-MARKER-DECISION"
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+    poisoned_decision = _validation_v2(uuid4(), accept=False).model_copy(
+        update={"decision": marker}
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(RequestUnderstandingV2Error) as caught:
+            _build_v2(
+                request_input=_request_input_v2(
+                    message_ref=message_ref,
+                    message=message,
+                ),
+                output=_output_v2(
+                    message_ref=message_ref,
+                    candidates=(),
+                ),
+                authoritative_messages={message_ref: message},
+                candidate_validation=(poisoned_decision,),
+                accepted_task_deltas=(),
+            )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught_warnings == []
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_authoritative_lookup_context() -> None:
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message=message,
+            ),
+            output=_output_v2(
+                message_ref=message_ref,
+                candidates=(),
+            ),
+            authoritative_messages={},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert str(message_ref) not in str(caught.value)
+    assert str(message_ref) not in repr(caught.value)
+    assert str(message_ref) not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_source_normalization_context() -> None:
+    marker = "LEAK-MARKER-CANDIDATE"
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message=message,
+            ),
+            output=_output_v2(
+                message_ref=message_ref,
+                candidates=(
+                    _task_delta_v2(
+                        candidate_id=uuid4(),
+                        message_ref=message_ref,
+                        order_id=marker,
+                        source_quote="订单 O-4242",
+                    ),
+                ),
+            ),
+            authoritative_messages={message_ref: message},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
+
+
+def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() -> None:
+    message_ref = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    result = _reduce_initial_v2(
+        message="比较订单 O-4242 与订单 O-4343",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=first_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+                _task_delta_v2(
+                    candidate_id=second_id,
+                    message_ref=message_ref,
+                    order_id="O-4343",
+                    source_quote="订单 O-4343",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestUnroutedTaskGraphsDecisionV2
+    first_graph, second_graph = result.task_graphs
+    child_values = second_graph.accepted_delta.model_dump(mode="python")
+    child_values["task_id"] = first_graph.task.task_id
+    forked_child = AcceptedTaskDeltaV2(**child_values)
+    task_values = second_graph.task.model_dump(mode="python")
+    task_values["task_id"] = first_graph.task.task_id
+    forked_task = type(second_graph.task)(**task_values)
+    unit_values = second_graph.request_unit.model_dump(mode="python")
+    unit_values["task_id"] = first_graph.task.task_id
+    forked_unit = type(second_graph.request_unit)(**unit_values)
+    forked_graph = InitialAcceptedTaskGraphV2(
+        accepted_delta=forked_child,
+        input_binding=second_graph.input_binding,
+        task=forked_task,
+        request_unit=forked_unit,
+    )
+    forked_closure = RequestUnderstandingClosureV2(
+        record=result.closure.record,
+        accepted_task_deltas=(
+            first_graph.accepted_delta,
+            forked_child,
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="globally unique"):
+        InitialRequestUnroutedTaskGraphsDecisionV2(
+            closure=forked_closure,
+            task_graphs=(first_graph, forked_graph),
+        )
