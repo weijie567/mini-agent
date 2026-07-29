@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from mini_agent.application.ports import GetOrderPort, RuntimeRecordPort
 from mini_agent.application.records import (
@@ -29,6 +32,8 @@ from mini_agent.core.order import (
     GetOrderOutcome,
     GetOrderQuery,
     GetOrderResult,
+    OrderLineSummary,
+    OrderSummaryProjection,
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
@@ -61,6 +66,74 @@ class ReadToolExecution(RuntimePrivateModel):
     effective_timeout_ms: int | None = None
 
 
+_GET_ORDER_SOURCE_VERSION_PATTERN = re.compile(
+    r"mock-order-source-version\.p0\.v1:sha256:[0-9a-f]{64}",
+    flags=re.ASCII,
+)
+
+
+def _is_canonical_get_order_source_version(value: object) -> bool:
+    return (
+        type(value) is str
+        and _GET_ORDER_SOURCE_VERSION_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _has_exact_declared_model_state(
+    value: object,
+    expected_type: type[BaseModel],
+) -> bool:
+    if type(value) is not expected_type:
+        return False
+    declared_fields = frozenset(expected_type.model_fields)
+    required_fields = frozenset(
+        field_name
+        for field_name, field_info in expected_type.model_fields.items()
+        if field_info.is_required()
+    )
+    try:
+        state = vars(value)
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
+    except (AttributeError, TypeError):
+        return False
+    return (
+        type(state) is dict
+        and set(state) == declared_fields
+        and type(fields_set) is set
+        and all(type(field_name) is str for field_name in fields_set)
+        and required_fields <= fields_set <= declared_fields
+        and extra is None
+        and private is None
+    )
+
+
+def _exact_recursive_value_matches(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, BaseModel):
+        model_type = type(left)
+        if (
+            not _has_exact_declared_model_state(left, model_type)
+            or not _has_exact_declared_model_state(right, model_type)
+        ):
+            return False
+        return all(
+            _exact_recursive_value_matches(
+                getattr(left, field_name),
+                getattr(right, field_name),
+            )
+            for field_name in model_type.model_fields
+        )
+    if type(left) is tuple:
+        return len(left) == len(right) and all(
+            _exact_recursive_value_matches(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
 def _project_tool_call(
     record: ToolCallRecord,
     **updates: object,
@@ -77,8 +150,24 @@ def _canonical_get_order_result(
     value: object,
 ) -> GetOrderResult | None:
     if (
-        type(value) is not GetOrderResult
-        or set(vars(value)) != set(GetOrderResult.model_fields)
+        not _has_exact_declared_model_state(value, GetOrderResult)
+        or (
+            value.order_summary is not None
+            and (
+                not _has_exact_declared_model_state(
+                    value.order_summary,
+                    OrderSummaryProjection,
+                )
+                or type(value.order_summary.line_items) is not tuple
+                or any(
+                    not _has_exact_declared_model_state(
+                        line_item,
+                        OrderLineSummary,
+                    )
+                    for line_item in value.order_summary.line_items
+                )
+            )
+        )
     ):
         return None
     try:
@@ -90,7 +179,16 @@ def _canonical_get_order_result(
         rebuilt = GetOrderResult.model_validate(payload, strict=True)
     except (TypeError, ValueError):
         return None
-    if type(rebuilt) is not GetOrderResult or rebuilt != value:
+    if (
+        type(rebuilt) is not GetOrderResult
+        or not _exact_recursive_value_matches(value, rebuilt)
+        or (
+            rebuilt.outcome is GetOrderOutcome.FOUND
+            and not _is_canonical_get_order_source_version(
+                rebuilt.source_version
+            )
+        )
+    ):
         return None
     return rebuilt
 

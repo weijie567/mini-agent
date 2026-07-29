@@ -39,6 +39,10 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
+class SourceVersionSubclass(str):
+    pass
+
+
 class RuntimeSpy:
     def __init__(
         self,
@@ -309,6 +313,82 @@ def test_found_with_unusable_source_version_fails_before_observation(
     )
     if invalid_source_version not in {None, ""}:
         assert repr(invalid_source_version) not in str(execution)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "root_fields_set",
+        "root_extra",
+        "root_private",
+        "summary_fields_set",
+        "line_private",
+        "source_version_subclass",
+    ],
+)
+def test_found_with_noncanonical_recursive_state_fails_closed(
+    corruption: str,
+) -> None:
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+    if corruption == "root_fields_set":
+        object.__setattr__(
+            candidate,
+            "__pydantic_fields_set__",
+            {"outcome", "raw-secret"},
+        )
+    elif corruption == "root_extra":
+        object.__setattr__(
+            candidate,
+            "__pydantic_extra__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "root_private":
+        object.__setattr__(
+            candidate,
+            "__pydantic_private__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "summary_fields_set":
+        object.__setattr__(
+            candidate.order_summary,
+            "__pydantic_fields_set__",
+            {"order_number", "raw-secret"},
+        )
+    elif corruption == "line_private":
+        object.__setattr__(
+            candidate.order_summary.line_items[0],
+            "__pydantic_private__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "source_version_subclass":
+        candidate = GetOrderResult.model_construct(
+            outcome=GetOrderOutcome.FOUND,
+            order_summary=_summary(),
+            source_version=SourceVersionSubclass(
+                SYNTHETIC_SOURCE_VERSION
+            ),
+            failure_code=None,
+        )
+    else:
+        raise AssertionError("unsupported corruption")
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-secret" not in str(execution)
+    assert "must-not-survive" not in str(execution)
 
 
 @pytest.mark.parametrize(

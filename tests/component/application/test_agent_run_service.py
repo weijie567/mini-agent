@@ -46,6 +46,7 @@ from mini_agent.core.presentation import (
     PresentationPlan,
     PresentationTone,
 )
+from mini_agent.core.request_processing import RequestUnderstandingV2Error
 from mini_agent.core.request_understanding import (
     InputAuthority,
     InputCandidate,
@@ -58,8 +59,11 @@ from mini_agent.core.request_understanding import (
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
+    UncertaintyReasonCodeV2,
+    UncertaintyV2,
 )
 from mini_agent.core.task_state import (
+    RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -88,6 +92,20 @@ from mini_agent.core.trace import (
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+class CandidateInvalidSignalSubclass(
+    RequestUnderstandingCandidateInvalidError
+):
+    pass
+
+
+class ProviderProtocolSignalSubclass(ProviderProtocolError):
+    pass
+
+
+class SourceVersionSubclass(str):
+    pass
 
 
 class UuidSequence:
@@ -492,6 +510,28 @@ class HangingOrderSpy:
         raise AssertionError("unreachable")
 
 
+class ObservationVersionOverrideExecutor:
+    def __init__(
+        self,
+        delegate: ReadToolExecutor,
+        source_version: object,
+    ) -> None:
+        self.delegate = delegate
+        self.source_version = source_version
+
+    async def execute_get_order(self, **kwargs: object):
+        execution = await self.delegate.execute_get_order(**kwargs)
+        observation = execution.observation
+        assert observation is not None
+        return execution.model_copy(
+            update={
+                "observation": observation.model_copy(
+                    update={"source_version": self.source_version}
+                )
+            }
+        )
+
+
 class ModelSpy:
     def __init__(
         self,
@@ -501,8 +541,10 @@ class ModelSpy:
         proposed_order_id: str = "O-1001",
         requested_tool_name: str = "get_order",
         task_candidate_count: int = 1,
+        reject_all_candidates: bool = False,
         ru_protocol_error: bool = False,
         input_fault: bool = False,
+        ru_exception: Exception | None = None,
         presentation_protocol_error: bool = False,
     ) -> None:
         self.events = events
@@ -510,8 +552,10 @@ class ModelSpy:
         self.proposed_order_id = proposed_order_id
         self.requested_tool_name = requested_tool_name
         self.task_candidate_count = task_candidate_count
+        self.reject_all_candidates = reject_all_candidates
         self.ru_protocol_error = ru_protocol_error
         self.input_fault = input_fault
+        self.ru_exception = ru_exception
         self.presentation_protocol_error = presentation_protocol_error
         self.next_move_calls = 0
         self.presentation_calls = 0
@@ -525,6 +569,8 @@ class ModelSpy:
             raise ProviderProtocolError()
         if self.input_fault:
             raise RequestUnderstandingCandidateInvalidError()
+        if self.ru_exception is not None:
+            raise self.ru_exception
         message_ref = request.message_ref
         output = RequestUnderstandingOutputV2(
             schema_version="e2e01-thin-v2",
@@ -541,7 +587,20 @@ class ModelSpy:
                         confidence=0.99,
                     ),
                 ),
-                uncertainties=(),
+                uncertainties=(
+                    (
+                        UncertaintyV2(
+                            name="order_id",
+                            candidate_values=(),
+                            reason_code=(
+                                UncertaintyReasonCodeV2.MISSING_REFERENCE
+                            ),
+                            source_message_refs=(message_ref,),
+                        ),
+                    )
+                    if self.reject_all_candidates
+                    else ()
+                ),
                 source_message_refs=(message_ref,),
             ),
             task_delta_candidates=tuple(
@@ -1302,6 +1361,76 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
 
 
 @pytest.mark.parametrize(
+    "error_type",
+    [
+        CandidateInvalidSignalSubclass,
+        ProviderProtocolSignalSubclass,
+    ],
+)
+def test_provider_signal_subclasses_fail_without_product_classification(
+    error_type: type[Exception],
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(events, ru_exception=error_type())
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="noncanonical Provider signal",
+    ):
+        _run(service)
+
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
+def test_atomic_request_understanding_failure_is_not_input_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_atomic_reduction(**_: object) -> None:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    monkeypatch.setattr(
+        agent_run_service_module,
+        "validate_and_reduce_initial_request_v2",
+        fail_atomic_reduction,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build()
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="Request Understanding internal failure",
+    ):
+        _run(service)
+
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    assert "DURABLE_CLOSURE_COMMIT_FAILED" not in repr(
+        runtime.trace_events
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
+@pytest.mark.parametrize(
     "read_mode",
     [
         "empty",
@@ -1342,14 +1471,24 @@ def test_untrusted_authoritative_message_reads_fail_before_provider(
     _assert_no_response_rendered_or_run_stopped(runtime)
 
 
-@pytest.mark.parametrize("task_candidate_count", [0, 2])
+@pytest.mark.parametrize(
+    ("task_candidate_count", "reject_all_candidates"),
+    [
+        (0, False),
+        (1, True),
+        (2, False),
+    ],
+    ids=("zero", "all-reject", "multi-accept"),
+)
 def test_unscoped_v2_outcomes_fail_without_write_or_product_completion(
     task_candidate_count: int,
+    reject_all_candidates: bool,
 ) -> None:
     events: list[str] = []
     model = ModelSpy(
         events,
         task_candidate_count=task_candidate_count,
+        reject_all_candidates=reject_all_candidates,
     )
     service, _events, _model, runtime, _conversation, order, _artifact = _build(
         model=model
@@ -1432,6 +1571,44 @@ def test_order_system_failure_has_one_read_no_observation_or_presentation() -> N
         result=result,
         with_task=True,
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_source_version",
+    [
+        None,
+        "",
+        "bad",
+        "mock-order-source-version.p0.v1:sha256:" + ("A" * 64),
+        b"mock-order-source-version.p0.v1:sha256:" + (b"a" * 64),
+        SourceVersionSubclass(SYNTHETIC_SOURCE_VERSION),
+    ],
+)
+def test_service_rejects_injected_noncanonical_observation_version(
+    invalid_source_version: object,
+) -> None:
+    service, events, model, runtime, _conversation, order, _artifact = _build()
+    service._read_tool_executor = ObservationVersionOverrideExecutor(
+        service._read_tool_executor,
+        invalid_source_version,
+    )
+
+    result = _run(service)
+
+    assert result.outcome is AgentOutcome.BLOCKED
+    assert result.message == "订单服务暂时不可用，请稍后重试。"
+    assert model.presentation_calls == 0
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert len(runtime.manifests) == 1
+    assert "manifest:2" not in events
+    assert not any(
+        event.event_type is TraceEventType.OBSERVATION_RECORDED
+        for event in runtime.trace_events
+    )
+    assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
+    if invalid_source_version not in {None, ""}:
+        assert repr(invalid_source_version) not in result.message
 
 
 def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:

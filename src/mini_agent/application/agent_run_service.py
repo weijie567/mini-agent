@@ -22,6 +22,7 @@ from mini_agent.application.ports import (
 from mini_agent.application.read_tool_executor import (
     ReadToolExecution,
     ReadToolExecutor,
+    _is_canonical_get_order_source_version,
 )
 from mini_agent.application.records import (
     AgentRunCommand,
@@ -72,6 +73,8 @@ from mini_agent.core.request_processing import (
 )
 from mini_agent.core.request_understanding import RequestUnderstandingInput
 from mini_agent.core.task_state import (
+    RequestUnderstandingAggregateFailureCodeV2,
+    RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -434,14 +437,22 @@ class AgentRunService:
         )
         try:
             output = await self._model_provider.propose_next_move(request)
-        except RequestUnderstandingCandidateInvalidError:
+        except RequestUnderstandingCandidateInvalidError as error:
+            if type(error) is not RequestUnderstandingCandidateInvalidError:
+                raise AgentRunExecutionError(
+                    "noncanonical Provider signal"
+                ) from None
             return await self._finish_without_task(
                 running_run=running_run,
                 conversation=conversation,
                 stop_reason=StopReason.INPUT_INVALID,
                 failure_state=failure_state,
             )
-        except ProviderProtocolError:
+        except ProviderProtocolError as error:
+            if type(error) is not ProviderProtocolError:
+                raise AgentRunExecutionError(
+                    "noncanonical Provider signal"
+                ) from None
             return await self._finish_without_task(
                 running_run=running_run,
                 conversation=conversation,
@@ -473,7 +484,22 @@ class AgentRunService:
                 next_move_candidate_ref=self._uuid_factory(),
                 now=reduced_at,
             )
-        except RequestUnderstandingV2Error:
+        except RequestUnderstandingV2Error as error:
+            if (
+                type(error) is not RequestUnderstandingV2Error
+                or type(error.reason_code)
+                is RequestUnderstandingAtomicFailureCodeV2
+            ):
+                raise AgentRunExecutionError(
+                    "Request Understanding internal failure"
+                ) from None
+            if (
+                type(error.reason_code)
+                is not RequestUnderstandingAggregateFailureCodeV2
+            ):
+                raise AgentRunExecutionError(
+                    "Request Understanding failure category unavailable"
+                ) from None
             return await self._finish_without_task(
                 running_run=running_run,
                 conversation=conversation,
@@ -701,7 +727,11 @@ class AgentRunService:
             )
 
         observation = execution.observation
-        if observation is None or observation.source_version is None:
+        if observation is None or not (
+            _is_canonical_get_order_source_version(
+                observation.source_version
+            )
+        ):
             return await self._finish_with_task(
                 running_run=running_run,
                 conversation=conversation,
