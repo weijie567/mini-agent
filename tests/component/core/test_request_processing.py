@@ -2535,12 +2535,21 @@ def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> N
         },
     )
 
+    poisoned_private_key = result.model_copy(deep=True)
+    decision_seal = poisoned_private_key.__pydantic_private__.pop(
+        "_reducer_decision_seal"
+    )
+    poisoned_private_key.__pydantic_private__[
+        StrSubclass("_reducer_decision_seal")
+    ] = decision_seal
+
     for poisoned in (
         poisoned_fields_set,
         poisoned_json_leaf,
         poisoned_mapping_key,
         poisoned_nested_fields_member,
         poisoned_top_fields_member,
+        poisoned_private_key,
     ):
         with pytest.raises(RequestProcessingError, match="canonical"):
             revalidate_next_move_v2(
