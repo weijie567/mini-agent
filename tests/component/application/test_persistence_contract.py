@@ -2534,7 +2534,7 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         (
             v2_envelope,
             "request_understanding_record.p0.v1",
-            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
         ),
         (
             v2_envelope,
@@ -3252,20 +3252,47 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
         for code, spec in legacy_registry.items()
         if code is not case.code
     )
-    mutations: list[dict[str, object]] = []
+
     missing = json.loads(envelope.model_dump_json())
     missing.pop("record_schema_version")
-    mutations.append(missing)
-    for outer_version in (
-        other_active_version,
-        RU_V2_SCHEMA_VERSION,
-        "unknown-future-record.p0.v99",
-    ):
-        raw = json.loads(envelope.model_dump_json())
-        raw["record_schema_version"] = outer_version
-        mutations.append(raw)
+    other_v1 = json.loads(envelope.model_dump_json())
+    other_v1["record_schema_version"] = other_active_version
+    ru_v2 = json.loads(envelope.model_dump_json())
+    ru_v2["record_schema_version"] = RU_V2_SCHEMA_VERSION
+    unknown_future = json.loads(envelope.model_dump_json())
+    unknown_future["record_schema_version"] = "unknown-future-record.p0.v99"
 
-    for raw in mutations:
+    mutations: tuple[
+        tuple[
+            dict[str, object],
+            P0PersistenceIntegrityCategory,
+            P0PersistenceIntegrityCategory,
+        ],
+        ...,
+    ] = (
+        (
+            missing,
+            P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+        ),
+        (
+            other_v1,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        ),
+        (
+            ru_v2,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        ),
+        (
+            unknown_future,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        ),
+    )
+
+    for raw, legacy_category, versioned_category in mutations:
         with pytest.raises(P0PersistenceIntegrityError) as legacy_raised:
             decode_persistence_record(
                 raw,
@@ -3281,4 +3308,5 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
                 ].record_schema_version,
                 correlation_ref=_uuid(299),
             )
-        assert versioned_raised.value.category is legacy_raised.value.category
+        assert legacy_raised.value.category is legacy_category
+        assert versioned_raised.value.category is versioned_category
