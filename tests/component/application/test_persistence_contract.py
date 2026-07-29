@@ -781,6 +781,10 @@ def test_command_derived_external_relations_still_fail_closed_when_swapped() -> 
 
 
 def test_registry_is_exact_immutable_and_closed() -> None:
+    catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    legacy = _v1_registry()
+    ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+
     assert tuple(code.value for code in P0RecordCode) == EXPECTED_RECORD_CODES
     assert isinstance(P0_PERSISTENCE_REGISTRY, MappingProxyType)
     assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)
@@ -788,12 +792,35 @@ def test_registry_is_exact_immutable_and_closed() -> None:
     assert len({spec.source_model for spec in P0_PERSISTENCE_REGISTRY.values()}) == 17
     assert {
         spec.record_schema_version for spec in P0_PERSISTENCE_REGISTRY.values()
-    } == {f"{code.value}.p0.v1" for code in P0RecordCode}
+    } == {
+        (
+            RU_V2_SCHEMA_VERSION
+            if code is ru_code
+            else f"{code.value}.p0.v1"
+        )
+        for code in P0RecordCode
+    }
+    assert P0_PERSISTENCE_REGISTRY[ru_code] is catalog[
+        (ru_code, RU_V2_SCHEMA_VERSION)
+    ]
+
+    assert isinstance(legacy, MappingProxyType)
+    assert tuple(legacy) == tuple(P0RecordCode)
+    assert len(legacy) == 17
+    for code in P0RecordCode:
+        v1_spec = catalog[(code, f"{code.value}.p0.v1")]
+        assert legacy[code] is v1_spec
+        if code is not ru_code:
+            assert P0_PERSISTENCE_REGISTRY[code] is v1_spec
 
     with pytest.raises(TypeError):
         P0_PERSISTENCE_REGISTRY[P0RecordCode.CONVERSATION_RECORD] = (
             P0_PERSISTENCE_REGISTRY[P0RecordCode.MESSAGE_RECORD]
         )
+    with pytest.raises(TypeError):
+        legacy[P0RecordCode.CONVERSATION_RECORD] = legacy[
+            P0RecordCode.MESSAGE_RECORD
+        ]
 
     assert isinstance(P0_LOGICAL_CHILD_SPECS, MappingProxyType)
     assert tuple(P0_LOGICAL_CHILD_SPECS) == tuple(P0LogicalChildCode)
@@ -806,7 +833,7 @@ def test_registry_is_exact_immutable_and_closed() -> None:
 def test_projection_matrices_are_exact_and_reference_targets_are_closed() -> None:
     top_level_rules = tuple(
         rule
-        for spec in P0_PERSISTENCE_REGISTRY.values()
+        for spec in _v1_registry().values()
         for rule in spec.projection_decisions
     )
     child_rules = tuple(
@@ -864,7 +891,7 @@ def test_all_projection_decision_signatures_match_the_canonical_matrix() -> None
                 "1" if rule.unique else "0",
             )
         )
-        for registry in (P0_PERSISTENCE_REGISTRY, P0_LOGICAL_CHILD_SPECS)
+        for registry in (_v1_registry(), P0_LOGICAL_CHILD_SPECS)
         for owner_code, spec in registry.items()
         for rule in spec.projection_decisions
     ]
@@ -1884,6 +1911,16 @@ from mini_agent.core.task_state import (
 RU_V2_SCHEMA_VERSION = "request_understanding_record.p0.v2"
 
 
+def _v1_registry() -> MappingProxyType:
+    catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    return MappingProxyType(
+        {
+            code: catalog[(code, f"{code.value}.p0.v1")]
+            for code in P0RecordCode
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RequestUnderstandingV2Case:
     record: RequestUnderstandingRecordV2
@@ -2110,6 +2147,9 @@ def _decode_v2(
 
 def test_version_catalog_is_exact_immutable_and_only_ru_is_dual() -> None:
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    legacy = _v1_registry()
+    ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+
     assert isinstance(catalog, MappingProxyType)
     assert len(catalog) == 18
     assert {code for code, _ in catalog} == set(P0RecordCode)
@@ -2119,11 +2159,11 @@ def test_version_catalog_is_exact_immutable_and_only_ru_is_dual() -> None:
         == (2 if code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD else 1)
         for code, count in counts.items()
     )
-    for code, spec in P0_PERSISTENCE_REGISTRY.items():
-        assert catalog[(code, spec.record_schema_version)] is spec
+    for code, spec in legacy.items():
+        assert catalog[(code, f"{code.value}.p0.v1")] is spec
 
     v2_spec = catalog[
-        (P0RecordCode.REQUEST_UNDERSTANDING_RECORD, RU_V2_SCHEMA_VERSION)
+        (ru_code, RU_V2_SCHEMA_VERSION)
     ]
     assert v2_spec.source_model is RequestUnderstandingRecordV2
     assert v2_spec.identity_fields == ("request_understanding_record_id",)
@@ -2137,12 +2177,12 @@ def test_version_catalog_is_exact_immutable_and_only_ru_is_dual() -> None:
         ] = v2_spec
 
     assert len(P0_PERSISTENCE_REGISTRY) == 17
-    assert (
-        P0_PERSISTENCE_REGISTRY[
-            P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-        ].source_model
-        is RequestUnderstandingRecord
-    )
+    assert P0_PERSISTENCE_REGISTRY[ru_code] is v2_spec
+    assert P0_PERSISTENCE_REGISTRY[ru_code].source_model is RequestUnderstandingRecordV2
+    assert legacy[ru_code].source_model is RequestUnderstandingRecord
+    for code in P0RecordCode:
+        if code is not ru_code:
+            assert P0_PERSISTENCE_REGISTRY[code] is legacy[code]
     assert len(P0_LOGICAL_CHILD_SPECS) == 3
     assert (
         P0_LOGICAL_CHILD_SPECS[
@@ -2203,7 +2243,7 @@ def test_versioned_codec_signatures_require_explicit_exact_pair() -> None:
 
 @pytest.mark.parametrize("case", _record_cases(), ids=lambda case: case.code.value)
 def test_all_17_v1_pairs_have_legacy_semantic_parity(case: RecordCase) -> None:
-    version = P0_PERSISTENCE_REGISTRY[case.code].record_schema_version
+    version = _v1_registry()[case.code].record_schema_version
     versioned = persistence_module.encode_persistence_record_versioned(
         case.code,
         version,
@@ -2494,7 +2534,7 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         (
             v2_envelope,
             "request_understanding_record.p0.v1",
-            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
         ),
         (
             v2_envelope,
@@ -2535,11 +2575,39 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         assert raised.value.category is category
 
 
-def test_legacy_codec_remains_v1_only_after_codec_expand() -> None:
+def test_active_switch_preserves_v1_compatibility_until_contract() -> None:
+    ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+    catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    legacy_registry = _v1_registry()
+    v1_version = f"{ru_code.value}.p0.v1"
+
+    assert P0_PERSISTENCE_REGISTRY[ru_code] is catalog[
+        (ru_code, RU_V2_SCHEMA_VERSION)
+    ]
+    assert legacy_registry[ru_code] is catalog[(ru_code, v1_version)]
+    assert P0_PERSISTENCE_REGISTRY[ru_code] is not legacy_registry[ru_code]
+
+    v1_case = _case(ru_code)
+    legacy_envelope = encode_persistence_record(
+        v1_case.code,
+        v1_case.record,
+        external_references=v1_case.external_references,
+        logical_children=v1_case.logical_children,
+    )
+    explicit_v1_envelope = persistence_module.encode_persistence_record_versioned(
+        v1_case.code,
+        v1_version,
+        v1_case.record,
+        external_references=v1_case.external_references,
+        logical_children=v1_case.logical_children,
+    )
+    assert explicit_v1_envelope == legacy_envelope
+    assert legacy_envelope.record_schema_version == v1_version
+
     case = _request_understanding_v2_case("partial")
     with pytest.raises(P0PersistenceIntegrityError) as raised:
         encode_persistence_record(
-            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            ru_code,
             case.record,
             logical_children=case.children,
         )
@@ -2549,10 +2617,12 @@ def test_legacy_codec_remains_v1_only_after_codec_expand() -> None:
     )
 
     envelope = _encode_v2(case)
+    assert envelope.record_schema_version == RU_V2_SCHEMA_VERSION
+    assert _decode_v2(envelope).source_record == case.record
     with pytest.raises(P0PersistenceIntegrityError) as raised:
         decode_persistence_record(
             envelope,
-            expected_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            expected_record_code=ru_code,
             correlation_ref=_uuid(299),
         )
     assert (
@@ -2917,7 +2987,7 @@ def test_ru_v2_source_collection_duplicates_fail_but_reference_duplicates_collap
     )
 
 
-def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
+def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     codec_owner_files = {
         "src/mini_agent/application/persistence.py",
@@ -2967,6 +3037,9 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
     catalog_matches = files_referencing("P0_RECORD_SCHEMA_VERSION_CATALOG")
     assert codec_owner_files <= catalog_matches
     assert catalog_matches <= codec_owner_files | catalog_dependency_files
+
+    active_registry_matches = files_referencing("P0_PERSISTENCE_REGISTRY")
+    assert active_registry_matches == codec_owner_files
 
     versioned_encode_matches = files_referencing(
         "encode_persistence_record_versioned"
@@ -3062,11 +3135,17 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
         assert not decoder_name_references
         assert not decoder_attribute_references
 
-    assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
-    assert all(
-        spec.record_schema_version == f"{code.value}.p0.v1"
-        for code, spec in P0_PERSISTENCE_REGISTRY.items()
+    legacy = _v1_registry()
+    ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+    assert len(P0_PERSISTENCE_REGISTRY) == len(legacy) == len(P0RecordCode) == 17
+    assert (
+        P0_PERSISTENCE_REGISTRY[ru_code].record_schema_version
+        == RU_V2_SCHEMA_VERSION
     )
+    for code in P0RecordCode:
+        assert legacy[code].record_schema_version == f"{code.value}.p0.v1"
+        if code is not ru_code:
+            assert P0_PERSISTENCE_REGISTRY[code] is legacy[code]
 
     decoded = _decode_v2(_encode_v2(_request_understanding_v2_case("partial")))
     for forbidden_claim in (
@@ -3084,7 +3163,7 @@ def test_codec_expand_has_no_active_consumer_or_authority_claim() -> None:
 def test_codec_expand_preserves_all_legacy_projection_counts() -> None:
     top = tuple(
         rule
-        for spec in P0_PERSISTENCE_REGISTRY.values()
+        for spec in _v1_registry().values()
         for rule in spec.projection_decisions
     )
     child = tuple(
@@ -3161,6 +3240,7 @@ def test_versioned_decode_bounds_non_string_outer_version_before_membership(
 def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
     case: RecordCase,
 ) -> None:
+    legacy_registry = _v1_registry()
     envelope = encode_persistence_record(
         case.code,
         case.record,
@@ -3169,23 +3249,50 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
     )
     other_active_version = next(
         spec.record_schema_version
-        for code, spec in P0_PERSISTENCE_REGISTRY.items()
+        for code, spec in legacy_registry.items()
         if code is not case.code
     )
-    mutations: list[dict[str, object]] = []
+
     missing = json.loads(envelope.model_dump_json())
     missing.pop("record_schema_version")
-    mutations.append(missing)
-    for outer_version in (
-        other_active_version,
-        RU_V2_SCHEMA_VERSION,
-        "unknown-future-record.p0.v99",
-    ):
-        raw = json.loads(envelope.model_dump_json())
-        raw["record_schema_version"] = outer_version
-        mutations.append(raw)
+    other_v1 = json.loads(envelope.model_dump_json())
+    other_v1["record_schema_version"] = other_active_version
+    ru_v2 = json.loads(envelope.model_dump_json())
+    ru_v2["record_schema_version"] = RU_V2_SCHEMA_VERSION
+    unknown_future = json.loads(envelope.model_dump_json())
+    unknown_future["record_schema_version"] = "unknown-future-record.p0.v99"
 
-    for raw in mutations:
+    mutations: tuple[
+        tuple[
+            dict[str, object],
+            P0PersistenceIntegrityCategory,
+            P0PersistenceIntegrityCategory,
+        ],
+        ...,
+    ] = (
+        (
+            missing,
+            P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION,
+        ),
+        (
+            other_v1,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        ),
+        (
+            ru_v2,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+        ),
+        (
+            unknown_future,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+        ),
+    )
+
+    for raw, legacy_category, versioned_category in mutations:
         with pytest.raises(P0PersistenceIntegrityError) as legacy_raised:
             decode_persistence_record(
                 raw,
@@ -3196,11 +3303,10 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
             persistence_module.decode_persistence_record_versioned(
                 raw,
                 expected_record_code=case.code,
-                expected_schema_version=(
-                    P0_PERSISTENCE_REGISTRY[
-                        case.code
-                    ].record_schema_version
-                ),
+                expected_schema_version=legacy_registry[
+                    case.code
+                ].record_schema_version,
                 correlation_ref=_uuid(299),
             )
-        assert versioned_raised.value.category is legacy_raised.value.category
+        assert legacy_raised.value.category is legacy_category
+        assert versioned_raised.value.category is versioned_category
