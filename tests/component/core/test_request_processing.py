@@ -1,3 +1,4 @@
+import pickle
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import warnings
@@ -2204,15 +2205,14 @@ def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
         ),
     )
     assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    replacement = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_order",
+        arguments={"order_id": "O-4242"},
+        base_task_state_version=None,
+    )
     substituted = result.model_copy(
-        update={
-            "next_move_candidate": NextMove(
-                kind=NextMoveKind.CALL_TOOL,
-                requested_tool_name="get_order",
-                arguments={"order_id": "O-4242"},
-                base_task_state_version=None,
-            )
-        }
+        update={"next_move_candidate": replacement}
     )
 
     with pytest.raises(RequestProcessingError, match="canonical"):
@@ -2222,6 +2222,34 @@ def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
             current_request_unit=result.task_graph.request_unit,
             current_input_binding=result.task_graph.input_binding,
         )
+
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2(
+            closure=result.closure,
+            task_graph=result.task_graph,
+            next_move_candidate_ref=result.next_move_candidate_ref,
+            next_move_candidate=replacement,
+        )
+
+    payload = result.model_dump(mode="python")
+    payload["next_move_candidate"] = replacement
+    with pytest.raises(ValidationError, match="Reducer"):
+        InitialRequestRoutableTaskGraphDecisionV2.model_validate(payload)
+
+    with pytest.raises(TypeError, match="immutable"):
+        substituted._reducer_next_move_candidate = replacement
+
+    for copied in (
+        result.model_copy(deep=True),
+        pickle.loads(pickle.dumps(result)),
+    ):
+        with pytest.raises(RequestProcessingError, match="CALL_TOOL"):
+            revalidate_next_move_v2(
+                decision=copied,
+                current_task=result.task_graph.task,
+                current_request_unit=result.task_graph.request_unit,
+                current_input_binding=result.task_graph.input_binding,
+            )
 
 
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
