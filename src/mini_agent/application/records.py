@@ -355,11 +355,28 @@ def _canonical_model_field_projection(
     if type(value) is not expected_type:
         raise ValueError(error_message)
     field_names = frozenset(expected_type.model_fields)
+    required_field_names = frozenset(
+        field_name
+        for field_name, field in expected_type.model_fields.items()
+        if field.is_required()
+    )
+    try:
+        state = value.__dict__
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
+    except (AttributeError, TypeError):
+        raise ValueError(error_message) from None
     if (
-        frozenset(vars(value)) != field_names
-        or not value.model_fields_set.issubset(field_names)
-        or value.__pydantic_extra__ is not None
-        or value.__pydantic_private__ is not None
+        type(state) is not dict
+        or any(type(field_name) is not str for field_name in state)
+        or frozenset(state) != field_names
+        or type(fields_set) is not set
+        or any(type(field_name) is not str for field_name in fields_set)
+        or not required_field_names.issubset(fields_set)
+        or not fields_set.issubset(field_names)
+        or extra is not None
+        or private is not None
     ):
         raise ValueError(error_message)
     return {
@@ -393,7 +410,10 @@ def _strict_rebuild_exact_model(
     )
     return _strict_validate_canonical_projection(
         expected_type,
-        projection,
+        {
+            field_name: projection[field_name]
+            for field_name in value.__pydantic_fields_set__
+        },
         error_message=error_message,
     )
 
@@ -407,15 +427,32 @@ def _write_contract_values_match_exactly(
     if isinstance(left, BaseModel):
         try:
             declared_fields = set(type(left).model_fields)
-            left_state_keys = set(left.__dict__)
-            right_state_keys = set(right.__dict__)
-            left_fields_set = set(left.model_fields_set)
-            right_fields_set = set(right.model_fields_set)
+            left_state = left.__dict__
+            right_state = right.__dict__
+            left_state_keys = set(left_state)
+            right_state_keys = set(right_state)
+            left_fields_set = left.__pydantic_fields_set__
+            right_fields_set = right.__pydantic_fields_set__
         except (AttributeError, TypeError):
             return False
         if (
-            left_state_keys != right_state_keys
-            or not left_state_keys.issubset(declared_fields)
+            type(left_state) is not dict
+            or type(right_state) is not dict
+            or any(type(field_name) is not str for field_name in left_state)
+            or any(type(field_name) is not str for field_name in right_state)
+            or left_state_keys != declared_fields
+            or right_state_keys != declared_fields
+            or type(left_fields_set) is not set
+            or type(right_fields_set) is not set
+            or any(
+                type(field_name) is not str
+                for field_name in left_fields_set
+            )
+            or any(
+                type(field_name) is not str
+                for field_name in right_fields_set
+            )
+            or left_fields_set != right_fields_set
             or not left_fields_set.issubset(declared_fields)
             or not right_fields_set.issubset(declared_fields)
         ):
@@ -637,7 +674,10 @@ def _strict_rebuild_request_understanding_record_v2(
     )
     rebuilt = _strict_validate_canonical_projection(
         RequestUnderstandingRecordV2,
-        projection,
+        {
+            field_name: projection[field_name]
+            for field_name in value.__pydantic_fields_set__
+        },
         error_message=error_message,
     )
     return _require_exact_write_contract_projection(
