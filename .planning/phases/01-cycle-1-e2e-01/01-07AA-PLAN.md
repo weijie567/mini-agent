@@ -280,10 +280,11 @@ dependencies:
 required_checks:
 
 - `preflight containment`: actual repository/remote/head branch/base branch/worktree/base SHA/tree逐项等于本Packet；worktree clean；new test path在base为ABSENT；预期`PASS`，任一偏差`BLOCK`。
+- `adapter precheck`: collaboration runtime必须真实提供本Packet声明的`infra-engineer`能力，且唯一writer明确为执行本Packet的`/root`；只记录availability，不授权新Agent、第二writer或共享checkout写入；预期`PASS`，role缺失或writer不唯一时`BLOCK`。
 - `RED provenance`: RED commit只增加`tests/integration/test_postgres_v2_request_understanding_writes.py`，`postgres.py`仍为base blob；focused命令预期non-zero且失败只来自两个missing methods或明确列出的static-version/atomic behavior，环境/migration/test-construction失败`BLOCK`。
 - `focused GREEN`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py -q`；预期exit 0、zero failures/skip/xfail。
 - `neighbor regression`: `uv run pytest tests/integration/test_postgres_v2_request_understanding_writes.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_record_adapters.py -q`；预期exit 0、zero failures/skip/xfail。
-- `database environment`: `docker compose --profile test up --wait -d db-test`与`uv run alembic upgrade head`从仓库根执行；预期exit 0、healthy test database、migration head，无migration/source改动。
+- `canonical environment`: `uv sync --all-groups`、`docker compose up --wait -d db`、`docker compose --profile test up --wait -d db-test`与`uv run alembic upgrade head`依次从仓库根执行；预期全部exit 0、dev/test database healthy、migration head，无dependency/lock/migration/source drift。
 - `canonical full serial gate`: `uv run pytest`；预期exit 0、zero failures，既有单个credentialed deselection可以保留，warning count须如实报告且不能新增未裁决warning。
 - `mechanical source gate`: `git diff --check`、exact public signatures/imports、immutable static version map、v2 call graph forbidden legacy-helper tripwires及v1 protected method diff；预期全部PASS，v2 writer不得调用legacy encode/persist/decode/projection/physical-validation chain，v1 surface不得漂移。
 - `allowlist containment`: `git diff --name-only d704b87480f0a4252744f4c009cef9a86c08fa05...HEAD`排序后精确等于两个owned files；预期requested=accepted=unique=2，零第三文件、零merge commit、linear RED→GREEN→append-only fix history。
