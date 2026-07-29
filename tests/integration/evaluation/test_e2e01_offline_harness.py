@@ -205,6 +205,16 @@ MAPPER_FIXTURE_IDENTITIES = (
         UUID("03333333-3333-4333-8333-333333333333"),
     ),
 )
+MINIMAL_INPUT_INVALID_IDENTITIES = (
+    UUID("10101010-1010-4010-8010-101010101001"),
+    UUID("10101010-1010-4010-8010-101010101002"),
+    UUID("10101010-1010-4010-8010-101010101003"),
+    UUID("10101010-1010-4010-8010-101010101004"),
+    UUID("10101010-1010-4010-8010-101010101005"),
+    UUID("10101010-1010-4010-8010-101010101006"),
+    UUID("10101010-1010-4010-8010-101010101007"),
+    UUID("10101010-1010-4010-8010-101010101008"),
+)
 EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF = {
     "script:e2e01-01:success": "SUCCESS",
     "script:e2e01-04-a:foreign-order": "FOREIGN_ORDER",
@@ -1837,7 +1847,6 @@ def _exact_closure_for_script(
     script_ref: str,
     *,
     fixture_slot: int,
-    execution_ref: UUID,
 ) -> tuple[ExactRunEvidenceClosure, AgentRunResult]:
     (
         sut_execution_ref,
@@ -1892,12 +1901,16 @@ def _minimal_input_invalid_closure() -> tuple[
     ExactRunEvidenceClosure,
     AgentRunResult,
 ]:
-    execution_ref = EXECUTION_REF_4
-    run_id = _case_uuid(str(execution_ref), "run")
-    conversation_id = _case_uuid(str(execution_ref), "conversation")
-    message_id = _case_uuid(str(execution_ref), "message")
-    model_call_id = _case_uuid(str(execution_ref), "model-call")
-    context_id = _case_uuid(str(execution_ref), "context")
+    (
+        run_id,
+        conversation_id,
+        message_id,
+        model_call_id,
+        context_id,
+        message_trace_id,
+        context_trace_id,
+        stopped_trace_id,
+    ) = MINIMAL_INPUT_INVALID_IDENTITIES
     completed_at = NOW + timedelta(seconds=1)
     artifact = ModelVisibleToolsetArtifact(
         model_visible_toolset_hash=compute_model_visible_toolset_hash(
@@ -1918,14 +1931,14 @@ def _minimal_input_invalid_closure() -> tuple[
     )
     traces = (
         TraceEvent(
-            trace_event_id=_case_uuid(str(execution_ref), "trace-message"),
+            trace_event_id=message_trace_id,
             event_type=TraceEventType.MESSAGE_ACCEPTED,
             occurred_at=NOW,
             run_id=run_id,
             message_ref=message_id,
         ),
         TraceEvent(
-            trace_event_id=_case_uuid(str(execution_ref), "trace-context"),
+            trace_event_id=context_trace_id,
             event_type=TraceEventType.CONTEXT_MANIFEST_RECORDED,
             occurred_at=NOW + timedelta(milliseconds=1),
             run_id=run_id,
@@ -1936,7 +1949,7 @@ def _minimal_input_invalid_closure() -> tuple[
             model_visible_toolset_hash=manifest.model_visible_toolset_hash,
         ),
         TraceEvent(
-            trace_event_id=_case_uuid(str(execution_ref), "trace-stopped"),
+            trace_event_id=stopped_trace_id,
             event_type=TraceEventType.RUN_STOPPED,
             occurred_at=completed_at,
             run_id=run_id,
@@ -2003,7 +2016,6 @@ def _order_service_unavailable_closure() -> tuple[
     closure, _result = _exact_closure_for_script(
         "script:e2e01-04-b:nonexistent-order",
         fixture_slot=5,
-        execution_ref=EXECUTION_REF_3,
     )
     task = closure.task_records[0].model_copy(
         update={"status": TaskStatus.BLOCKED}
@@ -3240,16 +3252,23 @@ def test_exact_run_fixture_identities_are_opaque_and_external_ref_independent() 
     first_closure, first_result = _exact_closure_for_script(
         "script:e2e01-01:success",
         fixture_slot=0,
-        execution_ref=EXECUTION_REF_1,
     )
-    second_closure, second_result = _exact_closure_for_script(
-        "script:e2e01-01:success",
-        fixture_slot=0,
+    first_external_mapping = _map_exact_result(
+        execution_ref=EXECUTION_REF_1,
+        closure=first_closure,
+        agent_result=first_result,
+    )
+    second_external_mapping = _map_exact_result(
         execution_ref=UNKNOWN_EXECUTION_REF,
+        closure=first_closure,
+        agent_result=first_result,
     )
 
-    assert first_closure == second_closure
-    assert first_result == second_result
+    assert first_external_mapping.evidence == second_external_mapping.evidence
+    assert (
+        first_external_mapping.safe_observable
+        == second_external_mapping.safe_observable
+    )
     assert first_closure.run_record.run_id not in {
         EXECUTION_REF_1,
         UNKNOWN_EXECUTION_REF,
@@ -3258,6 +3277,64 @@ def test_exact_run_fixture_identities_are_opaque_and_external_ref_independent() 
         identity.version == 4
         for identity in MAPPER_FIXTURE_IDENTITIES[0]
     )
+    minimal_closure, minimal_result = _minimal_input_invalid_closure()
+    first_mapped = _map_exact_result(
+        execution_ref=EXECUTION_REF_4,
+        closure=minimal_closure,
+        agent_result=minimal_result,
+    )
+    second_mapped = _map_exact_result(
+        execution_ref=UNKNOWN_EXECUTION_REF,
+        closure=minimal_closure,
+        agent_result=minimal_result,
+    )
+    unavailable_closure, unavailable_result = (
+        _order_service_unavailable_closure()
+    )
+    unavailable_mapped = _map_exact_result(
+        execution_ref=EXECUTION_REF_3,
+        closure=unavailable_closure,
+        agent_result=unavailable_result,
+    )
+
+    external_refs = {
+        EXECUTION_REF_1,
+        EXECUTION_REF_2,
+        EXECUTION_REF_3,
+        EXECUTION_REF_4,
+        UNKNOWN_EXECUTION_REF,
+    }
+    assert len(set(MINIMAL_INPUT_INVALID_IDENTITIES)) == 8
+    assert all(
+        identity.version == 4
+        for identity in MINIMAL_INPUT_INVALID_IDENTITIES
+    )
+    assert set(MINIMAL_INPUT_INVALID_IDENTITIES).isdisjoint(external_refs)
+    assert first_mapped.execution_ref == EXECUTION_REF_4
+    assert second_mapped.execution_ref == UNKNOWN_EXECUTION_REF
+    assert first_mapped.evidence == second_mapped.evidence
+    assert first_mapped.safe_observable == second_mapped.safe_observable
+    assert minimal_closure.run_record.run_id not in external_refs
+    assert minimal_closure.conversation_record.conversation_id not in external_refs
+    assert all(
+        message.message_id not in external_refs
+        for message in minimal_closure.message_records
+    )
+    assert unavailable_mapped.evidence.run_record == (
+        unavailable_closure.run_record
+    )
+    assert unavailable_closure.run_record.run_id not in external_refs
+    for evidence in (
+        first_external_mapping.evidence,
+        first_mapped.evidence,
+        unavailable_mapped.evidence,
+    ):
+        assert _payload_tree_is_closed(
+            evidence,
+            forbidden_identity_values=frozenset(external_refs),
+            allow_any_schema_identity_value=True,
+            allow_semantic_json_keys=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3304,7 +3381,6 @@ def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
     closure, agent_result = _exact_closure_for_script(
         script_ref,
         fixture_slot=fixture_slot,
-        execution_ref=execution_ref,
     )
     result = _map_exact_result(
         execution_ref=execution_ref,
@@ -3350,7 +3426,6 @@ def test_exact_run_mapper_projects_logical_observation_source_version_chain() ->
     closure, agent_result = _exact_closure_for_script(
         "script:e2e01-01:success",
         fixture_slot=6,
-        execution_ref=EXECUTION_REF_1,
     )
     result = _map_exact_result(
         execution_ref=EXECUTION_REF_1,
@@ -3441,10 +3516,21 @@ def test_exact_run_mapper_projects_terminal_protocol_and_renderer_failures(
         closure=terminal_closure,
         agent_result=agent_result,
     )
+    remapped = _map_exact_result(
+        execution_ref=UNKNOWN_EXECUTION_REF,
+        closure=terminal_closure,
+        agent_result=agent_result,
+    )
 
     assert result.evidence.run_record.stop_reason is stop_reason
     assert result.evidence.observed_outcome is AgentOutcome.BLOCKED
     assert result.safe_observable.response_policy == "FIXED_SAFE_PROCESSING_ERROR"
+    assert result.evidence == remapped.evidence
+    assert result.safe_observable == remapped.safe_observable
+    assert terminal_closure.run_record.run_id not in {
+        EXECUTION_REF_4,
+        UNKNOWN_EXECUTION_REF,
+    }
 
 
 @pytest.mark.parametrize(
@@ -3473,10 +3559,10 @@ def test_exact_run_mapper_rejects_restart_and_non_completed_runs(
     invalid_closure = closure.model_copy(update={"run_record": run})
 
     errors = []
-    for _ in range(2):
+    for execution_ref in (EXECUTION_REF_4, UNKNOWN_EXECUTION_REF):
         with pytest.raises(EvalHarnessCommandError) as caught:
             _map_exact_result(
-                execution_ref=EXECUTION_REF_4,
+                execution_ref=execution_ref,
                 closure=invalid_closure,
                 agent_result=agent_result,
             )
@@ -3485,6 +3571,10 @@ def test_exact_run_mapper_rejects_restart_and_non_completed_runs(
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
     assert errors[0] is not errors[1]
+    assert closure.run_record.run_id not in {
+        EXECUTION_REF_4,
+        UNKNOWN_EXECUTION_REF,
+    }
 
 
 @pytest.mark.parametrize(
