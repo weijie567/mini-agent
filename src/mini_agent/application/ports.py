@@ -14,6 +14,7 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateInitialTaskGraphCommand,
+    CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
@@ -30,6 +31,7 @@ from mini_agent.application.records import (
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
+    SaveRequestUnderstandingV2NoTaskCommand,
     SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
@@ -195,6 +197,33 @@ class RuntimeRecordPort(Protocol):
         command: CreateInitialTaskGraphCommand,
     ) -> ConditionalWriteResult:
         """Conditionally insert the complete owner-bound initial graph atomically."""
+        ...
+
+    async def save_request_understanding_v2_no_task_if_current(
+        self,
+        command: SaveRequestUnderstandingV2NoTaskCommand,
+    ) -> ConditionalWriteResult:
+        """Conditionally commit one owner-bound RU-v2 parent in one transaction.
+
+        APPLIED requires every trusted root to remain exact and current. This
+        route never creates a Task or any accepted child, InputBinding, or link.
+        PROJECTION_CONFLICT and NOT_APPLICABLE guarantee zero writes. An absent
+        and an unauthorized owner graph remain indistinguishable.
+        """
+        ...
+
+    async def create_initial_task_graph_v2_if_current(
+        self,
+        command: CreateInitialTaskGraphV2Command,
+    ) -> ConditionalWriteResult:
+        """Conditionally commit the complete RU-v2 graph in one transaction.
+
+        APPLIED requires every trusted root to remain exact and current and
+        commits the parent, child, Task, RequestUnit, InputBinding, and links
+        atomically. This route never degrades to the no-task route.
+        PROJECTION_CONFLICT and NOT_APPLICABLE guarantee zero writes. An absent
+        and an unauthorized owner graph remain indistinguishable.
+        """
         ...
 
     async def apply_task_transition_if_current(
