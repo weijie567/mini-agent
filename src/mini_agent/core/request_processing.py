@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, JsonValue, field_serializer, field_validator
@@ -341,7 +341,7 @@ def revalidate_next_move(
 from datetime import datetime
 from hashlib import sha256
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 from pydantic_core import PydanticSerializationError
 
 from .common import require_utc
@@ -358,6 +358,7 @@ from .request_understanding import (
 )
 from .task_state import (
     AcceptedTaskDeltaV2,
+    CandidateRejectionReasonCode,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
@@ -1194,3 +1195,724 @@ def build_request_understanding_closure_v2(
         _fail_request_understanding_v2(
             RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
         )
+
+
+def _is_exact_canonical_model_v2(
+    value: object,
+    expected_type: type[BaseModel],
+) -> bool:
+    if type(value) is not expected_type:
+        return False
+    payload: dict[str, Any] | None
+    try:
+        payload = value.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+    except (AttributeError, TypeError, ValueError, PydanticSerializationError):
+        payload = None
+    if payload is None:
+        return False
+    try:
+        rebuilt = expected_type.model_validate(payload)
+    except (TypeError, ValueError, ValidationError):
+        return False
+    return _runtime_values_match_exactly_v2(rebuilt, value)
+
+
+class InitialTaskIdentityAllocationV2(RuntimePrivateModel):
+    """Trusted identities reserved for one emitted Candidate."""
+
+    candidate_ref: UUID
+    accepted_delta_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    binding_id: UUID
+
+    @model_validator(mode="after")
+    def generated_identities_are_distinct(self) -> Self:
+        generated = (
+            self.accepted_delta_id,
+            self.task_id,
+            self.request_unit_id,
+            self.binding_id,
+        )
+        if len(generated) != len(set(generated)):
+            raise ValueError("initial generated identities must be unique")
+        if self.candidate_ref in generated:
+            raise ValueError("candidate identity cannot be reused as a record identity")
+        return self
+
+
+class InitialAcceptedTaskGraphV2(RuntimePrivateModel):
+    """One accepted v2 child and its exact clean initial Task graph."""
+
+    accepted_delta: AcceptedTaskDeltaV2
+    input_binding: InputBinding
+    task: TaskRecord
+    request_unit: RequestUnitRecord
+
+    @model_validator(mode="after")
+    def graph_is_exact_initial_projection(self) -> Self:
+        if (
+            not _is_exact_canonical_model_v2(
+                self.accepted_delta,
+                AcceptedTaskDeltaV2,
+            )
+            or not _is_exact_canonical_model_v2(
+                self.input_binding,
+                InputBinding,
+            )
+            or not _is_exact_canonical_model_v2(self.task, TaskRecord)
+            or not _is_exact_canonical_model_v2(
+                self.request_unit,
+                RequestUnitRecord,
+            )
+        ):
+            raise ValueError("initial Task graph requires canonical records")
+
+        child = self.accepted_delta
+        binding = self.input_binding
+        task = self.task
+        unit = self.request_unit
+        identities = (
+            child.accepted_delta_id,
+            binding.binding_id,
+            task.task_id,
+            unit.request_unit_id,
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("initial Task graph identities must be unique")
+        if (
+            child.operation is not TaskDeltaOperation.ADD_GOAL
+            or child.task_id != task.task_id
+            or child.base_task_state_version is not None
+            or child.result_task_state_version != 1
+            or child.input_binding_refs != (binding.binding_id,)
+        ):
+            raise ValueError("accepted delta must define one initial Task effect")
+        if (
+            binding.name != "order_id"
+            or binding.authority is not InputAuthority.USER_CLAIM
+            or binding.validation_status is not InputValidationStatus.ACCEPTED
+            or binding.confirmed_by_user is not True
+            or binding.source_refs != (child.message_ref,)
+            or binding.supersedes is not None
+        ):
+            raise ValueError("initial InputBinding must bind the accepted message")
+        if (
+            task.status is not TaskStatus.ACTIVE
+            or task.state_version != 1
+            or task.last_outcome_ref is not None
+        ):
+            raise ValueError("initial Task must be clean ACTIVE/v1")
+        if (
+            unit.task_id != task.task_id
+            or unit.goal_text != child.goal_text
+            or unit.goal_source_refs != (child.message_ref,)
+            or unit.input_binding_refs != (binding.binding_id,)
+            or unit.status is not TaskStatus.ACTIVE
+            or unit.state_version != 1
+            or unit.contextualization_ref is not None
+            or unit.constraint_refs
+            or unit.dependency_refs
+            or unit.open_questions
+            or unit.observation_refs
+            or unit.evidence_binding_refs
+            or unit.pending_action_ref is not None
+            or unit.result_refs
+        ):
+            raise ValueError("initial RequestUnit must be a clean exact projection")
+        timestamps = {
+            child.accepted_at,
+            binding.created_at,
+            binding.updated_at,
+            task.created_at,
+            task.updated_at,
+            unit.created_at,
+            unit.updated_at,
+        }
+        if len(timestamps) != 1:
+            raise ValueError("initial Task graph must use one trusted timestamp")
+        return self
+
+
+class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
+    """A valid zero/all-reject closure with no Task effect."""
+
+    closure: RequestUnderstandingClosureV2
+
+    @model_validator(mode="after")
+    def closure_has_no_task_effect(self) -> Self:
+        if not _is_exact_canonical_model_v2(
+            self.closure,
+            RequestUnderstandingClosureV2,
+        ):
+            raise ValueError("no-task decision requires a canonical closure")
+        record = self.closure.record
+        if (
+            self.closure.accepted_task_deltas
+            or record.accepted_delta_refs
+            or any(
+                decision.decision is CandidateValidationDecision.ACCEPT
+                for decision in record.candidate_validation
+            )
+            or record.next_move_candidate_ref is not None
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version is not None
+        ):
+            raise ValueError("no-task decision cannot carry a Task effect")
+        return self
+
+
+class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
+    """Exact-one emitted/accepted result retaining the shared NextMove."""
+
+    closure: RequestUnderstandingClosureV2
+    task_graph: InitialAcceptedTaskGraphV2
+    next_move_candidate_ref: UUID
+    next_move_candidate: NextMove
+
+    @model_validator(mode="after")
+    def result_is_exact_one_and_next_move_bound(self) -> Self:
+        if (
+            not _is_exact_canonical_model_v2(
+                self.closure,
+                RequestUnderstandingClosureV2,
+            )
+            or not _is_exact_canonical_model_v2(
+                self.task_graph,
+                InitialAcceptedTaskGraphV2,
+            )
+            or not _is_exact_canonical_model_v2(
+                self.next_move_candidate,
+                NextMove,
+            )
+            or type(self.next_move_candidate_ref) is not UUID
+        ):
+            raise ValueError("routable decision requires canonical records")
+        record = self.closure.record
+        if (
+            len(record.task_delta_candidates) != 1
+            or len(record.candidate_validation) != 1
+            or record.candidate_validation[0].decision
+            is not CandidateValidationDecision.ACCEPT
+            or self.closure.accepted_task_deltas
+            != (self.task_graph.accepted_delta,)
+            or record.accepted_delta_refs
+            != (self.task_graph.accepted_delta.accepted_delta_id,)
+            or record.next_move_candidate_ref != self.next_move_candidate_ref
+            or record.proposed_base_task_state_version
+            != self.next_move_candidate.base_task_state_version
+            or record.validated_task_state_version != 1
+            or self.task_graph.accepted_delta.candidate_ref
+            != record.task_delta_candidates[0].candidate_id
+        ):
+            raise ValueError("routable decision must close one accepted Candidate")
+        return self
+
+
+class InitialRequestUnroutedTaskGraphsDecisionV2(RuntimePrivateModel):
+    """Partial or multi-accepted closure with no shared NextMove."""
+
+    closure: RequestUnderstandingClosureV2
+    task_graphs: Annotated[
+        tuple[InitialAcceptedTaskGraphV2, ...],
+        Field(min_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def result_preserves_all_task_effects_without_next_move(self) -> Self:
+        if not _is_exact_canonical_model_v2(
+            self.closure,
+            RequestUnderstandingClosureV2,
+        ) or any(
+            not _is_exact_canonical_model_v2(
+                graph,
+                InitialAcceptedTaskGraphV2,
+            )
+            for graph in self.task_graphs
+        ):
+            raise ValueError("unrouted decision requires canonical records")
+        record = self.closure.record
+        accepted_count = sum(
+            decision.decision is CandidateValidationDecision.ACCEPT
+            for decision in record.candidate_validation
+        )
+        if (
+            accepted_count < 1
+            or len(self.task_graphs) != accepted_count
+            or self.closure.accepted_task_deltas
+            != tuple(graph.accepted_delta for graph in self.task_graphs)
+            or record.accepted_delta_refs
+            != tuple(
+                graph.accepted_delta.accepted_delta_id
+                for graph in self.task_graphs
+            )
+            or record.next_move_candidate_ref is not None
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version is not None
+            or (
+                len(record.task_delta_candidates) == 1
+                and accepted_count == 1
+            )
+        ):
+            raise ValueError("unrouted decision must close partial or multi effects")
+        return self
+
+
+def _preflight_initial_request_projection_v2(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+) -> tuple[RequestUnderstandingInput, RequestUnderstandingOutputV2]:
+    canonical_input = _canonical_request_input_v2(request_input)
+    canonical_output = _canonical_request_output_v2(output)
+    if not isinstance(authoritative_messages, Mapping):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if canonical_input.message_ref != canonical_output.message_ref:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    _validate_input_visible_source_scope_v2(
+        request_input=canonical_input,
+        output=canonical_output,
+    )
+    current_message = _authoritative_message_v2(
+        authoritative_messages,
+        canonical_input.message_ref,
+    )
+    if current_message != canonical_input.original_query:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    _project_contextualization_v2(
+        canonical_output.contextualization,
+        authoritative_messages,
+    )
+    tuple(
+        _project_task_delta_v2(candidate, authoritative_messages)
+        for candidate in canonical_output.task_delta_candidates
+    )
+    return canonical_input, canonical_output
+
+
+def _canonical_initial_identity_allocations_v2(
+    *,
+    allocations: object,
+    emitted_candidate_refs: tuple[UUID, ...],
+    request_understanding_record_id: object,
+    next_move_candidate_ref: object,
+    customer_context: object,
+    now: object,
+) -> dict[UUID, InitialTaskIdentityAllocationV2]:
+    trusted_values_valid = (
+        type(request_understanding_record_id) is UUID
+        and type(next_move_candidate_ref) is UUID
+        and _is_exact_canonical_model_v2(customer_context, CustomerContext)
+        and type(now) is datetime
+    )
+    if trusted_values_valid:
+        now_is_utc = True
+        try:
+            require_utc(now, field_name="now")
+        except (TypeError, ValueError):
+            now_is_utc = False
+        trusted_values_valid = now_is_utc
+    if not trusted_values_valid or type(allocations) is not tuple:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    canonical_allocations = tuple(allocations)
+    if any(
+        not _is_exact_canonical_model_v2(
+            allocation,
+            InitialTaskIdentityAllocationV2,
+        )
+        for allocation in canonical_allocations
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    allocation_refs = tuple(
+        allocation.candidate_ref for allocation in canonical_allocations
+    )
+    if (
+        len(allocation_refs) != len(set(allocation_refs))
+        or set(allocation_refs) != set(emitted_candidate_refs)
+    ):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    generated_ids = (
+        request_understanding_record_id,
+        next_move_candidate_ref,
+        *(
+            generated_id
+            for allocation in canonical_allocations
+            for generated_id in (
+                allocation.accepted_delta_id,
+                allocation.task_id,
+                allocation.request_unit_id,
+                allocation.binding_id,
+            )
+        ),
+    )
+    if len(generated_ids) != len(set(generated_ids)):
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    return {
+        allocation.candidate_ref: allocation
+        for allocation in canonical_allocations
+    }
+
+
+def _candidate_rejection_reason_v2(
+    *,
+    candidate: TaskDeltaCandidate,
+    output: RequestUnderstandingOutputV2,
+) -> CandidateRejectionReasonCode | None:
+    uncertainty_reasons = {
+        uncertainty.reason_code
+        for uncertainty in output.contextualization.uncertainties
+        if uncertainty.name == "order_id"
+    }
+    if UncertaintyReasonCodeV2.MISSING_REFERENCE in uncertainty_reasons:
+        return CandidateRejectionReasonCode.REFERENCE_UNRESOLVED
+    if (
+        UncertaintyReasonCodeV2.MULTIPLE_PLAUSIBLE_REFERENCES
+        in uncertainty_reasons
+    ):
+        return CandidateRejectionReasonCode.REFERENCE_AMBIGUOUS
+    if len(candidate.input_candidates) != 1:
+        return CandidateRejectionReasonCode.REQUIRED_INPUT_MISSING
+    input_candidate = candidate.input_candidates[0]
+    if (
+        input_candidate.name != "order_id"
+        or input_candidate.semantic_role != "TARGET_RESOURCE_IDENTIFIER"
+        or input_candidate.authority is not InputAuthority.USER_CLAIM
+        or input_candidate.source_kind is not InputSourceKind.CURRENT_MESSAGE
+        or input_candidate.source_ref != output.message_ref
+    ):
+        return CandidateRejectionReasonCode.REQUIRED_INPUT_MISSING
+    try:
+        _normalize_order_id(input_candidate.candidate_value)
+    except RequestProcessingError:
+        return CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+    return None
+
+
+def _build_initial_task_graph_v2(
+    *,
+    candidate: TaskDeltaCandidate,
+    allocation: InitialTaskIdentityAllocationV2,
+    customer_context: CustomerContext,
+    message_ref: UUID,
+    normalized_order_id: str,
+    now: datetime,
+) -> InitialAcceptedTaskGraphV2:
+    graph: InitialAcceptedTaskGraphV2 | None = None
+    try:
+        binding = InputBinding(
+            binding_id=allocation.binding_id,
+            name="order_id",
+            normalized_value=normalized_order_id,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(message_ref,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=now,
+            updated_at=now,
+        )
+        accepted_delta = AcceptedTaskDeltaV2(
+            accepted_delta_id=allocation.accepted_delta_id,
+            candidate_ref=candidate.candidate_id,
+            message_ref=message_ref,
+            operation=TaskDeltaOperation.ADD_GOAL,
+            goal_text=candidate.goal_patch,
+            input_binding_refs=(allocation.binding_id,),
+            accepted_at=now,
+            task_id=allocation.task_id,
+            base_task_state_version=None,
+            result_task_state_version=1,
+        )
+        task = TaskRecord(
+            task_id=allocation.task_id,
+            owner_customer_id=customer_context.customer_id,
+            status=TaskStatus.ACTIVE,
+            state_version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        request_unit = RequestUnitRecord(
+            request_unit_id=allocation.request_unit_id,
+            task_id=allocation.task_id,
+            goal_text=candidate.goal_patch,
+            goal_source_refs=(message_ref,),
+            input_binding_refs=(allocation.binding_id,),
+            status=TaskStatus.ACTIVE,
+            state_version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        graph = InitialAcceptedTaskGraphV2(
+            accepted_delta=accepted_delta,
+            input_binding=binding,
+            task=task,
+            request_unit=request_unit,
+        )
+    except (TypeError, ValueError, ValidationError):
+        graph = None
+    if graph is None:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    return graph
+
+
+def validate_and_reduce_initial_request_v2(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    customer_context: CustomerContext,
+    request_understanding_record_id: UUID,
+    candidate_identity_allocations: tuple[
+        InitialTaskIdentityAllocationV2,
+        ...,
+    ],
+    next_move_candidate_ref: UUID,
+    now: datetime,
+) -> (
+    InitialRequestNoTaskDecisionV2
+    | InitialRequestRoutableTaskGraphDecisionV2
+    | InitialRequestUnroutedTaskGraphsDecisionV2
+):
+    """Validate actual v2 Candidates and build one exact pure Core result."""
+
+    canonical_input, canonical_output = _preflight_initial_request_projection_v2(
+        request_input=request_input,
+        output=output,
+        authoritative_messages=authoritative_messages,
+    )
+    emitted_refs = tuple(
+        candidate.candidate_id
+        for candidate in canonical_output.task_delta_candidates
+    )
+    allocations_by_candidate = _canonical_initial_identity_allocations_v2(
+        allocations=candidate_identity_allocations,
+        emitted_candidate_refs=emitted_refs,
+        request_understanding_record_id=request_understanding_record_id,
+        next_move_candidate_ref=next_move_candidate_ref,
+        customer_context=customer_context,
+        now=now,
+    )
+
+    decisions: list[CandidateValidationRecordV2] = []
+    graphs: list[InitialAcceptedTaskGraphV2] = []
+    decision_construction_failed = False
+    for candidate in canonical_output.task_delta_candidates:
+        rejection_reason = _candidate_rejection_reason_v2(
+            candidate=candidate,
+            output=canonical_output,
+        )
+        try:
+            decisions.append(
+                CandidateValidationRecordV2(
+                    candidate_ref=candidate.candidate_id,
+                    decision=(
+                        CandidateValidationDecision.REJECT
+                        if rejection_reason is not None
+                        else CandidateValidationDecision.ACCEPT
+                    ),
+                    reason_code=rejection_reason,
+                )
+            )
+        except (TypeError, ValueError, ValidationError):
+            decision_construction_failed = True
+            break
+        if rejection_reason is not None:
+            continue
+        input_candidate = candidate.input_candidates[0]
+        try:
+            normalized_order_id = _normalize_order_id(
+                input_candidate.candidate_value
+            )
+        except RequestProcessingError:
+            decision_construction_failed = True
+            break
+        graphs.append(
+            _build_initial_task_graph_v2(
+                candidate=candidate,
+                allocation=allocations_by_candidate[candidate.candidate_id],
+                customer_context=customer_context,
+                message_ref=canonical_output.message_ref,
+                normalized_order_id=normalized_order_id,
+                now=now,
+            )
+        )
+    if decision_construction_failed:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    exact_one_routable = (
+        len(canonical_output.task_delta_candidates) == 1 and len(graphs) == 1
+    )
+    closure = build_request_understanding_closure_v2(
+        request_input=canonical_input,
+        output=canonical_output,
+        authoritative_messages=authoritative_messages,
+        request_understanding_record_id=request_understanding_record_id,
+        candidate_validation=tuple(decisions),
+        accepted_task_deltas=tuple(
+            graph.accepted_delta for graph in graphs
+        ),
+        proposed_base_task_state_version=(
+            canonical_output.next_move_candidate.base_task_state_version
+            if exact_one_routable
+            else None
+        ),
+        validated_task_state_version=1 if exact_one_routable else None,
+        next_move_candidate_ref=(
+            next_move_candidate_ref if exact_one_routable else None
+        ),
+        now=now,
+    )
+
+    result: (
+        InitialRequestNoTaskDecisionV2
+        | InitialRequestRoutableTaskGraphDecisionV2
+        | InitialRequestUnroutedTaskGraphsDecisionV2
+        | None
+    ) = None
+    try:
+        if not graphs:
+            result = InitialRequestNoTaskDecisionV2(closure=closure)
+        elif exact_one_routable:
+            result = InitialRequestRoutableTaskGraphDecisionV2(
+                closure=closure,
+                task_graph=graphs[0],
+                next_move_candidate_ref=next_move_candidate_ref,
+                next_move_candidate=canonical_output.next_move_candidate,
+            )
+        else:
+            result = InitialRequestUnroutedTaskGraphsDecisionV2(
+                closure=closure,
+                task_graphs=tuple(graphs),
+            )
+    except (TypeError, ValueError, ValidationError):
+        result = None
+    if result is None:
+        _fail_request_understanding_v2(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    return result
+
+
+def revalidate_next_move_v2(
+    *,
+    decision: InitialRequestRoutableTaskGraphDecisionV2,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+    current_input_binding: InputBinding,
+) -> RevalidatedNextMove:
+    """Revalidate one persisted exact-one v2 graph without rewriting arguments."""
+
+    if not _is_exact_canonical_model_v2(
+        decision,
+        InitialRequestRoutableTaskGraphDecisionV2,
+    ):
+        raise RequestProcessingError("canonical v2 initial decision required")
+    if (
+        not _is_exact_canonical_model_v2(current_task, TaskRecord)
+        or not _is_exact_canonical_model_v2(
+            current_request_unit,
+            RequestUnitRecord,
+        )
+        or not _is_exact_canonical_model_v2(
+            current_input_binding,
+            InputBinding,
+        )
+    ):
+        raise RequestProcessingError("canonical current graph required")
+
+    expected = decision.task_graph
+    if current_task.owner_customer_id != expected.task.owner_customer_id:
+        raise RequestProcessingError("current Task owner mismatch")
+    if (
+        current_task.task_id != expected.task.task_id
+        or current_request_unit.task_id != current_task.task_id
+        or current_request_unit.request_unit_id
+        != expected.request_unit.request_unit_id
+    ):
+        raise RequestProcessingError("current Task graph mismatch")
+    if (
+        current_task.status is not TaskStatus.ACTIVE
+        or current_request_unit.status is not TaskStatus.ACTIVE
+        or current_task.state_version != 1
+        or current_request_unit.state_version != 1
+    ):
+        raise RequestProcessingError("current Task graph is not ACTIVE/v1")
+    if (
+        not _runtime_values_match_exactly_v2(current_task, expected.task)
+        or not _runtime_values_match_exactly_v2(
+            current_request_unit,
+            expected.request_unit,
+        )
+    ):
+        raise RequestProcessingError("current Task graph mismatch")
+    if (
+        not _runtime_values_match_exactly_v2(
+            current_input_binding,
+            expected.input_binding,
+        )
+        or current_request_unit.input_binding_refs
+        != (current_input_binding.binding_id,)
+        or expected.accepted_delta.input_binding_refs
+        != (current_input_binding.binding_id,)
+    ):
+        raise RequestProcessingError("current InputBinding graph mismatch")
+
+    candidate = decision.next_move_candidate
+    if (
+        candidate.kind is not NextMoveKind.CALL_TOOL
+        or candidate.requested_tool_name is None
+        or candidate.arguments is None
+    ):
+        raise RequestProcessingError("revalidation requires CALL_TOOL candidate")
+    if find_trusted_argument_field(candidate.arguments) is not None:
+        raise RequestProcessingError("trusted field in model arguments")
+
+    revalidated: RevalidatedNextMove | None = None
+    try:
+        revalidated = RevalidatedNextMove(
+            run_id=decision.closure.record.run_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_request_unit.request_unit_id,
+            next_move_candidate_ref=decision.next_move_candidate_ref,
+            kind=NextMoveKind.CALL_TOOL,
+            requested_provider_tool_name=candidate.requested_tool_name,
+            candidate_arguments=candidate.arguments,
+            normalized_candidate_order_id=_candidate_order_id_or_none(
+                candidate.arguments
+            ),
+            binding_name=current_input_binding.name,
+            binding_normalized_value=current_input_binding.normalized_value,
+            argument_binding_refs=(current_input_binding.binding_id,),
+            proposed_base_task_state_version=(
+                candidate.base_task_state_version
+            ),
+            validated_task_state_version=current_task.state_version,
+        )
+    except (TypeError, ValueError, ValidationError):
+        revalidated = None
+    if revalidated is None:
+        raise RequestProcessingError("v2 NextMove revalidation failed")
+    return revalidated
