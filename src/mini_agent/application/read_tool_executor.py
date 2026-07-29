@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
+from pydantic_core import TzInfo
 
 from mini_agent.application.ports import GetOrderPort, RuntimeRecordPort
 from mini_agent.application.records import (
@@ -169,10 +170,15 @@ def _canonical_enum_member_is_closed(value: object) -> bool:
 
 
 def _is_closed_utc_datetime(value: object) -> bool:
-    return (
-        type(value) is datetime
-        and object.__getattribute__(value, "tzinfo") is UTC
-    )
+    if type(value) is not datetime:
+        return False
+    timezone = object.__getattribute__(value, "tzinfo")
+    if timezone is UTC:
+        return True
+    if type(timezone) is not TzInfo:
+        return False
+    offset = TzInfo.utcoffset(timezone, value)
+    return type(offset) is timedelta and offset == timedelta(0)
 
 
 def _is_canonical_get_order_source_version(value: object) -> bool:
