@@ -2354,6 +2354,59 @@ def test_v2_routable_decision_rejects_self_issued_provenance_seals() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("target_name", "field_name", "operation"),
+    (
+        ("task", "owner_customer_id", "discard"),
+        ("task", "last_outcome_ref", "add"),
+        ("request_unit", "task_id", "discard"),
+        ("input_binding", "authority", "discard"),
+        ("next_move", "kind", "discard"),
+    ),
+)
+def test_v2_routable_decision_rejects_nested_fields_set_mutation(
+    target_name: str,
+    field_name: str,
+    operation: str,
+) -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    poisoned = result.model_copy(deep=True)
+    targets = {
+        "task": poisoned.task_graph.task,
+        "request_unit": poisoned.task_graph.request_unit,
+        "input_binding": poisoned.task_graph.input_binding,
+        "next_move": poisoned.next_move_candidate,
+    }
+    target = targets[target_name]
+    if operation == "add":
+        target.__pydantic_fields_set__.add(field_name)
+    else:
+        target.__pydantic_fields_set__.discard(field_name)
+
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=poisoned,
+            current_task=poisoned.task_graph.task,
+            current_request_unit=poisoned.task_graph.request_unit,
+            current_input_binding=poisoned.task_graph.input_binding,
+        )
+
+
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
     message_ref = uuid4()
     accepted_id = uuid4()
