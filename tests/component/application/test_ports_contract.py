@@ -22,6 +22,7 @@ from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     CreateInitialTaskGraphCommand,
+    CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
@@ -38,6 +39,7 @@ from mini_agent.application.records import (
     RequestUnderstandingCandidateInvalidError,
     RecoveryWriteResult,
     RestartRecoveryClosure,
+    SaveRequestUnderstandingV2NoTaskCommand,
     SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
@@ -128,6 +130,11 @@ def test_runtime_record_port_preserves_only_safe_append_causality_records() -> N
         "compare_and_set_request_unit",
         "transition_run_if_active",
         "compare_and_set_run_task_link",
+        "save_request_understanding_v2",
+        "save_request_understanding_v2_if_current",
+        "append_accepted_task_delta_v2",
+        "create_initial_task_graph_v2",
+        "create_initial_task_graph_latest_if_current",
     ):
         assert not hasattr(RuntimeRecordPort, bypass)
     assert not hasattr(ConversationRecordPort, "save_conversation_task_link")
@@ -230,6 +237,47 @@ def test_initial_graph_task_transition_and_observation_use_aggregate_commands() 
     observation_doc = RuntimeRecordPort.save_observation.__doc__ or ""
     assert "owner graph" in observation_doc
     assert "owner_scope" in observation_doc
+
+
+def test_v2_request_understanding_writes_use_two_exact_conditional_methods() -> None:
+    contracts = (
+        (
+            RuntimeRecordPort.save_request_understanding_v2_no_task_if_current,
+            SaveRequestUnderstandingV2NoTaskCommand,
+        ),
+        (
+            RuntimeRecordPort.create_initial_task_graph_v2_if_current,
+            CreateInitialTaskGraphV2Command,
+        ),
+    )
+    for method, command_type in contracts:
+        _assert_signature(
+            method,
+            parameters=("command",),
+            type_hints={
+                "command": command_type,
+                "return": ConditionalWriteResult,
+            },
+        )
+        doc = method.__doc__ or ""
+        assert "APPLIED" in doc
+        assert "PROJECTION_CONFLICT" in doc
+        assert "NOT_APPLICABLE" in doc
+        assert "zero writes" in doc
+        assert "one transaction" in doc
+        assert "absent" in doc
+        assert "unauthorized" in doc
+
+    no_task_doc = (
+        RuntimeRecordPort.save_request_understanding_v2_no_task_if_current.__doc__
+        or ""
+    )
+    graph_doc = (
+        RuntimeRecordPort.create_initial_task_graph_v2_if_current.__doc__
+        or ""
+    )
+    assert "never creates a Task" in no_task_doc
+    assert "never degrades to the no-task route" in graph_doc
 
 
 def test_owner_scoped_reads_require_minimal_trusted_owner_scope() -> None:
