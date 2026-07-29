@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
+from enum import Enum
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel
+from pydantic_core import TzInfo
 
 from mini_agent.application.ports import GetOrderPort, RuntimeRecordPort
 from mini_agent.application.records import (
@@ -28,6 +34,10 @@ from mini_agent.core.memory import (
 from mini_agent.core.order import (
     GetOrderOutcome,
     GetOrderQuery,
+    GetOrderResult,
+    OrderLineSummary,
+    OrderStatus,
+    OrderSummaryProjection,
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
@@ -60,6 +70,201 @@ class ReadToolExecution(RuntimePrivateModel):
     effective_timeout_ms: int | None = None
 
 
+_GET_ORDER_SOURCE_VERSION_PATTERN = re.compile(
+    r"mock-order-source-version\.p0\.v1:sha256:[0-9a-f]{64}",
+    flags=re.ASCII,
+)
+
+
+def _build_get_order_enum_member_snapshots() -> (
+    tuple[
+        tuple[
+            type[Enum],
+            tuple[tuple[Enum, tuple[tuple[str, object], ...]], ...],
+        ],
+        ...,
+    ]
+):
+    snapshots_by_type = []
+    for enum_type in (GetOrderOutcome, OrderStatus):
+        member_snapshots = []
+        for member in enum_type:
+            storage = object.__getattribute__(member, "__dict__")
+            if type(member) is not enum_type or type(storage) is not dict:
+                raise RuntimeError(
+                    "canonical get_order Enum storage changed"
+                )
+            storage_items = tuple(
+                (
+                    key,
+                    dict.__getitem__(storage, key),
+                )
+                for key in dict.__iter__(storage)
+            )
+            if any(
+                type(key) is not str
+                or not (
+                    stored_value is enum_type
+                    or type(stored_value) in {int, str}
+                )
+                for key, stored_value in storage_items
+            ):
+                raise RuntimeError(
+                    "canonical get_order Enum storage is not closed"
+                )
+            member_snapshots.append((member, storage_items))
+        snapshots_by_type.append((enum_type, tuple(member_snapshots)))
+    return tuple(snapshots_by_type)
+
+
+_GET_ORDER_ENUM_MEMBER_SNAPSHOTS = (
+    _build_get_order_enum_member_snapshots()
+)
+
+
+def _canonical_enum_member_is_closed(value: object) -> bool:
+    enum_type = type(value)
+    member_snapshots = next(
+        (
+            snapshots
+            for candidate_type, snapshots in (
+                _GET_ORDER_ENUM_MEMBER_SNAPSHOTS
+            )
+            if enum_type is candidate_type
+        ),
+        None,
+    )
+    if member_snapshots is None:
+        return False
+    snapshot = next(
+        (
+            candidate
+            for candidate in member_snapshots
+            if value is candidate[0]
+        ),
+        None,
+    )
+    if snapshot is None:
+        return False
+    storage = object.__getattribute__(value, "__dict__")
+    expected_items = snapshot[1]
+    if type(storage) is not dict or len(storage) != len(expected_items):
+        return False
+    stored_names = tuple(dict.__iter__(storage))
+    if (
+        any(type(name) is not str for name in stored_names)
+        or stored_names
+        != tuple(name for name, _ in expected_items)
+    ):
+        return False
+    for name, expected_value in expected_items:
+        stored_value = dict.__getitem__(storage, name)
+        if expected_value is enum_type:
+            if stored_value is not expected_value:
+                return False
+        elif (
+            type(stored_value) is not type(expected_value)
+            or stored_value != expected_value
+        ):
+            return False
+    return True
+
+
+def _is_closed_utc_datetime(value: object) -> bool:
+    if type(value) is not datetime:
+        return False
+    timezone_value = object.__getattribute__(value, "tzinfo")
+    if timezone_value is UTC:
+        return True
+    if type(timezone_value) is timezone:
+        offset = timezone.utcoffset(timezone_value, value)
+        name = timezone.tzname(timezone_value, value)
+        return (
+            type(offset) is timedelta
+            and offset == timedelta(0)
+            and type(name) is str
+            and name in {"UTC", "Z"}
+        )
+    if type(timezone_value) is ZoneInfo:
+        key = object.__getattribute__(timezone_value, "key")
+        if type(key) is not str or key != "UTC":
+            return False
+        offset = ZoneInfo.utcoffset(timezone_value, value)
+        return (
+            type(offset) is timedelta
+            and offset == timedelta(0)
+        )
+    if type(timezone_value) is not TzInfo:
+        return False
+    offset = TzInfo.utcoffset(timezone_value, value)
+    return type(offset) is timedelta and offset == timedelta(0)
+
+
+def _is_canonical_get_order_source_version(value: object) -> bool:
+    return (
+        type(value) is str
+        and _GET_ORDER_SOURCE_VERSION_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _has_exact_declared_model_state(
+    value: object,
+    expected_type: type[BaseModel],
+) -> bool:
+    if type(value) is not expected_type:
+        return False
+    declared_fields = frozenset(expected_type.model_fields)
+    required_fields = frozenset(
+        field_name
+        for field_name, field_info in expected_type.model_fields.items()
+        if field_info.is_required()
+    )
+    try:
+        state = vars(value)
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
+    except (AttributeError, TypeError):
+        return False
+    return (
+        type(state) is dict
+        and set(state) == declared_fields
+        and all(type(field_name) is str for field_name in state)
+        and type(fields_set) is set
+        and all(type(field_name) is str for field_name in fields_set)
+        and required_fields <= fields_set <= declared_fields
+        and extra is None
+        and private is None
+    )
+
+
+def _exact_recursive_value_matches(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, BaseModel):
+        model_type = type(left)
+        if (
+            not _has_exact_declared_model_state(left, model_type)
+            or not _has_exact_declared_model_state(right, model_type)
+            or left.__pydantic_fields_set__
+            != right.__pydantic_fields_set__
+        ):
+            return False
+        return all(
+            _exact_recursive_value_matches(
+                getattr(left, field_name),
+                getattr(right, field_name),
+            )
+            for field_name in model_type.model_fields
+        )
+    if type(left) is tuple:
+        return len(left) == len(right) and all(
+            _exact_recursive_value_matches(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
 def _project_tool_call(
     record: ToolCallRecord,
     **updates: object,
@@ -70,6 +275,73 @@ def _project_tool_call(
     }
     values.update(updates)
     return ToolCallRecord(**values)
+
+
+def _rebuild_canonical_get_order_result(
+    value: object,
+) -> GetOrderResult | None:
+    if (
+        not _has_exact_declared_model_state(value, GetOrderResult)
+        or not _canonical_enum_member_is_closed(value.outcome)
+        or (
+            value.order_summary is not None
+            and (
+                not _has_exact_declared_model_state(
+                    value.order_summary,
+                    OrderSummaryProjection,
+                )
+                or not _canonical_enum_member_is_closed(
+                    value.order_summary.status
+                )
+                or type(value.order_summary.line_items) is not tuple
+                or any(
+                    not _has_exact_declared_model_state(
+                        line_item,
+                        OrderLineSummary,
+                    )
+                    for line_item in value.order_summary.line_items
+                )
+                or not _is_closed_utc_datetime(
+                    value.order_summary.ordered_at
+                )
+                or not _is_closed_utc_datetime(
+                    value.order_summary.status_updated_at
+                )
+            )
+        )
+    ):
+        return None
+    try:
+        payload = value.model_dump(
+            mode="python",
+            round_trip=True,
+            exclude_unset=True,
+            warnings="error",
+        )
+        rebuilt = GetOrderResult.model_validate(payload, strict=True)
+    except (TypeError, ValueError):
+        return None
+    if (
+        type(rebuilt) is not GetOrderResult
+        or not _exact_recursive_value_matches(value, rebuilt)
+        or (
+            rebuilt.outcome is GetOrderOutcome.FOUND
+            and not _is_canonical_get_order_source_version(
+                rebuilt.source_version
+            )
+        )
+    ):
+        return None
+    return rebuilt
+
+
+def _canonical_get_order_result(
+    value: object,
+) -> GetOrderResult | None:
+    try:
+        return _rebuild_canonical_get_order_result(value)
+    except Exception:
+        return None
 
 
 class ReadToolExecutor:
@@ -252,7 +524,7 @@ class ReadToolExecutor:
         try:
             try:
                 async with asyncio.timeout(effective_timeout_ms / 1000):
-                    result = await self._get_order_port.get_order(
+                    candidate_result = await self._get_order_port.get_order(
                         GetOrderQuery(
                             customer_id=owner_scope.customer_id,
                             order_id=order_id,
@@ -276,6 +548,13 @@ class ReadToolExecutor:
                     finalized_attempt=finalized_attempt,
                     get_order_outcome=GetOrderOutcome.SYSTEM_FAILURE,
                     effective_timeout_ms=effective_timeout_ms,
+                )
+            result = _canonical_get_order_result(candidate_result)
+            candidate_result = None
+            if result is None:
+                result = GetOrderResult(
+                    outcome=GetOrderOutcome.SYSTEM_FAILURE,
+                    failure_code="ORDER_SERVICE_UNAVAILABLE",
                 )
 
             observation: OrderObservation | None = None
@@ -330,6 +609,7 @@ class ReadToolExecutor:
                     observed_at=finished_at,
                     recorded_at=finished_at,
                     visibility=ObservationVisibility.MODEL_VISIBLE,
+                    source_version=result.source_version,
                 )
                 observation_result = (
                     await self._runtime_record_port.save_observation(

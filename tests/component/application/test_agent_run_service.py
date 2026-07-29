@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,8 +23,10 @@ from mini_agent.application.records import (
     FinalizeRunCommand,
     InsertOnlyWriteResult,
     MessageDirection,
+    MessageRecord,
     ObservationWriteResult,
     ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
     ToolDispatchFenceWriteResult,
 )
 from mini_agent.core.identity import CustomerContext
@@ -43,17 +46,24 @@ from mini_agent.core.presentation import (
     PresentationPlan,
     PresentationTone,
 )
+from mini_agent.core.request_processing import RequestUnderstandingV2Error
 from mini_agent.core.request_understanding import (
     InputAuthority,
     InputCandidate,
     InputSourceKind,
     NextMove,
     NextMoveKind,
-    RequestUnderstandingOutput,
+    QueryContextualizationCandidateV2,
+    ReferenceSourceKindV2,
+    RequestUnderstandingOutputV2,
+    ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
+    UncertaintyReasonCodeV2,
+    UncertaintyV2,
 )
 from mini_agent.core.task_state import (
+    RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -82,6 +92,22 @@ from mini_agent.core.trace import (
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+class CandidateInvalidSignalSubclass(
+    RequestUnderstandingCandidateInvalidError
+):
+    def __init__(self) -> None:
+        Exception.__init__(self, "raw-customer-B-secret")
+
+
+class ProviderProtocolSignalSubclass(ProviderProtocolError):
+    def __init__(self) -> None:
+        Exception.__init__(self, "raw-customer-B-secret")
+
+
+class SourceVersionSubclass(str):
+    pass
 
 
 class UuidSequence:
@@ -140,6 +166,95 @@ class ConversationSpy:
         ):
             raise self.assistant_error
         self.messages.append(record)
+
+    async def load_conversation_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+    ):
+        self.events.append("conversation_reloaded")
+        if (
+            self.conversations
+            and self.conversations[-1].conversation_id == conversation_id
+            and self.conversations[-1].owner_customer_id
+            == owner_scope.customer_id
+        ):
+            return self.conversations[-1]
+        return None
+
+    async def list_messages_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+        limit: int,
+    ):
+        self.events.append("messages_reloaded")
+        if (
+            not self.conversations
+            or self.conversations[-1].conversation_id != conversation_id
+            or self.conversations[-1].owner_customer_id
+            != owner_scope.customer_id
+        ):
+            return ()
+        return tuple(
+            message
+            for message in self.messages[-limit:]
+            if message.conversation_id == conversation_id
+        )
+
+
+class MessageReadOverrideConversationSpy(ConversationSpy):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        read_mode: str,
+    ) -> None:
+        super().__init__(events)
+        self.read_mode = read_mode
+
+    async def list_messages_for_owner(
+        self,
+        *,
+        owner_scope: object,
+        conversation_id: UUID,
+        limit: int,
+    ):
+        messages = await super().list_messages_for_owner(
+            owner_scope=owner_scope,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+        if self.read_mode == "empty":
+            return ()
+        message = messages[0]
+        if self.read_mode == "duplicate":
+            return (message, message)
+        if self.read_mode == "foreign_conversation":
+            return (
+                MessageRecord(
+                    schema_version=message.schema_version,
+                    message_id=message.message_id,
+                    conversation_id=uuid4(),
+                    direction=message.direction,
+                    content=message.content,
+                    received_at=message.received_at,
+                ),
+            )
+        if self.read_mode == "stale_content":
+            return (
+                MessageRecord(
+                    schema_version=message.schema_version,
+                    message_id=message.message_id,
+                    conversation_id=message.conversation_id,
+                    direction=message.direction,
+                    content="请查询订单 O-9999",
+                    received_at=message.received_at,
+                ),
+            )
+        raise AssertionError("unsupported test read mode")
 
 
 class RuntimeSpy:
@@ -256,21 +371,28 @@ class RuntimeSpy:
         self.events.append("terminal_aggregate_applied")
         return ConditionalWriteResult.APPLIED
 
-    async def create_initial_task_graph_if_current(
+    async def create_initial_task_graph_v2_if_current(
         self,
         command: object,
     ) -> ConditionalWriteResult:
-        self.events.append("initial_graph_saved")
+        self.events.append("initial_graph_v2_saved")
         if self.graph_error is not None:
             raise self.graph_error
         if self.graph_result is ConditionalWriteResult.APPLIED:
             self.task = command.initial_task.initial_record
             self.request_unit = command.initial_request_unit.initial_record
-            self.input_binding = command.input_bindings[0].record
+            self.input_binding = command.input_binding.record
             self.run_task_link = command.run_task_link.active_record
             self.task_history.append(self.task)
             self.request_unit_history.append(self.request_unit)
         return self.graph_result
+
+    async def create_initial_task_graph_if_current(
+        self,
+        command: object,
+    ) -> ConditionalWriteResult:
+        del command
+        raise AssertionError("active Runtime must not call the v1 writer")
 
     async def apply_task_transition_if_current(
         self,
@@ -390,6 +512,28 @@ class HangingOrderSpy:
         raise AssertionError("unreachable")
 
 
+class ObservationVersionOverrideExecutor:
+    def __init__(
+        self,
+        delegate: ReadToolExecutor,
+        source_version: object,
+    ) -> None:
+        self.delegate = delegate
+        self.source_version = source_version
+
+    async def execute_get_order(self, **kwargs: object):
+        execution = await self.delegate.execute_get_order(**kwargs)
+        observation = execution.observation
+        assert observation is not None
+        return execution.model_copy(
+            update={
+                "observation": observation.model_copy(
+                    update={"source_version": self.source_version}
+                )
+            }
+        )
+
+
 class ModelSpy:
     def __init__(
         self,
@@ -398,17 +542,25 @@ class ModelSpy:
         bound_order_id: str = "O-1001",
         proposed_order_id: str = "O-1001",
         requested_tool_name: str = "get_order",
+        task_candidate_count: int = 1,
+        reject_all_candidates: bool = False,
         ru_protocol_error: bool = False,
         input_fault: bool = False,
+        ru_exception: Exception | None = None,
         presentation_protocol_error: bool = False,
+        presentation_exception: Exception | None = None,
     ) -> None:
         self.events = events
         self.bound_order_id = bound_order_id
         self.proposed_order_id = proposed_order_id
         self.requested_tool_name = requested_tool_name
+        self.task_candidate_count = task_candidate_count
+        self.reject_all_candidates = reject_all_candidates
         self.ru_protocol_error = ru_protocol_error
         self.input_fault = input_fault
+        self.ru_exception = ru_exception
         self.presentation_protocol_error = presentation_protocol_error
+        self.presentation_exception = presentation_exception
         self.next_move_calls = 0
         self.presentation_calls = 0
         self.next_move_requests: list[object] = []
@@ -419,10 +571,43 @@ class ModelSpy:
         self.next_move_requests.append(request)
         if self.ru_protocol_error:
             raise ProviderProtocolError()
+        if self.input_fault:
+            raise RequestUnderstandingCandidateInvalidError()
+        if self.ru_exception is not None:
+            raise self.ru_exception
         message_ref = request.message_ref
-        output = RequestUnderstandingOutput(
+        output = RequestUnderstandingOutputV2(
+            schema_version="e2e01-thin-v2",
             message_ref=message_ref,
-            task_delta_candidates=(
+            contextualization=QueryContextualizationCandidateV2(
+                text=request.original_query,
+                resolved_reference_candidates=(
+                    ResolvedReferenceCandidateV2(
+                        name="order_id",
+                        candidate_value=self.bound_order_id,
+                        source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                        source_ref=message_ref,
+                        source_quote=self.bound_order_id,
+                        confidence=0.99,
+                    ),
+                ),
+                uncertainties=(
+                    (
+                        UncertaintyV2(
+                            name="order_id",
+                            candidate_values=(),
+                            reason_code=(
+                                UncertaintyReasonCodeV2.MISSING_REFERENCE
+                            ),
+                            source_message_refs=(message_ref,),
+                        ),
+                    )
+                    if self.reject_all_candidates
+                    else ()
+                ),
+                source_message_refs=(message_ref,),
+            ),
+            task_delta_candidates=tuple(
                 TaskDeltaCandidate(
                     candidate_id=uuid4(),
                     operation=TaskDeltaOperation.ADD_GOAL,
@@ -440,7 +625,8 @@ class ModelSpy:
                         ),
                     ),
                     confidence=0.98,
-                ),
+                )
+                for _ in range(self.task_candidate_count)
             ),
             next_move_candidate=NextMove(
                 kind=NextMoveKind.CALL_TOOL,
@@ -449,19 +635,6 @@ class ModelSpy:
                 base_task_state_version=None,
             ),
         )
-        if self.input_fault:
-            bad_candidate = output.task_delta_candidates[0].input_candidates[
-                0
-            ].model_copy(update={"authority": "MODEL_INFERENCE"})
-            output = output.model_copy(
-                update={
-                    "task_delta_candidates": (
-                        output.task_delta_candidates[0].model_copy(
-                            update={"input_candidates": (bad_candidate,)}
-                        ),
-                    )
-                }
-            )
         return output
 
     async def plan_presentation(self, request: object) -> PresentationPlan:
@@ -469,6 +642,8 @@ class ModelSpy:
         self.presentation_calls += 1
         if self.presentation_protocol_error:
             raise ProviderProtocolError()
+        if self.presentation_exception is not None:
+            raise self.presentation_exception
         return PresentationPlan(
             template_id="ORDER_STATUS_SUMMARY_V1",
             tone=PresentationTone.WARM,
@@ -901,9 +1076,14 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
 
     assert _index(events, "artifact_get") < _index(events, "manifest:1")
     assert _index(events, "message:USER") < _index(
+        events, "messages_reloaded"
+    )
+    assert _index(events, "messages_reloaded") < _index(
         events, "provider:request_understanding"
     )
-    assert _index(events, "initial_graph_saved") < _index(events, "gate_saved")
+    assert _index(events, "initial_graph_v2_saved") < _index(
+        events, "gate_saved"
+    )
     assert _index(events, "gate_saved") < _index(events, "tool_call_created")
     assert _index(events, "dispatch_fence") < _index(events, "order_read")
     assert _index(events, "observation_saved") < _index(events, "manifest:2")
@@ -1186,6 +1366,165 @@ def test_request_understanding_faults_create_no_task_graph_or_gate(
     )
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        CandidateInvalidSignalSubclass,
+        ProviderProtocolSignalSubclass,
+    ],
+)
+def test_provider_signal_subclasses_fail_without_product_classification(
+    error_type: type[Exception],
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(events, ru_exception=error_type())
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="noncanonical Provider signal",
+    ) as captured:
+        _run(service)
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "raw-customer-B-secret" not in repr(captured.value)
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
+def test_atomic_request_understanding_failure_is_not_input_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_atomic_reduction(**_: object) -> None:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    monkeypatch.setattr(
+        agent_run_service_module,
+        "validate_and_reduce_initial_request_v2",
+        fail_atomic_reduction,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build()
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="Request Understanding internal failure",
+    ) as captured:
+        _run(service)
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    assert "DURABLE_CLOSURE_COMMIT_FAILED" not in repr(
+        runtime.trace_events
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
+@pytest.mark.parametrize(
+    "read_mode",
+    [
+        "empty",
+        "duplicate",
+        "foreign_conversation",
+        "stale_content",
+    ],
+)
+def test_untrusted_authoritative_message_reads_fail_before_provider(
+    read_mode: str,
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(events)
+    conversation = MessageReadOverrideConversationSpy(
+        events,
+        read_mode=read_mode,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model,
+        conversation=conversation,
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="authoritative current Message unavailable",
+    ):
+        _run(service)
+
+    assert model.next_move_calls == 0
+    assert "initial_graph_v2_saved" not in events
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert runtime.observation_commands == []
+    assert order.queries == []
+    assert runtime.run_record is None
+    assert runtime.finalize_run_commands == []
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
+@pytest.mark.parametrize(
+    ("task_candidate_count", "reject_all_candidates"),
+    [
+        (0, False),
+        (1, True),
+        (2, False),
+    ],
+    ids=("zero", "all-reject", "multi-accept"),
+)
+def test_unscoped_v2_outcomes_fail_without_write_or_product_completion(
+    task_candidate_count: int,
+    reject_all_candidates: bool,
+) -> None:
+    events: list[str] = []
+    model = ModelSpy(
+        events,
+        task_candidate_count=task_candidate_count,
+        reject_all_candidates=reject_all_candidates,
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="Request Understanding outcome is not routable",
+    ):
+        _run(service)
+
+    assert "initial_graph_v2_saved" not in events
+    assert runtime.task_history == []
+    assert runtime.gates == []
+    assert runtime.create_tool_commands == []
+    assert runtime.observation_commands == []
+    assert order.queries == []
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
+
+
 def test_no_task_completion_commits_result_message_and_run_stopped_once() -> None:
     events: list[str] = []
     model = ModelSpy(events, ru_protocol_error=True)
@@ -1243,6 +1582,44 @@ def test_order_system_failure_has_one_read_no_observation_or_presentation() -> N
         result=result,
         with_task=True,
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_source_version",
+    [
+        None,
+        "",
+        "bad",
+        "mock-order-source-version.p0.v1:sha256:" + ("A" * 64),
+        b"mock-order-source-version.p0.v1:sha256:" + (b"a" * 64),
+        SourceVersionSubclass(SYNTHETIC_SOURCE_VERSION),
+    ],
+)
+def test_service_rejects_injected_noncanonical_observation_version(
+    invalid_source_version: object,
+) -> None:
+    service, events, model, runtime, _conversation, order, _artifact = _build()
+    service._read_tool_executor = ObservationVersionOverrideExecutor(
+        service._read_tool_executor,
+        invalid_source_version,
+    )
+
+    result = _run(service)
+
+    assert result.outcome is AgentOutcome.BLOCKED
+    assert result.message == "订单服务暂时不可用，请稍后重试。"
+    assert model.presentation_calls == 0
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert len(runtime.manifests) == 1
+    assert "manifest:2" not in events
+    assert not any(
+        event.event_type is TraceEventType.OBSERVATION_RECORDED
+        for event in runtime.trace_events
+    )
+    assert runtime.run_record.stop_reason is StopReason.ORDER_SERVICE_UNAVAILABLE
+    if invalid_source_version not in {None, ""}:
+        assert repr(invalid_source_version) not in result.message
 
 
 def test_hanging_order_read_times_out_with_bounded_terminal_trace() -> None:
@@ -1375,6 +1752,36 @@ def test_presentation_protocol_failure_retains_observation_without_plan_trace() 
         result=result,
         with_task=True,
     )
+
+
+def test_presentation_protocol_subclass_fails_without_raw_context() -> None:
+    events: list[str] = []
+    model = ModelSpy(
+        events,
+        presentation_exception=ProviderProtocolSignalSubclass(),
+    )
+    service, _events, _model, runtime, _conversation, order, _artifact = _build(
+        model=model
+    )
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="noncanonical Presentation Provider signal",
+    ) as captured:
+        _run(service)
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "raw-customer-B-secret" not in repr(captured.value)
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert model.presentation_calls == 1
+    assert runtime.run_record.status is AgentRunStatus.FAILED
+    assert len(runtime.finalize_run_commands) == 1
+    _assert_failed_terminal_projection_is_empty(
+        runtime.finalize_run_commands[0]
+    )
+    _assert_no_response_rendered_or_run_stopped(runtime)
 
 
 def test_presentation_policy_rejection_never_reaches_renderer(
@@ -1844,3 +2251,14 @@ def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -
     assert service.after_revalidation_hook is not None
     assert "script" not in vars(service)
     assert "fixture" not in vars(service)
+
+
+def test_active_runtime_source_has_no_v1_or_source_version_fallback() -> None:
+    source = inspect.getsource(agent_run_service_module.AgentRunService)
+
+    assert "validate_and_reduce_initial_request(" not in source
+    assert "SaveRequestUnderstandingCommand(" not in source
+    assert ".create_initial_task_graph_if_current(" not in source
+    assert 'or "order-observation.p0.v1"' not in source
+    assert ".create_initial_task_graph_v2_if_current(" in source
+    assert "validate_and_reduce_initial_request_v2(" in source

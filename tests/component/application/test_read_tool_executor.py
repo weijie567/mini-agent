@@ -1,6 +1,8 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from uuid import UUID, uuid4
+from zoneinfo import TZPATH, ZoneInfo
 
 import pytest
 
@@ -37,6 +39,74 @@ from mini_agent.core.trace import TraceEvent, TraceEventType
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+class SourceVersionSubclass(str):
+    pass
+
+
+class StateKeySubclass(str):
+    pass
+
+
+class ArmedStateKeySubclass(str):
+    armed = False
+
+    def __hash__(self) -> int:
+        if self.armed:
+            raise RuntimeError("raw-customer-B-secret")
+        return str.__hash__(self)
+
+
+class ExplodingTzInfo(tzinfo):
+    def utcoffset(self, _value: datetime | None):
+        raise RuntimeError("raw-customer-B-secret")
+
+    def dst(self, _value: datetime | None):
+        return None
+
+    def tzname(self, _value: datetime | None):
+        return "exploding"
+
+
+class AlwaysUtcTzInfo(tzinfo):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def utcoffset(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def dst(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def tzname(self, _value: datetime | None):
+        self.reads += 1
+        return "raw-customer-B-secret"
+
+
+class FlipTzInfo(tzinfo):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def utcoffset(self, _value: datetime | None):
+        self.reads += 1
+        if self.reads <= 4:
+            return timedelta(0)
+        return timedelta(hours=8)
+
+    def dst(self, _value: datetime | None):
+        self.reads += 1
+        return timedelta(0)
+
+    def tzname(self, _value: datetime | None):
+        self.reads += 1
+        return "raw-customer-B-secret"
+
+
+class TimestampSubclass(datetime):
+    pass
 
 
 class RuntimeSpy:
@@ -261,6 +331,481 @@ def test_found_read_is_durably_fenced_once_then_observed() -> None:
     assert execution.observation is not None
     assert execution.observation.normalized_value.order_number == "O-1001"
     assert execution.observation.normalized_value == _summary()
+    assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
+
+
+def test_exact_builtin_named_utc_timezone_is_preserved() -> None:
+    named_utc = timezone(timedelta(0), "Z")
+    timestamp = datetime(2030, 1, 1, tzinfo=named_utc)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+
+    execution, runtime, order = asyncio.run(
+        _execute(
+            result=GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=summary,
+                source_version=SYNTHETIC_SOURCE_VERSION,
+            )
+        )
+    )
+
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert execution.get_order_outcome is GetOrderOutcome.FOUND
+    assert execution.observation is not None
+    assert (
+        object.__getattribute__(
+            execution.observation.normalized_value.ordered_at,
+            "tzinfo",
+        )
+        is named_utc
+    )
+    assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
+
+
+def test_exact_zoneinfo_utc_is_preserved() -> None:
+    zoneinfo_utc = ZoneInfo("UTC")
+    timestamp = datetime(2030, 1, 1, tzinfo=zoneinfo_utc)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+
+    execution, runtime, order = asyncio.run(
+        _execute(
+            result=GetOrderResult(
+                outcome=GetOrderOutcome.FOUND,
+                order_summary=summary,
+                source_version=SYNTHETIC_SOURCE_VERSION,
+            )
+        )
+    )
+
+    assert len(order.queries) == 1
+    assert len(runtime.observation_commands) == 1
+    assert execution.get_order_outcome is GetOrderOutcome.FOUND
+    assert execution.observation is not None
+    assert (
+        object.__getattribute__(
+            execution.observation.normalized_value.ordered_at,
+            "tzinfo",
+        )
+        is zoneinfo_utc
+    )
+    assert execution.observation.source_version == SYNTHETIC_SOURCE_VERSION
+
+
+def test_builtin_timezone_name_sidecar_fails_before_observation() -> None:
+    raw_timezone = timezone(
+        timedelta(0),
+        "raw-customer-B-secret",
+    )
+    timestamp = datetime(2030, 1, 1, tzinfo=raw_timezone)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+
+
+def test_zoneinfo_key_sidecar_fails_before_observation() -> None:
+    utc_tzif_path = next(
+        (
+            candidate
+            for root in TZPATH
+            if (candidate := Path(root) / "UTC").is_file()
+        ),
+        None,
+    )
+    assert utc_tzif_path is not None
+    with utc_tzif_path.open("rb") as utc_tzif:
+        raw_zone = ZoneInfo.from_file(
+            utc_tzif,
+            key="raw-customer-B-secret",
+        )
+    timestamp = datetime(2030, 1, 1, tzinfo=raw_zone)
+    summary = OrderSummaryProjection(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+
+
+@pytest.mark.parametrize(
+    "invalid_source_version",
+    [
+        None,
+        "",
+        " mock-order-source-version.p0.v1:sha256:"
+        + ("a" * 64),
+        "mock-order-source-version.p0.v1:sha256:" + ("A" * 64),
+        b"mock-order-source-version.p0.v1:sha256:" + (b"a" * 64),
+    ],
+)
+def test_found_with_unusable_source_version_fails_before_observation(
+    invalid_source_version: object,
+) -> None:
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=invalid_source_version,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.events == [
+        "tool_call_created",
+        "dispatch_fence",
+        "order_read",
+        "tool_call_finalized",
+    ]
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert execution.finalized_attempt is not None
+    assert (
+        execution.finalized_attempt.outcome
+        is ToolResultOutcome.SYSTEM_FAILURE
+    )
+    if invalid_source_version not in {None, ""}:
+        assert repr(invalid_source_version) not in str(execution)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "root_fields_set",
+        "root_legal_subset_fields_set",
+        "root_state_key_subclass",
+        "root_extra",
+        "root_private",
+        "summary_fields_set",
+        "line_private",
+        "source_version_subclass",
+    ],
+)
+def test_found_with_noncanonical_recursive_state_fails_closed(
+    corruption: str,
+) -> None:
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+    if corruption == "root_fields_set":
+        object.__setattr__(
+            candidate,
+            "__pydantic_fields_set__",
+            {"outcome", "raw-secret"},
+        )
+    elif corruption == "root_legal_subset_fields_set":
+        object.__setattr__(
+            candidate,
+            "__pydantic_fields_set__",
+            {"outcome"},
+        )
+    elif corruption == "root_state_key_subclass":
+        state = vars(candidate)
+        source_version = state.pop("source_version")
+        state[StateKeySubclass("source_version")] = source_version
+    elif corruption == "root_extra":
+        object.__setattr__(
+            candidate,
+            "__pydantic_extra__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "root_private":
+        object.__setattr__(
+            candidate,
+            "__pydantic_private__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "summary_fields_set":
+        object.__setattr__(
+            candidate.order_summary,
+            "__pydantic_fields_set__",
+            {"order_number", "raw-secret"},
+        )
+    elif corruption == "line_private":
+        object.__setattr__(
+            candidate.order_summary.line_items[0],
+            "__pydantic_private__",
+            {"raw-secret": "must-not-survive"},
+        )
+    elif corruption == "source_version_subclass":
+        candidate = GetOrderResult.model_construct(
+            outcome=GetOrderOutcome.FOUND,
+            order_summary=_summary(),
+            source_version=SourceVersionSubclass(
+                SYNTHETIC_SOURCE_VERSION
+            ),
+            failure_code=None,
+        )
+    else:
+        raise AssertionError("unsupported corruption")
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-secret" not in str(execution)
+    assert "must-not-survive" not in str(execution)
+
+
+def test_candidate_leaf_exception_becomes_raw_free_system_failure() -> None:
+    exploding_timestamp = datetime(
+        2030,
+        1,
+        1,
+        tzinfo=ExplodingTzInfo(),
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=exploding_timestamp,
+        status_updated_at=exploding_timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "ExplodingTzInfo" not in str(execution)
+
+
+def test_rebuild_exception_becomes_raw_free_system_failure() -> None:
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+    state = vars(candidate)
+    source_version = state.pop("source_version")
+    armed_key = ArmedStateKeySubclass("source_version")
+    state[armed_key] = source_version
+    armed_key.armed = True
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "ArmedStateKeySubclass" not in str(execution)
+
+
+@pytest.mark.parametrize("timezone_type", [AlwaysUtcTzInfo, FlipTzInfo])
+def test_custom_timezone_sidecar_fails_without_method_read(
+    timezone_type: type[tzinfo],
+) -> None:
+    custom_timezone = timezone_type()
+    timestamp = datetime(
+        2030,
+        1,
+        1,
+        tzinfo=custom_timezone,
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert custom_timezone.reads == 0
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert timezone_type.__name__ not in str(execution)
+
+
+def test_datetime_subclass_sidecar_fails_before_observation() -> None:
+    timestamp = TimestampSubclass(
+        2030,
+        1,
+        1,
+        tzinfo=UTC,
+    )
+    timestamp.hidden_raw = "raw-customer-B-secret"
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=timestamp,
+        status_updated_at=timestamp,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "TimestampSubclass" not in str(execution)
+
+
+@pytest.mark.parametrize("poisoned_field", ["outcome", "status"])
+def test_poisoned_get_order_enum_singleton_fails_before_observation(
+    poisoned_field: str,
+) -> None:
+    member = (
+        GetOrderOutcome.FOUND
+        if poisoned_field == "outcome"
+        else OrderStatus.SHIPPED
+    )
+    storage = object.__getattribute__(member, "__dict__")
+    original_items = tuple(
+        (key, dict.__getitem__(storage, key))
+        for key in dict.__iter__(storage)
+    )
+    object.__setattr__(
+        member,
+        "hidden_raw",
+        "raw-customer-B-secret",
+    )
+    summary = OrderSummaryProjection.model_construct(
+        order_number="O-1001",
+        status=OrderStatus.SHIPPED,
+        line_items=(OrderLineSummary(product_name="轻量跑鞋", quantity=1),),
+        ordered_at=NOW,
+        status_updated_at=NOW,
+    )
+    candidate = GetOrderResult.model_construct(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=summary,
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        failure_code=None,
+    )
+
+    try:
+        execution, runtime, order = asyncio.run(_execute(result=candidate))
+    finally:
+        dict.clear(storage)
+        for key, stored_value in original_items:
+            dict.__setitem__(storage, key, stored_value)
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
 
 
 @pytest.mark.parametrize(

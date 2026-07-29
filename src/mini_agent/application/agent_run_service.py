@@ -15,13 +15,14 @@ from mini_agent.application.deterministic_renderer import (
 )
 from mini_agent.application.ports import (
     ConversationRecordPort,
-    ModelProvider,
+    ModelProviderV2,
     ModelVisibleToolsetArtifactPort,
     RuntimeRecordPort,
 )
 from mini_agent.application.read_tool_executor import (
     ReadToolExecution,
     ReadToolExecutor,
+    _is_canonical_get_order_source_version,
 )
 from mini_agent.application.records import (
     AgentRunCommand,
@@ -30,7 +31,7 @@ from mini_agent.application.records import (
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    CreateInitialTaskGraphCommand,
+    CreateInitialTaskGraphV2Command,
     CreateRequestUnitCommand,
     CreateRunCommand,
     CreateRunTaskLinkCommand,
@@ -40,9 +41,10 @@ from mini_agent.application.records import (
     MessageDirection,
     MessageRecord,
     ProviderProtocolError,
+    RequestUnderstandingCandidateInvalidError,
     RunTaskLinkRecord,
     SaveInputBindingCommand,
-    SaveRequestUnderstandingCommand,
+    SaveRequestUnderstandingV2AcceptedCommand,
     TransitionRunCommand,
     TrustedOwnerScope,
 )
@@ -63,13 +65,16 @@ from mini_agent.core.presentation_policy import (
     validate_presentation_plan,
 )
 from mini_agent.core.request_processing import (
-    InitialRequestDecision,
-    RequestProcessingError,
-    revalidate_next_move,
-    validate_and_reduce_initial_request,
+    InitialRequestRoutableTaskGraphDecisionV2,
+    InitialTaskIdentityAllocationV2,
+    RequestUnderstandingV2Error,
+    revalidate_next_move_v2,
+    validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import RequestUnderstandingInput
 from mini_agent.core.task_state import (
+    RequestUnderstandingAggregateFailureCodeV2,
+    RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -183,7 +188,7 @@ class AgentRunService:
     def __init__(
         self,
         *,
-        model_provider: ModelProvider,
+        model_provider: ModelProviderV2,
         registry_snapshot: RegistrySnapshot,
         toolset_artifact_port: ModelVisibleToolsetArtifactPort,
         conversation_record_port: ConversationRecordPort,
@@ -349,6 +354,24 @@ class AgentRunService:
         )
         await self._conversation_record_port.save_conversation(conversation)
         await self._conversation_record_port.append_message(user_message)
+        authoritative_messages = (
+            await self._conversation_record_port.list_messages_for_owner(
+                owner_scope=owner_scope,
+                conversation_id=conversation.conversation_id,
+                limit=8,
+            )
+        )
+        if (
+            len(authoritative_messages) != 1
+            or type(authoritative_messages[0]) is not MessageRecord
+            or authoritative_messages[0] != user_message
+            or authoritative_messages[0].direction
+            is not MessageDirection.USER
+        ):
+            raise AgentRunExecutionError(
+                "authoritative current Message unavailable"
+            )
+        user_message = authoritative_messages[0]
 
         created_run = AgentRunRecord(
             run_id=self._uuid_factory(),
@@ -397,9 +420,10 @@ class AgentRunService:
             message_id=user_message.message_id,
         )
         request = RequestUnderstandingInput(
+            schema_version="e2e01-thin-v1",
             run_id=running_run.run_id,
             message_ref=user_message.message_id,
-            original_query=command.message,
+            original_query=user_message.content,
             provider_visible_tool_specs=(
                 resolved_artifact.provider_visible_tool_specs
             ),
@@ -411,83 +435,133 @@ class AgentRunService:
                 "Never provide trusted identity fields.",
             ),
         )
+        noncanonical_provider_signal = False
         try:
             output = await self._model_provider.propose_next_move(request)
-        except ProviderProtocolError:
-            return await self._finish_without_task(
-                running_run=running_run,
-                conversation=conversation,
-                stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
-                failure_state=failure_state,
-            )
+        except RequestUnderstandingCandidateInvalidError as error:
+            if type(error) is not RequestUnderstandingCandidateInvalidError:
+                noncanonical_provider_signal = True
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.INPUT_INVALID,
+                    failure_state=failure_state,
+                )
+        except ProviderProtocolError as error:
+            if type(error) is not ProviderProtocolError:
+                noncanonical_provider_signal = True
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+                    failure_state=failure_state,
+                )
+        if noncanonical_provider_signal:
+            raise AgentRunExecutionError("noncanonical Provider signal")
 
+        reduction_internal_error: str | None = None
         try:
-            decision = validate_and_reduce_initial_request(
+            reduced_at = self._clock()
+            decision = validate_and_reduce_initial_request_v2(
+                request_input=request,
                 output=output,
-                current_message_ref=user_message.message_id,
-                current_message=command.message,
+                authoritative_messages={
+                    message.message_id: message.content
+                    for message in authoritative_messages
+                },
                 customer_context=command.customer_context,
-                run_id=running_run.run_id,
-                accepted_delta_id=self._uuid_factory(),
-                task_id=self._uuid_factory(),
-                request_unit_id=self._uuid_factory(),
-                binding_id=self._uuid_factory(),
+                request_understanding_record_id=self._uuid_factory(),
+                candidate_identity_allocations=tuple(
+                    InitialTaskIdentityAllocationV2(
+                        candidate_ref=candidate.candidate_id,
+                        accepted_delta_id=self._uuid_factory(),
+                        task_id=self._uuid_factory(),
+                        request_unit_id=self._uuid_factory(),
+                        binding_id=self._uuid_factory(),
+                    )
+                    for candidate in output.task_delta_candidates
+                ),
                 next_move_candidate_ref=self._uuid_factory(),
-                now=self._clock(),
+                now=reduced_at,
             )
-        except RequestProcessingError:
-            return await self._finish_without_task(
-                running_run=running_run,
-                conversation=conversation,
-                stop_reason=StopReason.INPUT_INVALID,
-                failure_state=failure_state,
+        except RequestUnderstandingV2Error as error:
+            if (
+                type(error) is not RequestUnderstandingV2Error
+                or type(error.reason_code)
+                is RequestUnderstandingAtomicFailureCodeV2
+            ):
+                reduction_internal_error = (
+                    "Request Understanding internal failure"
+                )
+            elif (
+                type(error.reason_code)
+                is not RequestUnderstandingAggregateFailureCodeV2
+            ):
+                reduction_internal_error = (
+                    "Request Understanding failure category unavailable"
+                )
+            else:
+                return await self._finish_without_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    stop_reason=StopReason.INPUT_INVALID,
+                    failure_state=failure_state,
+                )
+        if reduction_internal_error is not None:
+            raise AgentRunExecutionError(reduction_internal_error)
+        if type(decision) is not InitialRequestRoutableTaskGraphDecisionV2:
+            raise AgentRunExecutionError(
+                "scoped Request Understanding outcome is not routable"
             )
+        task_graph = decision.task_graph
+        task = task_graph.task
+        request_unit = task_graph.request_unit
+        input_binding = task_graph.input_binding
 
         initial_run_task_link = RunTaskLinkRecord(
             schema_version=_RUN_TASK_LINK_SCHEMA_VERSION,
             run_id=running_run.run_id,
-            task_id=decision.task.task_id,
+            task_id=task.task_id,
             base_task_state_version=None,
         )
-        initial_graph = CreateInitialTaskGraphCommand(
+        initial_graph = CreateInitialTaskGraphV2Command(
             owner_scope=owner_scope,
             expected_conversation_record=conversation,
-            expected_message_record=user_message,
+            expected_message_records=authoritative_messages,
             expected_active_run_record=running_run,
-            request_understanding=SaveRequestUnderstandingCommand(
-                record=decision.request_understanding,
-                accepted_deltas=(decision.accepted_delta,),
+            request_understanding=SaveRequestUnderstandingV2AcceptedCommand(
+                record=decision.closure.record,
+                accepted_delta=task_graph.accepted_delta,
             ),
-            initial_task=CreateTaskCommand(initial_record=decision.task),
+            initial_task=CreateTaskCommand(initial_record=task),
             initial_request_unit=CreateRequestUnitCommand(
-                initial_record=decision.request_unit
+                initial_record=request_unit
             ),
-            input_bindings=(
-                SaveInputBindingCommand(
-                    record=decision.input_binding,
-                    request_unit_id=decision.request_unit.request_unit_id,
-                ),
+            input_binding=SaveInputBindingCommand(
+                record=input_binding,
+                request_unit_id=request_unit.request_unit_id,
             ),
             conversation_task_link=ConversationTaskLinkRecord(
                 schema_version=_CONVERSATION_TASK_LINK_SCHEMA_VERSION,
                 conversation_id=conversation.conversation_id,
-                task_id=decision.task.task_id,
+                task_id=task.task_id,
                 link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
-                linked_at=self._clock(),
+                linked_at=reduced_at,
             ),
             run_task_link=CreateRunTaskLinkCommand(
                 active_record=initial_run_task_link
             ),
         )
         graph_result = (
-            await self._runtime_record_port.create_initial_task_graph_if_current(
-                initial_graph
-            )
+            await self._runtime_record_port
+            .create_initial_task_graph_v2_if_current(initial_graph)
         )
         if graph_result is not ConditionalWriteResult.APPLIED:
             raise AgentRunExecutionError("initial Task graph conflict")
         failure_state.active_link = initial_run_task_link
-        failure_state.result_task = decision.task
+        failure_state.result_task = task
 
         await self._append_initial_decision_trace(
             run_id=running_run.run_id,
@@ -495,17 +569,17 @@ class AgentRunService:
             context_manifest_id=first_manifest.context_manifest_id,
             decision=decision,
         )
-        revalidated_move = revalidate_next_move(
+        revalidated_move = revalidate_next_move_v2(
             decision=decision,
-            current_task=decision.task,
-            current_request_unit=decision.request_unit,
-            current_input_binding=decision.input_binding,
+            current_task=task,
+            current_request_unit=request_unit,
+            current_input_binding=input_binding,
         )
         await self._append_trace(
             event_type=TraceEventType.NEXT_MOVE_REVALIDATED,
             run_id=running_run.run_id,
-            task_id=decision.task.task_id,
-            request_unit_id=decision.request_unit.request_unit_id,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
             model_call_id=first_model_call_id,
             requested_tool_name=(
                 revalidated_move.requested_provider_tool_name
@@ -521,19 +595,19 @@ class AgentRunService:
 
         hook_result = self._after_revalidation_hook(
             running_run.run_id,
-            decision.task,
-            decision.request_unit,
+            task,
+            request_unit,
         )
         if inspect.isawaitable(hook_result):
             await hook_result
         current_task = await self._runtime_record_port.load_task_for_owner(
             owner_scope=owner_scope,
-            task_id=decision.task.task_id,
+            task_id=task.task_id,
         )
         current_unit = (
             await self._runtime_record_port.load_request_unit_for_owner(
                 owner_scope=owner_scope,
-                request_unit_id=decision.request_unit.request_unit_id,
+                request_unit_id=request_unit.request_unit_id,
             )
         )
         if current_task is None or current_unit is None:
@@ -545,7 +619,7 @@ class AgentRunService:
             customer_context=command.customer_context,
             current_task=current_task,
             current_request_unit=current_unit,
-            current_input_binding=decision.input_binding,
+            current_input_binding=input_binding,
             registry_snapshot=self._registry_snapshot,
             context_manifest=first_manifest,
             gate_decision_id=self._uuid_factory(),
@@ -595,7 +669,7 @@ class AgentRunService:
             gate_decision_id=gate.gate_decision_id,
             canonical_tool_name="get_order",
             validated_arguments={
-                "order_id": decision.input_binding.normalized_value
+                "order_id": input_binding.normalized_value
             },
             argument_binding_refs=gate.argument_binding_refs,
             validated_task_state_version=gate.validated_task_state_version,
@@ -658,11 +732,26 @@ class AgentRunService:
             )
 
         observation = execution.observation
-        if observation is None:
-            raise AgentRunExecutionError("FOUND read missing Observation")
+        if observation is None or not (
+            _is_canonical_get_order_source_version(
+                observation.source_version
+            )
+        ):
+            return await self._finish_with_task(
+                running_run=running_run,
+                conversation=conversation,
+                current_task=current_task,
+                current_unit=current_unit,
+                active_link=initial_run_task_link,
+                stop_reason=StopReason.ORDER_SERVICE_UNAVAILABLE,
+                target_status=TaskStatus.BLOCKED,
+                reason_ref=self._uuid_factory(),
+                failure_state=failure_state,
+            )
         await self._append_trace(
             event_type=TraceEventType.OBSERVATION_RECORDED,
             run_id=running_run.run_id,
+            occurred_at=observation.recorded_at,
             task_id=current_task.task_id,
             request_unit_id=current_unit.request_unit_id,
             tool_call_id=execution.terminal_tool_call.tool_call_id,
@@ -677,12 +766,10 @@ class AgentRunService:
             task=current_task,
             observation_ref=VersionedRecordRef(
                 record_ref=observation.observation_id,
-                version=(
-                    observation.source_version
-                    or "order-observation.p0.v1"
-                ),
+                version=observation.source_version,
             ),
         )
+        noncanonical_presentation_signal = False
         try:
             plan = await self._model_provider.plan_presentation(
                 PresentationInput(
@@ -690,18 +777,25 @@ class AgentRunService:
                     order_summary=observation.normalized_value,
                 )
             )
-        except ProviderProtocolError:
-            return await self._finish_with_task(
-                running_run=running_run,
-                conversation=conversation,
-                current_task=current_task,
-                current_unit=current_unit,
-                active_link=initial_run_task_link,
-                stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
-                target_status=TaskStatus.BLOCKED,
-                reason_ref=self._uuid_factory(),
-                observation_ref=observation.observation_id,
-                failure_state=failure_state,
+        except ProviderProtocolError as error:
+            if type(error) is not ProviderProtocolError:
+                noncanonical_presentation_signal = True
+            else:
+                return await self._finish_with_task(
+                    running_run=running_run,
+                    conversation=conversation,
+                    current_task=current_task,
+                    current_unit=current_unit,
+                    active_link=initial_run_task_link,
+                    stop_reason=StopReason.PROVIDER_PROTOCOL_ERROR,
+                    target_status=TaskStatus.BLOCKED,
+                    reason_ref=self._uuid_factory(),
+                    observation_ref=observation.observation_id,
+                    failure_state=failure_state,
+                )
+        if noncanonical_presentation_signal:
+            raise AgentRunExecutionError(
+                "noncanonical Presentation Provider signal"
             )
 
         presentation_plan_ref = self._uuid_factory()
@@ -875,12 +969,14 @@ class AgentRunService:
         run_id: UUID,
         model_call_id: UUID,
         context_manifest_id: UUID,
-        decision: InitialRequestDecision,
+        decision: InitialRequestRoutableTaskGraphDecisionV2,
     ) -> None:
+        record = decision.closure.record
+        graph = decision.task_graph
         await self._append_trace(
             event_type=TraceEventType.NEXT_MOVE_PROPOSED,
             run_id=run_id,
-            message_ref=decision.request_understanding.message_ref,
+            message_ref=record.message_ref,
             model_call_id=model_call_id,
             context_manifest_id=context_manifest_id,
             next_move_kind=decision.next_move_candidate.kind.value,
@@ -894,29 +990,29 @@ class AgentRunService:
         await self._append_trace(
             event_type=TraceEventType.TASK_DELTA_VALIDATED,
             run_id=run_id,
-            message_ref=decision.request_understanding.message_ref,
-            accepted_delta_ref=decision.accepted_delta.accepted_delta_id,
+            message_ref=record.message_ref,
+            accepted_delta_ref=graph.accepted_delta.accepted_delta_id,
         )
         await self._append_trace(
             event_type=TraceEventType.TASK_DELTA_ACCEPTED,
             run_id=run_id,
-            message_ref=decision.request_understanding.message_ref,
-            accepted_delta_ref=decision.accepted_delta.accepted_delta_id,
-            task_id=decision.task.task_id,
-            request_unit_id=decision.request_unit.request_unit_id,
+            message_ref=record.message_ref,
+            accepted_delta_ref=graph.accepted_delta.accepted_delta_id,
+            task_id=graph.task.task_id,
+            request_unit_id=graph.request_unit.request_unit_id,
         )
         await self._append_trace(
             event_type=TraceEventType.INPUT_BINDING_RECORDED,
             run_id=run_id,
-            task_id=decision.task.task_id,
-            request_unit_id=decision.request_unit.request_unit_id,
-            input_binding_ref=decision.input_binding.binding_id,
+            task_id=graph.task.task_id,
+            request_unit_id=graph.request_unit.request_unit_id,
+            input_binding_ref=graph.input_binding.binding_id,
         )
         await self._append_trace(
             event_type=TraceEventType.TASK_STATE_CHANGED,
             run_id=run_id,
-            task_id=decision.task.task_id,
-            request_unit_id=decision.request_unit.request_unit_id,
+            task_id=graph.task.task_id,
+            request_unit_id=graph.request_unit.request_unit_id,
         )
 
     async def _append_tool_trace(self, execution: ReadToolExecution) -> None:
