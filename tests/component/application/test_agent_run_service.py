@@ -388,13 +388,6 @@ class RuntimeSpy:
             self.request_unit_history.append(self.request_unit)
         return self.graph_result
 
-    async def create_initial_task_graph_if_current(
-        self,
-        command: object,
-    ) -> ConditionalWriteResult:
-        del command
-        raise AssertionError("active Runtime must not call the v1 writer")
-
     async def apply_task_transition_if_current(
         self,
         command: object,
