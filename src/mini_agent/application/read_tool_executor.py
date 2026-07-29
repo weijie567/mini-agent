@@ -101,6 +101,7 @@ def _has_exact_declared_model_state(
     return (
         type(state) is dict
         and set(state) == declared_fields
+        and all(type(field_name) is str for field_name in state)
         and type(fields_set) is set
         and all(type(field_name) is str for field_name in fields_set)
         and required_fields <= fields_set <= declared_fields
@@ -117,6 +118,8 @@ def _exact_recursive_value_matches(left: object, right: object) -> bool:
         if (
             not _has_exact_declared_model_state(left, model_type)
             or not _has_exact_declared_model_state(right, model_type)
+            or left.__pydantic_fields_set__
+            != right.__pydantic_fields_set__
         ):
             return False
         return all(
@@ -174,6 +177,7 @@ def _canonical_get_order_result(
         payload = value.model_dump(
             mode="python",
             round_trip=True,
+            exclude_unset=True,
             warnings="error",
         )
         rebuilt = GetOrderResult.model_validate(payload, strict=True)

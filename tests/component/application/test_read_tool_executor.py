@@ -43,6 +43,10 @@ class SourceVersionSubclass(str):
     pass
 
 
+class StateKeySubclass(str):
+    pass
+
+
 class RuntimeSpy:
     def __init__(
         self,
@@ -319,6 +323,8 @@ def test_found_with_unusable_source_version_fails_before_observation(
     "corruption",
     [
         "root_fields_set",
+        "root_legal_subset_fields_set",
+        "root_state_key_subclass",
         "root_extra",
         "root_private",
         "summary_fields_set",
@@ -340,6 +346,16 @@ def test_found_with_noncanonical_recursive_state_fails_closed(
             "__pydantic_fields_set__",
             {"outcome", "raw-secret"},
         )
+    elif corruption == "root_legal_subset_fields_set":
+        object.__setattr__(
+            candidate,
+            "__pydantic_fields_set__",
+            {"outcome"},
+        )
+    elif corruption == "root_state_key_subclass":
+        state = vars(candidate)
+        source_version = state.pop("source_version")
+        state[StateKeySubclass("source_version")] = source_version
     elif corruption == "root_extra":
         object.__setattr__(
             candidate,
