@@ -2251,3 +2251,106 @@ def test_v2_decision_closure_rejects_parent_child_clock_drift() -> None:
             record=drifted_record,
             accepted_task_deltas=result.closure.accepted_task_deltas,
         )
+
+
+def test_v2_builder_discards_semantic_projection_validation_context() -> None:
+    marker = "LEAK-MARKER-WRONG-GOAL"
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    message = "请查询订单 O-4242"
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _output_v2(
+        message_ref=message_ref,
+        candidates=(
+            _task_delta_v2(
+                candidate_id=candidate_id,
+                message_ref=message_ref,
+                order_id="O-4242",
+                source_quote="订单 O-4242",
+            ),
+        ),
+    )
+    child = _accepted_delta_v2(
+        candidate_ref=candidate_id,
+        message_ref=message_ref,
+        goal_text=marker,
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: message},
+            candidate_validation=(_validation_v2(candidate_id, accept=True),),
+            accepted_task_deltas=(child,),
+            validated_task_state_version=1,
+            next_move_candidate_ref=uuid4(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
+
+
+def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() -> None:
+    message_ref = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    result = _reduce_initial_v2(
+        message="比较订单 O-4242 与订单 O-4343",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=first_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+                _task_delta_v2(
+                    candidate_id=second_id,
+                    message_ref=message_ref,
+                    order_id="O-4343",
+                    source_quote="订单 O-4343",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestUnroutedTaskGraphsDecisionV2
+    first_graph, second_graph = result.task_graphs
+    child_values = second_graph.accepted_delta.model_dump(mode="python")
+    child_values["task_id"] = first_graph.task.task_id
+    forked_child = AcceptedTaskDeltaV2(**child_values)
+    task_values = second_graph.task.model_dump(mode="python")
+    task_values["task_id"] = first_graph.task.task_id
+    forked_task = type(second_graph.task)(**task_values)
+    unit_values = second_graph.request_unit.model_dump(mode="python")
+    unit_values["task_id"] = first_graph.task.task_id
+    forked_unit = type(second_graph.request_unit)(**unit_values)
+    forked_graph = InitialAcceptedTaskGraphV2(
+        accepted_delta=forked_child,
+        input_binding=second_graph.input_binding,
+        task=forked_task,
+        request_unit=forked_unit,
+    )
+    forked_closure = RequestUnderstandingClosureV2(
+        record=result.closure.record,
+        accepted_task_deltas=(
+            first_graph.accepted_delta,
+            forked_child,
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="globally unique"):
+        InitialRequestUnroutedTaskGraphsDecisionV2(
+            closure=forked_closure,
+            task_graphs=(first_graph, forked_graph),
+        )
