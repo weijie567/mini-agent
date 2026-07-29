@@ -2454,6 +2454,59 @@ def test_v2_routable_decision_rejects_nested_scalar_subclasses() -> None:
             )
 
 
+def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> None:
+    class StrSubclass(str):
+        pass
+
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    poisoned_fields_set = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_fields_set,
+        "__pydantic_fields_set__",
+        tuple(poisoned_fields_set.model_fields_set),
+    )
+
+    poisoned_json_leaf = result.model_copy(deep=True)
+    original_arguments = poisoned_json_leaf.next_move_candidate.arguments
+    poisoned_arguments = tuple.__new__(
+        type(original_arguments),
+        (
+            (
+                "order_id",
+                StrSubclass(original_arguments["order_id"]),
+            ),
+        ),
+    )
+    poisoned_json_leaf.next_move_candidate.__dict__["arguments"] = (
+        poisoned_arguments
+    )
+
+    for poisoned in (poisoned_fields_set, poisoned_json_leaf):
+        with pytest.raises(RequestProcessingError, match="canonical"):
+            revalidate_next_move_v2(
+                decision=poisoned,
+                current_task=poisoned.task_graph.task,
+                current_request_unit=poisoned.task_graph.request_unit,
+                current_input_binding=poisoned.task_graph.input_binding,
+            )
+
+
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
     message_ref = uuid4()
     accepted_id = uuid4()
