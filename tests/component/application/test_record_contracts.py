@@ -1075,6 +1075,7 @@ def _initial_v2_graph_exact_run_evidence(
     *,
     candidate_value: str = "o-1001",
     binding_value: str = "O-1001",
+    include_extra_binding_source: bool = False,
 ) -> ExactRunEvidenceClosure:
     graph = _initial_v2_graph()
     record = graph.request_understanding.record
@@ -1094,6 +1095,14 @@ def _initial_v2_graph_exact_run_evidence(
     projected_binding = _rebuild(
         graph.input_binding.record,
         normalized_value=binding_value,
+        source_refs=(
+            (
+                *graph.input_binding.record.source_refs,
+                graph.expected_message_records[0].message_id,
+            )
+            if include_extra_binding_source
+            else graph.input_binding.record.source_refs
+        ),
     )
     return ExactRunEvidenceClosure(
         conversation_record=graph.expected_conversation_record,
@@ -5889,7 +5898,29 @@ def test_exact_run_evidence_rejects_invalid_candidate_without_raw_value() -> Non
     ) as exc_info:
         _initial_v2_graph_exact_run_evidence(candidate_value=raw_value)
 
-    assert raw_value not in str(exc_info.value)
+    error = exc_info.value
+    projections = (
+        str(error),
+        repr(error),
+        error.json(include_url=False),
+        repr(error.errors(include_url=False)),
+        repr(error.__cause__),
+        repr(error.__context__),
+    )
+    assert all(raw_value not in projection for projection in projections)
+    assert error.errors(include_url=False)[0]["input"] is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_exact_run_evidence_rejects_extra_candidate_binding_source() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="accepted child bindings must preserve validated input values",
+    ):
+        _initial_v2_graph_exact_run_evidence(
+            include_extra_binding_source=True,
+        )
 
 
 def test_exact_run_evidence_rejects_missing_extra_foreign_or_eval_graph_rows() -> None:
