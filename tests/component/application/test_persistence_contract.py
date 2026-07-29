@@ -2987,7 +2987,7 @@ def test_ru_v2_source_collection_duplicates_fail_but_reference_duplicates_collap
     )
 
 
-def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
+def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     codec_owner_files = {
         "src/mini_agent/application/persistence.py",
@@ -2998,20 +2998,268 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         "tests/integration/test_database_migrations.py",
     }
     versioned_encode_dependency_files = {
+        "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
+        "tests/integration/test_postgres_v2_request_understanding_writes.py",
     }
     versioned_decode_dependency_files = {
         "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
     }
 
+    def folded_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = folded_string(node.left)
+            right = folded_string(node.right)
+            return left + right if left is not None and right is not None else None
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for value in node.values:
+                if isinstance(value, ast.FormattedValue):
+                    part = folded_string(value.value)
+                else:
+                    part = folded_string(value)
+                if part is None:
+                    return None
+                parts.append(part)
+            return "".join(parts)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], (ast.List, ast.Tuple))
+        ):
+            separator = folded_string(node.func.value)
+            parts = tuple(folded_string(item) for item in node.args[0].elts)
+            if separator is not None and all(part is not None for part in parts):
+                return separator.join(
+                    part for part in parts if part is not None
+                )
+        return None
+
+    def imports_from_persistence(node: ast.ImportFrom) -> bool:
+        return (
+            node.module == "mini_agent.application.persistence"
+            or (
+                node.level > 0
+                and node.module is not None
+                and node.module.split(".")[-1] == "persistence"
+            )
+        )
+
     def files_referencing(*symbols: str) -> set[str]:
-        return {
-            path.relative_to(repository_root).as_posix()
-            for root in ("src", "tests")
-            for path in (repository_root / root).rglob("*.py")
-            if any(symbol in path.read_text() for symbol in symbols)
-        }
+        # This inventories bounded static dependency syntax. It is not a
+        # Python reflection sandbox or arbitrary cross-module data-flow proof.
+        symbol_set = frozenset(symbols)
+        is_versioned_codec_query = bool(
+            symbol_set
+            & {
+                "decode_persistence_record_versioned",
+                "encode_persistence_record_versioned",
+            }
+        )
+        matches: set[str] = set()
+        for root in ("src", "tests"):
+            for path in (repository_root / root).rglob("*.py"):
+                source = path.read_text()
+                tree = ast.parse(source)
+                relative_path = path.relative_to(repository_root).as_posix()
+                parent_by_node = {
+                    child: parent
+                    for parent in ast.walk(tree)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                module_bindings: set[str] = set()
+                sys_bindings: set[str] = set()
+                sys_modules_bindings: set[str] = set()
+                module_import_without_alias = False
+                persistence_reflective_import = False
+                persistence_star_import = False
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for imported in node.names:
+                            if (
+                                imported.name
+                                == "mini_agent.application.persistence"
+                            ):
+                                if imported.asname is None:
+                                    module_import_without_alias = True
+                                else:
+                                    module_bindings.add(imported.asname)
+                            elif imported.name == "sys":
+                                sys_bindings.add(imported.asname or "sys")
+                    elif isinstance(node, ast.ImportFrom):
+                        for imported in node.names:
+                            imports_persistence = imports_from_persistence(node)
+                            if (
+                                imported.name == "*"
+                                and imports_persistence
+                            ):
+                                persistence_star_import = True
+                            elif (
+                                imported.name.startswith("__")
+                                and imports_persistence
+                            ):
+                                persistence_reflective_import = True
+                            if imported.name == "sys":
+                                sys_bindings.add(
+                                    imported.asname or imported.name
+                                )
+                            elif (
+                                node.module == "sys"
+                                and imported.name == "modules"
+                            ):
+                                sys_modules_bindings.add(
+                                    imported.asname or imported.name
+                                )
+                            if (
+                                imported.name == "persistence"
+                                and (
+                                    node.module == "mini_agent.application"
+                                    or (
+                                        node.level > 0
+                                        and (
+                                            node.module is None
+                                            or node.module.split(".")[-1]
+                                            == "application"
+                                        )
+                                    )
+                                )
+                            ):
+                                module_bindings.add(
+                                    imported.asname or imported.name
+                                )
+
+                legacy_monkeypatch_calls = [
+                    node
+                    for node in ast.walk(tree)
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "monkeypatch"
+                        and node.func.attr == "setattr"
+                        and len(node.args) == 3
+                        and isinstance(node.args[0], ast.Name)
+                        and node.args[0].id in module_bindings
+                        and isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value
+                        in {
+                            "decode_persistence_record",
+                            "encode_persistence_record",
+                        }
+                        and isinstance(node.args[2], ast.Name)
+                        and node.args[2].id == "forbidden"
+                        and not node.keywords
+                    )
+                ]
+                exact_legacy_monkeypatch_calls = (
+                    relative_path
+                    == (
+                        "tests/integration/"
+                        "test_postgres_v2_request_understanding_writes.py"
+                    )
+                    and len(legacy_monkeypatch_calls) == 2
+                    and {
+                        call.args[1].value
+                        for call in legacy_monkeypatch_calls
+                    }
+                    == {
+                        "decode_persistence_record",
+                        "encode_persistence_record",
+                    }
+                )
+
+                def is_allowed_legacy_monkeypatch_reference(
+                    node: ast.Name,
+                ) -> bool:
+                    parent = parent_by_node[node]
+                    return (
+                        exact_legacy_monkeypatch_calls
+                        and isinstance(parent, ast.Call)
+                        and parent in legacy_monkeypatch_calls
+                        and parent.args[0] is node
+                    )
+
+                dynamic_module_lookup = (
+                    module_import_without_alias
+                    or persistence_reflective_import
+                    or persistence_star_import
+                    or any(
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in module_bindings
+                        and not is_allowed_legacy_monkeypatch_reference(node)
+                        for node in ast.walk(tree)
+                    )
+                )
+                unsafe_sys_module_use = any(
+                    (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in sys_bindings
+                        and not (
+                            isinstance(parent_by_node[node], ast.Attribute)
+                            and parent_by_node[node].value is node
+                            and parent_by_node[node].attr == "path"
+                        )
+                    )
+                    or (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in sys_modules_bindings
+                    )
+                    for node in ast.walk(tree)
+                )
+                dynamic_import_surface = any(
+                    (
+                        isinstance(node, ast.Import)
+                        and any(
+                            imported.name.split(".", maxsplit=1)[0]
+                            in {"builtins", "importlib"}
+                            for imported in node.names
+                        )
+                    )
+                    or (
+                        isinstance(node, ast.ImportFrom)
+                        and node.module is not None
+                        and node.module.split(".", maxsplit=1)[0]
+                        in {"builtins", "importlib"}
+                    )
+                    or (
+                        isinstance(node, ast.Name)
+                        and node.id
+                        in {
+                            "__builtins__",
+                            "__import__",
+                            "compile",
+                            "eval",
+                            "exec",
+                        }
+                    )
+                    or (
+                        isinstance(node, ast.Attribute)
+                        and node.attr == "import_module"
+                    )
+                    for node in ast.walk(tree)
+                ) or unsafe_sys_module_use
+                if (
+                    any(symbol in source for symbol in symbol_set)
+                    or any(
+                        folded_string(node) in symbol_set
+                        for node in ast.walk(tree)
+                    )
+                    or (
+                        is_versioned_codec_query
+                        and (dynamic_module_lookup or dynamic_import_surface)
+                    )
+                ):
+                    matches.add(path.relative_to(repository_root).as_posix())
+        return matches
 
     exact_reader_owner_files = {
         "src/mini_agent/application/ports.py",
@@ -3024,6 +3272,7 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         "src/mini_agent/evaluation/harness.py",
         "tests/component/evaluation/test_e2e01_artifact_consistency.py",
         "tests/integration/evaluation/test_e2e01_offline_harness.py",
+        "tests/integration/test_postgres_v2_request_understanding_writes.py",
     }
     exact_reader_matches = files_referencing(
         "ExactRunEvidencePort",
@@ -3066,6 +3315,223 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         for parent in ast.walk(postgres_tree)
         for child in ast.iter_child_nodes(parent)
     }
+    versioned_codec_symbols = frozenset(
+        {
+            "encode_persistence_record_versioned",
+            "decode_persistence_record_versioned",
+        }
+    )
+    persistence_module_object_imports = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(
+                imported.name == "mini_agent"
+                or imported.name.startswith("mini_agent.application")
+                for imported in node.names
+            )
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and any(
+                (
+                    node.module == "mini_agent"
+                    and imported.name == "application"
+                )
+                or (
+                    node.module == "mini_agent.application"
+                    and imported.name == "persistence"
+                )
+                or (
+                    imports_from_persistence(node)
+                    and (
+                        imported.name == "*"
+                        or imported.name.startswith("__")
+                    )
+                )
+                or (
+                    node.level > 0
+                    and imported.name == "persistence"
+                    and (
+                        node.module is None
+                        or node.module.split(".")[-1] == "application"
+                    )
+                )
+                or (
+                    node.level > 0
+                    and imported.name == "application"
+                    and (
+                        node.module is None
+                        or node.module.split(".")[-1] == "mini_agent"
+                    )
+                )
+                for imported in node.names
+            )
+        )
+    ]
+    dynamic_imports = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(
+                imported.name.split(".", maxsplit=1)[0]
+                in {"builtins", "importlib", "sys"}
+                for imported in node.names
+            )
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and (
+                (
+                    node.module is not None
+                    and node.module.split(".", maxsplit=1)[0]
+                    in {"builtins", "importlib", "inspect", "sys"}
+                )
+                or any(imported.name == "sys" for imported in node.names)
+            )
+        )
+    ]
+    dynamic_namespace_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if (
+            isinstance(node, ast.Name)
+            and node.id
+            in {
+                "__builtins__",
+                "__import__",
+                "compile",
+                "eval",
+                "exec",
+                "globals",
+                "locals",
+                "vars",
+            }
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr
+            in {
+                "__dict__",
+                "__getattr__",
+                "__getattribute__",
+                "__globals__",
+                "sys",
+            }
+        )
+    ]
+    allowed_getattr_fields = frozenset(
+        {
+            "attempt_count",
+            "started_at",
+            "state_version",
+            "status",
+        }
+    )
+    unsafe_getattr_calls = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and not (
+            len(node.args) in {2, 3}
+            and not node.keywords
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in {"record", "row"}
+            and (
+                (
+                    isinstance(node.args[1], ast.Name)
+                    and node.args[1].id == "field_name"
+                )
+                or (
+                    isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in allowed_getattr_fields
+                )
+            )
+        )
+    ]
+    constructed_codec_symbols = [
+        node
+        for node in ast.walk(postgres_tree)
+        if folded_string(node) in versioned_codec_symbols
+    ]
+    shadowing_bindings: list[ast.AST] = []
+    for node in ast.walk(postgres_tree):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif isinstance(node, ast.arg) and node.arg in versioned_codec_symbols:
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.alias)
+            and node.asname in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.alias)
+            and node.name in versioned_codec_symbols
+            and not (
+                isinstance(parent_by_node[node], ast.ImportFrom)
+                and parent_by_node[node].module
+                == "mini_agent.application.persistence"
+                and node.asname is None
+            )
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.ExceptHandler)
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, (ast.MatchAs, ast.MatchStar))
+            and node.name in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+        elif (
+            isinstance(node, ast.MatchMapping)
+            and node.rest in versioned_codec_symbols
+        ):
+            shadowing_bindings.append(node)
+
+    assert not persistence_module_object_imports
+    assert not dynamic_imports
+    assert not dynamic_namespace_references
+    assert not unsafe_getattr_calls
+    assert not constructed_codec_symbols
+    assert not shadowing_bindings
+
+    encoder_imports = [
+        imported
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "mini_agent.application.persistence"
+        for imported in node.names
+        if imported.name == "encode_persistence_record_versioned"
+    ]
+    encoder_name_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "encode_persistence_record_versioned"
+    ]
+    encoder_attribute_references = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "encode_persistence_record_versioned"
+    ]
     decoder_imports = [
         imported
         for node in ast.walk(postgres_tree)
@@ -3100,6 +3566,68 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
         )
     ]
     postgres_rel = postgres_path.relative_to(repository_root).as_posix()
+    if postgres_rel in versioned_encode_matches:
+        assert len(encoder_imports) == 1
+        assert encoder_imports[0].asname is None
+        assert encoder_name_references
+        assert not encoder_attribute_references
+        for reference in encoder_name_references:
+            call = parent_by_node[reference]
+            assert isinstance(call, ast.Call) and call.func is reference
+
+            direct_method_child: ast.AST = call
+            enclosing_function: ast.AST | None = parent_by_node.get(call)
+            while enclosing_function is not None and not isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                assert not isinstance(
+                    enclosing_function,
+                    (
+                        ast.ClassDef,
+                        ast.DictComp,
+                        ast.GeneratorExp,
+                        ast.Lambda,
+                        ast.ListComp,
+                        ast.SetComp,
+                    ),
+                )
+                direct_method_child = enclosing_function
+                enclosing_function = parent_by_node.get(enclosing_function)
+            assert isinstance(
+                enclosing_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+            assert direct_method_child in enclosing_function.body
+            assert not any(
+                isinstance(descendant, (ast.Yield, ast.YieldFrom))
+                for descendant in ast.walk(enclosing_function)
+            )
+            assert enclosing_function.name == "_ru_v2_write_encode"
+
+            enclosing_class: ast.AST | None = enclosing_function
+            while enclosing_class is not None and not isinstance(
+                enclosing_class,
+                ast.ClassDef,
+            ):
+                enclosing_class = parent_by_node.get(enclosing_class)
+            assert isinstance(enclosing_class, ast.ClassDef)
+            assert enclosing_class.name == "PostgresRecordAdapter"
+            assert parent_by_node[enclosing_function] is enclosing_class
+        encoder_methods = [
+            node
+            for node in ast.walk(postgres_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_ru_v2_write_encode"
+            and isinstance(parent_by_node[node], ast.ClassDef)
+            and parent_by_node[node].name == "PostgresRecordAdapter"
+        ]
+        assert len(encoder_methods) == 1
+    else:
+        assert not encoder_imports
+        assert not encoder_name_references
+        assert not encoder_attribute_references
+
     if postgres_rel in versioned_decode_matches:
         assert len(decoder_imports) == 1
         assert decoder_imports[0].asname is None
@@ -3110,17 +3638,38 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
             call = parent_by_node[reference]
             assert isinstance(call, ast.Call) and call.func is reference
 
-            enclosing_function: ast.AST | None = call
+            direct_method_child = call
+            enclosing_function = parent_by_node.get(call)
             while enclosing_function is not None and not isinstance(
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             ):
+                assert not isinstance(
+                    enclosing_function,
+                    (
+                        ast.ClassDef,
+                        ast.DictComp,
+                        ast.GeneratorExp,
+                        ast.Lambda,
+                        ast.ListComp,
+                        ast.SetComp,
+                    ),
+                )
+                direct_method_child = enclosing_function
                 enclosing_function = parent_by_node.get(enclosing_function)
             assert isinstance(
                 enclosing_function,
                 (ast.FunctionDef, ast.AsyncFunctionDef),
             )
-            assert enclosing_function.name == exact_reader_method_name
+            assert direct_method_child in enclosing_function.body
+            assert not any(
+                isinstance(descendant, (ast.Yield, ast.YieldFrom))
+                for descendant in ast.walk(enclosing_function)
+            )
+            assert (
+                enclosing_function.name == exact_reader_method_name
+                or enclosing_function.name.startswith("_ru_v2_write_")
+            )
 
             enclosing_class: ast.AST | None = enclosing_function
             while enclosing_class is not None and not isinstance(
@@ -3130,6 +3679,7 @@ def test_codec_active_switch_has_no_runtime_or_authority_claim() -> None:
                 enclosing_class = parent_by_node.get(enclosing_class)
             assert isinstance(enclosing_class, ast.ClassDef)
             assert enclosing_class.name == "PostgresRecordAdapter"
+            assert parent_by_node[enclosing_function] is enclosing_class
     else:
         assert not decoder_imports
         assert not decoder_name_references
