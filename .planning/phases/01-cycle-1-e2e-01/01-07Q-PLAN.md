@@ -44,7 +44,7 @@ must_haves:
 
 Purpose: 让后续01-07J可以从唯一public active mapping观察到RU-v2 current selection，同时保证Q/J之间的串行集成窗口和后续01-07T contract closure之前，既有v1调用方仍可复现且不会被静默推断、升级或fallback。
 
-Output: 一个只改owned Component test的RED commit和一个只改Application persistence codec的GREEN commit；不创建Summary，不修改共享State、canonical owner或任何Runtime/Infrastructure/Eval consumer。
+Output: 一个只改owned Component test的RED commit、一个只改Application persistence codec的GREEN commit，以及一个只修正两个既有category oracle的append-only test fix commit；不创建Summary，不修改共享State、canonical owner或任何Runtime/Infrastructure/Eval consumer。
 </objective>
 
 <execution_context>
@@ -470,6 +470,101 @@ for name in allowed:
         after,
         include_attributes=False,
     )
+PY
+uv run python - <<'PY'
+import json
+import runpy
+
+namespace = runpy.run_path(
+    "tests/component/application/test_persistence_contract.py"
+)
+persistence = namespace["persistence_module"]
+category_enum = namespace["P0PersistenceIntegrityCategory"]
+integrity_error = namespace["P0PersistenceIntegrityError"]
+ru_v2_schema_version = namespace["RU_V2_SCHEMA_VERSION"]
+v1_registry = namespace["_v1_registry"]()
+
+
+def decode_category(call):
+    try:
+        call()
+    except integrity_error as error:
+        return error.category
+    raise AssertionError("directed category oracle unexpectedly decoded")
+
+
+expected = (
+    (
+        "missing",
+        category_enum.MISSING_RECORD_SCHEMA_VERSION,
+        category_enum.MISSING_RECORD_SCHEMA_VERSION,
+    ),
+    (
+        "other_v1",
+        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
+        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
+    ),
+    (
+        "ru_v2",
+        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
+        category_enum.RECORD_SCHEMA_VERSION_MISMATCH,
+    ),
+    (
+        "future",
+        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
+        category_enum.UNKNOWN_RECORD_SCHEMA_VERSION,
+    ),
+)
+for case in namespace["_record_cases"]():
+    envelope = namespace["encode_persistence_record"](
+        case.code,
+        case.record,
+        external_references=case.external_references,
+        logical_children=case.logical_children,
+    )
+    other_v1 = next(
+        spec.record_schema_version
+        for code, spec in v1_registry.items()
+        if code is not case.code
+    )
+    raws = {}
+    missing = json.loads(envelope.model_dump_json())
+    missing.pop("record_schema_version")
+    raws["missing"] = missing
+    for label, version in (
+        ("other_v1", other_v1),
+        ("ru_v2", ru_v2_schema_version),
+        ("future", "unknown-future-record.p0.v99"),
+    ):
+        raw = json.loads(envelope.model_dump_json())
+        raw["record_schema_version"] = version
+        raws[label] = raw
+
+    for label, expected_legacy, expected_versioned in expected:
+        raw = raws[label]
+        actual_legacy = decode_category(
+            lambda raw=raw, code=case.code: namespace[
+                "decode_persistence_record"
+            ](
+                raw,
+                expected_record_code=code,
+                correlation_ref=namespace["_uuid"](299),
+            )
+        )
+        actual_versioned = decode_category(
+            lambda raw=raw, code=case.code: (
+                persistence.decode_persistence_record_versioned(
+                    raw,
+                    expected_record_code=code,
+                    expected_schema_version=v1_registry[
+                        code
+                    ].record_schema_version,
+                    correlation_ref=namespace["_uuid"](299),
+                )
+            )
+        )
+        assert actual_legacy is expected_legacy, (case.code, label)
+        assert actual_versioned is expected_versioned, (case.code, label)
 PY
 test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
   sed '1,3d' |
