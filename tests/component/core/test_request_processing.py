@@ -2460,6 +2460,9 @@ def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> N
     class StrSubclass(str):
         pass
 
+    class DictSubclass(dict):
+        pass
+
     message_ref = uuid4()
     result = _reduce_initial_v2(
         message="请查询订单 O-4242",
@@ -2543,6 +2546,20 @@ def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> N
         StrSubclass("_reducer_decision_seal")
     ] = decision_seal
 
+    poisoned_top_state = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_top_state,
+        "__dict__",
+        DictSubclass(poisoned_top_state.__dict__),
+    )
+
+    poisoned_nested_state = result.model_copy(deep=True)
+    object.__setattr__(
+        poisoned_nested_state.task_graph.task,
+        "__dict__",
+        DictSubclass(poisoned_nested_state.task_graph.task.__dict__),
+    )
+
     for poisoned in (
         poisoned_fields_set,
         poisoned_json_leaf,
@@ -2550,6 +2567,8 @@ def test_v2_routable_decision_rejects_fields_set_and_json_leaf_subclasses() -> N
         poisoned_nested_fields_member,
         poisoned_top_fields_member,
         poisoned_private_key,
+        poisoned_top_state,
+        poisoned_nested_state,
     ):
         with pytest.raises(RequestProcessingError, match="canonical"):
             revalidate_next_move_v2(
