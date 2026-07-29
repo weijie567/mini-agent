@@ -3372,7 +3372,69 @@ def _exact_evidence_expand_supersedes(
     return reachable
 
 
-class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
+_EXACT_RUN_EVIDENCE_BINDING_VALIDATION_MESSAGE = (
+    "accepted child bindings must preserve validated input values"
+)
+
+
+def _is_exact_run_evidence_binding_validation_error(
+    error: ValidationError,
+) -> bool:
+    line_errors = error.errors(
+        include_url=False,
+        include_context=True,
+        include_input=False,
+    )
+    if len(line_errors) != 1:
+        return False
+    context = line_errors[0].get("ctx")
+    if not isinstance(context, Mapping):
+        return False
+    source_error = context.get("error")
+    return (
+        type(source_error) is ValueError
+        and source_error.args
+        == (_EXACT_RUN_EVIDENCE_BINDING_VALIDATION_MESSAGE,)
+    )
+
+
+def _new_exact_run_evidence_binding_validation_error() -> ValidationError:
+    return ValidationError.from_exception_data(
+        "ExactRunEvidenceClosure",
+        [
+            {
+                "type": "value_error",
+                "loc": ("accepted_task_deltas",),
+                "input": None,
+                "ctx": {
+                    "error": ValueError(
+                        _EXACT_RUN_EVIDENCE_BINDING_VALIDATION_MESSAGE
+                    )
+                },
+            }
+        ],
+        input_type="python",
+        hide_input=True,
+    )
+
+
+class _ExactRunEvidenceClosureMeta(type(_StrictRuntimePrivateRecord)):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().__call__(*args, **kwargs)
+        except ValidationError as error:
+            if not _is_exact_run_evidence_binding_validation_error(error):
+                raise
+            sanitized_error = (
+                _new_exact_run_evidence_binding_validation_error()
+            )
+        raise sanitized_error from None
+
+
+class ExactRunEvidenceClosure(
+    _StrictRuntimePrivateRecord,
+    metaclass=_ExactRunEvidenceClosureMeta,
+):
     """Internally closed logical records for exactly one owner-scoped Run.
 
     This DTO validates only the supplied graph. Infrastructure remains
@@ -3701,17 +3763,18 @@ class ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                     }
                 except ValueError:
                     raise ValueError(
-                        "accepted child bindings must preserve validated input values"
+                        _EXACT_RUN_EVIDENCE_BINDING_VALIDATION_MESSAGE
                     ) from None
                 if any(
                     binding.normalized_value
                     != normalized_expected_inputs[name]
                     or binding.authority is not expected_inputs[name].authority
-                    or expected_inputs[name].source_ref not in binding.source_refs
+                    or binding.source_refs
+                    != (expected_inputs[name].source_ref,)
                     for name, binding in actual_bindings.items()
                 ):
                     raise ValueError(
-                        "accepted child bindings must preserve validated input values"
+                        _EXACT_RUN_EVIDENCE_BINDING_VALIDATION_MESSAGE
                     )
                 if child.task_id not in task_by_id:
                     raise ValueError("accepted child Task must resolve in closure")
