@@ -3,7 +3,8 @@ phase: 01-cycle-1-e2e-01
 plan: 01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT
 type: contract-remediation
 status: reviewed-plan-required
-base_sha: 8cd842cd4cc2605de506011a2f979dedc998a2ed
+base_sha: dc21e906183647c9fdf9aeffa47f256ad1a823ae
+planning_base_sha: 8cd842cd4cc2605de506011a2f979dedc998a2ed
 feature_base_sha: dc21e906183647c9fdf9aeffa47f256ad1a823ae
 feature_branch: codex/e2e01-01-ru-v2-codec-handoff
 feature_worktree: e2e01-01-ru-v2-codec-handoff
@@ -116,9 +117,17 @@ planning_base_sha:
 
 - `8cd842cd4cc2605de506011a2f979dedc998a2ed`
 
+base_sha:
+
+- `dc21e906183647c9fdf9aeffa47f256ad1a823ae`
+
 feature_base_sha:
 
 - `dc21e906183647c9fdf9aeffa47f256ad1a823ae`
+
+head_branch:
+
+- `codex/e2e01-01-ru-v2-codec-handoff`
 
 feature_branch:
 
@@ -128,11 +137,19 @@ feature_worktree:
 
 - `e2e01-01-ru-v2-codec-handoff`
 
+worktree_id:
+
+- `e2e01-01-ru-v2-codec-handoff`
+
 current_unpublished_feature_head:
 
 - `6f550e53b6dd2f32b8622bd6cc8ad0b8a760eefa`
 
 file_allowlist:
+
+- `tests/component/application/test_persistence_contract.py`
+
+owned_files:
 
 - `tests/component/application/test_persistence_contract.py`
 
@@ -213,6 +230,40 @@ handoff_format:
 - contract/security/eval impact；
 - unresolved risks与rollback。
 
+precheck:
+
+- branch / worktree / `base_sha` 必须精确为 Packet 值；
+- `git merge-base HEAD dc21e906183647c9fdf9aeffa47f256ad1a823ae` 必须等于 exact base；
+- current unpublished head必须是base的线性后代，worktree clean；
+- current changed files必须精确等于 `owned_files`，无merge commit。
+
+postcheck:
+
+- final head仍是 `dc21e906…` 的线性后代；
+- changed files精确等于 `tests/component/application/test_persistence_contract.py`；
+- `git diff --check dc21e906…HEAD` PASS；
+- required / composition sidecar checks全部exit 0；
+- exact-head与latest-integration overlay reviewer均为 `P0=0/P1=0/P2=0/P3=0 PASS`。
+
+expected_results:
+
+- feature baseline：focused `1 passed`、Application contracts按当时collection全绿、canonical full zero failure且既有credentialed deselection可保留；
+- composition：renamed guard + 12 AA focused tests、111 neighbor tests与canonical full zero failure；
+- exact counts若因已合并的合法测试增长发生变化，必须报告base/head collection差异，不得静默沿用旧数字。
+
+done_when:
+
+- repo gate只声明本 Plan 第3.1节的静态dependency证明边界；
+- Postgres exact codec import/reference/call/method/body/scope由正向集合证明；
+- nested class与generator-method adversarial均失败；
+- single-file containment、required checks、fresh AA sidecar与两轮independent review全部PASS；
+- squash merge tree精确等于reviewed latest-overlay tree并形成 `B_AA_CODEC_HANDOFF`。
+
+handoff_to:
+
+- `Integrator`：串行发布 feature PR、构建latest-integration overlay、合并并实例化 `B_AA_CODEC_HANDOFF`；
+- `01-07AA acceptance-base amendment owner`：只从 exact `B_AA_CODEC_HANDOFF` 冻结后继 replay base。
+
 ## 5. 执行顺序
 
 1. 本 amendment 在 dedicated planning-status Worktree 只写本文件。
@@ -237,4 +288,3 @@ handoff_format:
 - feature `665` Application contracts、`1950` canonical suite及AA sidecar `13 / 111 / 1962`（或当时精确新增总数）全绿；
 - exact-head与latest-overlay均独立 `PASS`；
 - merge后形成的 barrier仅命名为 `B_AA_CODEC_HANDOFF`，不提前声称 `B_J_READY`。
-
