@@ -120,7 +120,7 @@ dependencies:
 
 - 01-07Z exact command validator and builders；
 - 01-07K exact reader consumes `ExactRunEvidenceClosure`；
-- AA feature remains separately based on exact `B_YZ=d704b874...`；本remediation merge不替换其base。
+- AA当前RED/GREEN donor branch仍源自exact `B_YZ=d704b874...`，但它的exact head因缺少本Application修复而不具备可接受性；本remediation reviewed merge后，Integrator必须用append-only AA Plan amendment把该merge冻结为AA replacement/replay acceptance base，再从该exact base新建clean AA feature并重放同一two-file RED→GREEN patch。禁止silent rebase、禁止把Application修复cherry-pick进AA allowlist、禁止把donor head送审或merge。
 
 required_checks:
 
@@ -132,6 +132,7 @@ required_checks:
 - `canonical environment/full`: `uv sync --all-groups`、healthy dev/test DB、`uv run alembic upgrade head`、`uv run pytest`；预期exit 0，既有credentialed deselection可保留。
 - `containment`: diff-check、linear RED→GREEN、base→head changed-files精确2项、无contract/field/signature/normalizer漂移。
 - `review/integration`: exact-head与latest-integration overlay分别独立`0/0/0/0 PASS`；reviewed overlay tree等于merge tree；post-merge gates通过。
+- `AA acceptance-base handoff`: remediation merge SHA/tree固定后，先合并dedicated append-only AA Plan amendment，明确`original_input_barrier=B_YZ`、`acceptance_base_sha/tree=<remediation merge>`、原donor branch只作patch provenance；随后从replacement exact base创建clean AA feature。amendment未reviewed merge前AA保持`BLOCK`。
 
 done_when:
 
@@ -139,7 +140,8 @@ done_when:
 - source只将closure comparator对齐到existing normalizer；
 - two-file containment、focused/neighbors/AA composition/Alembic/full全部通过；
 - exact-head及latest-overlay独立PASS并串行merge；
-- AA feature继续从原B_YZ，应用remediation latest overlay后12项focused转绿。
+- remediation merge只形成AA replacement-base候选，不形成`B_J_READY`；
+- AA Plan amendment reviewed merge并授权replacement/replay base后，AA clean feature才可重放；原B_YZ donor不得送审或merge。
 
 handoff_to: `/root Integrator`
 
@@ -150,12 +152,12 @@ handoff_format:
 - RED、focused、neighbors、AA composition、Alembic、full命令/结果；
 - exact-head/overlay reviewer、finding、verdict；
 - contract/security/eval/cross-file impact、risks、rollback；
-- PR/merge SHA/tree；明确`denominator_delta=0`且不claim B_J_READY。
+- PR/merge SHA/tree；AA amendment所需replacement-base字段与donor冻结状态；明确`denominator_delta=0`且不claim B_J_READY。
 
 contract_changes: `NONE；实现对齐reviewed Z与existing normalizer。`
 security_impact: `YES — fail-closed closure validation；raw invalid input不得进入error context。身份/owner范围不变。`
 eval_impact: `YES — 修复K reader可消费合法RU-v2 initial graph的Component/Integration oracle；不推进Case lifecycle。`
-rollback: `Revert remediation merge；AA的K-reader round-trip重新阻断，01-07AA不得merge或形成B_J_READY。`
+rollback: `Revert remediation merge；撤销/作废任何引用该merge的AA replacement-base amendment与clean replay branch；AA的K-reader round-trip重新阻断，01-07AA不得merge或形成B_J_READY。`
 </packet_contract>
 
 <tasks>
