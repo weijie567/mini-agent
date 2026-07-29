@@ -511,7 +511,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 <!-- P0-RU-V2-EXECUTION-MAP:START -->
 ```json
 {
-  "manifest_version": "p0-ru-v2-execution-map-r2",
+  "manifest_version": "p0-ru-v2-execution-map-r3",
   "canonical_input": {
     "owner_path": "docs/implementation/e2e01-thin-slice-implementation-spec.md",
     "manifest_version": "p0-ru-v2-cutover-r1",
@@ -543,6 +543,19 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
       ],
       "denominator_delta": 3,
       "feature_base_rule": "01-07Y-and-01-07Z-use-exact-B_Q-not-the-execution-owner-remediation-merge"
+    },
+    "contract_closure_preflight_remediation": {
+      "status": "CONFIRMED_X_ALLOWLIST_GAP",
+      "input_barrier": "B_SU",
+      "input_sha": "f037582446598512a0132a90504e24b5d701c0f6",
+      "input_tree": "4d9eb4b419301cd6b4ec7b272ca6f4bc0290f7cd",
+      "blocking_finding": "01-07X three-file ownership omits the AA-owned integration tests that directly call and intentionally preserve the legacy PostgreSQL writer; deleting that writer inside the old allowlist would make the canonical full gate fail or force an out-of-scope test change",
+      "preserves_packet_id": true,
+      "denominator_delta": 0,
+      "added_owned_files": [
+        "tests/integration/test_postgres_v2_request_understanding_writes.py"
+      ],
+      "feature_base_rule": "01-07X-uses-exact-B_SU-not-the-execution-owner-remediation-or-plan-merge"
     }
   },
   "pre_core_status_chain": [
@@ -963,9 +976,18 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
               "owned_files": [
                 "src/mini_agent/infrastructure/persistence/postgres.py",
                 "tests/integration/test_postgres_record_adapters.py",
-                "tests/integration/test_postgres_atomicity.py"
+                "tests/integration/test_postgres_atomicity.py",
+                "tests/integration/test_postgres_v2_request_understanding_writes.py"
               ],
-              "removes_v1_surface": true
+              "removes_v1_surface": true,
+              "acceptance_requires": [
+                "legacy-postgres-initial-graph-writer-definition-imports-and-direct-callers-removed",
+                "legacy-postgres-request-understanding-and-accepted-delta-readers-and-v1-type-imports-removed",
+                "aa-v2-writer-success-conflict-atomicity-and-recovery-lock-order-evidence-preserved",
+                "legacy-v2-coexistence-oracles-retired-without-weakening-v2-only-projection-gates",
+                "application-v1-command-and-port-remain-isolated-until-01-07W",
+                "feature-starts-from-exact-B_SU"
+              ]
             }
           ]
         },
@@ -1120,7 +1142,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 
 该map只拥有execution拆分，不覆盖Thin Slice、Intent、Memory、Tool、Business或Eval语义；symbolic barrier只有对应Packet完成exact-head review、latest-integration replay与串行merge后才实例化。F与E可以使用独立Worktree，但F先从status-aligned `B_O_STATUS`形成`B_F`，E只能再从reviewed `B_F`形成`B_FE_EXPAND`；两者不再从`B_DH`同base并行。`B_FE_EXPAND`仍是non-routable additive barrier，不能被解释为active registry、PostgreSQL、Runtime、Provider/Eval、v1 contract或readiness已经切换。
 
-`p0-ru-v2-execution-map-r2`在exact `B_Q` preflight修正r1遗漏的三道active Runtime前置ownership，不改变Thin Slice / Intent / Memory canonical contract，也不把execution-owner remediation本身计为新Packet。01-07Y与01-07Z可从同一exact `B_Q`创建互斥feature Worktree并独立实现，Integrator仍须逐个审查、latest-integration replay与串行merge后才能形成`B_YZ`；01-07AA只能再从reviewed `B_YZ`实现两个exact-v2 PostgreSQL write route并形成`B_J_READY`。01-07J的feature base因此改为exact `B_J_READY`，不得继续从`B_Q`、execution-owner文档merge或任一单独Y/Z merge启动。
+`p0-ru-v2-execution-map-r3`保留r2在exact `B_Q`补入的三道active Runtime前置ownership，并在exact `B_SU` preflight修正01-07X遗漏的AA-owned PostgreSQL v1/v2 coexistence tests。该修正只把`tests/integration/test_postgres_v2_request_understanding_writes.py`加入同一X writer，保留Packet ID、42分母、`B_SU → B_X`顺序及exact feature base；execution-owner与Plan merge都不得替代`B_SU`。X必须删除legacy PostgreSQL writer及其direct callers、两个RU-v1 reader与对应v1 type imports，同时把仍有效的v2 success、conflict、historical-v1 collision fail-closed、atomicity和recovery lock-order证据留在reviewed test suite中；Application v1 command / Port仍由01-07W关闭。r3不改变Thin Slice / Intent / Memory canonical contract，也不把本次remediation计为新Packet。
 
 01-07C / 01-07G 已从共同 execution base `3f0753f7bef87fc02f314e28fe8b07860a819701` 完成“单目标Plan → owner feature → exact-head review → latest-integration overlay → 串行merge”。01-07G planning / feature PR #48/#50形成merge `bfc63c9444ee1af204cc3806eac7e7e84fc1bb19`；01-07C原feature PR #51因review发现`run_id`与durable contextualization缺口而关闭保留，r1 Plan / feature PR #52/#53关闭问题并形成共同 barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。该barrier的default full offline suite为`1493 passed, 1 deselected, 12 warnings`；Graphify受控全量重建为`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`，记录`699`个dangling endpoint、`687`组directed与`713`组undirected collapse candidate、`0` missing endpoint与`0` self-loop。Status-evidence review发现Project Direction仍保留C未开始快照后，独立exact one-file owner PR #54以`0/0/0` review与1493-test full gate关闭并merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`；该证据对齐不替换`B_CG`。01-07C / 01-07G因此为`COMPLETE / EVIDENCE_INDEXED`。
 
@@ -1318,16 +1340,16 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
 | GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；D/H feature PR #59/#60形成`B_DH = 4a7e802...`，01-07N Plan/owner PR #62/#63形成remediation merge `a4b1edb...`，01-07O Plan/owner PR #64/#65形成`7332091...`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / J_REVIEWED_MERGED / SCOPED_B_ACTIVE_FORMED / S_U_NEXT` | activation PR #10生效；K/L/M/Q形成`B_DEPENDENCY → B_DEPENDENCY_M → B_Q`；execution-map r2 PR #107加入Y/Z/AA并固定42 denominator；PR #108–#120形成`B_YZ`与`B_J_READY`，PR #121–#124形成scoped `B_ACTIVE = 7f92b5e...`；PR #125–#128完成derived/entry-owner evidence alignment |
+| GSD | `ACTIVE / EFFECTIVE / S_U_REVIEWED_MERGED / B_SU_FORMED / X_NEXT` | activation PR #10生效；K/L/M/Q形成`B_DEPENDENCY → B_DEPENDENCY_M → B_Q`；execution-map r2 PR #107加入Y/Z/AA并固定42 denominator；PR #108–#124形成`B_YZ`、`B_J_READY`与scoped `B_ACTIVE = 7f92b5e...`；PR #130–#133完成S/U Plan与feature串行合并并形成`B_SU = f037582...` |
 | W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J REVIEWED_MERGED / SCOPED_B_ACTIVE_FORMED / S_U_NEXT` | Y/Z/AA/J已按r2 map完成review、latest-integration replay与串行merge；J post-merge focused 87、Application 707、neighbors 165、full `2033 passed, 1 deselected, 12 warnings`；01-07S/U只可从原exact `B_ACTIVE`分别签发 |
+| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J_S_U REVIEWED_MERGED / B_SU_FORMED / X_NEXT` | S/U已从原exact `B_ACTIVE`分别完成review、latest-integration replay与串行merge；共同`B_SU = f037582...`、tree `4d9eb4b...`通过focused 871与canonical full `1980 passed, 1 deselected, 12 warnings`；X只能从该exact barrier签发 |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为32/42；Phase目录中有38份`*-PLAN.md` artifact与24份Summary。PR #107只修订execution map；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact不增加target denominator，当前完成分子只在PR #107记录值上计入Y/Z/AA/J四个真实implementation Packet。Plan签发、execution-map落盘、oracle remediation、status索引或本次prose closure都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为34/42；Phase目录中有40份`*-PLAN.md` artifact与24份Summary。PR #107与本次01-07X preflight remediation只修订execution map；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact不增加target denominator。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
 
-Cross-file impact scan确认PR #125依exact allowlist对齐`.planning/PROJECT.md`与`.planning/ROADMAP.md`，PR #126对齐`.planning/STATE.md`、`.planning/REQUIREMENTS.md`与W2 Validation，PR #127对齐`PROJECT_DIRECTION.md`，PR #128对齐`README.md`；本次single-writer allowlist只更新本canonical execution owner的current-status prose。Marker-bounded `P0-RU-V2-EXECUTION-MAP`保持byte-identical，现有Plan/Summary历史正文不随active状态重写。上述alignment均不改变reviewed exact barriers、不推进Case/Requirement/Phase lifecycle，也不替代01-07S/U的feature base。
+Cross-file impact scan确认S/U Plan与feature证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`与`README.md`；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle，也不改变reviewed `B_SU`。
 
-下一步从原exact `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`分别签发01-07S与01-07U；planning/status/owner merge都不得替换该feature base。两个互斥writer仍须逐个exact-head review、latest-integration replay与串行merge后才形成`B_SU`，再按`X → T → W → V`关闭v1 surface。`B_ACTIVE`只覆盖exact-one accepted E2E01与已定义fault routes；zero/all-REJECT、multi-ACCEPT、atomic failure恢复、v1 contract closure、真实HTTP Trajectory/E2E、Case PASS与产品readiness仍未完成。
+下一步从exact `B_SU = f037582446598512a0132a90504e24b5d701c0f6`签发01-07X；execution-owner remediation、Plan或status merge都不得替换该feature base。X reviewed merge与post-merge gate形成`B_X`后，才可继续按`T → W → V`关闭其余v1 surface。`B_SU`仍只覆盖exact-one accepted E2E01与已定义fault routes；zero/all-REJECT、multi-ACCEPT、atomic failure恢复、完整v1 contract closure、真实HTTP Trajectory/E2E、Case PASS与产品readiness仍未完成。
