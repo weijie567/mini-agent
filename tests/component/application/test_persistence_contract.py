@@ -3270,10 +3270,11 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
         "src/mini_agent/evaluation/harness.py",
-        "tests/component/evaluation/test_e2e01_artifact_consistency.py",
-        "tests/integration/evaluation/test_e2e01_offline_harness.py",
-        "tests/integration/test_postgres_v2_request_understanding_writes.py",
-    }
+            "tests/component/evaluation/test_e2e01_artifact_consistency.py",
+            "tests/integration/test_agent_run_service_v2_persistence.py",
+            "tests/integration/evaluation/test_e2e01_offline_harness.py",
+            "tests/integration/test_postgres_v2_request_understanding_writes.py",
+        }
     exact_reader_matches = files_referencing(
         "ExactRunEvidencePort",
         "load_exact_run_evidence_for_owner",
