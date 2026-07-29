@@ -2185,6 +2185,45 @@ def test_v2_routable_decision_rejects_joint_binding_and_next_move_substitution()
         )
 
 
+def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
+    message_ref = uuid4()
+    candidate_id = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=candidate_id,
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+            next_move=NextMove(kind=NextMoveKind.ASK_USER),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    substituted = result.model_copy(
+        update={
+            "next_move_candidate": NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="get_order",
+                arguments={"order_id": "O-4242"},
+                base_task_state_version=None,
+            )
+        }
+    )
+
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=substituted,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
+
+
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
     message_ref = uuid4()
     accepted_id = uuid4()
@@ -2298,6 +2337,71 @@ def test_v2_builder_discards_semantic_projection_validation_context() -> None:
     assert marker not in str(caught.value)
     assert marker not in repr(caught.value)
     assert marker not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_canonical_validation_diagnostics() -> None:
+    marker = "LEAK-MARKER-DECISION"
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+    poisoned_decision = _validation_v2(uuid4(), accept=False).model_copy(
+        update={"decision": marker}
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(RequestUnderstandingV2Error) as caught:
+            _build_v2(
+                request_input=_request_input_v2(
+                    message_ref=message_ref,
+                    message=message,
+                ),
+                output=_output_v2(
+                    message_ref=message_ref,
+                    candidates=(),
+                ),
+                authoritative_messages={message_ref: message},
+                candidate_validation=(poisoned_decision,),
+                accepted_task_deltas=(),
+            )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert caught_warnings == []
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_authoritative_lookup_context() -> None:
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message=message,
+            ),
+            output=_output_v2(
+                message_ref=message_ref,
+                candidates=(),
+            ),
+            authoritative_messages={},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert str(message_ref) not in str(caught.value)
+    assert str(message_ref) not in repr(caught.value)
+    assert str(message_ref) not in repr(caught.value.args)
 
 
 def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() -> None:
