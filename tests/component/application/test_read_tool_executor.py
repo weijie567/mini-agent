@@ -47,6 +47,15 @@ class StateKeySubclass(str):
     pass
 
 
+class ArmedStateKeySubclass(str):
+    armed = False
+
+    def __hash__(self) -> int:
+        if self.armed:
+            raise RuntimeError("raw-customer-B-secret")
+        return str.__hash__(self)
+
+
 class ExplodingTzInfo(tzinfo):
     def utcoffset(self, _value: datetime | None):
         raise RuntimeError("raw-customer-B-secret")
@@ -492,6 +501,33 @@ def test_candidate_leaf_exception_becomes_raw_free_system_failure() -> None:
     )
     assert "raw-customer-B-secret" not in str(execution)
     assert "ExplodingTzInfo" not in str(execution)
+
+
+def test_rebuild_exception_becomes_raw_free_system_failure() -> None:
+    candidate = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=_summary(),
+        source_version=SYNTHETIC_SOURCE_VERSION,
+    )
+    state = vars(candidate)
+    source_version = state.pop("source_version")
+    armed_key = ArmedStateKeySubclass("source_version")
+    state[armed_key] = source_version
+    armed_key.armed = True
+
+    execution, runtime, order = asyncio.run(_execute(result=candidate))
+
+    assert len(order.queries) == 1
+    assert runtime.observation_commands == []
+    assert execution.observation is None
+    assert execution.get_order_outcome is GetOrderOutcome.SYSTEM_FAILURE
+    assert execution.terminal_tool_call is not None
+    assert execution.terminal_tool_call.status is ToolCallStatus.FAILED
+    assert execution.terminal_tool_call.failure_code == (
+        "ORDER_SERVICE_UNAVAILABLE"
+    )
+    assert "raw-customer-B-secret" not in str(execution)
+    assert "ArmedStateKeySubclass" not in str(execution)
 
 
 @pytest.mark.parametrize("timezone_type", [AlwaysUtcTzInfo, FlipTzInfo])
