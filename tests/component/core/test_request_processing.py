@@ -2237,7 +2237,19 @@ def test_v2_routable_decision_rejects_next_move_only_substitution() -> None:
         InitialRequestRoutableTaskGraphDecisionV2.model_validate(payload)
 
     with pytest.raises(TypeError, match="immutable"):
-        substituted._reducer_next_move_candidate = replacement
+        substituted._reducer_next_move_fingerprint = "forged"
+
+    nested_poisoned = result.model_copy(deep=True)
+    nested_poisoned.next_move_candidate.__dict__.update(
+        replacement.__dict__
+    )
+    with pytest.raises(RequestProcessingError, match="canonical"):
+        revalidate_next_move_v2(
+            decision=nested_poisoned,
+            current_task=result.task_graph.task,
+            current_request_unit=result.task_graph.request_unit,
+            current_input_binding=result.task_graph.input_binding,
+        )
 
     for copied in (
         result.model_copy(deep=True),
@@ -2430,6 +2442,43 @@ def test_v2_builder_discards_authoritative_lookup_context() -> None:
     assert str(message_ref) not in str(caught.value)
     assert str(message_ref) not in repr(caught.value)
     assert str(message_ref) not in repr(caught.value.args)
+
+
+def test_v2_builder_discards_source_normalization_context() -> None:
+    marker = "LEAK-MARKER-CANDIDATE"
+    message_ref = uuid4()
+    message = "请查询订单 O-4242"
+
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _build_v2(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message=message,
+            ),
+            output=_output_v2(
+                message_ref=message_ref,
+                candidates=(
+                    _task_delta_v2(
+                        candidate_id=uuid4(),
+                        message_ref=message_ref,
+                        order_id=marker,
+                        source_quote="订单 O-4242",
+                    ),
+                ),
+            ),
+            authoritative_messages={message_ref: message},
+            candidate_validation=(),
+            accepted_task_deltas=(),
+        )
+
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in str(caught.value)
+    assert marker not in repr(caught.value)
+    assert marker not in repr(caught.value.args)
 
 
 def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() -> None:
