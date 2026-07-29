@@ -946,6 +946,26 @@ def _assert_same_exact_closure(
         ), field_name
 
 
+def _assert_canonical_top_level_order(
+    closure: ExactRunEvidenceClosure,
+) -> None:
+    identities_by_code: dict[P0RecordCode, list[str]] = {}
+    for envelope in _closure_envelopes(closure):
+        identities_by_code.setdefault(envelope.record_code, []).append(
+            json.dumps(
+                to_jsonable_python(
+                    envelope.logical_identity,
+                    serialize_unknown=True,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    for record_code, identities in identities_by_code.items():
+        assert identities == sorted(identities), record_code
+
+
 @pytest.mark.parametrize(
     "closure_factory",
     (
@@ -982,8 +1002,16 @@ async def test_exact_run_reader_returns_representative_closed_graphs(
             ),
             run_id=closure.run_record.run_id,
         )
+        repeated = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=_owner_scope(
+                closure.conversation_record.owner_customer_id
+            ),
+            run_id=closure.run_record.run_id,
+        )
 
         assert loaded is not None
+        assert repeated == loaded
+        _assert_canonical_top_level_order(loaded)
         _assert_same_exact_closure(loaded, closure)
     finally:
         engine.dispose()
@@ -1238,8 +1266,45 @@ async def test_rejected_gate_is_found_by_manifest_and_binding_reverse_edges(
     ("cap_kind", "closure_factory"),
     (
         ("run-root-2", _minimal_exact_run_evidence),
+        ("conversation-2", _minimal_exact_run_evidence),
+        ("message-65", _minimal_exact_run_evidence),
         (
             "request-understanding-2",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "task-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "request-unit-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "conversation-task-link-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "run-task-link-65",
+            lambda: _request_understanding_exact_run_evidence(
+                candidate_count=1,
+                accepted_count=1,
+            ),
+        ),
+        (
+            "input-binding-65",
             lambda: _request_understanding_exact_run_evidence(
                 candidate_count=1,
                 accepted_count=1,
@@ -1286,12 +1351,127 @@ async def test_exact_run_reader_enforces_every_frozen_cap_class_before_materiali
                     P0RecordCode.AGENT_RUN_RECORD,
                 )
                 session.add(_clone_row(source))
+            elif cap_kind == "conversation-2":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.CONVERSATION_RECORD,
+                )
+                clone = _clone_row(source)
+                session.add(clone)
+                session.flush()
+                message = _row_for_code(
+                    session,
+                    P0RecordCode.MESSAGE_RECORD,
+                )
+                highest = session.scalar(
+                    select(P0RecordReferenceModel.ordinal)
+                    .where(
+                        P0RecordReferenceModel.source_record_code
+                        == message.record_code,
+                        P0RecordReferenceModel.source_logical_identity
+                        == message.logical_identity,
+                    )
+                    .order_by(P0RecordReferenceModel.ordinal.desc())
+                    .limit(1)
+                )
+                assert highest is not None
+                session.add(
+                    P0RecordReferenceModel(
+                        reference_id=uuid4(),
+                        source_record_code=message.record_code,
+                        source_logical_identity=message.logical_identity,
+                        ordinal=highest + 1,
+                        relation="conversation_id",
+                        target_record_code=source.record_code,
+                        target_logical_identity=clone.logical_identity,
+                    )
+                )
+            elif cap_kind == "message-65":
+                source = _row_for_code(
+                    session,
+                    P0RecordCode.MESSAGE_RECORD,
+                )
+                clones = tuple(_clone_row(source) for _ in range(64))
+                session.add_all(clones)
+                manifest = _row_for_code(
+                    session,
+                    P0RecordCode.CONTEXT_MANIFEST_RECORD,
+                )
+                manifest_clone = _clone_row(manifest)
+                manifest_clone.run_id = closure.run_record.run_id
+                session.add(manifest_clone)
+                session.flush()
+                _clone_references(
+                    session,
+                    source=manifest,
+                    clone=manifest_clone,
+                )
+                session.flush()
+                for reference_source, targets in (
+                    (manifest, clones[:32]),
+                    (manifest_clone, clones[32:]),
+                ):
+                    highest = session.scalar(
+                        select(P0RecordReferenceModel.ordinal)
+                        .where(
+                            P0RecordReferenceModel.source_record_code
+                            == reference_source.record_code,
+                            P0RecordReferenceModel.source_logical_identity
+                            == reference_source.logical_identity,
+                        )
+                        .order_by(P0RecordReferenceModel.ordinal.desc())
+                        .limit(1)
+                    )
+                    assert highest is not None
+                    session.add_all(
+                        P0RecordReferenceModel(
+                            reference_id=uuid4(),
+                            source_record_code=reference_source.record_code,
+                            source_logical_identity=(
+                                reference_source.logical_identity
+                            ),
+                            ordinal=highest + offset,
+                            relation="selected_message_ref",
+                            target_record_code=source.record_code,
+                            target_logical_identity=target.logical_identity,
+                        )
+                        for offset, target in enumerate(targets, start=1)
+                    )
             elif cap_kind == "request-understanding-2":
                 source = _row_for_code(
                     session,
                     P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
                 )
                 session.add(_clone_row(source))
+            elif cap_kind in {
+                "task-65",
+                "request-unit-65",
+                "conversation-task-link-65",
+                "run-task-link-65",
+                "input-binding-65",
+            }:
+                code = {
+                    "task-65": P0RecordCode.TASK_RECORD,
+                    "request-unit-65": P0RecordCode.REQUEST_UNIT_RECORD,
+                    "conversation-task-link-65": (
+                        P0RecordCode.CONVERSATION_TASK_LINK_RECORD
+                    ),
+                    "run-task-link-65": P0RecordCode.RUN_TASK_LINK_RECORD,
+                    "input-binding-65": P0RecordCode.INPUT_BINDING_RECORD,
+                }[cap_kind]
+                source = _row_for_code(session, code)
+                clones = tuple(_clone_row(source) for _ in range(64))
+                for clone in clones:
+                    clone.run_id = closure.run_record.run_id
+                session.add_all(clones)
+                if cap_kind == "input-binding-65":
+                    session.flush()
+                    for clone in clones:
+                        _clone_references(
+                            session,
+                            source=source,
+                            clone=clone,
+                        )
             elif cap_kind == "context-manifest-3":
                 source = _row_for_code(
                     session,

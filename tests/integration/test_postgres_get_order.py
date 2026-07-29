@@ -18,6 +18,24 @@ from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import MockOrderModel
 
 UTC_NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+ALICE_ORDERED_AT = datetime(2026, 7, 20, 2, 15, tzinfo=timezone.utc)
+ALICE_STATUS_UPDATED_AT = datetime(
+    2026,
+    7,
+    24,
+    9,
+    30,
+    tzinfo=timezone.utc,
+)
+BOB_ORDERED_AT = datetime(2026, 7, 19, 3, 20, tzinfo=timezone.utc)
+BOB_STATUS_UPDATED_AT = datetime(
+    2026,
+    7,
+    23,
+    8,
+    10,
+    tzinfo=timezone.utc,
+)
 SOURCE_VERSION_A = (
     "mock-order-source-version.p0.v1:sha256:"
     "861c136b1a41ecef3cd9625dc58524ec452e939b5ca1eb70ebcab69181561c42"
@@ -40,8 +58,24 @@ def _summary(order_id: str, product_name: str) -> OrderSummaryProjection:
         order_number=order_id,
         status=OrderStatus.SHIPPED,
         line_items=(OrderLineSummary(product_name=product_name, quantity=1),),
-        ordered_at=UTC_NOW,
-        status_updated_at=UTC_NOW + timedelta(minutes=1),
+        ordered_at=ALICE_ORDERED_AT,
+        status_updated_at=ALICE_STATUS_UPDATED_AT,
+    )
+
+
+def _alice_summary() -> OrderSummaryProjection:
+    return _summary("O-1001", "轻量跑鞋")
+
+
+def _bob_summary() -> OrderSummaryProjection:
+    return OrderSummaryProjection(
+        order_number="O-2001",
+        status=OrderStatus.FULFILLING,
+        line_items=(
+            OrderLineSummary(product_name="合成隔离测试商品", quantity=2),
+        ),
+        ordered_at=BOB_ORDERED_AT,
+        status_updated_at=BOB_STATUS_UPDATED_AT,
     )
 
 
@@ -69,11 +103,11 @@ async def test_get_order_uses_one_composite_owner_predicate_and_returns_safe_pro
     try:
         await adapter.seed_mock_order(
             customer_id="customer-A",
-            order_summary=_summary("O-1001", "轻量跑鞋"),
+            order_summary=_alice_summary(),
         )
         await adapter.seed_mock_order(
             customer_id="customer-B",
-            order_summary=_summary("O-2001", "Bob private product"),
+            order_summary=_bob_summary(),
         )
 
         result = await adapter.get_order(
@@ -81,7 +115,7 @@ async def test_get_order_uses_one_composite_owner_predicate_and_returns_safe_pro
         )
 
         assert result.outcome is GetOrderOutcome.FOUND
-        assert result.order_summary == _summary("O-1001", "轻量跑鞋")
+        assert result.order_summary == _alice_summary()
         assert result.source_version == SOURCE_VERSION_A
         assert result.failure_code is None
         assert len(statements) == 1
@@ -102,7 +136,7 @@ async def test_foreign_and_nonexistent_orders_are_exactly_indistinguishable(
     try:
         await adapter.seed_mock_order(
             customer_id="customer-B",
-            order_summary=_summary("O-2001", "Bob private product"),
+            order_summary=_bob_summary(),
         )
 
         foreign = await adapter.get_order(
@@ -117,7 +151,7 @@ async def test_foreign_and_nonexistent_orders_are_exactly_indistinguishable(
         assert foreign.order_summary is None
         assert foreign.source_version is None
         assert foreign.failure_code is None
-        assert "Bob private product" not in foreign.model_dump_json()
+        assert "合成隔离测试商品" not in foreign.model_dump_json()
     finally:
         engine.dispose()
 
@@ -158,11 +192,11 @@ async def test_source_version_matches_both_fixed_owner_vectors(
     try:
         await adapter.seed_mock_order(
             customer_id="customer-A",
-            order_summary=_summary("O-1001", "轻量跑鞋"),
+            order_summary=_alice_summary(),
         )
         await adapter.seed_mock_order(
             customer_id="customer-B",
-            order_summary=_summary("O-2001", "Bob private product"),
+            order_summary=_bob_summary(),
         )
 
         alice = await adapter.get_order(
@@ -186,7 +220,7 @@ async def test_source_version_is_content_sensitive_and_allows_aba_replay(
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresGetOrderAdapter(build_session_factory(engine))
-    original = _summary("O-1001", "轻量跑鞋")
+    original = _alice_summary()
     changed = _summary("O-1001", "轻量越野跑鞋")
     try:
         await adapter.seed_mock_order(
@@ -237,7 +271,7 @@ async def test_order_corruption_is_bounded_system_failure_without_token(
     try:
         await adapter.seed_mock_order(
             customer_id="customer-A",
-            order_summary=_summary("O-1001", "轻量跑鞋"),
+            order_summary=_alice_summary(),
         )
         if tamper_kind == "invalid-payload":
             payload = {
@@ -282,7 +316,7 @@ async def test_source_version_ignores_forbidden_stored_at_version_source(
     try:
         await adapter.seed_mock_order(
             customer_id="customer-A",
-            order_summary=_summary("O-1001", "轻量跑鞋"),
+            order_summary=_alice_summary(),
         )
         before = await adapter.get_order(
             GetOrderQuery(customer_id="customer-A", order_id="O-1001")
