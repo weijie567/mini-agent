@@ -511,7 +511,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 <!-- P0-RU-V2-EXECUTION-MAP:START -->
 ```json
 {
-  "manifest_version": "p0-ru-v2-execution-map-r3",
+  "manifest_version": "p0-ru-v2-execution-map-r4",
   "canonical_input": {
     "owner_path": "docs/implementation/e2e01-thin-slice-implementation-spec.md",
     "manifest_version": "p0-ru-v2-cutover-r1",
@@ -556,6 +556,20 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
         "tests/integration/test_postgres_v2_request_understanding_writes.py"
       ],
       "feature_base_rule": "01-07X-uses-exact-B_SU-not-the-execution-owner-remediation-or-plan-merge"
+    },
+    "codec_contract_preflight_remediation": {
+      "status": "CONFIRMED_PHYSICAL_CATALOG_OWNERSHIP_GAP",
+      "input_barrier": "B_X",
+      "input_sha": "9e8c70db39786b35c1ebea5070a32a1bc36e0df7",
+      "input_tree": "4b01798be73c15ae0b3eda42483078cbd7cdf7dc",
+      "blocking_finding": "01-07T cannot reduce the Application executable catalog from 18 pairs to 17 inside its two-file ownership because Infrastructure SQLAlchemy metadata imports that catalog to generate the physical check constraint while migration 0003 must continue admitting both RU-v1 and RU-v2 physical rows",
+      "remediation_packet": "01-07T-PHYSICAL-HANDOFF",
+      "output_barrier": "B_T_PHYSICAL_HANDOFF",
+      "preserves_packet_id": "01-07T",
+      "denominator_delta": 0,
+      "physical_pair_count": 18,
+      "application_current_pair_count_after_01_07T": 17,
+      "feature_base_rule": "01-07T-uses-exact-B_T_PHYSICAL_HANDOFF-not-B_X-or-the-plan-merge"
     }
   },
   "pre_core_status_chain": [
@@ -993,6 +1007,31 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
         },
         {
           "input_barrier": "B_X",
+          "output_barrier": "B_T_PHYSICAL_HANDOFF",
+          "packets": [
+            {
+              "packet_id": "01-07T-PHYSICAL-HANDOFF",
+              "writer": "Infrastructure physical codec catalog handoff sole writer",
+              "branch": "codex/e2e01-01-ru-physical-catalog-handoff",
+              "worktree_id": "e2e01-01-ru-physical-catalog-handoff",
+              "owned_files": [
+                "src/mini_agent/infrastructure/persistence/models.py",
+                "tests/integration/test_database_migrations.py"
+              ],
+              "remediation": true,
+              "removes_v1_surface": false,
+              "acceptance_requires": [
+                "sqlalchemy-physical-18-pair-allowset-no-longer-imports-the-application-executable-catalog",
+                "migration-0003-and-physical-RU-v1-and-v2-admissibility-remain-unchanged",
+                "application-catalog-may-transition-from-expanded-18-pair-to-current-17-pair-without-physical-metadata-drift",
+                "no-v1-codec-dto-fallback-backfill-or-readiness-claim",
+                "remediation-starts-from-exact-B_X"
+              ]
+            }
+          ]
+        },
+        {
+          "input_barrier": "B_T_PHYSICAL_HANDOFF",
           "output_barrier": "B_T",
           "packets": [
             {
@@ -1004,7 +1043,15 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
                 "src/mini_agent/application/persistence.py",
                 "tests/component/application/test_persistence_contract.py"
               ],
-              "removes_v1_surface": true
+              "removes_v1_surface": true,
+              "acceptance_requires": [
+                "application-executable-catalog-and-active-registry-close-to-17-current-pairs",
+                "RU-v1-parent-child-codec-and-generic-or-versioned-success-paths-removed",
+                "16-non-RU-generic-codec-callers-preserved",
+                "RU-callers-require-the-exact-versioned-v2-path",
+                "physical-18-pair-allowset-remains-owned-by-Infrastructure",
+                "feature-starts-from-exact-B_T_PHYSICAL_HANDOFF"
+              ]
             }
           ]
         },
@@ -1066,6 +1113,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
     "01-07J",
     "01-07S+01-07U",
     "01-07X",
+    "01-07T-PHYSICAL-HANDOFF",
     "01-07T",
     "01-07W",
     "01-07V"
@@ -1133,6 +1181,13 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
       "v1-compatibility-surface-not-removed",
       "composition-root-http-eval-not-proven",
       "readiness-not-proven"
+    ],
+    "B_T_PHYSICAL_HANDOFF": [
+      "application-executable-catalog-not-yet-closed-to-current-17-pairs",
+      "application-and-core-v1-contract-not-removed",
+      "historical-physical-v1-rows-not-migrated-or-deleted",
+      "physical-v1-representation-retirement-01-07R-not-activated",
+      "readiness-not-proven"
     ]
   },
   "next_after_contract": "01-08"
@@ -1142,7 +1197,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 
 该map只拥有execution拆分，不覆盖Thin Slice、Intent、Memory、Tool、Business或Eval语义；symbolic barrier只有对应Packet完成exact-head review、latest-integration replay与串行merge后才实例化。F与E可以使用独立Worktree，但F先从status-aligned `B_O_STATUS`形成`B_F`，E只能再从reviewed `B_F`形成`B_FE_EXPAND`；两者不再从`B_DH`同base并行。`B_FE_EXPAND`仍是non-routable additive barrier，不能被解释为active registry、PostgreSQL、Runtime、Provider/Eval、v1 contract或readiness已经切换。
 
-`p0-ru-v2-execution-map-r3`保留r2在exact `B_Q`补入的三道active Runtime前置ownership，并在exact `B_SU` preflight修正01-07X遗漏的AA-owned PostgreSQL v1/v2 coexistence tests。该修正只把`tests/integration/test_postgres_v2_request_understanding_writes.py`加入同一X writer，保留Packet ID、42分母、`B_SU → B_X`顺序及exact feature base；execution-owner与Plan merge都不得替代`B_SU`。X必须删除legacy PostgreSQL writer及其direct callers、两个RU-v1 reader与对应v1 type imports，同时把仍有效的v2 success、conflict、historical-v1 collision fail-closed、atomicity和recovery lock-order证据留在reviewed test suite中；Application v1 command / Port仍由01-07W关闭。r3不改变Thin Slice / Intent / Memory canonical contract，也不把本次remediation计为新Packet。
+`p0-ru-v2-execution-map-r4`保留r3的X四文件ownership，并记录exact `B_X`上的01-07T preflight blocker：Application executable catalog仍被Infrastructure SQLAlchemy model直接用来生成physical check constraint，因此T不能在两文件allowlist内把catalog从18-pair收敛为17-pair。r4在`B_X`与T之间插入denominator-neutral的`01-07T-PHYSICAL-HANDOFF`，只允许`models.py`与migration integration test把固定18-pair physical allowance从Application executable catalog解耦；migration 0003、physical RU-v1/v2 admissibility与inactive 01-07R保持不变。handoff reviewed merge形成`B_T_PHYSICAL_HANDOFF`后，T必须从该exact barrier启动，不能使用原`B_X`、execution-owner merge或Plan merge。该remediation不提供v1 DTO/decoder、fallback、backfill、migration或readiness，不改变42分母、Thin Slice / Intent / Memory canonical contract或T/W/V产品Packet ID。
 
 01-07C / 01-07G 已从共同 execution base `3f0753f7bef87fc02f314e28fe8b07860a819701` 完成“单目标Plan → owner feature → exact-head review → latest-integration overlay → 串行merge”。01-07G planning / feature PR #48/#50形成merge `bfc63c9444ee1af204cc3806eac7e7e84fc1bb19`；01-07C原feature PR #51因review发现`run_id`与durable contextualization缺口而关闭保留，r1 Plan / feature PR #52/#53关闭问题并形成共同 barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。该barrier的default full offline suite为`1493 passed, 1 deselected, 12 warnings`；Graphify受控全量重建为`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`，记录`699`个dangling endpoint、`687`组directed与`713`组undirected collapse candidate、`0` missing endpoint与`0` self-loop。Status-evidence review发现Project Direction仍保留C未开始快照后，独立exact one-file owner PR #54以`0/0/0` review与1493-test full gate关闭并merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`；该证据对齐不替换`B_CG`。01-07C / 01-07G因此为`COMPLETE / EVIDENCE_INDEXED`。
 
@@ -1345,11 +1400,11 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
 | W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J_S_U REVIEWED_MERGED / B_SU_FORMED / X_NEXT` | S/U已从原exact `B_ACTIVE`分别完成review、latest-integration replay与串行merge；共同`B_SU = f037582...`、tree `4d9eb4b...`通过focused 871与canonical full `1980 passed, 1 deselected, 12 warnings`；X只能从该exact barrier签发 |
+| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J_S_U_X REVIEWED_MERGED / B_X_FORMED / T_PHYSICAL_HANDOFF_NEXT` | X已从原exact `B_SU`完成review、latest-integration replay与串行merge；`B_X = 9e8c70d...`、tree `4b01798...`通过focused+neighbor 152与canonical full `1974 passed, 1 deselected, 12 warnings`。T preflight发现physical catalog ownership blocker，下一步只能从B_X执行01-07T-PHYSICAL-HANDOFF |
 | `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为34/42；Phase目录中有40份`*-PLAN.md` artifact与24份Summary。PR #107与本次01-07X preflight remediation只修订execution map；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact不增加target denominator。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U/X、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为35/42；Phase目录中有40份`*-PLAN.md` artifact与24份Summary。PR #107、01-07X preflight remediation与本次01-07T physical handoff remediation只修订execution/acceptance route；新增的`01-07AA-ORACLE-FIX`、`01-07AA-CODEC-HANDOFF`、`01-07AA-CODEC-BOUNDARY-SCOPE-AMENDMENT`与`01-07AB`四份remediation Plan artifact及本次handoff均不增加target denominator。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
 
-Cross-file impact scan确认S/U Plan与feature证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`与`README.md`；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle，也不改变reviewed `B_SU`。
+Cross-file impact scan确认S/U/X Plan与feature证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`与`README.md`；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle，也不改变reviewed `B_X`。
 
-下一步从exact `B_SU = f037582446598512a0132a90504e24b5d701c0f6`签发01-07X；execution-owner remediation、Plan或status merge都不得替换该feature base。X reviewed merge与post-merge gate形成`B_X`后，才可继续按`T → W → V`关闭其余v1 surface。`B_SU`仍只覆盖exact-one accepted E2E01与已定义fault routes；zero/all-REJECT、multi-ACCEPT、atomic failure恢复、完整v1 contract closure、真实HTTP Trajectory/E2E、Case PASS与产品readiness仍未完成。
+下一步从exact `B_X = 9e8c70db39786b35c1ebea5070a32a1bc36e0df7`签发01-07T-PHYSICAL-HANDOFF；execution-owner或Plan merge不得替换该remediation feature base。handoff reviewed merge与post-merge gate形成`B_T_PHYSICAL_HANDOFF`后，重新签发的01-07T必须从该exact barrier启动；随后仍按`T → W → V`关闭其余v1 executable surface。`B_X`仍只覆盖exact-one accepted E2E01与已定义fault routes；physical RU-v1 retirement默认inactive，zero/all-REJECT、multi-ACCEPT、atomic failure恢复、完整v1 contract closure、真实HTTP Trajectory/E2E、Case PASS与产品readiness仍未完成。
