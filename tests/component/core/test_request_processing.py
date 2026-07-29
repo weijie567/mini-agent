@@ -474,13 +474,14 @@ def _accepted_delta_v2(
     base_version: int | None = None,
     result_version: int = 1,
     accepted_at: datetime = NOW,
+    goal_text: str = "查询订单状态",
 ) -> AcceptedTaskDeltaV2:
     return AcceptedTaskDeltaV2(
         accepted_delta_id=accepted_delta_id or uuid4(),
         candidate_ref=candidate_ref,
         message_ref=message_ref,
         operation=TaskDeltaOperation.ADD_GOAL,
-        goal_text="查询订单状态",
+        goal_text=goal_text,
         input_binding_refs=(uuid4(),),
         accepted_at=accepted_at,
         task_id=task_id or uuid4(),
@@ -542,6 +543,7 @@ def test_v2_builder_projects_unicode_quotes_to_safe_exact_provenance() -> None:
     child = _accepted_delta_v2(
         candidate_ref=candidate_id,
         message_ref=message_ref,
+        goal_text="查询 O-4242 的状态",
     )
 
     closure = _build_v2(
@@ -704,6 +706,7 @@ def test_v2_builder_preserves_child_order_but_chains_by_emitted_candidates() -> 
         task_id=task_id,
         base_version=None,
         result_version=1,
+        goal_text="查询 O-4242 的状态",
     )
     second_child = _accepted_delta_v2(
         candidate_ref=second_id,
@@ -711,6 +714,7 @@ def test_v2_builder_preserves_child_order_but_chains_by_emitted_candidates() -> 
         task_id=task_id,
         base_version=1,
         result_version=2,
+        goal_text="查询 O-4343 的状态",
     )
 
     closure = _build_v2(
@@ -762,6 +766,7 @@ def test_v2_builder_supports_partial_acceptance() -> None:
     child = _accepted_delta_v2(
         candidate_ref=accepted_id,
         message_ref=message_ref,
+        goal_text="查询 O-4242 的状态",
     )
 
     closure = _build_v2(

@@ -395,6 +395,74 @@ class RequestUnderstandingClosureV2(RuntimePrivateModel):
     record: RequestUnderstandingRecordV2
     accepted_task_deltas: tuple[AcceptedTaskDeltaV2, ...]
 
+    @model_validator(mode="after")
+    def accepted_children_are_exact_candidate_projections(self) -> Self:
+        if (
+            not _is_exact_canonical_model_v2(
+                self.record,
+                RequestUnderstandingRecordV2,
+            )
+            or any(
+                not _is_exact_canonical_model_v2(
+                    child,
+                    AcceptedTaskDeltaV2,
+                )
+                for child in self.accepted_task_deltas
+            )
+        ):
+            raise ValueError("v2 closure requires canonical records")
+        candidate_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in self.record.task_delta_candidates
+        }
+        decision_by_candidate = {
+            decision.candidate_ref: decision
+            for decision in self.record.candidate_validation
+        }
+        accepted_candidate_refs = {
+            candidate_ref
+            for candidate_ref, decision in decision_by_candidate.items()
+            if decision.decision is CandidateValidationDecision.ACCEPT
+        }
+        child_candidate_refs = tuple(
+            child.candidate_ref for child in self.accepted_task_deltas
+        )
+        child_ids = tuple(
+            child.accepted_delta_id for child in self.accepted_task_deltas
+        )
+        if (
+            len(child_candidate_refs) != len(set(child_candidate_refs))
+            or len(child_ids) != len(set(child_ids))
+            or set(child_candidate_refs) != accepted_candidate_refs
+            or set(child_ids) != set(self.record.accepted_delta_refs)
+        ):
+            raise ValueError(
+                "v2 closure children must match the exact accepted Candidate set"
+            )
+        for child in self.accepted_task_deltas:
+            candidate = candidate_by_id.get(child.candidate_ref)
+            if (
+                candidate is None
+                or child.message_ref != self.record.message_ref
+                or child.operation is not candidate.operation
+                or child.goal_text != candidate.goal_patch
+            ):
+                raise ValueError(
+                    "v2 accepted child must preserve its Candidate projection"
+                )
+            if (
+                len(child.input_binding_refs)
+                != len(set(child.input_binding_refs))
+            ):
+                raise ValueError(
+                    "v2 accepted child InputBinding refs must be unique"
+                )
+            if child.accepted_at != self.record.created_at:
+                raise ValueError(
+                    "v2 parent and children must share one trusted timestamp"
+                )
+        return self
+
 
 def _fail_request_understanding_v2(
     reason_code: (
@@ -1338,6 +1406,50 @@ class InitialAcceptedTaskGraphV2(RuntimePrivateModel):
         return self
 
 
+def _validate_initial_graph_candidate_projection_v2(
+    *,
+    record: RequestUnderstandingRecordV2,
+    graph: InitialAcceptedTaskGraphV2,
+) -> None:
+    child = graph.accepted_delta
+    matching_candidates = tuple(
+        candidate
+        for candidate in record.task_delta_candidates
+        if candidate.candidate_id == child.candidate_ref
+    )
+    if len(matching_candidates) != 1:
+        raise ValueError("initial graph must bind one accepted Candidate")
+    candidate = matching_candidates[0]
+    if (
+        child.message_ref != record.message_ref
+        or child.operation is not candidate.operation
+        or child.goal_text != candidate.goal_patch
+        or len(candidate.input_candidates) != 1
+    ):
+        raise ValueError(
+            "initial graph must preserve its accepted Candidate projection"
+        )
+    candidate_input = candidate.input_candidates[0]
+    try:
+        normalized_candidate_value = _normalize_order_id(
+            candidate_input.candidate_value
+        )
+    except RequestProcessingError:
+        raise ValueError(
+            "initial graph Candidate InputBinding projection is invalid"
+        ) from None
+    binding = graph.input_binding
+    if (
+        binding.name != candidate_input.name
+        or binding.normalized_value != normalized_candidate_value
+        or binding.authority is not candidate_input.authority
+        or binding.source_refs != (candidate_input.source_ref,)
+    ):
+        raise ValueError(
+            "initial graph Candidate InputBinding projection mismatch"
+        )
+
+
 class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
     """A valid zero/all-reject closure with no Task effect."""
 
@@ -1410,6 +1522,10 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
             != record.task_delta_candidates[0].candidate_id
         ):
             raise ValueError("routable decision must close one accepted Candidate")
+        _validate_initial_graph_candidate_projection_v2(
+            record=record,
+            graph=self.task_graph,
+        )
         return self
 
 
@@ -1459,6 +1575,11 @@ class InitialRequestUnroutedTaskGraphsDecisionV2(RuntimePrivateModel):
             )
         ):
             raise ValueError("unrouted decision must close partial or multi effects")
+        for graph in self.task_graphs:
+            _validate_initial_graph_candidate_projection_v2(
+                record=record,
+                graph=graph,
+            )
         return self
 
 
