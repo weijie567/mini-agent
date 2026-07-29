@@ -1,8 +1,8 @@
 ---
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
-scope: 01-04H-through-01-07I-and-01-07P-complete
-status: evidence_complete_through_01_07I_01_07P_b_ip_confirmed
+scope: 01-04H-through-01-07J-complete
+status: evidence_complete_through_01_07J_scoped_b_active_confirmed
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-07-27"
@@ -11,7 +11,7 @@ created: "2026-07-27"
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只定义已完成01-04H至01-07I/P的实现/合同反馈与可复现验证索引。01-07I Application dependency expand与01-07P physical dependency expand均已完成真实RED→GREEN、review fix、exact-head review、latest-integration replay与串行merge，因此当前scope的`wave_0_complete=true`；该字段不推进Case生命周期。Case、指标、Critical failure与生命周期仍由canonical Eval owner持有；Component / migration绿色证据与non-routable `B_IP`不能替代dependency consumers、active switch、真实纵向证据或post-execution quality gate。
+> 本文件只定义已完成01-04H至01-07J的实现/合同反馈与可复现验证索引。01-07K/L/M/Q/Y/Z/AA/J均已完成适用真实RED→GREEN或合同反馈、review fix、exact-head review、latest-integration replay、串行merge与post-merge gate，因此当前scope的`wave_0_complete=true`；该字段不推进Case生命周期。Case、指标、Critical failure与生命周期仍由canonical Eval owner持有；scoped `B_ACTIVE`只覆盖J已审查的exact-one与定义内fault routes，不能替代v1 contract closure、真实HTTP Trajectory/E2E或post-execution quality gate。
 
 ## Test Infrastructure
 
@@ -22,7 +22,7 @@ created: "2026-07-27"
 | Quick command | 每个 Task Packet 的 exact focused pytest command |
 | Full suite | `uv run pytest` |
 | Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
-| Current reviewed evidence | I feature/overlay通过357 focused、1759 full与independent `0/0/0/0`；P remediation replay通过48 focused、119 database、1767 full与final `0/0/0/0`；serial merge形成`B_IP = bbe14fa...` / tree `65415ff...`，exact post-merge full为1767 passed |
+| Current reviewed evidence | K/L/M/Q形成`B_DEPENDENCY`、`B_DEPENDENCY_M`、`B_Q`并在各barrier通过最高1901 full；Y/Z形成`B_YZ`，AA形成`B_J_READY`并通过1987 full；J exact-head/latest-overlay均`0/0/0/0`，post-merge focused 87、Application 707、neighbors 165、full 2033 passed，最终形成scoped `B_ACTIVE = 7f92b5e...` / tree `f70b202...` |
 | Graphify status | 用户已明确暂时停用；后续不运行、不引用，也不作为门禁 |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
 
@@ -38,6 +38,7 @@ created: "2026-07-27"
 - 01-07D / 01-07H已从`B_CG`以互斥allowlist执行并串行形成`B_DH`；01-07N/O又依次完成cutover remediation与唯一execution map。
 - 01-07F从exact `B_O_STATUS`形成`B_F`，01-07E再从reviewed `B_F`形成non-routable `B_FE_EXPAND`；两者feature与latest overlay均重复scope、protected-v1、focused、full与独立review。
 - 01-07I从exact `B_FE_EXPAND`完成Application dependency expand；01-07P经dedicated oracle remediation后从exact `B_I_E_ORACLE_FIX`完成r1 acceptance replay；两者串行形成non-routable `B_IP`，feature与latest overlay均重复scope、focused/database/full与独立review。
+- 01-07K/L从exact `B_IP`以互斥ownership执行并串行形成`B_DEPENDENCY`；M与Q依序形成`B_DEPENDENCY_M`和`B_Q`。Execution-map r2新增Y/Z/AA后，Y/Z形成`B_YZ`，AA形成`B_J_READY`，J最终形成scoped `B_ACTIVE`；各feature与latest overlay均重复适用scope、focused/neighbor/full与独立review。
 - 01-08 前：Runtime、Infra、Eval、01-07A、01-07B及后续owner-ruling / implementation Packet都必须有 reviewed exact-head和latest-integration compatibility证据；01-08A credentialed runner在01-08之后独立执行。
 
 ## Per-Task Verification Map
@@ -77,12 +78,20 @@ created: "2026-07-27"
 | 01-07E-01 | 01-07E | 20 | E2E01-01/04 | RUC-S01/RUC-T01/RUC-R01/RUC-I01/RUC-D01/RUC-E01 | immutable 18-pair catalog、exact-version API、RU v2 8+4 projection、child closure、bounded metadata与17-pair legacy parity | Component contract | 233 focused；60-definition/12-mutant oracle；catalog/consumer gate；1671 full；feature/latest-overlay review | ✅ existing | ✅ green |
 | 01-07I-01 | 01-07I | 21 | E2E01-01/04 | ERI-S01/ERI-T01/ERI-R01/ERI-I01/ERI-D01/ERI-E01 | owner-scoped、transactionally-consistent exact-Run logical closure、不可区分read Port、bounded candidate-invalid signal与additive ModelProviderV2；v1 surface与active routing不变 | Component contract | 357 focused；protected-v1/closure/Port/signal oracle；1759 full；feature/latest-overlay review | ✅ existing | ✅ green |
 | 01-07P-01 | 01-07P | 21 | E2E01-01/04 | RUP-S01/RUP-T01/RUP-R01/RUP-I01/RUP-D01/RUP-E01 | exact 17-code/18-pair physical admission、self-contained 0003与同事务fail-closed downgrade lock；不切换logical codec/reader/writer | Migration integration | 48 focused；119 database；downgrade AST/order/concurrency/atomicity；1767 full；feature/latest-overlay review | ✅ existing | ✅ green |
+| 01-07K-01 | 01-07K | 22 | E2E01-01/04 | K-S01/K-T01/K-R01/K-I01/K-D01/K-E01 | owner-scoped exact-Run strict PostgreSQL reader与authoritative order source-version producer；pre-payload indistinguishability、single-snapshot closure与fixed-vector parity | Infrastructure integration | feature/overlay 59 focused；protected oracle `58 + 2 exact`；1813 full；exact-head/latest-overlay review | ✅ existing | ✅ green |
+| 01-07L-01 | 01-07L | 22 | E2E01-01/04 | L-S01/L-T01/L-R01/L-I01/L-D01/L-E01 | v2 Scripted/Qwen Provider failure partition、case-free exact-Run HTTP mapper与logical-v2 evidence validation；Runtime catch仍归J | Eval component + integration | feature/overlay 837 focused；mapper 386；Qwen zero-network 23；latest overlay 1901 full；review findings closed | ✅ existing | ✅ green |
+| 01-07M-01 | 01-07M | 23 | E2E01-01/04 | M-S01/M-T01/M-R01/M-I01/M-D01/M-E01 | `GetOrderResult.FOUND`强制strict source version并保持negative错误优先级、ToolSpec non-exposure与既有producer闭合 | Core component contract | RED `1 failed, 38 passed`；GREEN 39；feature/overlay 1901 full；independent review | ✅ existing | ✅ green |
+| 01-07Q-01 | 01-07Q | 24 | E2E01-01/04 | Q-S01/Q-T01/Q-T02/Q-R01/Q-I01/Q-D01/Q-E01 | public RU persistence mapping切换v2，同时保持legacy API隔离、exact catalog与physical migration oracle | Application component contract | component 233；K isolation 50；migration oracle 48；feature/overlay 1901 full；independent review | ✅ existing | ✅ green |
+| 01-07Y-01 | 01-07Y | 25 | E2E01-01/04 | Y-S01/Y-T01/Y-T02/Y-T03/Y-R01/Y-I01/Y-D01/Y-E01 | 纯确定性v2 initial decision与post-write revalidation；拒绝把整体失败伪装成REJECT或自行定义Runtime结果 | Core component contract | focused 88；neighbors 37；feature/overlay 1934 full；双review全零 | ✅ existing | ✅ green |
+| 01-07Z-01 | 01-07Z | 25 | E2E01-01/04 | Z-S01/Z-T01/Z-T02/Z-T03/Z-R01/Z-I01/Z-D01/Z-E01 | exact-v2 Application command/Port写合同；不实现Adapter、不路由Runtime、不通过动态fallback探测 | Application component contract | feature/overlay 368 focused；latest overlay 1945 full；双review全零 | ✅ existing | ✅ green |
+| 01-07AA-01 | 01-07AA | 26 | E2E01-01/04 | 01-07AA Plan security acceptance | owner-scoped PostgreSQL RU-v2 atomic writers、static exact-version chain、CAS/closed-set/concurrency/fault replay与bounded failure | Infrastructure integration | RED 12 expected failures；focused+codec 38；neighbors 136；feature/overlay 1987 full；双review全零 | ✅ existing | ✅ green |
+| 01-07J-01 | 01-07J | 27 | E2E01-01/04 | 01-07J Plan security acceptance | Runtime切换到reviewed v2 reducer/command/writer；authoritative Message reload、source-version exact-copy、INPUT_INVALID raw-free与exact-one PostgreSQL闭合 | Application component + integration | focused 87；Application 707；neighbors 165；full 2033；exact-head/latest-overlay review与merge-tree equality | ✅ existing | ✅ green |
 
 *Status: ⬜ pending/replay · ✅ green/feature · ❌ red · ⚠️ flaky；`feature`不表示已merge或通过latest-integration gate。*
 
 ## Wave 0 Requirements
 
-Wave 0 是各 Packet的首个测试或合同反馈提交，不新增共享 bootstrap。01-04H至01-07I/P的当前scope均已有reviewed绿色证据，因此`wave_0_complete=true`：
+Wave 0 是各 Packet的首个测试或合同反馈提交，不新增共享 bootstrap。01-04H至01-07J的当前scope均已有reviewed绿色证据，因此`wave_0_complete=true`：
 
 - 01-04H：扩展两个既有 Application contract test files，RED/GREEN与reviewed merge均已完成。
 - historical 01-05：7个allowlisted Component test files与RED/GREEN保留在donor history；01-05R新增terminal aggregate RED并已完成reviewed merge。
@@ -100,9 +109,14 @@ Wave 0 是各 Packet的首个测试或合同反馈提交，不新增共享 boots
 - 01-07E：Application persistence contract先取得`138 passed / 66 failed`的真实RED，再以persistence source完成GREEN与review fixes；feature/overlay最终233 focused、1671 full、60-symbol oracle、catalog/consumer与independent `0/0/0`通过，PR #74已merge。
 - 01-07I：两份Application tests先取得缺失closure/Port/signal/Provider v2 surface的真实RED，再以两份source完成GREEN与append-only fixes；feature/overlay最终357 focused、1759 full与independent `0/0/0/0`通过，PR #83已merge。
 - 01-07P：migration integration test先取得缺失0003/18-pair/downgrade合同的真实RED；原PR #82因跨Packet oracle冲突关闭未合并，经PR #84/#85 remediation后r1重放byte-identical GREEN patch并追加downgrade lock oracle fix；feature/overlay最终48 focused、119 database、1767 full与independent `0/0/0/0`通过，PR #87已merge。
+- 01-07K/L：分别以Infrastructure与Eval互斥allowlist完成strict reader/order producer及v2 Provider/mapper反馈；L首轮`0/3/3/0` findings由security amendment与append-only fixes关闭，PR #96/#98串行merge形成`B_DEPENDENCY`。
+- 01-07M/Q：M以单一预期RED关闭`FOUND + None`，Q以Application codec contract反馈切换public active mapping；PR #101/#106依序形成`B_DEPENDENCY_M`与`B_Q`。
+- 01-07Y/Z：Core reducer与Application write-contract两个互斥writer均完成真实RED→GREEN、exact-head与latest overlay；PR #110/#111串行形成`B_YZ`。
+- 01-07AA：经closure与codec quality-gate remediation后，r2在最终acceptance base重放fresh RED→GREEN并通过PostgreSQL atomicity/concurrency/fault矩阵；PR #120形成`B_J_READY`。
+- 01-07J：三个owned tests取得Runtime仍走v1、缺v2 writer调用与source-version copy的真实RED；两个source完成GREEN与append-only review fix，PR #124通过双review、merge-tree equality与post-merge full形成scoped `B_ACTIVE`。
 - 不修改 `pyproject.toml`、`uv.lock`、共享 fixtures或canonical owners。
 
-原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环。D/H/N/O/F/E/I/P也已完成各自首个合同或测试反馈、GREEN、review与merge，所以当前scope的`wave_0_complete=true`。该字段不推进Case lifecycle，也不表示dependency consumers、active routing或真实纵向链已实现。
+原01-05/06/07三个writer、01-04H、01-05R、01-06R与01-07A均已展示各自RED；01-07B又以test-only commit `8978655a...`形成独立RED，并由GREEN / review-fix、双review与merge证据闭环。D/H/N/O/F/E/I/P/K/L/M/Q/Y/Z/AA/J也已完成各自首个合同或测试反馈、GREEN、review与merge，所以当前scope的`wave_0_complete=true`。该字段不推进Case lifecycle；scoped `B_ACTIVE`也不表示zero/multi outcome、v1 contract closure或真实HTTP Trajectory/E2E已经完成。
 
 ## Packet Full Gates
 
@@ -269,7 +283,7 @@ git diff --check
 
 01-07B必须先用两条独立test-only RED证明完整`EvalCaseArtifact`、嵌套message extra key与semantic `model_script_ref`/`ModelScriptArtifact.expected_control_result`/nested step answer-like key可达，SUT output被迫携带semantic `case_id`且没有one-time non-semantic nonce correlation，以及reordered Trace false PASS；再以exact six-file GREEN引入只含opaque `execution_ref`、closed role/content message、trusted Session-fixture ref或closed behavior-specific step/runtime fault/opaque identity的execution-only SUT/Provider projection。`execution_ref`与Provider execution identity必须由不接收Case/script/expectation参数的zero-argument injected nonce factory分别生成，production default为`uuid4`；collision/reuse以及`uuid5`/hash等semantic deterministic derivation必须FAIL。SUT result只回传one-time `execution_ref`与unbound evidence/observable，Harness拒绝unknown/mismatch/replay并在成功关联后独自绑定authenticated `case_id`。Trace使用每个现有Case/script variant的closed safety-causal DAG：正常、not-found、Gateway拒绝、Request Understanding/provider/input fault与presentation fault各自canonical PASS，每条适用edge swap与缺失required endpoint必须FAIL；with-Task路径还必须验证`ResponseRendered → last TaskStateChanged → RunStopped`（含state-advanced fault），task-less路径验证`ResponseRendered → RunStopped`，合法额外事件继续PASS。Actual/expected mismatch必须形成正常grader `FAIL`，不能被SUT按answers补造为PASS。它不创建real SUT、PG reader、HTTP E2E或Eval lifecycle更新。
 
-01-07B也不改变外部`ModelProvider`失败合同；当时确认的invalid Request Understanding schema / trusted-field override、raw `ValidationError`与`ProviderProtocolError`分类，以及source-version producer / closure缺口都属于后续owner，而不是01-07B的完成内容。01-07N/O已经显式supersede本段曾使用的旧Packet顺序与旧分母；当前writer、allowlist、failure-taxonomy ownership、source-version阶段、active switch、v1 contract closure、barrier和目标`39`只由[多Agent实施计划](../../../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)中的marker-bounded `P0-RU-V2-EXECUTION-MAP`拥有。本Validation不再维护第二套顺序，也不能从历史01-07B nonclaim推断J早于K/L/M或直接签发01-08。
+01-07B也不改变外部`ModelProvider`失败合同；当时确认的invalid Request Understanding schema / trusted-field override、raw `ValidationError`与`ProviderProtocolError`分类，以及source-version producer / closure缺口都属于后续owner，而不是01-07B的完成内容。01-07N/O及execution-owner r2已经显式supersede本段曾使用的旧Packet顺序与39分母；当前writer、allowlist、failure-taxonomy ownership、source-version阶段、active switch、v1 contract closure、barrier和目标`42`只由[多Agent实施计划](../../../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)中的marker-bounded `P0-RU-V2-EXECUTION-MAP`拥有。本Validation只索引reviewed evidence，不维护第二套顺序，也不能从scoped `B_ACTIVE`推断01-08已解锁。
 
 ### 01-07C / 01-07G Owner rulings
 
@@ -290,7 +304,7 @@ graphify update .
 - Graphify diagnostic必须保留`699` dangling endpoint、`687` directed与`713` undirected collapse candidate、`0` missing endpoint、`0` self-loop；这些warning不阻断图可用性，但禁止把health描述为全绿；
 - [01-07C Summary](01-07C-SUMMARY.md)与[01-07G Summary](01-07G-SUMMARY.md)只索引证据；Case lifecycle仍为`0/8`。
 
-### 01-07D / 01-07H / 01-07N / 01-07O / 01-07F / 01-07E / 01-07I / 01-07P completion and barriers
+### 01-07D / 01-07H / 01-07N / 01-07O / 01-07F / 01-07E / 01-07I / 01-07P / 01-07K–J completion and barriers
 
 - D/H分别通过Plan PR #56/#57与feature PR #59/#60从同一`B_CG`执行；allowlist交集为0，feature与latest overlay均获independent `0/0/0/0`，串行merge形成`B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131` / tree `a5a60292ccdf116aba4dacaaea366576e183c532`。
 - N Plan / owner PR #62/#63从exact `B_DH`关闭旧E/F同base授权，reviewed merge为`a4b1edb4c50a2e3e826571194bac58f7b31eab6d` / tree `469e26460c1041d9ca5042d39ae9a57ded7d5442`；它只冻结`p0-ru-v2-cutover-r1`，不实现Core、codec、migration或routing。
@@ -302,7 +316,11 @@ graphify update .
 - I Plan / feature PR #80/#83从exact `B_FE_EXPAND`完成Application exact-Run closure、Port、bounded signal与additive Provider v2 declaration；feature与latest overlay最终357 focused、1759 full及independent `0/0/0/0`通过，reviewed merge为`b14a15d60b17eda8d8b5aed892c5d00f16005310`。
 - P原PR #82只保留blocked lineage并关闭未合并；dedicated oracle fix PR #84形成`B_I_E_ORACLE_FIX = 0fb4d0ba5fb9d673f2d116041ce023dd367a52ec`，execution-owner remediation PR #85与r1 Plan PR #86授权同一Packet acceptance replay。P-r1 feature PR #87经首轮`0/0/1/0` finding closure后，feature/overlay最终48 focused、119 database、1767 full及independent `0/0/0/0`通过。
 - P-r1 reviewed serial merge形成`B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc` / tree `65415ff5846892f257e95d8b8bd34f50752980a2`；exact post-merge Alembic head为`20260728_0003`，full为`1767 passed, 1 deselected, 12 warnings`，namespace contamination为0。
-- `B_IP`已满足K/L的implementation input，但K/L签发仍等待四步status alignment closure；active registry、strict PostgreSQL evidence reader、Runtime、Provider/Eval consumers、v1 contract与readiness均未切换。本派生状态对齐不创建第二道implementation barrier。
+- K/L Plan、feature与security amendment PR #94–#98从exact `B_IP`执行并串行形成`B_DEPENDENCY = e54a6a4d77208695440c2caf03c3ab32f9d37108`；exact full为`1901 passed, 1 deselected, 12 warnings`。
+- M Plan、shell correction与feature PR #99–#101形成`B_DEPENDENCY_M = 42fa2ec7ef1a61a2edfd78d69ca4e6a5d32aa1c3`；Q oracle remediation与Plan/category/feature PR #102–#106形成`B_Q = 2b9fde6f0e09308a53b86a4929ea3b639660f82e`。
+- Execution-owner r2 PR #107把Y/Z/AA纳入42 denominator；Y/Z PR #108–#111形成`B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05`，AA与quality-gate remediation PR #112–#120形成`B_J_READY = b8d32d50775a0d3f4a0d3e7e609c717f6c540b33`。
+- J Plan、exact-reader scope alignment与feature PR #121–#124通过exact-head/latest-overlay双review、merge-tree equality与post-merge focused 87、Application 707、neighbors 165、full `2033 passed, 1 deselected, 12 warnings`，形成scoped `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd` / tree `f70b20215e569acf3ad196cc050e9a23700d4bae`。
+- 01-07S/U已从原exact `B_ACTIVE`解锁；status alignment不替换该feature base。zero/all-REJECT、multi-ACCEPT、atomic failure恢复、v1 contract closure、Composition Root、真实HTTP Trajectory/E2E与readiness仍未完成。
 - 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## Manual-only Verification
@@ -353,7 +371,11 @@ graphify update .
 - [x] 01-07I Plan/feature PR #80/#83完成Application dependency expand；357 focused、1759 full、feature/overlay independent `0/0/0/0`通过。
 - [x] 01-07P原PR #82保持closed/unmerged；PR #84/#85 remediation与r1 Plan/feature PR #86/#87完成同Packet acceptance replay，48 focused、119 database、1767 full、feature/overlay independent `0/0/0/0`通过。
 - [x] I/P reviewed serial merge形成exact `B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc` / tree `65415ff5846892f257e95d8b8bd34f50752980a2`；post-merge Alembic/full/namespace gate通过。
+- [x] 01-07K/L Plan、feature与security amendment PR #94–#98完成strict PostgreSQL reader/order producer及v2 Eval Provider/mapper，串行形成`B_DEPENDENCY = e54a6a4...`。
+- [x] 01-07M/Q PR #99–#106完成Core source-version closure与Application codec active switch，依序形成`B_DEPENDENCY_M = 42fa2ec...`与`B_Q = 2b9fde6...`。
+- [x] Execution-owner r2 PR #107把Y/Z/AA纳入唯一map与42 denominator；PR #108–#120完成Core reducer、Application write contracts、PostgreSQL atomic writers及quality-gate remediation，形成`B_YZ`与`B_J_READY`。
+- [x] 01-07J PR #121–#124完成Runtime v2 active switch与exact-reader scope alignment；双review、merge-tree equality、post-merge 2033 full通过并形成scoped `B_ACTIVE = 7f92b5e...`。
 - [x] 当前scope的Wave 0已完成，`wave_0_complete=true`；这不推进Case lifecycle。
 - [x] F/E后七文件派生状态Packet已通过exact-head review并由PR #75 merge `b1deb0a...`；Project Direction PR #76、README PR #77与execution owner PR #78随后完成各自single-writer evidence-only对齐。四者均不是I/P前置barrier，也不创建第二道barrier。
 
-**Approval:** `W2_THROUGH_01-07I_01-07P_COMPLETE / B_IP_CONFIRMED / WAVE_0_COMPLETE / STATUS_ALIGNMENT_IN_PROGRESS`。I/P均已完成Plan、真实RED→GREEN、review fixes、focused/database/full、exact-head review、latest-integration replay与串行merge；共同barrier为`bbe14fadc0cd2e14ad35e19177b079fcab685dfc`。当前正式签发26个Plan、24份Summary，目标Packet完成证据为`24/39`，numbered Plan evidence仍为7/8，canonical lifecycle与Requirements checkbox仍为0/8。Exact `B_IP`已满足K/L的implementation input，但须先依次完成本dedicated planning-status、Project Direction、README与execution-owner final closure，之后才可签发K/L；这些evidence-only PR不创建第二道implementation barrier，也不批准active routing、Case、credentialed Baseline、release或lifecycle结论。用户已暂停Graphify，后续不运行、不引用，也不把freshness作为门禁。
+**Approval:** `W2_THROUGH_01-07J_COMPLETE / SCOPED_B_ACTIVE_CONFIRMED / WAVE_0_COMPLETE / 01-07S_01-07U_NEXT`。K/L/M/Q/Y/Z/AA/J均已完成适用Plan、真实RED→GREEN或合同反馈、review fixes、focused/neighbor/database/full、exact-head review、latest-integration replay与串行merge；最终barrier为`B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`。当前磁盘38份Plan artifact、24份Summary，目标Packet完成证据为`32/42`，numbered Plan evidence仍为7/8，canonical lifecycle与Requirements checkbox仍为0/8。01-07S/U只可从原exact `B_ACTIVE`分别签发；evidence-only status PR不替换feature base、不创建第二道implementation barrier，也不批准zero/multi outcome、v1 contract closure、真实HTTP Trajectory/E2E、credentialed Baseline、release或lifecycle结论。用户已暂停Graphify，后续不运行、不引用，也不把freshness作为门禁。
