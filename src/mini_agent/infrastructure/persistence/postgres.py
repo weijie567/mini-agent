@@ -34,7 +34,6 @@ from mini_agent.application.records import (
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    CreateInitialTaskGraphCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -56,10 +55,8 @@ from mini_agent.application.records import (
 )
 from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     InputBinding,
-    RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -3243,122 +3240,6 @@ class PostgresRecordAdapter:
             return ConditionalWriteResult.PROJECTION_CONFLICT
         return ConditionalWriteResult.APPLIED
 
-    async def create_initial_task_graph_if_current(
-        self,
-        command: CreateInitialTaskGraphCommand,
-    ) -> ConditionalWriteResult:
-        expected_rows = (
-            (
-                P0RecordCode.CONVERSATION_RECORD,
-                ((
-                    "conversation_id",
-                    command.expected_conversation_record.conversation_id,
-                ),),
-                command.expected_conversation_record,
-            ),
-            (
-                P0RecordCode.MESSAGE_RECORD,
-                (("message_id", command.expected_message_record.message_id),),
-                command.expected_message_record,
-            ),
-            (
-                P0RecordCode.AGENT_RUN_RECORD,
-                (("run_id", command.expected_active_run_record.run_id),),
-                command.expected_active_run_record,
-            ),
-        )
-        with self.session_factory.begin() as session:
-            locked_expected_rows: dict[P0RecordCode, P0RecordModel] = {}
-            for code, identity, expected in sorted(
-                expected_rows,
-                key=lambda item: (
-                    item[0].value,
-                    _canonical_identity_text(_json_identity(item[1])),
-                ),
-            ):
-                row = self._row_for_identity(
-                    session,
-                    record_code=code,
-                    logical_identity=identity,
-                    for_update=True,
-                    owner_scope=command.owner_scope,
-                )
-                if row is None:
-                    return ConditionalWriteResult.NOT_APPLICABLE
-                decoded = self._validate_physical_projection(
-                    session,
-                    row,
-                    expected_owner=command.owner_scope.customer_id,
-                )
-                if decoded.source_record != expected:
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-                locked_expected_rows[code] = row
-
-            try:
-                self._ru_v2_write_check_same_run(
-                    session,
-                    run_id=command.expected_active_run_record.run_id,
-                    owner_customer_id=command.owner_scope.customer_id,
-                    allowed_ru_identity=None,
-                    allowed_run_link_identity=None,
-                )
-            except _RuV2WriteProjectionConflict:
-                return ConditionalWriteResult.PROJECTION_CONFLICT
-
-            request_unit = command.initial_request_unit.initial_record
-            envelopes = (
-                encode_persistence_record(
-                    P0RecordCode.TASK_RECORD,
-                    command.initial_task.initial_record,
-                ),
-                encode_persistence_record(
-                    P0RecordCode.REQUEST_UNIT_RECORD,
-                    request_unit,
-                ),
-                *(
-                    encode_persistence_record(
-                        P0RecordCode.INPUT_BINDING_RECORD,
-                        binding.record,
-                        external_references=(
-                            _external_reference(
-                                "request_unit_id",
-                                P0RecordCode.REQUEST_UNIT_RECORD,
-                                "request_unit_id",
-                                binding.request_unit_id,
-                            ),
-                        ),
-                    )
-                    for binding in command.input_bindings
-                ),
-                encode_persistence_record(
-                    P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-                    command.request_understanding.record,
-                    logical_children=command.request_understanding.accepted_deltas,
-                ),
-                encode_persistence_record(
-                    P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
-                    command.conversation_task_link,
-                ),
-                encode_persistence_record(
-                    P0RecordCode.RUN_TASK_LINK_RECORD,
-                    command.run_task_link.active_record,
-                ),
-            )
-            for envelope in sorted(envelopes, key=self._envelope_key):
-                if self._row_for_identity(
-                    session,
-                    record_code=envelope.record_code,
-                    logical_identity=envelope.logical_identity,
-                    for_update=True,
-                ) is not None:
-                    return ConditionalWriteResult.PROJECTION_CONFLICT
-            self._persist_envelopes(session, envelopes)
-            self._touch_recovery_anchor(
-                session,
-                locked_expected_rows[P0RecordCode.AGENT_RUN_RECORD],
-            )
-            return ConditionalWriteResult.APPLIED
-
     async def apply_task_transition_if_current(
         self,
         command: ApplyTaskTransitionCommand,
@@ -3728,56 +3609,6 @@ class PostgresRecordAdapter:
             identity=(("request_unit_id", request_unit_id),),
             expected_type=RequestUnitRecord,
         )
-
-    async def load_request_understanding_for_owner(
-        self,
-        *,
-        owner_scope: TrustedOwnerScope,
-        run_id: UUID,
-    ) -> RequestUnderstandingRecord | None:
-        return await self._load_for_owner(
-            owner_scope=owner_scope,
-            record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-            identity=(("run_id", run_id),),
-            expected_type=RequestUnderstandingRecord,
-        )
-
-    @_bounded_database_failures
-    async def load_accepted_task_delta_for_owner(
-        self,
-        *,
-        owner_scope: TrustedOwnerScope,
-        accepted_delta_id: UUID,
-    ) -> AcceptedTaskDelta | None:
-        with self.session_factory() as session:
-            rows = tuple(
-                session.scalars(
-                    select(P0RecordModel).where(
-                        P0RecordModel.record_code
-                        == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
-                        P0RecordModel.scope_owner_customer_id
-                        == owner_scope.customer_id,
-                    )
-                )
-            )
-            found: list[AcceptedTaskDelta] = []
-            for row in rows:
-                decoded = self._validate_physical_projection(
-                    session,
-                    row,
-                    expected_owner=owner_scope.customer_id,
-                )
-                found.extend(
-                    child
-                    for child in decoded.logical_children
-                    if isinstance(child, AcceptedTaskDelta)
-                    and child.accepted_delta_id == accepted_delta_id
-                )
-            if len(found) > 1:
-                raise _integrity(
-                    P0PersistenceIntegrityCategory.CHILD_MISMATCH
-                )
-            return found[0] if found else None
 
     async def load_input_binding_for_owner(
         self,

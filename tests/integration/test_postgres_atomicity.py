@@ -62,16 +62,22 @@ _COMPONENT_APPLICATION_TESTS = (
     Path(__file__).parents[1] / "component" / "application"
 )
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
-from test_persistence_contract import _record_cases  # noqa: E402
 from test_record_contracts import (  # noqa: E402
     _completed_finalization,
     _conversation,
     _failed_finalization,
-    _initial_graph,
+    _initial_v2_graph,
     _input_binding,
     _message,
     _owner_scope,
     _recovery_trace_events,
+)
+
+_INTEGRATION_TESTS = Path(__file__).parent
+sys.path.append(str(_INTEGRATION_TESTS))
+from test_postgres_record_adapters import (  # noqa: E402
+    _encode_non_ru_record_case,
+    _non_ru_record_cases,
 )
 
 pytestmark = pytest.mark.anyio
@@ -85,7 +91,7 @@ def anyio_backend() -> str:
 def _encoded_record_set_for_dispatch(*, effect: ToolEffect):
     envelopes = []
     created_tool_call = None
-    for case in _record_cases():
+    for case in _non_ru_record_cases():
         record = case.record
         logical_children = case.logical_children
         if case.code is P0RecordCode.AGENT_RUN_RECORD:
@@ -103,10 +109,9 @@ def _encoded_record_set_for_dispatch(*, effect: ToolEffect):
             logical_children = ()
             created_tool_call = record
         envelopes.append(
-            encode_persistence_record(
-                case.code,
-                record,
-                external_references=case.external_references,
+            _encode_non_ru_record_case(
+                case,
+                record=record,
                 logical_children=logical_children,
             )
         )
@@ -117,7 +122,7 @@ def _encoded_record_set_for_dispatch(*, effect: ToolEffect):
 def _encoded_graph_and_new_tool_call():
     envelopes = []
     new_tool_call = None
-    for case in _record_cases():
+    for case in _non_ru_record_cases():
         record = case.record
         logical_children = case.logical_children
         if case.code is P0RecordCode.AGENT_RUN_RECORD:
@@ -140,10 +145,9 @@ def _encoded_graph_and_new_tool_call():
                 }
             )
         envelopes.append(
-            encode_persistence_record(
-                case.code,
-                record,
-                external_references=case.external_references,
+            _encode_non_ru_record_case(
+                case,
+                record=record,
                 logical_children=logical_children,
             )
         )
@@ -472,12 +476,13 @@ def _assert_persisted_finalization(
 async def _seed_initial_graph_prerequisites(
     adapter: PostgresRecordAdapter,
 ):
-    graph = _initial_graph()
+    graph = _initial_v2_graph()
     created_run = graph.expected_active_run_record.model_copy(
         update={"status": AgentRunStatus.CREATED}
     )
     await adapter.save_conversation(graph.expected_conversation_record)
-    await adapter.append_message(graph.expected_message_record)
+    for message in graph.expected_message_records:
+        await adapter.append_message(message)
     assert (
         await adapter.insert_run(CreateRunCommand(created_record=created_run))
         is InsertOnlyWriteResult.INSERTED
@@ -581,7 +586,7 @@ async def _seed_tool_call_support_for_finalization(
     assert transition is not None
     record_by_code = {
         case.code: case.record
-        for case in _record_cases()
+        for case in _non_ru_record_cases()
     }
     toolset_artifact = record_by_code[
         P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
@@ -770,59 +775,13 @@ def _assert_bounded_persistence_system_error(
     assert all(value not in projection for value in forbidden_values)
 
 
-async def test_initial_graph_rolls_back_every_row_and_reference_on_mid_write_failure(
-    eval_postgres_namespace,
-    monkeypatch,
-) -> None:
-    engine = eval_postgres_namespace.build_engine()
-    adapter = PostgresRecordAdapter(build_session_factory(engine))
-    try:
-        graph = await _seed_initial_graph_prerequisites(adapter)
-        with adapter.session_factory() as session:
-            baseline_records = session.scalar(
-                select(func.count()).select_from(P0RecordModel)
-            )
-            baseline_references = session.scalar(
-                select(func.count()).select_from(P0RecordReferenceModel)
-            )
-
-        original = adapter._persist_one_envelope
-        calls = 0
-
-        def fail_after_two_writes(session, envelope):
-            nonlocal calls
-            calls += 1
-            result = original(session, envelope)
-            if calls == 2:
-                raise RuntimeError("injected aggregate failure")
-            return result
-
-        monkeypatch.setattr(adapter, "_persist_one_envelope", fail_after_two_writes)
-        with pytest.raises(RuntimeError, match="injected aggregate failure"):
-            await adapter.create_initial_task_graph_if_current(graph)
-
-        with adapter.session_factory() as session:
-            assert (
-                session.scalar(select(func.count()).select_from(P0RecordModel))
-                == baseline_records
-            )
-            assert (
-                session.scalar(
-                    select(func.count()).select_from(P0RecordReferenceModel)
-                )
-                == baseline_references
-            )
-    finally:
-        engine.dispose()
-
-
 async def test_owner_scoped_read_discards_database_failure_context(
     eval_postgres_namespace,
     monkeypatch,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
-    graph = _initial_graph()
+    graph = _initial_v2_graph()
     forbidden_values = (
         "customer-A",
         "p0-session-alice",
@@ -859,181 +818,6 @@ async def test_owner_scoped_read_discards_database_failure_context(
             forbidden_values=forbidden_values,
         )
     finally:
-        engine.dispose()
-
-
-async def test_initial_graph_and_recovery_use_one_stable_real_transaction_lock_order(
-    eval_postgres_namespace,
-    monkeypatch,
-) -> None:
-    engine = eval_postgres_namespace.build_engine()
-    session_factory = build_session_factory(engine)
-    records = PostgresRecordAdapter(session_factory)
-    recovery = PostgresRestartRecoveryAdapter(session_factory)
-    initial_conversation_locked = threading.Event()
-    recovery_run_selected = threading.Event()
-    start_barrier = threading.Barrier(2)
-    first_initial_lock: list[P0RecordCode] = []
-    try:
-        graph = await _seed_initial_graph_prerequisites(records)
-        closure = await recovery.load_next_restart_recovery_closure()
-        assert closure is not None
-        recovery_command = _empty_graph_recovery_command(closure)
-
-        original_row_for_identity = records._row_for_identity
-
-        def synchronized_initial_row_lock(*args, **kwargs):
-            row = original_row_for_identity(*args, **kwargs)
-            if kwargs.get("for_update"):
-                code = kwargs["record_code"]
-                if not first_initial_lock:
-                    first_initial_lock.append(code)
-                if code is P0RecordCode.CONVERSATION_RECORD:
-                    initial_conversation_locked.set()
-                    if first_initial_lock[0] is P0RecordCode.CONVERSATION_RECORD:
-                        assert recovery_run_selected.wait(timeout=5)
-            return row
-
-        original_validate = recovery._validate_physical_projection
-        first_recovery_validation = True
-
-        def synchronize_after_recovery_run_selection(*args, **kwargs):
-            nonlocal first_recovery_validation
-            if first_recovery_validation:
-                first_recovery_validation = False
-                recovery_run_selected.set()
-                assert initial_conversation_locked.wait(timeout=5)
-            return original_validate(*args, **kwargs)
-
-        monkeypatch.setattr(
-            records,
-            "_row_for_identity",
-            synchronized_initial_row_lock,
-        )
-        monkeypatch.setattr(
-            recovery,
-            "_validate_physical_projection",
-            synchronize_after_recovery_run_selection,
-        )
-
-        def apply_initial_graph():
-            start_barrier.wait(timeout=5)
-            return asyncio.run(
-                records.create_initial_task_graph_if_current(graph)
-            )
-
-        def apply_recovery():
-            start_barrier.wait(timeout=5)
-            return asyncio.run(
-                recovery.claim_and_apply_restart_recovery(recovery_command)
-            )
-
-        initial_result, recovery_result = await asyncio.wait_for(
-            asyncio.gather(
-                asyncio.to_thread(apply_initial_graph),
-                asyncio.to_thread(apply_recovery),
-            ),
-            timeout=15,
-        )
-
-        assert initial_result in {
-            ConditionalWriteResult.APPLIED,
-            ConditionalWriteResult.PROJECTION_CONFLICT,
-            ConditionalWriteResult.NOT_APPLICABLE,
-        }
-        assert recovery_result in {
-            RecoveryWriteResult.APPLIED,
-            RecoveryWriteResult.CLOSURE_CONFLICT,
-            RecoveryWriteResult.NOT_APPLICABLE,
-        }
-        assert first_initial_lock[0] is P0RecordCode.AGENT_RUN_RECORD
-    finally:
-        engine.dispose()
-
-
-async def test_recovery_rechecks_empty_closure_after_initial_graph_commits(
-    eval_postgres_namespace,
-    monkeypatch,
-) -> None:
-    engine = eval_postgres_namespace.build_engine()
-    session_factory = build_session_factory(engine)
-    records = PostgresRecordAdapter(session_factory)
-    recovery = PostgresRestartRecoveryAdapter(session_factory)
-    old_closure_materialized = threading.Event()
-    initial_graph_committed = threading.Event()
-    try:
-        graph = await _seed_initial_graph_prerequisites(records)
-        closure = await recovery.load_next_restart_recovery_closure()
-        assert closure is not None
-        assert closure.run_task_links == ()
-        command = _empty_graph_recovery_command(closure)
-
-        original_lock_rows_stably = recovery._lock_rows_stably
-
-        def wait_for_initial_graph_before_locking(session, rows):
-            old_closure_materialized.set()
-            assert initial_graph_committed.wait(timeout=5)
-            return original_lock_rows_stably(session, rows)
-
-        monkeypatch.setattr(
-            recovery,
-            "_lock_rows_stably",
-            wait_for_initial_graph_before_locking,
-        )
-
-        def apply_recovery():
-            return asyncio.run(
-                recovery.claim_and_apply_restart_recovery(command)
-            )
-
-        recovery_task = asyncio.create_task(asyncio.to_thread(apply_recovery))
-        assert await asyncio.to_thread(old_closure_materialized.wait, 5)
-        try:
-            initial_result = await records.create_initial_task_graph_if_current(
-                graph
-            )
-        finally:
-            initial_graph_committed.set()
-        recovery_result = await asyncio.wait_for(recovery_task, timeout=10)
-
-        assert initial_result is ConditionalWriteResult.APPLIED
-        assert recovery_result is RecoveryWriteResult.CLOSURE_CONFLICT
-
-        with session_factory() as session:
-            run_row = session.scalar(
-                select(P0RecordModel).where(
-                    P0RecordModel.record_code
-                    == P0RecordCode.AGENT_RUN_RECORD.value,
-                    P0RecordModel.run_id
-                    == graph.expected_active_run_record.run_id,
-                )
-            )
-            assert run_row is not None
-            assert run_row.lifecycle_status == AgentRunStatus.RUNNING.value
-            assert (
-                session.scalar(
-                    select(func.count())
-                    .select_from(P0RecordModel)
-                    .where(
-                        P0RecordModel.record_code
-                        == P0RecordCode.TASK_RECORD.value
-                    )
-                )
-                == 1
-            )
-            assert (
-                session.scalar(
-                    select(func.count())
-                    .select_from(P0RecordModel)
-                    .where(
-                        P0RecordModel.record_code
-                        == P0RecordCode.TRACE_EVENT_RECORD.value
-                    )
-                )
-                == 0
-            )
-    finally:
-        initial_graph_committed.set()
         engine.dispose()
 
 
@@ -1133,7 +917,7 @@ async def test_task_transition_uses_exact_projection_cas_and_one_atomic_child(
     try:
         graph = await _seed_initial_graph_prerequisites(adapter)
         assert (
-            await adapter.create_initial_task_graph_if_current(graph)
+            await adapter.create_initial_task_graph_v2_if_current(graph)
             is ConditionalWriteResult.APPLIED
         )
         expected_task = graph.initial_task.initial_record
@@ -2051,105 +1835,6 @@ async def test_finalize_run_non_applied_paths_write_nothing(
         if stale_kind.endswith("_exists"):
             assert not replacement_attempted
     finally:
-        engine.dispose()
-
-
-async def test_finalize_run_rechecks_link_closure_after_acquiring_run_lock(
-    eval_postgres_namespace,
-    monkeypatch,
-) -> None:
-    engine = eval_postgres_namespace.build_engine()
-    session_factory = build_session_factory(engine)
-    finalizer = PostgresRecordAdapter(session_factory)
-    initial_graph_writer = PostgresRecordAdapter(session_factory)
-    old_closure_materialized = threading.Event()
-    initial_graph_committed = threading.Event()
-    pause_guard = threading.Lock()
-    paused = False
-    try:
-        graph = await _seed_initial_graph_prerequisites(
-            initial_graph_writer
-        )
-        command = _no_task_finalization_for_graph(graph)
-        original_lock_rows_stably = finalizer._lock_rows_stably
-
-        def pause_before_first_lock(session, rows):
-            nonlocal paused
-            materialized = tuple(rows)
-            with pause_guard:
-                should_pause = not paused
-                paused = True
-            if should_pause:
-                assert tuple(
-                    row.record_code for row in materialized
-                ) == (P0RecordCode.AGENT_RUN_RECORD.value,)
-                old_closure_materialized.set()
-                assert initial_graph_committed.wait(timeout=5)
-            return original_lock_rows_stably(session, materialized)
-
-        monkeypatch.setattr(
-            finalizer,
-            "_lock_rows_stably",
-            pause_before_first_lock,
-        )
-
-        def finalize_in_thread():
-            return asyncio.run(finalizer.finalize_run_if_active(command))
-
-        finalize_task = asyncio.create_task(
-            asyncio.to_thread(finalize_in_thread)
-        )
-        assert await asyncio.to_thread(
-            old_closure_materialized.wait,
-            5,
-        )
-        try:
-            initial_graph_result = (
-                await initial_graph_writer.create_initial_task_graph_if_current(
-                    graph
-                )
-            )
-        finally:
-            initial_graph_committed.set()
-        finalize_result = await asyncio.wait_for(finalize_task, timeout=15)
-
-        assert initial_graph_result is ConditionalWriteResult.APPLIED
-        assert finalize_result is ConditionalWriteResult.PROJECTION_CONFLICT
-        assert (
-            await finalizer.load_run_for_owner(
-                owner_scope=graph.owner_scope,
-                run_id=graph.expected_active_run_record.run_id,
-            )
-            == graph.expected_active_run_record
-        )
-        assert (
-            await finalizer.list_run_task_links_for_owner(
-                owner_scope=graph.owner_scope,
-                run_id=graph.expected_active_run_record.run_id,
-            )
-            == (graph.run_task_link.active_record,)
-        )
-        assert (
-            await finalizer.list_trace_events_for_owner(
-                owner_scope=graph.owner_scope,
-                run_id=graph.expected_active_run_record.run_id,
-            )
-            == ()
-        )
-        assert command.assistant_message is not None
-        with session_factory() as session:
-            assert (
-                _row_for_envelope(
-                    session,
-                    encode_persistence_record(
-                        P0RecordCode.MESSAGE_RECORD,
-                        command.assistant_message,
-                    ),
-                )
-                is None
-            )
-    finally:
-        initial_graph_committed.set()
         engine.dispose()
 
 
