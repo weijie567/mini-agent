@@ -187,7 +187,18 @@ dependencies:
 - reviewed 01-07AA Plan plus frozen unpushed r1 donor
 - canonical PostgreSQL and full-suite test database
 
-verification_commands:
+canonical_inputs:
+
+- `AGENTS.md`：项目级 evidence、security、allowlist、Worktree、review 与 merge 纪律；
+- `docs/architecture/memory-design-reference.md`：exact owner closure、atomic persistence 与 replay owner；
+- `docs/implementation/e2e01-thin-slice-implementation-spec.md`：E2E01-01/04 scoped implementation owner；
+- `docs/implementation/e2e01-thin-slice-multi-agent-plan.md`：01-07Q/K/AA ownership、执行顺序与 `B_J_READY` barrier owner；
+- `.planning/phases/01-cycle-1-e2e-01/01-07Q-PLAN.md`：active codec registry 与当前 pre-writer dependency guard provenance；
+- `.planning/phases/01-cycle-1-e2e-01/01-07K-PLAN.md`：`load_exact_run_evidence_for_owner` scoped reader contract；
+- `.planning/phases/01-cycle-1-e2e-01/01-07AA-PLAN.md`：writer exact-version chain、reader oracle、frozen donor 与 acceptance replay contract；
+- exact base `dc21e906183647c9fdf9aeffa47f256ad1a823ae` 和 owned-file blob `1aa3064c88669acf4af3a1e436dc7f24921e0cfe`。
+
+required_checks:
 
 ```bash
 uv sync --all-groups
@@ -198,6 +209,12 @@ uv run pytest tests/component/application/test_persistence_contract.py::test_cod
 uv run pytest tests/component/application/test_persistence_contract.py tests/component/application/test_ports_contract.py -q
 uv run pytest
 ```
+
+- precheck：branch/worktree/base SHA/tree/owned blob 精确相等且 worktree clean；
+- postcheck：changed files 精确等于单文件 allowlist，无 forbidden file、merge commit、skip/xfail 或 whitespace error；
+- expected feature result：renamed guard、Application contracts、Alembic 与 canonical full suite 全部通过；
+- expected composition result：frozen AA patch sidecar 的 renamed guard、12 个 AA focused tests、111 个相邻 regression 与 canonical full suite 全部通过；
+- review result：feature exact head 与 latest-integration overlay 均为独立 `PASS`，所有 P0/P1/P2/P3 finding 已关闭或由 Integrator 显式阻断。
 
 composition_sidecar_commands:
 
@@ -225,6 +242,21 @@ rollback:
 - merge 后 revert exact remediation merge；
 - 不回退 Q、K 或任何已 reviewed product barrier；
 - 01-07AA-r2 未形成前继续冻结 r1 donor，不发布半完成 writer。
+- 若 acceptance-base amendment branch/PR 已创建但未 merge，关闭 PR 并将其标记为 superseded；不得继续签发 r2。
+- 若 amendment 已 merge但 r2 尚未 merge，使用普通 revert PR 撤销 amendment，关闭/作废 r2 branch 与 PR，并撤销 `B_AA_CODEC_HANDOFF` 可供 AA replay 的 claim。
+- 若 r2 或后续 `B_J_READY` 已形成，先阻断 01-07J 与所有下游 merge，分别以普通 revert PR 按逆序撤销下游 AA/J merge 与本 remediation；同步撤销 `B_J_READY` / `B_ACTIVE` claim，并重新从最后一个 reviewed unaffected barrier 裁决，禁止 destructive reset 或 force push。
+
+done_when:
+
+- 单文件 guard remediation 在 exact feature head 与 frozen AA composition sidecar 上满足全部 `required_checks`；
+- exact-head 与 latest-integration overlay independent review 均为 `PASS`；
+- feature draft PR 串行 merge 后 post-merge canonical gate通过并记录 exact merge SHA/tree；
+- handoff 明确只命名 `B_AA_CODEC_HANDOFF`，并阻止在另一个 reviewed acceptance-base amendment 前创建 01-07AA-r2。
+
+handoff_to:
+
+- `/root Integrator`：负责 exact-head review、latest-integration overlay、draft PR 串行 merge、post-merge gate 与 `B_AA_CODEC_HANDOFF` 记录；
+- 后续独立 planning-status Packet：只负责把 reviewed remediation merge 冻结为 01-07AA-r2 exact acceptance base，不得复用本 Plan 或 Plan merge替代 feature base。
 
 handoff_format:
 
