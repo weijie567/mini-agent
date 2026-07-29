@@ -3043,18 +3043,91 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
 
     def files_referencing(*symbols: str) -> set[str]:
         symbol_set = frozenset(symbols)
-        return {
-            path.relative_to(repository_root).as_posix()
-            for root in ("src", "tests")
-            for path in (repository_root / root).rglob("*.py")
-            if (
-                any(symbol in path.read_text() for symbol in symbol_set)
-                or any(
-                    folded_string(node) in symbol_set
-                    for node in ast.walk(ast.parse(path.read_text()))
+        matches: set[str] = set()
+        for root in ("src", "tests"):
+            for path in (repository_root / root).rglob("*.py"):
+                source = path.read_text()
+                tree = ast.parse(source)
+                module_object_import = any(
+                    (
+                        isinstance(node, ast.Import)
+                        and any(
+                            imported.name
+                            == "mini_agent.application.persistence"
+                            for imported in node.names
+                        )
+                    )
+                    or (
+                        isinstance(node, ast.ImportFrom)
+                        and (
+                            (
+                                node.module == "mini_agent.application"
+                                and any(
+                                    imported.name == "persistence"
+                                    for imported in node.names
+                                )
+                            )
+                            or (
+                                node.module == "mini_agent"
+                                and any(
+                                    imported.name == "application"
+                                    for imported in node.names
+                                )
+                            )
+                        )
+                    )
+                    for node in ast.walk(tree)
                 )
-            )
-        }
+                dynamic_import_surface = any(
+                    (
+                        isinstance(node, ast.Import)
+                        and any(
+                            imported.name.split(".", maxsplit=1)[0]
+                            in {"builtins", "importlib"}
+                            for imported in node.names
+                        )
+                    )
+                    or (
+                        isinstance(node, ast.ImportFrom)
+                        and node.module is not None
+                        and node.module.split(".", maxsplit=1)[0]
+                        in {"builtins", "importlib"}
+                    )
+                    or (
+                        isinstance(node, ast.Name)
+                        and node.id
+                        in {
+                            "__builtins__",
+                            "__import__",
+                            "compile",
+                            "eval",
+                            "exec",
+                        }
+                    )
+                    or (
+                        isinstance(node, ast.Attribute)
+                        and (
+                            node.attr == "import_module"
+                            or (
+                                node.attr == "modules"
+                                and isinstance(node.value, ast.Name)
+                                and node.value.id == "sys"
+                            )
+                        )
+                    )
+                    for node in ast.walk(tree)
+                )
+                if (
+                    any(symbol in source for symbol in symbol_set)
+                    or any(
+                        folded_string(node) in symbol_set
+                        for node in ast.walk(tree)
+                    )
+                    or module_object_import
+                    or dynamic_import_surface
+                ):
+                    matches.add(path.relative_to(repository_root).as_posix())
+        return matches
 
     exact_reader_owner_files = {
         "src/mini_agent/application/ports.py",
@@ -3177,6 +3250,9 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 "compile",
                 "eval",
                 "exec",
+                "globals",
+                "locals",
+                "vars",
             }
         )
         or (
@@ -3187,6 +3263,37 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 "__getattribute__",
                 "__globals__",
             }
+        )
+    ]
+    allowed_getattr_fields = frozenset(
+        {
+            "attempt_count",
+            "started_at",
+            "state_version",
+            "status",
+        }
+    )
+    unsafe_getattr_calls = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and not (
+            len(node.args) in {2, 3}
+            and not node.keywords
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in {"record", "row"}
+            and (
+                (
+                    isinstance(node.args[1], ast.Name)
+                    and node.args[1].id == "field_name"
+                )
+                or (
+                    isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in allowed_getattr_fields
+                )
+            )
         )
     ]
     constructed_codec_symbols = [
@@ -3244,6 +3351,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     assert not persistence_module_object_imports
     assert not dynamic_imports
     assert not dynamic_namespace_references
+    assert not unsafe_getattr_calls
     assert not constructed_codec_symbols
     assert not shadowing_bindings
 
