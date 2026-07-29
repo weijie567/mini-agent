@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import Enum
 from functools import wraps
 from hashlib import sha256
+from types import MappingProxyType
 from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID, uuid4
 
@@ -26,6 +27,7 @@ from mini_agent.application.persistence import (
     decode_persistence_record,
     decode_persistence_record_versioned,
     encode_persistence_record,
+    encode_persistence_record_versioned,
 )
 from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
@@ -33,6 +35,7 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateInitialTaskGraphCommand,
+    CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
     DispatchToolCallCommand,
@@ -46,6 +49,7 @@ from mini_agent.application.records import (
     ObservationWriteResult,
     RunTaskLinkRecord,
     SaveObservationCommand,
+    SaveRequestUnderstandingV2NoTaskCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
@@ -138,6 +142,23 @@ _EXACT_RUN_VERSION_BY_CODE = {
     P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
     P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v1",
 }
+_RU_V2_WRITE_VERSION_BY_CODE = MappingProxyType(
+    {
+        P0RecordCode.CONVERSATION_RECORD: "conversation_record.p0.v1",
+        P0RecordCode.MESSAGE_RECORD: "message_record.p0.v1",
+        P0RecordCode.AGENT_RUN_RECORD: "agent_run_record.p0.v1",
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+            "request_understanding_record.p0.v2"
+        ),
+        P0RecordCode.TASK_RECORD: "task_record.p0.v1",
+        P0RecordCode.REQUEST_UNIT_RECORD: "request_unit_record.p0.v1",
+        P0RecordCode.INPUT_BINDING_RECORD: "input_binding_record.p0.v1",
+        P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+            "conversation_task_link_record.p0.v1"
+        ),
+        P0RecordCode.RUN_TASK_LINK_RECORD: "run_task_link_record.p0.v1",
+    }
+)
 _EXACT_RUN_PRIVATE_CODES = frozenset(
     code
     for code in _EXACT_RUN_VERSION_BY_CODE
@@ -492,6 +513,20 @@ class _FinalizeRunNotApplicable(Exception):
 
 
 class _FinalizeRunProjectionConflict(Exception):
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class _RuV2WriteNotApplicable(Exception):
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class _RuV2WriteProjectionConflict(Exception):
     __slots__ = ()
 
     def __init__(self) -> None:
@@ -2487,6 +2522,726 @@ class PostgresRecordAdapter:
             return ConditionalWriteResult.PROJECTION_CONFLICT
         return ConditionalWriteResult.APPLIED
 
+    @staticmethod
+    def _ru_v2_write_version(record_code: P0RecordCode) -> str:
+        expected_version = _RU_V2_WRITE_VERSION_BY_CODE.get(record_code)
+        if expected_version is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
+            )
+        return expected_version
+
+    @classmethod
+    def _ru_v2_write_encode(
+        cls,
+        record_code: P0RecordCode,
+        record: BaseModel,
+        *,
+        external_references: tuple[P0RecordReference, ...] = (),
+        logical_children: tuple[BaseModel, ...] = (),
+    ) -> P0PersistenceEnvelope:
+        expected_version = cls._ru_v2_write_version(record_code)
+        envelope = encode_persistence_record_versioned(
+            record_code,
+            expected_version,
+            record,
+            external_references=external_references,
+            logical_children=logical_children,
+        )
+        decoded = decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=record_code,
+            expected_schema_version=expected_version,
+            correlation_ref=uuid4(),
+        )
+        if (
+            decoded.source_record != record
+            or decoded.logical_children != logical_children
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        return envelope
+
+    @classmethod
+    def _ru_v2_write_projection_values(
+        cls,
+        envelope: P0PersistenceEnvelope,
+        decoded: DecodedP0PersistenceRecord,
+        *,
+        owner_customer_id: str,
+    ) -> dict[str, object]:
+        record_code = envelope.record_code
+        expected_version = cls._ru_v2_write_version(record_code)
+        if (
+            envelope.record_schema_version != expected_version
+            or decoded.record_code is not record_code
+            or decoded.record_schema_version != expected_version
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            )
+        record = decoded.source_record
+
+        def uuid_projection(field_name: str) -> UUID | None:
+            value = getattr(record, field_name, None)
+            return value if type(value) is UUID else None
+
+        lifecycle_status = _enum_value(getattr(record, "status", None))
+        state_version = getattr(record, "state_version", None)
+        attempt_count = getattr(record, "attempt_count", None)
+        recovery_sort_at = (
+            getattr(record, "started_at", None)
+            if record_code is P0RecordCode.AGENT_RUN_RECORD
+            else None
+        )
+        return {
+            "record_code": record_code.value,
+            "record_schema_version": expected_version,
+            "logical_identity": _json_identity(envelope.logical_identity),
+            "direct_owner_customer_id": envelope.direct_owner_customer_id,
+            "scope_owner_customer_id": owner_customer_id,
+            "conversation_id": uuid_projection("conversation_id"),
+            "run_id": uuid_projection("run_id"),
+            "task_id": uuid_projection("task_id"),
+            "request_unit_id": uuid_projection("request_unit_id"),
+            "lifecycle_status": lifecycle_status,
+            "state_version": (
+                state_version if type(state_version) is int else None
+            ),
+            "attempt_count": (
+                attempt_count if type(attempt_count) is int else None
+            ),
+            "recovery_sort_at": (
+                recovery_sort_at
+                if type(recovery_sort_at) is datetime
+                else None
+            ),
+            "envelope": envelope.model_dump(mode="json"),
+        }
+
+    @classmethod
+    def _ru_v2_write_validate_row(
+        cls,
+        session: Session,
+        row: P0RecordModel,
+        *,
+        expected_code: P0RecordCode,
+        owner_customer_id: str,
+    ) -> tuple[DecodedP0PersistenceRecord, P0PersistenceEnvelope]:
+        expected_version = cls._ru_v2_write_version(expected_code)
+        if row.record_code != expected_code.value:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.RECORD_CODE_MISMATCH
+            )
+        if row.record_schema_version != expected_version:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            )
+        if row.scope_owner_customer_id != owner_customer_id:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+            )
+        envelope = _exact_run_parse_envelope(row.envelope)
+        decoded = decode_persistence_record_versioned(
+            _exact_run_versioned_decode_input(row, expected_code),
+            expected_record_code=expected_code,
+            expected_schema_version=expected_version,
+            correlation_ref=uuid4(),
+        )
+        expected_projection = cls._ru_v2_write_projection_values(
+            envelope,
+            decoded,
+            owner_customer_id=owner_customer_id,
+        )
+        for field_name, value in expected_projection.items():
+            if getattr(row, field_name) != value:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                    if field_name == "scope_owner_customer_id"
+                    else P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                )
+        if (
+            envelope.record_code is not expected_code
+            or envelope.record_schema_version != expected_version
+            or (
+                envelope.direct_owner_customer_id is not None
+                and envelope.direct_owner_customer_id != owner_customer_id
+            )
+            or _exact_run_normalized_references(session, row)
+            != envelope.record_references
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        return decoded, envelope
+
+    @staticmethod
+    def _ru_v2_write_metadata_for_run(
+        session: Session,
+        *,
+        record_code: P0RecordCode,
+        run_id: UUID,
+    ) -> tuple[object, ...]:
+        return tuple(
+            session.execute(
+                select(
+                    P0RecordModel.record_id,
+                    P0RecordModel.record_code,
+                    P0RecordModel.logical_identity,
+                    P0RecordModel.record_schema_version,
+                    P0RecordModel.scope_owner_customer_id,
+                    P0RecordModel.run_id,
+                )
+                .where(
+                    P0RecordModel.record_code == record_code.value,
+                    P0RecordModel.run_id == run_id,
+                )
+                .order_by(P0RecordModel.logical_identity)
+                .limit(2)
+                .with_for_update()
+            )
+        )
+
+    @staticmethod
+    def _ru_v2_write_metadata_for_identity(
+        session: Session,
+        *,
+        record_code: P0RecordCode,
+        logical_identity: tuple[tuple[str, object], ...],
+    ) -> tuple[object, ...]:
+        return tuple(
+            session.execute(
+                select(
+                    P0RecordModel.record_id,
+                    P0RecordModel.record_code,
+                    P0RecordModel.logical_identity,
+                    P0RecordModel.record_schema_version,
+                    P0RecordModel.scope_owner_customer_id,
+                    P0RecordModel.run_id,
+                )
+                .where(
+                    P0RecordModel.record_code == record_code.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(logical_identity),
+                )
+                .order_by(P0RecordModel.logical_identity)
+                .limit(2)
+                .with_for_update()
+            )
+        )
+
+    @classmethod
+    def _ru_v2_write_check_metadata_rows(
+        cls,
+        rows: tuple[object, ...],
+        *,
+        record_code: P0RecordCode,
+        owner_customer_id: str,
+        allowed_identity: list[list[object]] | None,
+    ) -> None:
+        for metadata in rows:
+            if metadata.scope_owner_customer_id != owner_customer_id:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                )
+        if len(rows) > 1:
+            raise _RuV2WriteProjectionConflict() from None
+        if not rows:
+            return
+        metadata = rows[0]
+        expected_version = cls._ru_v2_write_version(record_code)
+        if metadata.record_schema_version != expected_version:
+            if (
+                record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                and metadata.record_schema_version
+                == "request_understanding_record.p0.v1"
+            ):
+                raise _RuV2WriteProjectionConflict() from None
+            raise _integrity(
+                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            )
+        if (
+            metadata.record_code != record_code.value
+            or metadata.run_id is None
+            and record_code
+            in {
+                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+            }
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        if (
+            allowed_identity is None
+            or metadata.logical_identity != allowed_identity
+        ):
+            raise _RuV2WriteProjectionConflict() from None
+
+    @classmethod
+    def _ru_v2_write_check_same_run(
+        cls,
+        session: Session,
+        *,
+        run_id: UUID,
+        owner_customer_id: str,
+        allowed_ru_identity: list[list[object]] | None,
+        allowed_run_link_identity: list[list[object]] | None,
+    ) -> None:
+        for record_code, allowed_identity in (
+            (
+                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                allowed_ru_identity,
+            ),
+            (
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                allowed_run_link_identity,
+            ),
+        ):
+            rows = cls._ru_v2_write_metadata_for_run(
+                session,
+                record_code=record_code,
+                run_id=run_id,
+            )
+            cls._ru_v2_write_check_metadata_rows(
+                rows,
+                record_code=record_code,
+                owner_customer_id=owner_customer_id,
+                allowed_identity=allowed_identity,
+            )
+
+    @classmethod
+    def _ru_v2_write_lock_roots(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation: ConversationRecord,
+        messages: tuple[MessageRecord, ...],
+        run: AgentRunRecord,
+    ) -> tuple[P0RecordModel, ...]:
+        expected_roots: tuple[
+            tuple[
+                P0RecordCode,
+                tuple[tuple[str, object], ...],
+                BaseModel,
+            ],
+            ...,
+        ] = (
+            (
+                P0RecordCode.CONVERSATION_RECORD,
+                (("conversation_id", conversation.conversation_id),),
+                conversation,
+            ),
+            *(
+                (
+                    P0RecordCode.MESSAGE_RECORD,
+                    (("message_id", message.message_id),),
+                    message,
+                )
+                for message in messages
+            ),
+            (
+                P0RecordCode.AGENT_RUN_RECORD,
+                (("run_id", run.run_id),),
+                run,
+            ),
+        )
+        locked: list[P0RecordModel] = []
+        for record_code, identity, expected in sorted(
+            expected_roots,
+            key=lambda item: (
+                item[0].value,
+                _canonical_identity_text(_json_identity(item[1])),
+            ),
+        ):
+            row = session.scalar(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code == record_code.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(identity),
+                    P0RecordModel.scope_owner_customer_id
+                    == owner_scope.customer_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise _RuV2WriteNotApplicable() from None
+            decoded, _envelope = cls._ru_v2_write_validate_row(
+                session,
+                row,
+                expected_code=record_code,
+                owner_customer_id=owner_scope.customer_id,
+            )
+            if decoded.source_record != expected or decoded.logical_children:
+                raise _RuV2WriteProjectionConflict() from None
+            locked.append(row)
+        return tuple(locked)
+
+    @staticmethod
+    def _ru_v2_write_row_key(
+        record_code: P0RecordCode,
+        logical_identity: tuple[tuple[str, object], ...],
+    ) -> tuple[str, str]:
+        return (
+            record_code.value,
+            _canonical_identity_text(_json_identity(logical_identity)),
+        )
+
+    @classmethod
+    def _ru_v2_write_validate_closed_rows(
+        cls,
+        rows: tuple[P0RecordModel, ...],
+        *,
+        owner_customer_id: str,
+    ) -> None:
+        by_key: dict[
+            tuple[str, str],
+            tuple[P0RecordModel, P0PersistenceEnvelope],
+        ] = {}
+        for row in rows:
+            record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+            if (
+                record_code is None
+                or record_code not in _RU_V2_WRITE_VERSION_BY_CODE
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
+                )
+            _decoded, envelope = cls._ru_v2_write_validate_row(
+                session=cast(Session, row._sa_instance_state.session),
+                row=row,
+                expected_code=record_code,
+                owner_customer_id=owner_customer_id,
+            )
+            key = (
+                record_code.value,
+                _canonical_identity_text(row.logical_identity),
+            )
+            if key in by_key:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
+            by_key[key] = (row, envelope)
+        for _row, envelope in by_key.values():
+            for reference in envelope.record_references:
+                target_key = (
+                    reference.target_record_code.value,
+                    _canonical_identity_text(
+                        _json_identity(reference.target_logical_identity)
+                    ),
+                )
+                if target_key not in by_key:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+
+    @classmethod
+    def _ru_v2_write_target_rows(
+        cls,
+        session: Session,
+        envelopes: tuple[P0PersistenceEnvelope, ...],
+        *,
+        owner_customer_id: str,
+    ) -> tuple[P0RecordModel, ...] | None:
+        metadata_by_key: dict[tuple[str, str], object] = {}
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            rows = cls._ru_v2_write_metadata_for_identity(
+                session,
+                record_code=envelope.record_code,
+                logical_identity=envelope.logical_identity,
+            )
+            cls._ru_v2_write_check_metadata_rows(
+                rows,
+                record_code=envelope.record_code,
+                owner_customer_id=owner_customer_id,
+                allowed_identity=_json_identity(envelope.logical_identity),
+            )
+            if rows:
+                metadata_by_key[cls._envelope_key(envelope)] = rows[0]
+        if not metadata_by_key:
+            return None
+        if len(metadata_by_key) != len(envelopes):
+            raise _RuV2WriteProjectionConflict() from None
+        loaded: list[P0RecordModel] = []
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            metadata = metadata_by_key[cls._envelope_key(envelope)]
+            row = session.scalar(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_id == metadata.record_id,
+                    P0RecordModel.record_code == envelope.record_code.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(envelope.logical_identity),
+                    P0RecordModel.scope_owner_customer_id
+                    == owner_customer_id,
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                )
+            decoded, persisted_envelope = cls._ru_v2_write_validate_row(
+                session,
+                row,
+                expected_code=envelope.record_code,
+                owner_customer_id=owner_customer_id,
+            )
+            desired_decoded = decode_persistence_record_versioned(
+                envelope,
+                expected_record_code=envelope.record_code,
+                expected_schema_version=cls._ru_v2_write_version(
+                    envelope.record_code
+                ),
+                correlation_ref=uuid4(),
+            )
+            if (
+                persisted_envelope.model_dump(mode="json")
+                != envelope.model_dump(mode="json")
+                or decoded != desired_decoded
+            ):
+                raise _RuV2WriteProjectionConflict() from None
+            loaded.append(row)
+        return tuple(loaded)
+
+    @classmethod
+    def _ru_v2_write_insert_targets(
+        cls,
+        session: Session,
+        envelopes: tuple[P0PersistenceEnvelope, ...],
+        *,
+        owner_customer_id: str,
+    ) -> tuple[P0RecordModel, ...]:
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            decoded = decode_persistence_record_versioned(
+                envelope,
+                expected_record_code=envelope.record_code,
+                expected_schema_version=cls._ru_v2_write_version(
+                    envelope.record_code
+                ),
+                correlation_ref=uuid4(),
+            )
+            values = cls._ru_v2_write_projection_values(
+                envelope,
+                decoded,
+                owner_customer_id=owner_customer_id,
+            )
+            inserted_record_id = session.scalar(
+                postgresql_insert(P0RecordModel)
+                .values(record_id=uuid4(), **values)
+                .on_conflict_do_nothing(
+                    index_elements=(
+                        P0RecordModel.record_code,
+                        P0RecordModel.logical_identity,
+                    )
+                )
+                .returning(P0RecordModel.record_id)
+            )
+            if inserted_record_id is None:
+                raise _RuV2WriteProjectionConflict() from None
+        session.flush()
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            session.add_all(
+                cls._reference_model(
+                    envelope,
+                    ordinal=ordinal,
+                    reference=reference,
+                )
+                for ordinal, reference in enumerate(
+                    envelope.record_references
+                )
+            )
+        session.flush()
+        loaded: list[P0RecordModel] = []
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            row = session.scalar(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code == envelope.record_code.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(envelope.logical_identity),
+                    P0RecordModel.scope_owner_customer_id
+                    == owner_customer_id,
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.MISSING_RECORD_CODE
+                )
+            cls._ru_v2_write_validate_row(
+                session,
+                row,
+                expected_code=envelope.record_code,
+                owner_customer_id=owner_customer_id,
+            )
+            loaded.append(row)
+        return tuple(loaded)
+
+    @classmethod
+    def _ru_v2_write_apply(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation: ConversationRecord,
+        messages: tuple[MessageRecord, ...],
+        run: AgentRunRecord,
+        envelopes: tuple[P0PersistenceEnvelope, ...],
+        expected_ru_identity: tuple[tuple[str, object], ...],
+        expected_run_link_identity: tuple[tuple[str, object], ...] | None,
+    ) -> None:
+        root_rows = cls._ru_v2_write_lock_roots(
+            session,
+            owner_scope=owner_scope,
+            conversation=conversation,
+            messages=messages,
+            run=run,
+        )
+        cls._ru_v2_write_check_same_run(
+            session,
+            run_id=run.run_id,
+            owner_customer_id=owner_scope.customer_id,
+            allowed_ru_identity=_json_identity(expected_ru_identity),
+            allowed_run_link_identity=(
+                _json_identity(expected_run_link_identity)
+                if expected_run_link_identity is not None
+                else None
+            ),
+        )
+        target_rows = cls._ru_v2_write_target_rows(
+            session,
+            envelopes,
+            owner_customer_id=owner_scope.customer_id,
+        )
+        if target_rows is not None:
+            cls._ru_v2_write_validate_closed_rows(
+                (*root_rows, *target_rows),
+                owner_customer_id=owner_scope.customer_id,
+            )
+            return
+        inserted_rows = cls._ru_v2_write_insert_targets(
+            session,
+            envelopes,
+            owner_customer_id=owner_scope.customer_id,
+        )
+        cls._ru_v2_write_validate_closed_rows(
+            (*root_rows, *inserted_rows),
+            owner_customer_id=owner_scope.customer_id,
+        )
+        run_row = next(
+            row
+            for row in root_rows
+            if row.record_code == P0RecordCode.AGENT_RUN_RECORD.value
+        )
+        cls._touch_recovery_anchor(session, run_row)
+
+    @_bounded_database_failures
+    async def save_request_understanding_v2_no_task_if_current(
+        self,
+        command: SaveRequestUnderstandingV2NoTaskCommand,
+    ) -> ConditionalWriteResult:
+        envelope = self._ru_v2_write_encode(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            command.request_understanding_record,
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v2_write_apply(
+                    session,
+                    owner_scope=command.owner_scope,
+                    conversation=command.expected_conversation_record,
+                    messages=command.expected_message_records,
+                    run=command.expected_active_run_record,
+                    envelopes=(envelope,),
+                    expected_ru_identity=envelope.logical_identity,
+                    expected_run_link_identity=None,
+                )
+        except _RuV2WriteNotApplicable:
+            return ConditionalWriteResult.NOT_APPLICABLE
+        except _RuV2WriteProjectionConflict:
+            return ConditionalWriteResult.PROJECTION_CONFLICT
+        return ConditionalWriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def create_initial_task_graph_v2_if_current(
+        self,
+        command: CreateInitialTaskGraphV2Command,
+    ) -> ConditionalWriteResult:
+        request_unit = command.initial_request_unit.initial_record
+        envelopes = (
+            self._ru_v2_write_encode(
+                P0RecordCode.TASK_RECORD,
+                command.initial_task.initial_record,
+            ),
+            self._ru_v2_write_encode(
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                request_unit,
+            ),
+            self._ru_v2_write_encode(
+                P0RecordCode.INPUT_BINDING_RECORD,
+                command.input_binding.record,
+                external_references=(
+                    _external_reference(
+                        "request_unit_id",
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        "request_unit_id",
+                        command.input_binding.request_unit_id,
+                    ),
+                ),
+            ),
+            self._ru_v2_write_encode(
+                P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                command.request_understanding.record,
+                logical_children=(
+                    command.request_understanding.accepted_delta,
+                ),
+            ),
+            self._ru_v2_write_encode(
+                P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                command.conversation_task_link,
+            ),
+            self._ru_v2_write_encode(
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                command.run_task_link.active_record,
+            ),
+        )
+        ru_envelope = next(
+            envelope
+            for envelope in envelopes
+            if envelope.record_code
+            is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        )
+        run_link_envelope = next(
+            envelope
+            for envelope in envelopes
+            if envelope.record_code is P0RecordCode.RUN_TASK_LINK_RECORD
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v2_write_apply(
+                    session,
+                    owner_scope=command.owner_scope,
+                    conversation=command.expected_conversation_record,
+                    messages=command.expected_message_records,
+                    run=command.expected_active_run_record,
+                    envelopes=envelopes,
+                    expected_ru_identity=ru_envelope.logical_identity,
+                    expected_run_link_identity=(
+                        run_link_envelope.logical_identity
+                    ),
+                )
+        except _RuV2WriteNotApplicable:
+            return ConditionalWriteResult.NOT_APPLICABLE
+        except _RuV2WriteProjectionConflict:
+            return ConditionalWriteResult.PROJECTION_CONFLICT
+        return ConditionalWriteResult.APPLIED
+
     async def create_initial_task_graph_if_current(
         self,
         command: CreateInitialTaskGraphCommand,
@@ -2537,6 +3292,17 @@ class PostgresRecordAdapter:
                 if decoded.source_record != expected:
                     return ConditionalWriteResult.PROJECTION_CONFLICT
                 locked_expected_rows[code] = row
+
+            try:
+                self._ru_v2_write_check_same_run(
+                    session,
+                    run_id=command.expected_active_run_record.run_id,
+                    owner_customer_id=command.owner_scope.customer_id,
+                    allowed_ru_identity=None,
+                    allowed_run_link_identity=None,
+                )
+            except _RuV2WriteProjectionConflict:
+                return ConditionalWriteResult.PROJECTION_CONFLICT
 
             request_unit = command.initial_request_unit.initial_record
             envelopes = (
