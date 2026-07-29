@@ -3081,6 +3081,13 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                     elif isinstance(node, ast.ImportFrom):
                         for imported in node.names:
                             if (
+                                node.module == "sys"
+                                and imported.name == "modules"
+                            ):
+                                sys_modules_bindings.add(
+                                    imported.asname or imported.name
+                                )
+                            if (
                                 imported.name == "persistence"
                                 and (
                                     node.module == "mini_agent.application"
@@ -3095,15 +3102,6 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                                 )
                             ):
                                 module_bindings.add(
-                                    imported.asname or imported.name
-                                )
-                    elif (
-                        isinstance(node, ast.ImportFrom)
-                        and node.module == "sys"
-                    ):
-                        for imported in node.names:
-                            if imported.name == "modules":
-                                sys_modules_bindings.add(
                                     imported.asname or imported.name
                                 )
 
