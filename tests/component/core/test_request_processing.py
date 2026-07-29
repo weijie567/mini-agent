@@ -1,3 +1,4 @@
+import gc
 import pickle
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -2581,6 +2582,37 @@ def test_v2_routable_decision_rejects_reused_witness_on_direct_clone() -> None:
             current_request_unit=clone.task_graph.request_unit,
             current_input_binding=clone.task_graph.input_binding,
         )
+
+
+def test_v2_routable_decision_pickle_survives_source_collection() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    blob = pickle.dumps(result)
+    del result
+    gc.collect()
+
+    restored = pickle.loads(blob)
+    move = revalidate_next_move_v2(
+        decision=restored,
+        current_task=restored.task_graph.task,
+        current_request_unit=restored.task_graph.request_unit,
+        current_input_binding=restored.task_graph.input_binding,
+    )
+    assert move.requested_provider_tool_name == "get_order"
 
 
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
