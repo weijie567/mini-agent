@@ -625,6 +625,87 @@ async def test_wrong_owner_same_run_collision_never_selects_foreign_envelope(
         assert "envelope" not in selected_columns
 
 
+async def test_wrong_owner_exact_target_never_selects_foreign_envelope(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    task_record = command.initial_task.initial_record
+    foreign_envelope = adapter._ru_v2_write_encode(
+        P0RecordCode.TASK_RECORD,
+        task_record,
+    )
+    foreign_secret = "FOREIGN_TARGET_ENVELOPE_MUST_NOT_MATERIALIZE"
+    raw_envelope = foreign_envelope.model_dump(mode="json")
+    raw_envelope["foreign_secret"] = foreign_secret
+    statements: list[tuple[str, str]] = []
+
+    def capture(
+        _connection,
+        _cursor,
+        statement,
+        parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append((statement, repr(parameters)))
+
+    try:
+        await _seed_v2_roots(adapter, command)
+        with adapter.session_factory.begin() as session:
+            session.add(
+                P0RecordModel(
+                    record_id=uuid4(),
+                    record_code=P0RecordCode.TASK_RECORD.value,
+                    record_schema_version="task_record.p0.v1",
+                    logical_identity=to_jsonable_python(
+                        foreign_envelope.logical_identity
+                    ),
+                    direct_owner_customer_id=None,
+                    scope_owner_customer_id="customer-B",
+                    conversation_id=None,
+                    run_id=None,
+                    task_id=task_record.task_id,
+                    request_unit_id=None,
+                    lifecycle_status=task_record.status.value,
+                    state_version=task_record.state_version,
+                    attempt_count=None,
+                    recovery_sort_at=None,
+                    envelope=raw_envelope,
+                )
+            )
+        baseline = _database_snapshot(adapter)
+        event.listen(engine, "before_cursor_execute", capture)
+        with pytest.raises(P0PersistenceIntegrityError) as raised:
+            await adapter.create_initial_task_graph_v2_if_current(command)
+        assert (
+            raised.value.category
+            is P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+        )
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        error_projection = (
+            f"{raised.value!s} {raised.value!r} {raised.value.args!r}"
+        )
+        assert foreign_secret not in error_projection
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        if event.contains(engine, "before_cursor_execute", capture):
+            event.remove(engine, "before_cursor_execute", capture)
+        engine.dispose()
+
+    target_selects = tuple(
+        statement
+        for statement, parameters in statements
+        if P0RecordCode.TASK_RECORD.value in parameters
+    )
+    assert target_selects
+    for statement in target_selects:
+        selected_columns = statement.lower().split(" from ", maxsplit=1)[0]
+        assert "envelope" not in selected_columns
+
+
 async def test_mid_reference_failure_rolls_back_every_v2_row_and_reference(
     eval_postgres_namespace,
 ) -> None:
