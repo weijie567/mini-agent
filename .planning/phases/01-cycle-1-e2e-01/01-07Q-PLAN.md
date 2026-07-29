@@ -393,22 +393,88 @@ uv run pytest tests/integration/test_database_migrations.py -q
 uv run pytest
 
 git diff --check "$base_sha...HEAD"
-test "$(git rev-list --count "$base_sha..HEAD")" -ge 2
+test "$(git rev-list --count "$base_sha..HEAD")" -ge 3
 test "$(git rev-list --merges --count "$base_sha..HEAD")" -eq 0
 red_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '1p')"
 green_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '2p')"
+category_fix_sha="$(git rev-list --reverse "$base_sha..HEAD" | sed -n '3p')"
 test "$(git show -s --format=%s "$red_sha")" = \
   "test(01-07Q): require ru v2 active codec"
 test "$(git show -s --format=%s "$green_sha")" = \
   "feat(01-07Q): switch ru v2 active codec"
+test "$(git show -s --format=%s "$category_fix_sha")" = \
+  "fix(01-07Q): align full-catalog category expectations"
 test "$(git diff-tree --no-commit-id --name-only -r "$red_sha")" = \
   tests/component/application/test_persistence_contract.py
 test "$(git diff-tree --no-commit-id --name-only -r "$green_sha")" = \
   src/mini_agent/application/persistence.py
+test "$(git diff-tree --no-commit-id --name-only -r "$category_fix_sha")" = \
+  tests/component/application/test_persistence_contract.py
+uv run python - "$green_sha" "$category_fix_sha" <<'PY'
+import ast
+import subprocess
+import sys
+
+path = "tests/component/application/test_persistence_contract.py"
+allowed = {
+    "test_versioned_decode_rejects_cross_version_and_metadata_confusion",
+    "test_all_17_v1_versioned_decode_outer_version_categories_match_legacy",
+}
+
+
+def load(revision: str) -> ast.Module:
+    source = subprocess.run(
+        ["git", "show", f"{revision}:{path}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return ast.parse(source)
+
+
+def separate(
+    tree: ast.Module,
+) -> tuple[ast.Module, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    selected: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    retained: list[ast.stmt] = []
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in allowed
+        ):
+            assert node.name not in selected
+            selected[node.name] = node
+        else:
+            retained.append(node)
+    assert set(selected) == allowed
+    tree.body = retained
+    return tree, selected
+
+
+before_tree, before_functions = separate(load(sys.argv[1]))
+after_tree, after_functions = separate(load(sys.argv[2]))
+assert ast.dump(before_tree, include_attributes=False) == ast.dump(
+    after_tree,
+    include_attributes=False,
+)
+for name in allowed:
+    before = before_functions[name]
+    after = after_functions[name]
+    assert ast.dump(before, include_attributes=False) != ast.dump(
+        after,
+        include_attributes=False,
+    )
+    before.body = [ast.Pass()]
+    after.body = [ast.Pass()]
+    assert ast.dump(before, include_attributes=False) == ast.dump(
+        after,
+        include_attributes=False,
+    )
+PY
 test -z "$(git log --reverse --format=%s "$base_sha..HEAD" |
-  sed '1,2d' |
+  sed '1,3d' |
   rg -v '^fix\(01-07Q\): .+$' || true)"
-for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,2d'); do
+for fix_sha in $(git rev-list --reverse "$base_sha..HEAD" | sed '1,3d'); do
   test -z "$(git diff-tree --no-commit-id --name-only -r "$fix_sha" |
     rg -v '^(src/mini_agent/application/persistence\.py|tests/component/application/test_persistence_contract\.py)$' ||
     true)"
