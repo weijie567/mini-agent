@@ -60,7 +60,11 @@ dependencies:
 contract_changes: NONE
 security_impact: NONE; static dependency inventory only
 eval_impact: YES; registers the already-required J PostgreSQL integration oracle
-rollback: ordinary revert PR removing only the one dependency-set entry
+rollback: >-
+  01-07J merge前可关闭PR或以普通revert PR只撤销本登记；
+  01-07J/B_ACTIVE或后继已合并后，先阻断新签发/流量并按依赖逆序
+  普通revert全部后继（至少先revert J），确认新oracle文件已退出后才
+  revert本登记；禁止reset、force-push或保留未登记reader consumer
 canonical_inputs:
   - AGENTS.md section 8 multi-Agent Task Packet and single-writer rules
   - .planning/GOVERNANCE.md Task Packet, review and merge gates
