@@ -74,7 +74,7 @@ from mini_agent.evaluation.graders import (
 )
 from mini_agent.evaluation.scripted_provider import (
     RuntimeFaultDirective,
-    ScriptedModelProvider,
+    ScriptedModelProviderV2,
 )
 
 
@@ -129,9 +129,6 @@ _UNBOUND_EVIDENCE_FIELD_ALLOWLIST = (
     "agent_result",
     "conversation_records",
     "message_records",
-    "request_understanding_output",
-    "request_understanding_records",
-    "accepted_task_deltas",
     "input_bindings",
     "task_records",
     "request_units",
@@ -141,7 +138,6 @@ _UNBOUND_EVIDENCE_FIELD_ALLOWLIST = (
     "tool_calls",
     "tool_attempts",
     "observations",
-    "observation_persistence_envelopes",
     "context_manifests",
     "model_visible_toolset_artifacts",
     "request_understanding_records_v2",
@@ -290,7 +286,7 @@ class EvalCaseSut(Protocol):
         self,
         *,
         execution_input: EvalCaseExecutionInput,
-        scripted_provider: ScriptedModelProvider,
+        scripted_provider: ScriptedModelProviderV2,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None: ...
 
@@ -565,9 +561,6 @@ def _exact_run_eval_map_result(
             agent_result=detached_agent_result,
             conversation_records=(detached_closure.conversation_record,),
             message_records=detached_closure.message_records,
-            request_understanding_output=None,
-            request_understanding_records=(),
-            accepted_task_deltas=(),
             input_bindings=detached_closure.input_binding_records,
             task_records=detached_closure.task_records,
             request_units=detached_closure.request_unit_records,
@@ -579,7 +572,6 @@ def _exact_run_eval_map_result(
             tool_calls=detached_closure.tool_calls,
             tool_attempts=detached_closure.tool_attempts,
             observations=detached_closure.observation_records,
-            observation_persistence_envelopes=(),
             context_manifests=detached_closure.context_manifests,
             model_visible_toolset_artifacts=(
                 detached_closure.model_visible_toolset_artifacts
@@ -2363,7 +2355,7 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
         execution_ref, script_execution_ref = nonce_pair
-        provider: ScriptedModelProvider | None = None
+        provider: ScriptedModelProviderV2 | None = None
         runtime_fault: RuntimeFaultDirective | None = None
         execution_input: EvalCaseExecutionInput | None = None
         try:
@@ -2382,7 +2374,7 @@ class OfflineEvalHarness:
                 case,
                 execution_ref=sut_execution_ref,
             )
-            provider = ScriptedModelProvider(
+            provider = ScriptedModelProviderV2(
                 script,
                 script_execution_ref=provider_execution_ref,
             )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from inspect import signature
+from inspect import getsource, signature
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -1107,7 +1107,7 @@ def test_artifacts_contain_only_declared_synthetic_data_and_no_secrets() -> None
             assert not string_value.startswith(("http://", "https://"))
 
 
-def test_v2_eval_dependency_is_additive_and_not_an_artifact_activation() -> None:
+def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None:
     serialized_artifacts = "\n".join(
         path.read_text(encoding="utf-8") for path in ARTIFACT_PATHS
     )
@@ -1122,27 +1122,30 @@ def test_v2_eval_dependency_is_additive_and_not_an_artifact_activation() -> None
         qwen_responses_module,
         "QwenResponsesAdapterV2",
     )
-    for provider_type, legacy_type in (
-        (scripted_v2, scripted_provider_module.ScriptedModelProvider),
-        (qwen_v2, qwen_responses_module.QwenResponsesAdapter),
-    ):
-        assert provider_type.__bases__ == (legacy_type,)
+    assert not hasattr(scripted_provider_module, "ScriptedModelProvider")
+    assert not hasattr(qwen_responses_module, "QwenResponsesAdapter")
+    for provider_type in (scripted_v2, qwen_v2):
+        assert provider_type.__bases__ == (object,)
         assert issubclass(provider_type, ModelProviderV2)
-        assert {
-            name
-            for name in provider_type.__dict__
-            if not name.startswith("__")
-        } == {"propose_next_move", "plan_presentation"}
         method_signature = signature(provider_type.propose_next_move)
         assert tuple(method_signature.parameters) == ("self", "request")
         presentation_signature = signature(provider_type.plan_presentation)
         assert tuple(presentation_signature.parameters) == ("self", "request")
 
-    assert tuple(graders_module.EvalEvidence.model_fields)[-3:] == (
+    assert {
+        "request_understanding_output",
+        "request_understanding_records",
+        "accepted_task_deltas",
+        "observation_persistence_envelopes",
+    }.isdisjoint(graders_module.EvalEvidence.model_fields)
+    assert {
         "request_understanding_records_v2",
         "accepted_task_deltas_v2",
         "task_state_transitions",
-    )
+    } <= set(graders_module.EvalEvidence.model_fields)
+    harness_source = getsource(harness_module)
+    assert "ScriptedModelProviderV2" in harness_source
+    assert "ScriptedModelProvider," not in harness_source
     mapper_signature = signature(
         getattr(
             harness_module,

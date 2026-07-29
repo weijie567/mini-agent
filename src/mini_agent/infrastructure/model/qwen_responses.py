@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from mini_agent.application.records import (
     ProviderProtocolError,
@@ -16,14 +15,11 @@ from mini_agent.application.records import (
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
 )
 
 
 QWEN_MODEL_SNAPSHOT = "qwen3.7-plus-2026-05-26"
-_OutputModel = TypeVar("_OutputModel", bound=BaseModel)
-_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = RequestUnderstandingOutput.model_json_schema()
 _PRESENTATION_PLAN_SCHEMA = PresentationPlan.model_json_schema()
 _V2_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA = (
     RequestUnderstandingOutputV2.model_json_schema()
@@ -37,7 +33,7 @@ def _fresh_protocol_error() -> ProviderProtocolError:
     return error
 
 
-class QwenResponsesAdapter:
+class QwenResponsesAdapterV2:
     """Map the closed Responses function envelope to canonical model outputs."""
 
     def __init__(
@@ -70,16 +66,17 @@ class QwenResponsesAdapter:
     async def propose_next_move(
         self,
         request: RequestUnderstandingInput,
-    ) -> RequestUnderstandingOutput:
+    ) -> RequestUnderstandingOutputV2:
         if type(request) is not RequestUnderstandingInput:
             raise TypeError("request must be RequestUnderstandingInput")
-        return await self._invoke(
-            request=request,
-            target_name="submit_next_move",
-            description="Submit one Request Understanding candidate.",
-            output_model=RequestUnderstandingOutput,
-            output_schema=_REQUEST_UNDERSTANDING_OUTPUT_SCHEMA,
-        )
+        status, output = await _v2_invoke_request_understanding(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if status == "CANDIDATE_INVALID":
+            raise _v2_fresh_candidate_invalid_error()
+        if status != "SUCCESS" or output is None:
+            raise _fresh_protocol_error()
+        return output
 
     async def plan_presentation(
         self,
@@ -87,28 +84,29 @@ class QwenResponsesAdapter:
     ) -> PresentationPlan:
         if type(request) is not PresentationInput:
             raise TypeError("request must be PresentationInput")
-        return await self._invoke(
-            request=request,
-            target_name="submit_presentation_plan",
-            description="Submit one fact-free presentation plan.",
-            output_model=PresentationPlan,
-            output_schema=_PRESENTATION_PLAN_SCHEMA,
-        )
+        plan: PresentationPlan | None = None
+        failed = False
+        try:
+            plan = await self._invoke_presentation(request)
+        except ProviderProtocolError:
+            failed = True
+        if failed:
+            self = None  # type: ignore[assignment]
+            request = None  # type: ignore[assignment]
+            raise _fresh_protocol_error()
+        assert plan is not None
+        return plan
 
-    async def _invoke(
+    async def _invoke_presentation(
         self,
-        *,
-        request: RequestUnderstandingInput | PresentationInput,
-        target_name: str,
-        description: str,
-        output_model: type[_OutputModel],
-        output_schema: dict[str, object],
-    ) -> _OutputModel:
+        request: PresentationInput,
+    ) -> PresentationPlan:
+        target_name = "submit_presentation_plan"
         target_tool = {
             "type": "function",
             "name": target_name,
-            "description": description,
-            "parameters": deepcopy(output_schema),
+            "description": "Submit one fact-free presentation plan.",
+            "parameters": deepcopy(_PRESENTATION_PLAN_SCHEMA),
         }
         body = {
             "model": QWEN_MODEL_SNAPSHOT,
@@ -122,7 +120,7 @@ class QwenResponsesAdapter:
             "stream": False,
         }
         failed = False
-        parsed_output: _OutputModel | None = None
+        parsed_output: PresentationPlan | None = None
         try:
             response = await self._client.post(
                 self._endpoint,
@@ -155,7 +153,7 @@ class QwenResponsesAdapter:
             arguments = json.loads(raw_arguments)
             if not isinstance(arguments, dict):
                 raise ValueError
-            parsed_output = output_model.model_validate(arguments)
+            parsed_output = PresentationPlan.model_validate(arguments)
         except (
             httpx.HTTPError,
             json.JSONDecodeError,
@@ -180,7 +178,7 @@ def _v2_fresh_candidate_invalid_error(
 
 
 async def _v2_invoke_request_understanding(
-    adapter: QwenResponsesAdapter,
+    adapter: QwenResponsesAdapterV2,
     request: RequestUnderstandingInput,
 ) -> tuple[str, RequestUnderstandingOutputV2 | None]:
     target_name = "submit_next_move"
@@ -260,37 +258,3 @@ async def _v2_invoke_request_understanding(
     if parsed_output is None:
         return "PROTOCOL_ERROR", None
     return "SUCCESS", parsed_output
-
-
-class QwenResponsesAdapterV2(QwenResponsesAdapter):
-    async def propose_next_move(
-        self,
-        request: RequestUnderstandingInput,
-    ) -> RequestUnderstandingOutputV2:
-        if type(request) is not RequestUnderstandingInput:
-            raise TypeError("request must be RequestUnderstandingInput")
-        status, output = await _v2_invoke_request_understanding(self, request)
-        self = None  # type: ignore[assignment]
-        request = None  # type: ignore[assignment]
-        if status == "CANDIDATE_INVALID":
-            raise _v2_fresh_candidate_invalid_error()
-        if status != "SUCCESS" or output is None:
-            raise _fresh_protocol_error()
-        return output
-
-    async def plan_presentation(
-        self,
-        request: PresentationInput,
-    ) -> PresentationPlan:
-        plan: PresentationPlan | None = None
-        failed = False
-        try:
-            plan = await super().plan_presentation(request)
-        except ProviderProtocolError:
-            failed = True
-        if failed:
-            self = None  # type: ignore[assignment]
-            request = None  # type: ignore[assignment]
-            raise _fresh_protocol_error()
-        assert plan is not None
-        return plan

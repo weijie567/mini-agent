@@ -20,7 +20,6 @@ from mini_agent.core.request_understanding import (
     NextMoveKind,
     ReferenceSourceKindV2,
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
     TaskDeltaOperation,
 )
@@ -229,7 +228,7 @@ def _project_step(step: Mapping[str, object]) -> _ExecutableStep:
     raise ArtifactContractError("unknown scripted model-call purpose")
 
 
-class ScriptedModelProvider:
+class ScriptedModelProviderV2:
     """Consume a closed executable projection through a strict purpose cursor."""
 
     __slots__ = (
@@ -285,97 +284,39 @@ class ScriptedModelProvider:
     async def propose_next_move(
         self,
         request: RequestUnderstandingInput,
-    ) -> RequestUnderstandingOutput:
+    ) -> RequestUnderstandingOutputV2:
         if type(request) is not RequestUnderstandingInput:
             raise TypeError("request must be RequestUnderstandingInput")
-        step = self._consume_request_step()
-        behavior = step.behavior
-        if behavior in {
-            "INJECT_ZERO_TARGET_FUNCTION_CALLS",
-            "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS",
-        }:
-            raise _fresh_protocol_error()
-
-        message_order_number = "O-1001"
-        next_move_order_number = message_order_number
-        requested_tool_name = "get_order"
-        attempted_customer_id: str | None = None
-        if type(step) is _OrderLookupStep:
-            message_order_number = step.message_order_number
-            next_move_order_number = step.next_move_order_number
-        elif type(step) is _SourceAuthorityMismatchStep:
-            message_order_number = step.message_order_number
-            next_move_order_number = message_order_number
-        elif type(step) is _TrustedFieldOverrideStep:
-            message_order_number = step.message_order_number
-            next_move_order_number = message_order_number
-            attempted_customer_id = step.attempted_customer_id
-        elif type(step) is _UnknownToolStep:
-            message_order_number = step.message_order_number
-            next_move_order_number = message_order_number
-            requested_tool_name = step.requested_tool_name
-
-        authority: str = InputAuthority.USER_CLAIM
-        arguments: dict[str, object] = {
-            "order_id": next_move_order_number,
-        }
-        task_delta_candidates: list[dict[str, object]] = [
-            {
-                "candidate_id": uuid5(
-                    NAMESPACE_URL,
-                    (
-                        "script-execution:"
-                        f"{self._script_execution_ref}:{request.message_ref}"
-                    ),
-                ),
-                "operation": TaskDeltaOperation.ADD_GOAL,
-                "goal_patch": "查询指定订单状态",
-                "input_candidates": [
-                    {
-                        "name": "order_id",
-                        "candidate_value": message_order_number,
-                        "semantic_role": "TARGET_RESOURCE_IDENTIFIER",
-                        "authority": authority,
-                        "source_kind": InputSourceKind.CURRENT_MESSAGE,
-                        "source_ref": request.message_ref,
-                        "source_quote": message_order_number,
-                        "confidence": 1.0,
-                    }
-                ],
-                "confidence": 1.0,
-            }
-        ]
-
-        if behavior == "INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA":
-            task_delta_candidates = []
-        elif behavior == "INJECT_SOURCE_AUTHORITY_MISMATCH":
-            task_delta_candidates[0]["input_candidates"][0][  # type: ignore[index]
-                "authority"
-            ] = InputAuthority.MODEL_INFERENCE
-        elif behavior == "INJECT_TRUSTED_FIELD_OVERRIDE":
-            assert attempted_customer_id is not None
-            arguments["customer_id"] = attempted_customer_id
-        elif behavior not in {
-            "VALID_ORDER_LOOKUP",
-            "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
-            "INJECT_UNKNOWN_TOOL_NAME",
-        }:
-            raise _fresh_protocol_error()
-
-        return RequestUnderstandingOutput.model_validate(
-            {
-                "message_ref": request.message_ref,
-                "task_delta_candidates": task_delta_candidates,
-                "next_move_candidate": {
-                    "kind": NextMoveKind.CALL_TOOL,
-                    "requested_tool_name": requested_tool_name,
-                    "arguments": arguments,
-                    "base_task_state_version": None,
-                },
-            }
+        status, output = _v2_project_scripted_request(
+            provider=self,
+            request=request,
         )
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if status == "CANDIDATE_INVALID":
+            raise _v2_fresh_candidate_invalid_error()
+        if status != "SUCCESS" or output is None:
+            raise _fresh_protocol_error()
+        return output
 
     async def plan_presentation(
+        self,
+        request: PresentationInput,
+    ) -> PresentationPlan:
+        plan: PresentationPlan | None = None
+        failed = False
+        try:
+            plan = self._project_presentation(request)
+        except ProviderProtocolError:
+            failed = True
+        if failed:
+            self = None  # type: ignore[assignment]
+            request = None  # type: ignore[assignment]
+            raise _fresh_protocol_error()
+        assert plan is not None
+        return plan
+
+    def _project_presentation(
         self,
         request: PresentationInput,
     ) -> PresentationPlan:
@@ -463,7 +404,7 @@ def _v2_fresh_candidate_invalid_error(
 
 def _v2_project_scripted_request(
     *,
-    provider: ScriptedModelProvider,
+    provider: ScriptedModelProviderV2,
     request: RequestUnderstandingInput,
 ) -> tuple[str, RequestUnderstandingOutputV2 | None]:
     output: RequestUnderstandingOutputV2 | None = None
@@ -581,40 +522,3 @@ def _v2_project_scripted_request(
     if output is None:
         return "PROTOCOL_ERROR", None
     return "SUCCESS", output
-
-
-class ScriptedModelProviderV2(ScriptedModelProvider):
-    async def propose_next_move(
-        self,
-        request: RequestUnderstandingInput,
-    ) -> RequestUnderstandingOutputV2:
-        if type(request) is not RequestUnderstandingInput:
-            raise TypeError("request must be RequestUnderstandingInput")
-        status, output = _v2_project_scripted_request(
-            provider=self,
-            request=request,
-        )
-        self = None  # type: ignore[assignment]
-        request = None  # type: ignore[assignment]
-        if status == "CANDIDATE_INVALID":
-            raise _v2_fresh_candidate_invalid_error()
-        if status != "SUCCESS" or output is None:
-            raise _fresh_protocol_error()
-        return output
-
-    async def plan_presentation(
-        self,
-        request: PresentationInput,
-    ) -> PresentationPlan:
-        plan: PresentationPlan | None = None
-        failed = False
-        try:
-            plan = await super().plan_presentation(request)
-        except ProviderProtocolError:
-            failed = True
-        if failed:
-            self = None  # type: ignore[assignment]
-            request = None  # type: ignore[assignment]
-            raise _fresh_protocol_error()
-        assert plan is not None
-        return plan
