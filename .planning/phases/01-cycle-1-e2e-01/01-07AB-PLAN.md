@@ -75,7 +75,7 @@ handoff_to: /root Integrator
 handoff_format:
   identity: repository/base/branch/worktree/head/tree/PR and reviewed overlay
   scope: expected and actual files, base/final blobs, dirty/untracked/merge containment
-  verification: RED/overlay GREEN/Application/focused/db/Alembic/full commands and results
+  verification: RED/overlay GREEN/sync/db/db-test/Alembic/Application/focused/full commands and results
   review: exact-head and overlay reviewers, SHA/tree, findings and resolutions
   contract_and_risk: contract/security/eval impact, allowlist result, unresolved risk
   integration: merge SHA/tree equality, post-merge gates, B_J_SCOPE claim or blocker
@@ -110,10 +110,16 @@ Plan branch与feature branch均从上述 exact base 独立创建。Plan merge只
    `uv run pytest tests/component/application -q`，零失败。
 4. 01-07J focused：
    在 latest-integration overlay 中运行 J 的三个 test 文件，零失败。
-5. `uv run pytest`、`uv run alembic upgrade head`、canonical db/db-test health。
-6. `git diff --check`；changed files 精确等于 one-file allowlist；线性、零 merge。
-7. exact-head 独立审查与 latest-integration overlay 独立审查均为全零 findings。
-8. 串行 squash merge；merge tree 等于 reviewed overlay tree；post-merge
+5. 从仓库根目录严格运行 canonical environment：
+   `uv sync --all-groups`；
+   `docker compose up --wait -d db`；
+   `docker compose --profile test up --wait -d db-test`；
+   `uv run alembic upgrade head`。
+6. 从仓库根目录运行 `uv run pytest`；既有 credentialed deselection 与
+   warnings 如实记录。
+7. `git diff --check`；changed files 精确等于 one-file allowlist；线性、零 merge。
+8. exact-head 独立审查与 latest-integration overlay 独立审查均为全零 findings。
+9. 串行 squash merge；merge tree 等于 reviewed overlay tree；post-merge
    Application/full 通过后形成 `B_J_SCOPE`，供 01-07J latest overlay 使用。
 
 ## Nonclaims
