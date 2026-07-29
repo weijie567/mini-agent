@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic_core import to_jsonable_python
-from sqlalchemy import event, select, update
+from sqlalchemy import event, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from mini_agent.application import persistence as application_persistence
@@ -289,6 +289,66 @@ def _database_snapshot(
             )
         )
     return rows, references
+
+
+def _backend_pid(session) -> int:
+    backend_pid = session.scalar(text("SELECT pg_backend_pid()"))
+    assert type(backend_pid) is int
+    return backend_pid
+
+
+def _assert_backend_is_blocked_by(
+    engine,
+    *,
+    blocked_pid: int,
+    blocking_pid: int,
+) -> None:
+    with engine.connect() as connection:
+        for _attempt in range(1000):
+            blocking_pids = connection.scalar(
+                text("SELECT pg_blocking_pids(:blocked_pid)"),
+                {"blocked_pid": blocked_pid},
+            )
+            assert isinstance(blocking_pids, list)
+            if blocking_pid in blocking_pids:
+                return
+    raise AssertionError(
+        "loser backend never waited on the winner backend's Run row lock"
+    )
+
+
+class _DeterministicRunLockRace:
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.winner_locked = threading.Event()
+        self.loser_ready = threading.Event()
+        self.winner_snapshot_taken = threading.Event()
+        self.block_observed = threading.Event()
+        self.winner_pid: int | None = None
+        self.loser_pid: int | None = None
+
+    def winner_after_lock(self, session) -> None:
+        self.winner_pid = _backend_pid(session)
+        self.winner_locked.set()
+        assert self.loser_ready.wait(timeout=5)
+        assert self.loser_pid is not None
+        _assert_backend_is_blocked_by(
+            self.engine,
+            blocked_pid=self.loser_pid,
+            blocking_pid=self.winner_pid,
+        )
+        self.block_observed.set()
+
+    def loser_before_lock(self, session) -> None:
+        self.loser_pid = _backend_pid(session)
+        self.loser_ready.set()
+
+    def loser_after_lock(self) -> None:
+        assert self.winner_snapshot_taken.wait(timeout=5)
+
+    def release_waiters(self) -> None:
+        self.loser_ready.set()
+        self.winner_snapshot_taken.set()
 
 
 async def test_no_task_writer_roundtrips_exact_v2_and_replays_without_mutation(
@@ -667,46 +727,68 @@ async def test_legacy_and_v2_writers_recheck_same_run_in_both_orders(
         engine.dispose()
 
 
+@pytest.mark.parametrize("winner_index", (0, 1))
 async def test_concurrent_v2_writers_commit_at_most_one_complete_graph(
     eval_postgres_namespace,
+    monkeypatch,
+    winner_index: int,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     first = _initial_v2_graph()
     second = _second_v2_graph(first)
-    barrier = threading.Barrier(2)
+    commands = (first, second)
+    local_state = threading.local()
+    race = _DeterministicRunLockRace(engine)
+    original_lock_roots = PostgresRecordAdapter._ru_v2_write_lock_roots
 
-    def write(command: CreateInitialTaskGraphV2Command):
-        barrier.wait(timeout=5)
+    def gated_lock_roots(_cls, session, **kwargs):
+        if local_state.command_index == winner_index:
+            rows = original_lock_roots(session, **kwargs)
+            race.winner_after_lock(session)
+            return rows
+        race.loser_before_lock(session)
+        rows = original_lock_roots(session, **kwargs)
+        race.loser_after_lock()
+        return rows
+
+    def write(command_index: int):
+        local_state.command_index = command_index
         return asyncio.run(
-            adapter.create_initial_task_graph_v2_if_current(command)
+            adapter.create_initial_task_graph_v2_if_current(
+                commands[command_index]
+            )
         )
 
     try:
         await _seed_v2_roots(adapter, first)
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                asyncio.to_thread(write, first),
-                asyncio.to_thread(write, second),
-            ),
-            timeout=15,
+        monkeypatch.setattr(
+            PostgresRecordAdapter,
+            "_ru_v2_write_lock_roots",
+            classmethod(gated_lock_roots),
         )
-        assert sorted(result.value for result in results) == [
-            ConditionalWriteResult.APPLIED.value,
-            ConditionalWriteResult.PROJECTION_CONFLICT.value,
-        ]
-        loaded = await adapter.load_exact_run_evidence_for_owner(
-            owner_scope=first.owner_scope,
-            run_id=first.expected_active_run_record.run_id,
+        winner_task = asyncio.create_task(
+            asyncio.to_thread(write, winner_index)
         )
-        assert loaded is not None
-        assert len(loaded.accepted_task_deltas) == 1
-        assert len(loaded.task_records) == 1
-        assert len(loaded.request_unit_records) == 1
-        assert len(loaded.input_binding_records) == 1
-        assert len(loaded.conversation_task_links) == 1
-        assert len(loaded.run_task_links) == 1
+        assert await asyncio.to_thread(race.winner_locked.wait, 5)
+        loser_task = asyncio.create_task(
+            asyncio.to_thread(write, 1 - winner_index)
+        )
+        winner_result = await asyncio.wait_for(winner_task, timeout=15)
+        winner_snapshot = _database_snapshot(adapter)
+        race.winner_snapshot_taken.set()
+        loser_result = await asyncio.wait_for(loser_task, timeout=15)
+
+        assert race.block_observed.is_set()
+        assert winner_result is ConditionalWriteResult.APPLIED
+        assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        assert _database_snapshot(adapter) == winner_snapshot
+        await _assert_initial_graph_closure(
+            adapter,
+            commands[winner_index],
+        )
     finally:
+        race.release_waiters()
         engine.dispose()
 
 
@@ -1196,54 +1278,74 @@ async def test_initial_writer_locks_exact_run_before_other_trusted_roots(
         engine.dispose()
 
 
+@pytest.mark.parametrize("winner_route", ("no_task", "initial"))
 async def test_no_task_and_initial_writers_commit_one_nonhybrid_closure(
     eval_postgres_namespace,
+    monkeypatch,
+    winner_route: str,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     adapter = PostgresRecordAdapter(build_session_factory(engine))
     initial = _initial_v2_graph()
     no_task = _no_task_from_graph(initial)
-    barrier = threading.Barrier(2)
+    local_state = threading.local()
+    race = _DeterministicRunLockRace(engine)
+    original_lock_roots = PostgresRecordAdapter._ru_v2_write_lock_roots
 
-    def write_no_task():
-        barrier.wait(timeout=5)
-        return asyncio.run(
-            adapter.save_request_understanding_v2_no_task_if_current(no_task)
-        )
+    def gated_lock_roots(_cls, session, **kwargs):
+        if local_state.route == winner_route:
+            rows = original_lock_roots(session, **kwargs)
+            race.winner_after_lock(session)
+            return rows
+        race.loser_before_lock(session)
+        rows = original_lock_roots(session, **kwargs)
+        race.loser_after_lock()
+        return rows
 
-    def write_initial():
-        barrier.wait(timeout=5)
+    def write(route: str):
+        local_state.route = route
+        if route == "no_task":
+            return asyncio.run(
+                adapter.save_request_understanding_v2_no_task_if_current(
+                    no_task
+                )
+            )
         return asyncio.run(
             adapter.create_initial_task_graph_v2_if_current(initial)
         )
 
     try:
         await _seed_v2_roots(adapter, initial)
-        no_task_result, initial_result = await asyncio.wait_for(
-            asyncio.gather(
-                asyncio.to_thread(write_no_task),
-                asyncio.to_thread(write_initial),
-            ),
-            timeout=15,
+        monkeypatch.setattr(
+            PostgresRecordAdapter,
+            "_ru_v2_write_lock_roots",
+            classmethod(gated_lock_roots),
         )
-        assert (
-            no_task_result is ConditionalWriteResult.APPLIED
-        ) is not (
-            initial_result is ConditionalWriteResult.APPLIED
+        loser_route = (
+            "initial" if winner_route == "no_task" else "no_task"
         )
-        assert {
-            no_task_result,
-            initial_result,
-        } == {
-            ConditionalWriteResult.APPLIED,
-            ConditionalWriteResult.PROJECTION_CONFLICT,
-        }
+        winner_task = asyncio.create_task(
+            asyncio.to_thread(write, winner_route)
+        )
+        assert await asyncio.to_thread(race.winner_locked.wait, 5)
+        loser_task = asyncio.create_task(
+            asyncio.to_thread(write, loser_route)
+        )
+        winner_result = await asyncio.wait_for(winner_task, timeout=15)
+        winner_snapshot = _database_snapshot(adapter)
+        race.winner_snapshot_taken.set()
+        loser_result = await asyncio.wait_for(loser_task, timeout=15)
+
+        assert race.block_observed.is_set()
+        assert winner_result is ConditionalWriteResult.APPLIED
+        assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        assert _database_snapshot(adapter) == winner_snapshot
         loaded = await adapter.load_exact_run_evidence_for_owner(
             owner_scope=initial.owner_scope,
             run_id=initial.expected_active_run_record.run_id,
         )
         assert loaded is not None
-        if no_task_result is ConditionalWriteResult.APPLIED:
+        if winner_route == "no_task":
             assert loaded.request_understanding_record == (
                 no_task.request_understanding_record
             )
@@ -1256,6 +1358,7 @@ async def test_no_task_and_initial_writers_commit_one_nonhybrid_closure(
         else:
             await _assert_initial_graph_closure(adapter, initial)
     finally:
+        race.release_waiters()
         engine.dispose()
 
 
@@ -1271,9 +1374,8 @@ async def test_legacy_and_v2_writers_serialize_both_lock_orders(
     v2_adapter = PostgresRecordAdapter(session_factory)
     v2 = _initial_v2_graph()
     legacy = _legacy_graph_for(v2)
-    winner_locked = threading.Event()
-    loser_attempted = threading.Event()
-    held = False
+    race = _DeterministicRunLockRace(engine)
+    gate_used = False
 
     try:
         await _seed_v2_roots(v2_adapter, v2)
@@ -1283,24 +1385,26 @@ async def test_legacy_and_v2_writers_serialize_both_lock_orders(
             )
 
             def hold_legacy_after_run_lock(session, row, **kwargs):
-                nonlocal held
+                nonlocal gate_used
+                decoded = original_legacy_validate(session, row, **kwargs)
                 if (
-                    not held
+                    not gate_used
                     and row.record_code
                     == P0RecordCode.AGENT_RUN_RECORD.value
                 ):
-                    held = True
-                    winner_locked.set()
-                    assert loser_attempted.wait(timeout=5)
-                return original_legacy_validate(session, row, **kwargs)
+                    gate_used = True
+                    race.winner_after_lock(session)
+                return decoded
 
             original_v2_lock_roots = (
                 PostgresRecordAdapter._ru_v2_write_lock_roots
             )
 
-            def announce_v2_attempt(_cls, *args, **kwargs):
-                loser_attempted.set()
-                return original_v2_lock_roots(*args, **kwargs)
+            def block_v2_loser(_cls, session, **kwargs):
+                race.loser_before_lock(session)
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.loser_after_lock()
+                return rows
 
             monkeypatch.setattr(
                 legacy_adapter,
@@ -1310,55 +1414,45 @@ async def test_legacy_and_v2_writers_serialize_both_lock_orders(
             monkeypatch.setattr(
                 PostgresRecordAdapter,
                 "_ru_v2_write_lock_roots",
-                classmethod(announce_v2_attempt),
+                classmethod(block_v2_loser),
             )
         else:
-            original_v2_validate = (
-                PostgresRecordAdapter._ru_v2_write_validate_row
+            original_v2_lock_roots = (
+                PostgresRecordAdapter._ru_v2_write_lock_roots
             )
 
-            def hold_v2_after_run_lock(
-                _cls,
-                session,
-                row,
-                *,
-                expected_code,
-                owner_customer_id,
-            ):
-                nonlocal held
-                if (
-                    not held
-                    and expected_code is P0RecordCode.AGENT_RUN_RECORD
-                ):
-                    held = True
-                    winner_locked.set()
-                    assert loser_attempted.wait(timeout=5)
-                return original_v2_validate(
-                    session,
-                    row,
-                    expected_code=expected_code,
-                    owner_customer_id=owner_customer_id,
-                )
+            def hold_v2_after_run_lock(_cls, session, **kwargs):
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.winner_after_lock(session)
+                return rows
 
             original_legacy_row = legacy_adapter._row_for_identity
 
-            def announce_legacy_attempt(*args, **kwargs):
-                if (
-                    kwargs.get("record_code")
+            def block_legacy_loser(session, *args, **kwargs):
+                nonlocal gate_used
+                is_run_lock = (
+                    not gate_used
+                    and kwargs.get("for_update")
+                    and kwargs.get("record_code")
                     is P0RecordCode.AGENT_RUN_RECORD
-                ):
-                    loser_attempted.set()
-                return original_legacy_row(*args, **kwargs)
+                )
+                if is_run_lock:
+                    gate_used = True
+                    race.loser_before_lock(session)
+                row = original_legacy_row(session, *args, **kwargs)
+                if is_run_lock:
+                    race.loser_after_lock()
+                return row
 
             monkeypatch.setattr(
                 PostgresRecordAdapter,
-                "_ru_v2_write_validate_row",
+                "_ru_v2_write_lock_roots",
                 classmethod(hold_v2_after_run_lock),
             )
             monkeypatch.setattr(
                 legacy_adapter,
                 "_row_for_identity",
-                announce_legacy_attempt,
+                block_legacy_loser,
             )
 
         def apply_legacy():
@@ -1374,15 +1468,17 @@ async def test_legacy_and_v2_writers_serialize_both_lock_orders(
         winner_call = apply_legacy if winner == "legacy" else apply_v2
         loser_call = apply_v2 if winner == "legacy" else apply_legacy
         winner_task = asyncio.create_task(asyncio.to_thread(winner_call))
-        assert await asyncio.to_thread(winner_locked.wait, 5)
+        assert await asyncio.to_thread(race.winner_locked.wait, 5)
         loser_task = asyncio.create_task(asyncio.to_thread(loser_call))
-        winner_result, loser_result = await asyncio.wait_for(
-            asyncio.gather(winner_task, loser_task),
-            timeout=15,
-        )
+        winner_result = await asyncio.wait_for(winner_task, timeout=15)
+        winner_snapshot = _database_snapshot(v2_adapter)
+        race.winner_snapshot_taken.set()
+        loser_result = await asyncio.wait_for(loser_task, timeout=15)
 
+        assert race.block_observed.is_set()
         assert winner_result is ConditionalWriteResult.APPLIED
         assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        assert _database_snapshot(v2_adapter) == winner_snapshot
         counts = _task_graph_family_counts(v2_adapter)
         assert all(count == 1 for count in counts.values())
         with session_factory() as session:
@@ -1398,20 +1494,28 @@ async def test_legacy_and_v2_writers_serialize_both_lock_orders(
                 if winner == "legacy"
                 else "request_understanding_record.p0.v2"
             )
+        if winner == "v2":
+            await _assert_initial_graph_closure(v2_adapter, v2)
     finally:
-        loser_attempted.set()
+        race.release_waiters()
         engine.dispose()
 
 
+@pytest.mark.parametrize("winner_side", ("v2", "recovery"))
 async def test_recovery_and_v2_initial_writer_converge_without_orphans(
     eval_postgres_namespace,
+    monkeypatch,
+    winner_side: str,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     session_factory = build_session_factory(engine)
     writer = PostgresRecordAdapter(session_factory)
     recovery = PostgresRestartRecoveryAdapter(session_factory)
     command = _initial_v2_graph()
-    barrier = threading.Barrier(2)
+    race = _DeterministicRunLockRace(engine)
+    original_v2_lock_roots = PostgresRecordAdapter._ru_v2_write_lock_roots
+    original_recovery_lock_rows = recovery._lock_rows_stably
+    recovery_gate_used = False
     try:
         await _seed_v2_roots(writer, command)
         closure = await recovery.load_next_restart_recovery_closure()
@@ -1419,100 +1523,228 @@ async def test_recovery_and_v2_initial_writer_converge_without_orphans(
         assert closure.run_task_links == ()
         recovery_command = _empty_graph_recovery_command(closure)
 
+        if winner_side == "v2":
+
+            def gate_v2_winner(_cls, session, **kwargs):
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.winner_after_lock(session)
+                return rows
+
+            def gate_recovery_loser(session, rows):
+                nonlocal recovery_gate_used
+                materialized = tuple(rows)
+                if recovery_gate_used:
+                    return original_recovery_lock_rows(
+                        session,
+                        materialized,
+                    )
+                recovery_gate_used = True
+                race.loser_before_lock(session)
+                locked = original_recovery_lock_rows(
+                    session,
+                    materialized,
+                )
+                race.loser_after_lock()
+                return locked
+
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_lock_roots",
+                classmethod(gate_v2_winner),
+            )
+            monkeypatch.setattr(
+                recovery,
+                "_lock_rows_stably",
+                gate_recovery_loser,
+            )
+        else:
+
+            def gate_recovery_winner(session, rows):
+                nonlocal recovery_gate_used
+                materialized = tuple(rows)
+                locked = original_recovery_lock_rows(
+                    session,
+                    materialized,
+                )
+                if not recovery_gate_used:
+                    recovery_gate_used = True
+                    race.winner_after_lock(session)
+                return locked
+
+            def gate_v2_loser(_cls, session, **kwargs):
+                race.loser_before_lock(session)
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.loser_after_lock()
+                return rows
+
+            monkeypatch.setattr(
+                recovery,
+                "_lock_rows_stably",
+                gate_recovery_winner,
+            )
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_lock_roots",
+                classmethod(gate_v2_loser),
+            )
+
         def write_v2():
-            barrier.wait(timeout=5)
             return asyncio.run(
                 writer.create_initial_task_graph_v2_if_current(command)
             )
 
         def apply_recovery():
-            barrier.wait(timeout=5)
             return asyncio.run(
                 recovery.claim_and_apply_restart_recovery(recovery_command)
             )
 
-        writer_result, recovery_result = await asyncio.wait_for(
-            asyncio.gather(
-                asyncio.to_thread(write_v2),
-                asyncio.to_thread(apply_recovery),
-            ),
-            timeout=15,
+        winner_call = (
+            write_v2 if winner_side == "v2" else apply_recovery
         )
-        assert (
-            writer_result is ConditionalWriteResult.APPLIED
-        ) is not (recovery_result is RecoveryWriteResult.APPLIED)
-        if writer_result is ConditionalWriteResult.APPLIED:
-            assert recovery_result in {
-                RecoveryWriteResult.CLOSURE_CONFLICT,
-                RecoveryWriteResult.NOT_APPLICABLE,
-            }
+        loser_call = (
+            apply_recovery if winner_side == "v2" else write_v2
+        )
+        winner_task = asyncio.create_task(asyncio.to_thread(winner_call))
+        assert await asyncio.to_thread(race.winner_locked.wait, 5)
+        loser_task = asyncio.create_task(asyncio.to_thread(loser_call))
+        winner_result = await asyncio.wait_for(winner_task, timeout=15)
+        winner_snapshot = _database_snapshot(writer)
+        race.winner_snapshot_taken.set()
+        loser_result = await asyncio.wait_for(loser_task, timeout=15)
+
+        assert race.block_observed.is_set()
+        assert _database_snapshot(writer) == winner_snapshot
+        if winner_side == "v2":
+            assert winner_result is ConditionalWriteResult.APPLIED
+            assert loser_result is RecoveryWriteResult.CLOSURE_CONFLICT
             await _assert_initial_graph_closure(writer, command)
         else:
-            assert recovery_result is RecoveryWriteResult.APPLIED
-            assert writer_result in {
-                ConditionalWriteResult.PROJECTION_CONFLICT,
-                ConditionalWriteResult.NOT_APPLICABLE,
-            }
+            assert winner_result is RecoveryWriteResult.APPLIED
+            assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
             assert all(
                 count == 0
                 for count in _task_graph_family_counts(writer).values()
             )
     finally:
+        race.release_waiters()
         engine.dispose()
 
 
+@pytest.mark.parametrize("winner_side", ("v2", "finalization"))
 async def test_finalization_and_v2_initial_writer_converge_without_orphans(
     eval_postgres_namespace,
+    monkeypatch,
+    winner_side: str,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     session_factory = build_session_factory(engine)
     writer = PostgresRecordAdapter(session_factory)
     finalizer = PostgresRecordAdapter(session_factory)
     command = _initial_v2_graph()
-    barrier = threading.Barrier(2)
+    race = _DeterministicRunLockRace(engine)
+    original_v2_lock_roots = PostgresRecordAdapter._ru_v2_write_lock_roots
+    original_finalizer_lock_rows = finalizer._lock_rows_stably
+    finalizer_gate_used = False
     try:
         await _seed_v2_roots(writer, command)
         finalization = _no_task_finalization_for_graph(command)
 
+        if winner_side == "v2":
+
+            def gate_v2_winner(_cls, session, **kwargs):
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.winner_after_lock(session)
+                return rows
+
+            def gate_finalizer_loser(session, rows):
+                nonlocal finalizer_gate_used
+                materialized = tuple(rows)
+                if finalizer_gate_used:
+                    return original_finalizer_lock_rows(
+                        session,
+                        materialized,
+                    )
+                finalizer_gate_used = True
+                race.loser_before_lock(session)
+                locked = original_finalizer_lock_rows(
+                    session,
+                    materialized,
+                )
+                race.loser_after_lock()
+                return locked
+
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_lock_roots",
+                classmethod(gate_v2_winner),
+            )
+            monkeypatch.setattr(
+                finalizer,
+                "_lock_rows_stably",
+                gate_finalizer_loser,
+            )
+        else:
+
+            def gate_finalizer_winner(session, rows):
+                nonlocal finalizer_gate_used
+                materialized = tuple(rows)
+                locked = original_finalizer_lock_rows(
+                    session,
+                    materialized,
+                )
+                if not finalizer_gate_used:
+                    finalizer_gate_used = True
+                    race.winner_after_lock(session)
+                return locked
+
+            def gate_v2_loser(_cls, session, **kwargs):
+                race.loser_before_lock(session)
+                rows = original_v2_lock_roots(session, **kwargs)
+                race.loser_after_lock()
+                return rows
+
+            monkeypatch.setattr(
+                finalizer,
+                "_lock_rows_stably",
+                gate_finalizer_winner,
+            )
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_lock_roots",
+                classmethod(gate_v2_loser),
+            )
+
         def write_v2():
-            barrier.wait(timeout=5)
             return asyncio.run(
                 writer.create_initial_task_graph_v2_if_current(command)
             )
 
         def finalize():
-            barrier.wait(timeout=5)
             return asyncio.run(finalizer.finalize_run_if_active(finalization))
 
-        writer_result, finalization_result = await asyncio.wait_for(
-            asyncio.gather(
-                asyncio.to_thread(write_v2),
-                asyncio.to_thread(finalize),
-            ),
-            timeout=15,
-        )
-        assert (
-            writer_result is ConditionalWriteResult.APPLIED
-        ) is not (
-            finalization_result is ConditionalWriteResult.APPLIED
-        )
-        if writer_result is ConditionalWriteResult.APPLIED:
-            assert (
-                finalization_result
-                is ConditionalWriteResult.PROJECTION_CONFLICT
-            )
+        winner_call = write_v2 if winner_side == "v2" else finalize
+        loser_call = finalize if winner_side == "v2" else write_v2
+        winner_task = asyncio.create_task(asyncio.to_thread(winner_call))
+        assert await asyncio.to_thread(race.winner_locked.wait, 5)
+        loser_task = asyncio.create_task(asyncio.to_thread(loser_call))
+        winner_result = await asyncio.wait_for(winner_task, timeout=15)
+        winner_snapshot = _database_snapshot(writer)
+        race.winner_snapshot_taken.set()
+        loser_result = await asyncio.wait_for(loser_task, timeout=15)
+
+        assert race.block_observed.is_set()
+        assert _database_snapshot(writer) == winner_snapshot
+        if winner_side == "v2":
+            assert winner_result is ConditionalWriteResult.APPLIED
+            assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
             await _assert_initial_graph_closure(writer, command)
         else:
-            assert (
-                finalization_result is ConditionalWriteResult.APPLIED
-            )
-            assert writer_result in {
-                ConditionalWriteResult.PROJECTION_CONFLICT,
-                ConditionalWriteResult.NOT_APPLICABLE,
-            }
+            assert winner_result is ConditionalWriteResult.APPLIED
+            assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
             assert all(
                 count == 0
                 for count in _task_graph_family_counts(writer).values()
             )
     finally:
+        race.release_waiters()
         engine.dispose()
