@@ -61,6 +61,20 @@ contract_changes: NONE
 security_impact: NONE; static dependency inventory only
 eval_impact: YES; registers the already-required J PostgreSQL integration oracle
 rollback: ordinary revert PR removing only the one dependency-set entry
+canonical_inputs:
+  - AGENTS.md section 8 multi-Agent Task Packet and single-writer rules
+  - .planning/GOVERNANCE.md Task Packet, review and merge gates
+  - reviewed 01-07J Plan exact merge 023cce5a357122511823bc759ad767d75f8fb053
+  - tests/component/application/test_persistence_contract.py closed dependency inventory
+  - provisional J oracle blob 3c147a754ceae7bf8534e16ae2fd0d1f1531c5a3
+handoff_to: /root Integrator
+handoff_format:
+  identity: repository/base/branch/worktree/head/tree/PR and reviewed overlay
+  scope: expected and actual files, base/final blobs, dirty/untracked/merge containment
+  verification: RED/overlay GREEN/Application/focused/db/Alembic/full commands and results
+  review: exact-head and overlay reviewers, SHA/tree, findings and resolutions
+  contract_and_risk: contract/security/eval impact, allowlist result, unresolved risk
+  integration: merge SHA/tree equality, post-merge gates, B_J_SCOPE claim or blocker
 ```
 
 Plan branch与feature branch均从上述 exact base 独立创建。Plan merge只记录
