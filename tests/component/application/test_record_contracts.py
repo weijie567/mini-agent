@@ -1071,6 +1071,63 @@ def _initial_v2_graph() -> CreateInitialTaskGraphV2Command:
     )
 
 
+def _initial_v2_graph_exact_run_evidence(
+    *,
+    candidate_value: str = "o-1001",
+    binding_value: str = "O-1001",
+    include_extra_binding_source: bool = False,
+) -> ExactRunEvidenceClosure:
+    graph = _initial_v2_graph()
+    record = graph.request_understanding.record
+    candidate = record.task_delta_candidates[0]
+    candidate_input = _rebuild(
+        candidate.input_candidates[0],
+        candidate_value=candidate_value,
+    )
+    projected_candidate = _rebuild(
+        candidate,
+        input_candidates=(candidate_input,),
+    )
+    projected_record = _rebuild(
+        record,
+        task_delta_candidates=(projected_candidate,),
+    )
+    projected_binding = _rebuild(
+        graph.input_binding.record,
+        normalized_value=binding_value,
+        source_refs=(
+            (
+                *graph.input_binding.record.source_refs,
+                graph.expected_message_records[0].message_id,
+            )
+            if include_extra_binding_source
+            else graph.input_binding.record.source_refs
+        ),
+    )
+    return ExactRunEvidenceClosure(
+        conversation_record=graph.expected_conversation_record,
+        run_record=graph.expected_active_run_record,
+        message_records=graph.expected_message_records,
+        request_understanding_record=projected_record,
+        accepted_task_deltas=(
+            graph.request_understanding.accepted_delta,
+        ),
+        input_binding_records=(projected_binding,),
+        task_records=(graph.initial_task.initial_record,),
+        task_state_transitions=(),
+        request_unit_records=(graph.initial_request_unit.initial_record,),
+        conversation_task_links=(graph.conversation_task_link,),
+        run_task_links=(graph.run_task_link.active_record,),
+        gate_decisions=(),
+        tool_calls=(),
+        tool_attempts=(),
+        observation_records=(),
+        context_manifests=(),
+        model_visible_toolset_artifacts=(),
+        trace_events=(),
+    )
+
+
 def _v2_no_task_command(
     *,
     zero_candidates: bool = False,
@@ -5813,6 +5870,57 @@ def test_exact_run_evidence_accepts_closed_ru_v2_candidate_shapes(
     )
     assert len(closure.accepted_task_deltas) == accepted_count
     assert len(closure.task_records) == accepted_count
+
+
+@pytest.mark.parametrize("candidate_value", ("o-1001", "O-1001"))
+def test_exact_run_evidence_normalizes_accepted_candidate_binding_values(
+    candidate_value: str,
+) -> None:
+    closure = _initial_v2_graph_exact_run_evidence(
+        candidate_value=candidate_value,
+    )
+    assert closure.input_binding_records[0].normalized_value == "O-1001"
+
+
+def test_exact_run_evidence_rejects_wrong_normalized_candidate_binding() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="accepted child bindings must preserve validated input values",
+    ):
+        _initial_v2_graph_exact_run_evidence(binding_value="O-9999")
+
+
+def test_exact_run_evidence_rejects_invalid_candidate_without_raw_value() -> None:
+    raw_value = "invalid-raw-order-secret"
+    with pytest.raises(
+        ValidationError,
+        match="accepted child bindings must preserve validated input values",
+    ) as exc_info:
+        _initial_v2_graph_exact_run_evidence(candidate_value=raw_value)
+
+    error = exc_info.value
+    projections = (
+        str(error),
+        repr(error),
+        error.json(include_url=False),
+        repr(error.errors(include_url=False)),
+        repr(error.__cause__),
+        repr(error.__context__),
+    )
+    assert all(raw_value not in projection for projection in projections)
+    assert error.errors(include_url=False)[0]["input"] is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_exact_run_evidence_rejects_extra_candidate_binding_source() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="accepted child bindings must preserve validated input values",
+    ):
+        _initial_v2_graph_exact_run_evidence(
+            include_extra_binding_source=True,
+        )
 
 
 def test_exact_run_evidence_rejects_missing_extra_foreign_or_eval_graph_rows() -> None:
