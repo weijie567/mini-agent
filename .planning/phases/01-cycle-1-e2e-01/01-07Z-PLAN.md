@@ -147,6 +147,7 @@ Z有意使用单个`input_binding`而不是tuple：当前RU-v2 direct-binding DT
 
 - referenced Message projections使用与no-task command相同的exact-set算法；全部Message属于trusted Conversation，current `record.message_ref`对应exact USER Message，Run属于同一Conversation且为clean `RUNNING`；
 - parent必须恰有一个actual Candidate、一个validation且为`ACCEPT`、一个accepted child；一个ACCEPT加其他REJECT的partial closure与multi-ACCEPT都不能进入此active exact-one command；
+- accepted child必须保存唯一accepted Candidate的完整语义投影：`accepted_delta.goal_text == accepted_candidate.goal_patch`；唯一InputBinding的`name`、`normalized_value`、`authority`与`source_refs`必须分别精确对应accepted Candidate input的`name`、按Y canonical `order_id` normalization所得值、`authority`与`(source_ref,)`，不得只校验ID闭合；
 - Task owner与trusted scope相同，Task / RequestUnit都是`ACTIVE/v1`且identity/status/version一致；
 - AcceptedTaskDeltaV2 `task_id`等于initial Task，result version等于Task/RequestUnit version `1`；
 - RequestUnit goal/message/binding与accepted child exact；
@@ -154,6 +155,7 @@ Z有意使用单个`input_binding`而不是tuple：当前RU-v2 direct-binding DT
 - ConversationTaskLink是active exact Task link；RunTaskLink绑定exact Run/new Task，base与result都按现有initial active-link contract保持`None`；
 - initial Task固定`last_outcome_ref=None`；initial RequestUnit固定`contextualization_ref=None`、`constraint_refs=()`、`dependency_refs=()`、`open_questions=()`、`observation_refs=()`、`evidence_binding_refs=()`、`pending_action_ref=None`、`result_refs=()`；initial InputBinding固定`supersedes=None`；
 - parent / child / Task / RequestUnit / InputBinding使用Y的同一次trusted timestamp：parent `created_at == child.accepted_at == Task.created_at == Task.updated_at == RequestUnit.created_at == RequestUnit.updated_at == InputBinding.created_at == InputBinding.updated_at`；ConversationTaskLink `linked_at`使用同一initial timestamp且`ended_at=None`；
+- 上述同一trusted timestamp还必须满足`>= current Message.received_at`且`>= Run.started_at`；即使攻击者把全部graph timestamps同步回拨并继续保持彼此相等，也必须fail closed；
 - command construction对`TrustedOwnerScope`执行exact instance/projection guard，对其他nested model执行exact-type、recursive canonical rebuild，拒绝subclass、`model_construct` undeclared state与noncanonical nested value；不得从一个对象重建另一个，也不得接受v1 record/child。
 
 ## 4. Two explicit RuntimeRecordPort methods
@@ -332,7 +334,7 @@ handoff_format: repository/remote/branch/worktree、exact B_Q base/tree、Plan m
   <name>Task 1: RED — freeze two exact v2 conditional write contracts</name>
   <files>tests/component/application/test_record_contracts.py, tests/component/application/test_ports_contract.py</files>
   <read_first>Intent §13、Memory Port/owner/atomic rules、Thin Slice v2 local closure、execution map Z acceptance、existing v1 initial graph command/Port tests</read_first>
-  <action>只改两个owned tests。增加三个command import/field/config/cardinality与two Protocol method exact signature/doc tests；构造canonical no-task、all-reject、exact-one emitted/accepted及current+recent contextualization fixtures，逐项tamper owner/root/referenced Message exact set/run/decision/child/task/binding/link/version/time、全部initial-empty refs、subclass/undeclared state/noncanonical nested value；证明partial/multi不能进入accepted command、v1 model不能进入v2 command、v2 model不能进入v1 command，且没有union/optional/alias/bypass method。保持existing v1 tests与test fixture边界，不用DB/network/skip/xfail。</action>
+  <action>只改两个owned tests。增加三个command import/field/config/cardinality与two Protocol method exact signature/doc tests；构造canonical no-task、all-reject、exact-one emitted/accepted及current+recent contextualization fixtures，逐项tamper owner/root/referenced Message exact set/run/decision/child/task/binding/link/version/time、全部initial-empty refs、subclass/undeclared state/noncanonical nested value；accepted graph必须另有定向tamper覆盖child goal、InputBinding normalized value、authority与source，证明它们逐项绑定accepted Candidate input；另以全部parent/child/Task/RequestUnit/InputBinding/link timestamps保持同步但整体早于current Message或Run的rollback fixture证明lower-bound fail closed；证明partial/multi不能进入accepted command、v1 model不能进入v2 command、v2 model不能进入v1 command，且没有union/optional/alias/bypass method。保持existing v1 tests与test fixture边界，不用DB/network/skip/xfail。</action>
   <verify>
     <automated>uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -q</automated>
     RED必须非零且只因additive Z symbols/behavior缺失；四个source blobs保持B_Q值。
@@ -437,11 +439,11 @@ test "$(git rev-parse "${red_sha}:src/mini_agent/application/ports.py")" = \
   4b4d5c7556f13a072a8fb83cfcf539441f76eaa1
 if test "$commit_count" -gt 2; then
   test -z "$(git log --reverse --format=%s "${green_sha}..HEAD" |
-    rg -v '^fix\\(01-07Z\\): ' || true)"
+    rg -v '^fix\(01-07Z\): ' || true)"
 fi
 for commit in $commits; do
   test -z "$(git diff-tree --no-commit-id --name-only -r "$commit" |
-    rg -v '^(src/mini_agent/application/(records|ports)\\.py|tests/component/application/test_(record_contracts|ports_contract)\\.py)$' ||
+    rg -v '^(src/mini_agent/application/(records|ports)\.py|tests/component/application/test_(record_contracts|ports_contract)\.py)$' ||
     true)"
 done
 
