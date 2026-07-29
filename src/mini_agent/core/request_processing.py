@@ -340,6 +340,8 @@ def revalidate_next_move(
 
 from datetime import datetime
 from hashlib import sha256
+from hmac import compare_digest, digest as hmac_digest
+from secrets import token_bytes
 
 from pydantic import (
     BaseModel,
@@ -1329,6 +1331,13 @@ def _is_exact_canonical_model_v2(
 ) -> bool:
     if type(value) is not expected_type:
         return False
+    if expected_type is globals().get(
+        "InitialRequestRoutableTaskGraphDecisionV2"
+    ):
+        verifier = globals().get(
+            "_initial_routable_decision_seal_matches_v2"
+        )
+        return callable(verifier) and verifier(value)
     payload: dict[str, Any] | None
     try:
         payload = value.model_dump(
@@ -1340,21 +1349,8 @@ def _is_exact_canonical_model_v2(
         payload = None
     if payload is None:
         return False
-    validation_context = (
-        {
-            _INITIAL_ROUTABLE_DECISION_CONTEXT_KEY: (
-                _INITIAL_ROUTABLE_DECISION_TOKEN
-            )
-        }
-        if expected_type
-        is globals().get("InitialRequestRoutableTaskGraphDecisionV2")
-        else None
-    )
     try:
-        rebuilt = expected_type.model_validate(
-            payload,
-            context=validation_context,
-        )
+        rebuilt = expected_type.model_validate(payload)
     except (TypeError, ValueError, ValidationError):
         return False
     return _runtime_values_match_exactly_v2(rebuilt, value)
@@ -1587,35 +1583,60 @@ class InitialRequestNoTaskDecisionV2(RuntimePrivateModel):
         return self
 
 
-_INITIAL_ROUTABLE_DECISION_CONTEXT_KEY = (
-    "mini_agent_initial_routable_decision_token"
-)
-_INITIAL_ROUTABLE_DECISION_TOKEN = object()
-
-
-def _next_move_fingerprint_v2(candidate: NextMove) -> str:
-    canonical_json: str | None = None
-    try:
-        canonical_json = candidate.model_dump_json(
-            round_trip=True,
-            warnings="error",
+def _validate_initial_routable_decision_fields_v2(
+    *,
+    closure: RequestUnderstandingClosureV2,
+    task_graph: InitialAcceptedTaskGraphV2,
+    next_move_candidate_ref: UUID,
+    next_move_candidate: NextMove,
+) -> None:
+    if (
+        not _is_exact_canonical_model_v2(
+            closure,
+            RequestUnderstandingClosureV2,
         )
-    except (
-        AttributeError,
-        TypeError,
-        ValueError,
-        PydanticSerializationError,
+        or not _is_exact_canonical_model_v2(
+            task_graph,
+            InitialAcceptedTaskGraphV2,
+        )
+        or not _is_exact_canonical_model_v2(
+            next_move_candidate,
+            NextMove,
+        )
+        or type(next_move_candidate_ref) is not UUID
     ):
-        pass
-    if canonical_json is None:
-        raise ValueError("Reducer NextMove binding must be canonical")
-    return sha256(canonical_json.encode("utf-8")).hexdigest()
+        raise ValueError("routable decision requires canonical records")
+    record = closure.record
+    if (
+        len(record.task_delta_candidates) != 1
+        or len(record.candidate_validation) != 1
+        or record.candidate_validation[0].decision
+        is not CandidateValidationDecision.ACCEPT
+        or closure.accepted_task_deltas != (task_graph.accepted_delta,)
+        or record.accepted_delta_refs
+        != (task_graph.accepted_delta.accepted_delta_id,)
+        or record.next_move_candidate_ref != next_move_candidate_ref
+        or record.proposed_base_task_state_version
+        != next_move_candidate.base_task_state_version
+        or record.validated_task_state_version != 1
+        or task_graph.accepted_delta.candidate_ref
+        != record.task_delta_candidates[0].candidate_id
+    ):
+        raise ValueError("routable decision must close one accepted Candidate")
+    _validate_initial_graph_candidate_projection_v2(
+        record=record,
+        graph=task_graph,
+    )
+    _validate_initial_graph_identity_closure_v2(
+        record=record,
+        graphs=(task_graph,),
+    )
 
 
 class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
     """Exact-one emitted/accepted result retaining the shared NextMove."""
 
-    _reducer_next_move_fingerprint: str = PrivateAttr()
+    _reducer_decision_seal: bytes = PrivateAttr()
 
     closure: RequestUnderstandingClosureV2
     task_graph: InitialAcceptedTaskGraphV2
@@ -1625,16 +1646,21 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
     def __setattr__(self, name: str, value: Any) -> None:
         private_state = getattr(self, "__pydantic_private__", None)
         if (
-            name == "_reducer_next_move_fingerprint"
+            name == "_reducer_decision_seal"
             and isinstance(private_state, dict)
             and name in private_state
         ):
-            raise TypeError("Reducer NextMove binding is immutable")
+            raise TypeError("Reducer decision seal is immutable")
+        if name == "_reducer_next_move_fingerprint":
+            raise TypeError("Reducer decision seal is immutable")
         super().__setattr__(name, value)
 
     def __delattr__(self, name: str) -> None:
-        if name == "_reducer_next_move_fingerprint":
-            raise TypeError("Reducer NextMove binding is immutable")
+        if name in {
+            "_reducer_decision_seal",
+            "_reducer_next_move_fingerprint",
+        }:
+            raise TypeError("Reducer decision seal is immutable")
         super().__delattr__(name)
 
     @model_validator(mode="after")
@@ -1642,61 +1668,86 @@ class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
         self,
         info: ValidationInfo,
     ) -> Self:
-        if (
-            not _is_exact_canonical_model_v2(
-                self.closure,
-                RequestUnderstandingClosureV2,
-            )
-            or not _is_exact_canonical_model_v2(
-                self.task_graph,
-                InitialAcceptedTaskGraphV2,
-            )
-            or not _is_exact_canonical_model_v2(
-                self.next_move_candidate,
-                NextMove,
-            )
-            or type(self.next_move_candidate_ref) is not UUID
-        ):
-            raise ValueError("routable decision requires canonical records")
-        record = self.closure.record
-        if (
-            len(record.task_delta_candidates) != 1
-            or len(record.candidate_validation) != 1
-            or record.candidate_validation[0].decision
-            is not CandidateValidationDecision.ACCEPT
-            or self.closure.accepted_task_deltas
-            != (self.task_graph.accepted_delta,)
-            or record.accepted_delta_refs
-            != (self.task_graph.accepted_delta.accepted_delta_id,)
-            or record.next_move_candidate_ref != self.next_move_candidate_ref
-            or record.proposed_base_task_state_version
-            != self.next_move_candidate.base_task_state_version
-            or record.validated_task_state_version != 1
-            or self.task_graph.accepted_delta.candidate_ref
-            != record.task_delta_candidates[0].candidate_id
-        ):
-            raise ValueError("routable decision must close one accepted Candidate")
-        _validate_initial_graph_candidate_projection_v2(
-            record=record,
-            graph=self.task_graph,
+        _validate_initial_routable_decision_fields_v2(
+            closure=self.closure,
+            task_graph=self.task_graph,
+            next_move_candidate_ref=self.next_move_candidate_ref,
+            next_move_candidate=self.next_move_candidate,
         )
-        _validate_initial_graph_identity_closure_v2(
-            record=record,
-            graphs=(self.task_graph,),
+        authorizer = globals().get(
+            "_initial_routable_decision_construction_is_authorized_v2"
         )
-        if (
-            (info.context or {}).get(
-                _INITIAL_ROUTABLE_DECISION_CONTEXT_KEY
-            )
-            is not _INITIAL_ROUTABLE_DECISION_TOKEN
-        ):
+        if not callable(authorizer) or not authorizer(self, info.context):
             raise ValueError(
                 "routable decision must be constructed by Reducer"
             )
-        self._reducer_next_move_fingerprint = _next_move_fingerprint_v2(
-            self.next_move_candidate
-        )
         return self
+
+
+def _initial_routable_decision_fields_payload_v2(
+    *,
+    closure: RequestUnderstandingClosureV2,
+    task_graph: InitialAcceptedTaskGraphV2,
+    next_move_candidate_ref: UUID,
+    next_move_candidate: NextMove,
+) -> bytes | None:
+    try:
+        _validate_initial_routable_decision_fields_v2(
+            closure=closure,
+            task_graph=task_graph,
+            next_move_candidate_ref=next_move_candidate_ref,
+            next_move_candidate=next_move_candidate,
+        )
+        closure_json = closure.model_dump_json(
+            round_trip=True, warnings="error"
+        )
+        task_graph_json = task_graph.model_dump_json(
+            round_trip=True, warnings="error"
+        )
+        next_move_json = next_move_candidate.model_dump_json(
+            round_trip=True, warnings="error"
+        )
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+        PydanticSerializationError,
+    ):
+        return None
+    return (
+        b"mini-agent:initial-routable-task-graph-decision-v2:"
+        + closure_json.encode("utf-8")
+        + b"\x00"
+        + task_graph_json.encode("utf-8")
+        + b"\x00"
+        + str(next_move_candidate_ref).encode("ascii")
+        + b"\x00"
+        + next_move_json.encode("utf-8")
+    )
+
+
+def _initial_routable_decision_payload_v2(
+    value: object,
+) -> bytes | None:
+    if type(value) is not InitialRequestRoutableTaskGraphDecisionV2:
+        return None
+    declared_fields = set(type(value).model_fields)
+    try:
+        if (
+            set(value.__dict__) != declared_fields
+            or set(value.model_fields_set) != declared_fields
+            or value.__pydantic_extra__ is not None
+        ):
+            return None
+    except (AttributeError, TypeError):
+        return None
+    return _initial_routable_decision_fields_payload_v2(
+        closure=value.closure,
+        task_graph=value.task_graph,
+        next_move_candidate_ref=value.next_move_candidate_ref,
+        next_move_candidate=value.next_move_candidate,
+    )
 
 
 class InitialRequestUnroutedTaskGraphsDecisionV2(RuntimePrivateModel):
@@ -1971,7 +2022,7 @@ def _build_initial_task_graph_v2(
     return graph
 
 
-def validate_and_reduce_initial_request_v2(
+def _validate_and_reduce_initial_request_v2_impl(
     *,
     request_input: RequestUnderstandingInput,
     output: RequestUnderstandingOutputV2,
@@ -1984,6 +2035,7 @@ def validate_and_reduce_initial_request_v2(
     ],
     next_move_candidate_ref: UUID,
     now: datetime,
+    _decision_seal_key: bytes,
 ) -> (
     InitialRequestNoTaskDecisionV2
     | InitialRequestRoutableTaskGraphDecisionV2
@@ -2091,21 +2143,50 @@ def validate_and_reduce_initial_request_v2(
         if not graphs:
             result = InitialRequestNoTaskDecisionV2(closure=closure)
         elif exact_one_routable:
-            result = InitialRequestRoutableTaskGraphDecisionV2.model_validate(
-                {
-                    "closure": closure,
-                    "task_graph": graphs[0],
-                    "next_move_candidate_ref": next_move_candidate_ref,
-                    "next_move_candidate": (
-                        canonical_output.next_move_candidate
-                    ),
-                },
-                context={
-                    _INITIAL_ROUTABLE_DECISION_CONTEXT_KEY: (
-                        _INITIAL_ROUTABLE_DECISION_TOKEN
-                    )
-                },
+            seal_payload = _initial_routable_decision_fields_payload_v2(
+                closure=closure,
+                task_graph=graphs[0],
+                next_move_candidate_ref=next_move_candidate_ref,
+                next_move_candidate=canonical_output.next_move_candidate,
             )
+            if (
+                type(_decision_seal_key) is not bytes
+                or len(_decision_seal_key) != 32
+                or seal_payload is None
+            ):
+                routable_result = None
+            else:
+                construction_permit = hmac_digest(
+                    _decision_seal_key,
+                    b"construct:\x00" + seal_payload,
+                    "sha256",
+                )
+                routable_result = (
+                    InitialRequestRoutableTaskGraphDecisionV2.model_validate(
+                        {
+                            "closure": closure,
+                            "task_graph": graphs[0],
+                            "next_move_candidate_ref": (
+                                next_move_candidate_ref
+                            ),
+                            "next_move_candidate": (
+                                canonical_output.next_move_candidate
+                            ),
+                        },
+                        context={
+                            "initial_routable_decision_permit_v2": (
+                                construction_permit
+                            )
+                        },
+                    )
+                )
+            if routable_result is not None and seal_payload is not None:
+                routable_result._reducer_decision_seal = hmac_digest(
+                    _decision_seal_key,
+                    b"sealed:\x00" + seal_payload,
+                    "sha256",
+                )
+            result = routable_result
         else:
             result = InitialRequestUnroutedTaskGraphsDecisionV2(
                 closure=closure,
@@ -2118,6 +2199,101 @@ def validate_and_reduce_initial_request_v2(
             RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
         )
     return result
+
+
+def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
+    decision_seal_key = token_bytes(32)
+
+    def initial_routable_decision_seal_matches(
+        value: object,
+    ) -> bool:
+        if type(value) is not InitialRequestRoutableTaskGraphDecisionV2:
+            return False
+        private_state = getattr(value, "__pydantic_private__", None)
+        if (
+            type(private_state) is not dict
+            or set(private_state) != {"_reducer_decision_seal"}
+        ):
+            return False
+        actual_seal = private_state["_reducer_decision_seal"]
+        if type(actual_seal) is not bytes or len(actual_seal) != 32:
+            return False
+        seal_payload = _initial_routable_decision_payload_v2(value)
+        if seal_payload is None:
+            return False
+        expected_seal = hmac_digest(
+            decision_seal_key,
+            b"sealed:\x00" + seal_payload,
+            "sha256",
+        )
+        return compare_digest(actual_seal, expected_seal)
+
+    def initial_routable_decision_construction_is_authorized(
+        value: object,
+        context: object,
+    ) -> bool:
+        if type(context) is not dict or set(context) != {
+            "initial_routable_decision_permit_v2"
+        }:
+            return False
+        actual_permit = context["initial_routable_decision_permit_v2"]
+        if type(actual_permit) is not bytes or len(actual_permit) != 32:
+            return False
+        seal_payload = _initial_routable_decision_payload_v2(value)
+        if seal_payload is None:
+            return False
+        expected_permit = hmac_digest(
+            decision_seal_key,
+            b"construct:\x00" + seal_payload,
+            "sha256",
+        )
+        return compare_digest(actual_permit, expected_permit)
+
+    def validate_and_reduce_initial_request_v2(
+        *,
+        request_input: RequestUnderstandingInput,
+        output: RequestUnderstandingOutputV2,
+        authoritative_messages: Mapping[UUID, str],
+        customer_context: CustomerContext,
+        request_understanding_record_id: UUID,
+        candidate_identity_allocations: tuple[
+            InitialTaskIdentityAllocationV2,
+            ...,
+        ],
+        next_move_candidate_ref: UUID,
+        now: datetime,
+    ) -> (
+        InitialRequestNoTaskDecisionV2
+        | InitialRequestRoutableTaskGraphDecisionV2
+        | InitialRequestUnroutedTaskGraphsDecisionV2
+    ):
+        """Validate actual v2 Candidates and build one exact Core result."""
+
+        return _validate_and_reduce_initial_request_v2_impl(
+            request_input=request_input,
+            output=output,
+            authoritative_messages=authoritative_messages,
+            customer_context=customer_context,
+            request_understanding_record_id=request_understanding_record_id,
+            candidate_identity_allocations=candidate_identity_allocations,
+            next_move_candidate_ref=next_move_candidate_ref,
+            now=now,
+            _decision_seal_key=decision_seal_key,
+        )
+
+    return (
+        validate_and_reduce_initial_request_v2,
+        initial_routable_decision_seal_matches,
+        initial_routable_decision_construction_is_authorized,
+    )
+
+
+(
+    validate_and_reduce_initial_request_v2,
+    _initial_routable_decision_seal_matches_v2,
+    _initial_routable_decision_construction_is_authorized_v2,
+) = _build_initial_request_reducer_v2()
+del _build_initial_request_reducer_v2
 
 
 def revalidate_next_move_v2(
