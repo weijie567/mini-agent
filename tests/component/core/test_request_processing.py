@@ -2643,6 +2643,33 @@ def test_v2_routable_decision_pickle_survives_source_collection() -> None:
     assert move.requested_provider_tool_name == "get_order"
 
 
+def test_v2_routable_decision_pickle_ticket_stays_consumed() -> None:
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+    consumed_blob = pickle.dumps(result)
+    current = pickle.loads(consumed_blob)
+
+    for _ in range(32):
+        successor_blob = pickle.dumps(current)
+        with pytest.raises(ValueError, match="unknown Reducer decision pickle"):
+            pickle.loads(consumed_blob)
+        current = pickle.loads(successor_blob)
+
+
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
     message_ref = uuid4()
     accepted_id = uuid4()
