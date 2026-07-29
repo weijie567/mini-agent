@@ -74,7 +74,7 @@ from mini_agent.evaluation.graders import (
 )
 from mini_agent.evaluation.scripted_provider import (
     RuntimeFaultDirective,
-    ScriptedModelProvider,
+    ScriptedModelProviderV2,
 )
 
 
@@ -290,7 +290,7 @@ class EvalCaseSut(Protocol):
         self,
         *,
         execution_input: EvalCaseExecutionInput,
-        scripted_provider: ScriptedModelProvider,
+        scripted_provider: ScriptedModelProviderV2,
         runtime_fault: RuntimeFaultDirective | None,
     ) -> EvalCaseSutResult | None: ...
 
@@ -2363,7 +2363,7 @@ class OfflineEvalHarness:
                 lane_artifact=lane_artifact,
             )
         execution_ref, script_execution_ref = nonce_pair
-        provider: ScriptedModelProvider | None = None
+        provider: ScriptedModelProviderV2 | None = None
         runtime_fault: RuntimeFaultDirective | None = None
         execution_input: EvalCaseExecutionInput | None = None
         try:
@@ -2382,7 +2382,7 @@ class OfflineEvalHarness:
                 case,
                 execution_ref=sut_execution_ref,
             )
-            provider = ScriptedModelProvider(
+            provider = ScriptedModelProviderV2(
                 script,
                 script_execution_ref=provider_execution_ref,
             )
