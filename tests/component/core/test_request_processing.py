@@ -2407,6 +2407,53 @@ def test_v2_routable_decision_rejects_nested_fields_set_mutation(
         )
 
 
+def test_v2_routable_decision_rejects_nested_scalar_subclasses() -> None:
+    class DatetimeSubclass(datetime):
+        pass
+
+    class UUIDSubclass(UUID):
+        pass
+
+    message_ref = uuid4()
+    result = _reduce_initial_v2(
+        message="请查询订单 O-4242",
+        output=_initial_output_v2(
+            message_ref=message_ref,
+            candidates=(
+                _task_delta_v2(
+                    candidate_id=uuid4(),
+                    message_ref=message_ref,
+                    order_id="O-4242",
+                    source_quote="订单 O-4242",
+                ),
+            ),
+        ),
+    )
+    assert type(result) is InitialRequestRoutableTaskGraphDecisionV2
+
+    poisoned_clock = result.model_copy(deep=True)
+    poisoned_now = DatetimeSubclass.fromtimestamp(
+        poisoned_clock.task_graph.task.created_at.timestamp(),
+        tz=UTC,
+    )
+    poisoned_clock.task_graph.task.__dict__["created_at"] = poisoned_now
+    poisoned_clock.task_graph.task.__dict__["updated_at"] = poisoned_now
+
+    poisoned_binding = result.model_copy(deep=True)
+    poisoned_binding.task_graph.input_binding.__dict__["binding_id"] = (
+        UUIDSubclass(str(poisoned_binding.task_graph.input_binding.binding_id))
+    )
+
+    for poisoned in (poisoned_clock, poisoned_binding):
+        with pytest.raises(RequestProcessingError, match="canonical"):
+            revalidate_next_move_v2(
+                decision=poisoned,
+                current_task=poisoned.task_graph.task,
+                current_request_unit=poisoned.task_graph.request_unit,
+                current_input_binding=poisoned.task_graph.input_binding,
+            )
+
+
 def test_v2_unrouted_closure_rejects_child_bound_to_rejected_candidate() -> None:
     message_ref = uuid4()
     accepted_id = uuid4()
