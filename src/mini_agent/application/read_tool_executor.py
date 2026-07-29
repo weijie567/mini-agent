@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 from pydantic_core import TzInfo
@@ -177,6 +178,9 @@ def _is_closed_utc_datetime(value: object) -> bool:
         return True
     if type(timezone_value) is timezone:
         offset = timezone.utcoffset(timezone_value, value)
+        return type(offset) is timedelta and offset == timedelta(0)
+    if type(timezone_value) is ZoneInfo:
+        offset = ZoneInfo.utcoffset(timezone_value, value)
         return type(offset) is timedelta and offset == timedelta(0)
     if type(timezone_value) is not TzInfo:
         return False
