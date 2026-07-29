@@ -340,6 +340,7 @@ def revalidate_next_move(
 
 from datetime import datetime
 from hashlib import sha256
+from itertools import count
 from weakref import ref
 
 from pydantic import (
@@ -2287,7 +2288,8 @@ def _validate_and_reduce_initial_request_v2_impl(
 def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
     construction_capability = object()
     seal_registry: dict[int, tuple[Any, bytes, Any]] = {}
-    pickle_ticket_registry: dict[int, tuple[object, bytes]] = {}
+    pickle_ticket_ids = count(1)
+    pickle_ticket_registry: dict[int, bytes] = {}
 
     class ReducerDecisionSeal:
         __slots__ = ("_digest", "__weakref__")
@@ -2443,9 +2445,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
             raise ValueError("unknown Reducer decision pickle")
         registered_ticket = pickle_ticket_registry.get(ticket_id)
         if (
-            registered_ticket is None
-            or id(registered_ticket[0]) != ticket_id
-            or type(registered_ticket[1]) is not bytes
+            type(registered_ticket) is not bytes
         ):
             raise ValueError("unknown Reducer decision pickle")
 
@@ -2486,7 +2486,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
             if seal_payload is not None
             else None
         )
-        if expected_digest != registered_ticket[1]:
+        if expected_digest != registered_ticket:
             raise ValueError("invalid Reducer decision pickle")
         if pickle_ticket_registry.pop(ticket_id, None) is not registered_ticket:
             raise ValueError("unknown Reducer decision pickle")
@@ -2515,12 +2515,10 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
         if seal_payload is None:
             raise ValueError("canonical Reducer decision required")
         state = BaseModel.__getstate__(self)
-        ticket = object()
-        ticket_id = id(ticket)
-        pickle_ticket_registry[ticket_id] = (
-            ticket,
-            sha256(b"sealed:\x00" + seal_payload).digest(),
-        )
+        ticket_id = next(pickle_ticket_ids)
+        pickle_ticket_registry[ticket_id] = sha256(
+            b"sealed:\x00" + seal_payload
+        ).digest()
         return (
             restore_pickled_initial_routable_decision,
             (
