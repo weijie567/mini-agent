@@ -340,8 +340,7 @@ def revalidate_next_move(
 
 from datetime import datetime
 from hashlib import sha256
-from hmac import compare_digest, digest as hmac_digest
-from secrets import token_bytes
+from weakref import ref
 
 from pydantic import (
     BaseModel,
@@ -489,12 +488,14 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
             declared_fields = set(type(left).model_fields)
             left_state_keys = set(left.__dict__)
             right_state_keys = set(right.__dict__)
-            left_fields_set = set(left.model_fields_set)
-            right_fields_set = set(right.model_fields_set)
+            left_fields_set = left.__pydantic_fields_set__
+            right_fields_set = right.__pydantic_fields_set__
         except (AttributeError, TypeError):
             return False
         if (
-            left_state_keys != right_state_keys
+            type(left_fields_set) is not set
+            or type(right_fields_set) is not set
+            or left_state_keys != right_state_keys
             or left_fields_set != right_fields_set
             or not left_state_keys.issubset(declared_fields)
             or not left_fields_set.issubset(declared_fields)
@@ -518,11 +519,6 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
             )
             for field_name in type(left).model_fields
         )
-    if isinstance(left, tuple):
-        return len(left) == len(right) and all(
-            _runtime_values_match_exactly_v2(left_item, right_item)
-            for left_item, right_item in zip(left, right, strict=True)
-        )
     if isinstance(left, Mapping):
         return (
             tuple(left) == tuple(right)
@@ -530,6 +526,11 @@ def _runtime_values_match_exactly_v2(left: Any, right: Any) -> bool:
                 _runtime_values_match_exactly_v2(left[key], right[key])
                 for key in left
             )
+        )
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _runtime_values_match_exactly_v2(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
 
@@ -1642,7 +1643,7 @@ def _validate_initial_routable_decision_fields_v2(
 class InitialRequestRoutableTaskGraphDecisionV2(RuntimePrivateModel):
     """Exact-one emitted/accepted result retaining the shared NextMove."""
 
-    _reducer_decision_seal: bytes = PrivateAttr()
+    _reducer_decision_seal: object = PrivateAttr()
 
     closure: RequestUnderstandingClosureV2
     task_graph: InitialAcceptedTaskGraphV2
@@ -1800,9 +1801,11 @@ def _initial_routable_decision_payload_v2(
         return None
     declared_fields = set(type(value).model_fields)
     try:
+        fields_set = value.__pydantic_fields_set__
         if (
             set(value.__dict__) != declared_fields
-            or set(value.model_fields_set) != declared_fields
+            or type(fields_set) is not set
+            or fields_set != declared_fields
             or value.__pydantic_extra__ is not None
         ):
             return None
@@ -2101,7 +2104,8 @@ def _validate_and_reduce_initial_request_v2_impl(
     ],
     next_move_candidate_ref: UUID,
     now: datetime,
-    _decision_seal_key: bytes,
+    _decision_construction_capability: object,
+    _issue_decision_seal: Any,
 ) -> (
     InitialRequestNoTaskDecisionV2
     | InitialRequestRoutableTaskGraphDecisionV2
@@ -2215,18 +2219,9 @@ def _validate_and_reduce_initial_request_v2_impl(
                 next_move_candidate_ref=next_move_candidate_ref,
                 next_move_candidate=canonical_output.next_move_candidate,
             )
-            if (
-                type(_decision_seal_key) is not bytes
-                or len(_decision_seal_key) != 32
-                or seal_payload is None
-            ):
+            if seal_payload is None or not callable(_issue_decision_seal):
                 routable_result = None
             else:
-                construction_permit = hmac_digest(
-                    _decision_seal_key,
-                    b"construct:\x00" + seal_payload,
-                    "sha256",
-                )
                 routable_result = (
                     InitialRequestRoutableTaskGraphDecisionV2.model_validate(
                         {
@@ -2241,16 +2236,17 @@ def _validate_and_reduce_initial_request_v2_impl(
                         },
                         context={
                             "initial_routable_decision_permit_v2": (
-                                construction_permit
+                                _decision_construction_capability
                             )
                         },
                     )
                 )
             if routable_result is not None and seal_payload is not None:
-                routable_result._reducer_decision_seal = hmac_digest(
-                    _decision_seal_key,
-                    b"sealed:\x00" + seal_payload,
-                    "sha256",
+                routable_result._reducer_decision_seal = (
+                    _issue_decision_seal(
+                        routable_result,
+                        seal_payload,
+                    )
                 )
             result = routable_result
         else:
@@ -2267,8 +2263,92 @@ def _validate_and_reduce_initial_request_v2_impl(
     return result
 
 
-def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
-    decision_seal_key = token_bytes(32)
+def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any, Any]:
+    construction_capability = object()
+    seal_registry: dict[int, tuple[Any, bytes]] = {}
+
+    class ReducerDecisionSeal:
+        __slots__ = ("_digest", "__weakref__")
+
+        def __new__(cls) -> Self:
+            raise TypeError("Reducer decision seal cannot be constructed")
+
+        def __setattr__(self, _name: str, _value: Any) -> None:
+            raise TypeError("Reducer decision seal is immutable")
+
+        def __delattr__(self, _name: str) -> None:
+            raise TypeError("Reducer decision seal is immutable")
+
+        def __copy__(self) -> Self:
+            return self
+
+        def __deepcopy__(self, _memo: dict[int, Any]) -> Self:
+            return self
+
+        def __reduce__(self) -> tuple[Any, tuple[int]]:
+            return (
+                restore_initial_routable_decision_seal,
+                (id(self),),
+            )
+
+        def __eq__(self, other: object) -> bool:
+            return (
+                type(other) is ReducerDecisionSeal
+                and self._digest == other._digest
+            )
+
+        __hash__ = None
+
+        def __repr__(self) -> str:
+            return "<ReducerDecisionSeal>"
+
+    def restore_initial_routable_decision_seal(
+        seal_id: int,
+    ) -> ReducerDecisionSeal:
+        if type(seal_id) is not int:
+            raise ValueError("unknown Reducer decision seal")
+        registered = seal_registry.get(seal_id)
+        if registered is None:
+            raise ValueError("unknown Reducer decision seal")
+        seal = registered[0]()
+        if type(seal) is not ReducerDecisionSeal:
+            raise ValueError("unknown Reducer decision seal")
+        return seal
+
+    restore_initial_routable_decision_seal.__name__ = (
+        "_restore_initial_routable_decision_seal_v2"
+    )
+    restore_initial_routable_decision_seal.__qualname__ = (
+        "_restore_initial_routable_decision_seal_v2"
+    )
+
+    def issue_initial_routable_decision_seal(
+        value: object,
+        seal_payload: bytes,
+    ) -> ReducerDecisionSeal:
+        if (
+            type(seal_payload) is not bytes
+            or _initial_routable_decision_payload_v2(value)
+            != seal_payload
+        ):
+            raise ValueError("Reducer decision seal payload mismatch")
+        seal_digest = sha256(b"sealed:\x00" + seal_payload).digest()
+        seal = object.__new__(ReducerDecisionSeal)
+        object.__setattr__(seal, "_digest", seal_digest)
+        seal_id = id(seal)
+
+        def discard_seal(
+            _dead_seal: Any,
+            *,
+            registered_seal_id: int = seal_id,
+        ) -> None:
+            seal_registry.pop(registered_seal_id, None)
+
+        seal_registry[seal_id] = (
+            ref(seal, discard_seal),
+            seal_digest,
+        )
+        return seal
 
     def initial_routable_decision_seal_matches(
         value: object,
@@ -2282,17 +2362,22 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
         ):
             return False
         actual_seal = private_state["_reducer_decision_seal"]
-        if type(actual_seal) is not bytes or len(actual_seal) != 32:
+        if type(actual_seal) is not ReducerDecisionSeal:
             return False
         seal_payload = _initial_routable_decision_payload_v2(value)
         if seal_payload is None:
             return False
-        expected_seal = hmac_digest(
-            decision_seal_key,
-            b"sealed:\x00" + seal_payload,
-            "sha256",
+        registered = seal_registry.get(id(actual_seal))
+        if registered is None or registered[0]() is not actual_seal:
+            return False
+        expected_digest = sha256(
+            b"sealed:\x00" + seal_payload
+        ).digest()
+        return (
+            type(actual_seal._digest) is bytes
+            and actual_seal._digest == registered[1]
+            and actual_seal._digest == expected_digest
         )
-        return compare_digest(actual_seal, expected_seal)
 
     def initial_routable_decision_construction_is_authorized(
         value: object,
@@ -2303,17 +2388,10 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
         }:
             return False
         actual_permit = context["initial_routable_decision_permit_v2"]
-        if type(actual_permit) is not bytes or len(actual_permit) != 32:
-            return False
-        seal_payload = _initial_routable_decision_payload_v2(value)
-        if seal_payload is None:
-            return False
-        expected_permit = hmac_digest(
-            decision_seal_key,
-            b"construct:\x00" + seal_payload,
-            "sha256",
+        return (
+            actual_permit is construction_capability
+            and _initial_routable_decision_payload_v2(value) is not None
         )
-        return compare_digest(actual_permit, expected_permit)
 
     def validate_and_reduce_initial_request_v2(
         *,
@@ -2344,13 +2422,15 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
             candidate_identity_allocations=candidate_identity_allocations,
             next_move_candidate_ref=next_move_candidate_ref,
             now=now,
-            _decision_seal_key=decision_seal_key,
+            _decision_construction_capability=construction_capability,
+            _issue_decision_seal=issue_initial_routable_decision_seal,
         )
 
     return (
         validate_and_reduce_initial_request_v2,
         initial_routable_decision_seal_matches,
         initial_routable_decision_construction_is_authorized,
+        restore_initial_routable_decision_seal,
     )
 
 
@@ -2358,6 +2438,7 @@ def _build_initial_request_reducer_v2() -> tuple[Any, Any, Any]:
     validate_and_reduce_initial_request_v2,
     _initial_routable_decision_seal_matches_v2,
     _initial_routable_decision_construction_is_authorized_v2,
+    _restore_initial_routable_decision_seal_v2,
 ) = _build_initial_request_reducer_v2()
 del _build_initial_request_reducer_v2
 
