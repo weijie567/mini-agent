@@ -211,6 +211,23 @@ def _reachable_state(
     )
 
 
+def _implementation_traceback_state(
+    error: BaseException,
+) -> tuple[tuple[str, ...], _ReachableState]:
+    frame_names: list[str] = []
+    frame_locals: list[dict[str, object]] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_globals.get("__name__") == (
+            "mini_agent.evaluation.scripted_provider"
+        ):
+            frame_names.append(frame.f_code.co_name)
+            frame_locals.append(dict(frame.f_locals))
+        traceback = traceback.tb_next
+    return tuple(frame_names), _reachable_state(tuple(frame_locals))
+
+
 def test_execution_only_provider_drops_script_oracle_and_unknown_step_keys() -> None:
     artifacts = load_e2e01_artifacts(REPO_ROOT, candidate_version="candidate")
     source = artifacts.script_by_ref("script:e2e01-01:success")
@@ -458,6 +475,11 @@ def test_v2_invalid_candidates_expose_fresh_bounded_candidate_errors(
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert script_ref not in str(caught.value)
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("propose_next_move",)
+        assert "customer-B" not in reachable.string_values
+        assert RequestUnderstandingInput not in reachable.value_types
+        assert type(_provider_v2(script_ref)) not in reachable.value_types
     assert errors[0] is not errors[1]
 
 
@@ -493,15 +515,24 @@ def test_request_protocol_faults_expose_fresh_parameterless_errors(
 def test_v2_request_framing_faults_remain_fresh_protocol_errors(
     script_ref: str,
 ) -> None:
-    with pytest.raises(ProviderProtocolError) as caught:
-        asyncio.run(_provider_v2(script_ref).propose_next_move(_request()))
-    assert not isinstance(
-        caught.value,
-        RequestUnderstandingCandidateInvalidError,
-    )
-    assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
+    errors = []
+    for _ in range(2):
+        provider_type = type(_provider_v2(script_ref))
+        with pytest.raises(ProviderProtocolError) as caught:
+            asyncio.run(_provider_v2(script_ref).propose_next_move(_request()))
+        errors.append(caught.value)
+        assert not isinstance(
+            caught.value,
+            RequestUnderstandingCandidateInvalidError,
+        )
+        assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("propose_next_move",)
+        assert RequestUnderstandingInput not in reachable.value_types
+        assert provider_type not in reachable.value_types
+    assert errors[0] is not errors[1]
 
 
 @pytest.mark.parametrize(
@@ -538,13 +569,23 @@ def test_presentation_protocol_faults_discard_raw_envelopes(
 def test_v2_presentation_faults_remain_protocol_errors(
     script_ref: str,
 ) -> None:
-    provider = _provider_v2(script_ref)
-    asyncio.run(provider.propose_next_move(_request()))
-    with pytest.raises(ProviderProtocolError) as caught:
-        asyncio.run(provider.plan_presentation(_presentation_input()))
-    assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
+    errors = []
+    for _ in range(2):
+        provider = _provider_v2(script_ref)
+        provider_type = type(provider)
+        asyncio.run(provider.propose_next_move(_request()))
+        with pytest.raises(ProviderProtocolError) as caught:
+            asyncio.run(provider.plan_presentation(_presentation_input()))
+        errors.append(caught.value)
+        assert caught.value.args == ("PROVIDER_PROTOCOL_ERROR",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        frame_names, reachable = _implementation_traceback_state(caught.value)
+        assert frame_names == ("plan_presentation",)
+        assert "O-1001 已发货" not in reachable.string_values
+        assert PresentationInput not in reachable.value_types
+        assert provider_type not in reachable.value_types
+    assert errors[0] is not errors[1]
 
 
 def test_stale_state_directive_is_separate_closed_and_one_shot() -> None:
@@ -571,10 +612,17 @@ def test_scripted_provider_reads_no_credentials_and_opens_no_network(
 
     monkeypatch.setattr(os, "getenv", forbidden_getenv)
     monkeypatch.setattr(socket.socket, "connect", forbidden_connect)
+    legacy_output = asyncio.run(
+        _provider(
+            "script:e2e01-04-b:nonexistent-order"
+        ).propose_next_move(_request())
+    )
     output = asyncio.run(
         _provider_v2(
             "script:e2e01-04-b:nonexistent-order"
         ).propose_next_move(_request())
     )
+    assert type(legacy_output) is RequestUnderstandingOutput
+    assert legacy_output.next_move_candidate.arguments == {"order_id": "O-9999"}
     assert type(output) is RequestUnderstandingOutputV2
     assert output.next_move_candidate.arguments == {"order_id": "O-9999"}

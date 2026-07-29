@@ -501,15 +501,14 @@ def _exact_run_eval_detached_closure(
     return rebuilt
 
 
-def map_exact_run_http_result_to_sut_result(
+def _exact_run_eval_map_result(
     *,
     execution_ref: UUID,
     http_status: int,
     agent_result: AgentRunResult,
     closure: ExactRunEvidenceClosure,
-) -> EvalCaseSutResult:
+) -> tuple[str, EvalCaseSutResult | None]:
     mapped_result: EvalCaseSutResult | None = None
-    failed = False
     try:
         detached_execution_ref = _detached_closed_uuid(execution_ref)
         detached_agent_result = _detached_canonical_model(
@@ -525,7 +524,7 @@ def map_exact_run_http_result_to_sut_result(
             or type(detached_agent_result) is not AgentRunResult
             or type(detached_closure) is not ExactRunEvidenceClosure
         ):
-            raise ValueError
+            return "FAILED", None
         run = detached_closure.run_record
         stop_reason = run.stop_reason
         if (
@@ -538,7 +537,7 @@ def map_exact_run_http_result_to_sut_result(
                 for event in detached_closure.trace_events
             )
         ):
-            raise ValueError
+            return "FAILED", None
         response_policy = _exact_run_eval_response_policy(stop_reason)
         expected_outcome = _exact_run_eval_expected_outcome(stop_reason)
         if (
@@ -546,13 +545,13 @@ def map_exact_run_http_result_to_sut_result(
             or expected_outcome is None
             or detached_agent_result.outcome is not expected_outcome
         ):
-            raise ValueError
+            return "FAILED", None
         fixed_message = _fixed_message(response_policy)
         if (
             fixed_message is not None
             and detached_agent_result.message != fixed_message
         ):
-            raise ValueError
+            return "FAILED", None
         understanding_records = (
             (detached_closure.request_understanding_record,)
             if detached_closure.request_understanding_record is not None
@@ -612,10 +611,30 @@ def map_exact_run_http_result_to_sut_result(
             authenticated_identity_values=frozenset(),
         )
     except Exception:
-        failed = True
+        return "FAILED", None
+    if mapped_result is None:
+        return "FAILED", None
+    return "SUCCESS", mapped_result
+
+
+def map_exact_run_http_result_to_sut_result(
+    *,
+    execution_ref: UUID,
+    http_status: int,
+    agent_result: AgentRunResult,
+    closure: ExactRunEvidenceClosure,
+) -> EvalCaseSutResult:
+    status, mapped_result = _exact_run_eval_map_result(
+        execution_ref=execution_ref,
+        http_status=http_status,
+        agent_result=agent_result,
+        closure=closure,
+    )
+    execution_ref = None  # type: ignore[assignment]
+    http_status = None  # type: ignore[assignment]
     agent_result = None  # type: ignore[assignment]
     closure = None  # type: ignore[assignment]
-    if failed or mapped_result is None:
+    if status != "SUCCESS" or mapped_result is None:
         raise _fresh_command_error()
     return mapped_result
 

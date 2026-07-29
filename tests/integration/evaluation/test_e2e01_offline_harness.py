@@ -168,6 +168,43 @@ SCRIPT_EXECUTION_REF_3 = UUID("66666666-6666-4666-8666-666666666666")
 EXECUTION_REF_4 = UUID("77777777-7777-4777-8777-777777777777")
 SCRIPT_EXECUTION_REF_4 = UUID("88888888-8888-4888-8888-888888888888")
 UNKNOWN_EXECUTION_REF = UUID("99999999-9999-4999-8999-999999999999")
+MAPPER_FIXTURE_IDENTITIES = (
+    (
+        UUID("a1111111-1111-4111-8111-111111111111"),
+        UUID("a2222222-2222-4222-8222-222222222222"),
+        UUID("a3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("b1111111-1111-4111-8111-111111111111"),
+        UUID("b2222222-2222-4222-8222-222222222222"),
+        UUID("b3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("c1111111-1111-4111-8111-111111111111"),
+        UUID("c2222222-2222-4222-8222-222222222222"),
+        UUID("c3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("d1111111-1111-4111-8111-111111111111"),
+        UUID("d2222222-2222-4222-8222-222222222222"),
+        UUID("d3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("e1111111-1111-4111-8111-111111111111"),
+        UUID("e2222222-2222-4222-8222-222222222222"),
+        UUID("e3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("f1111111-1111-4111-8111-111111111111"),
+        UUID("f2222222-2222-4222-8222-222222222222"),
+        UUID("f3333333-3333-4333-8333-333333333333"),
+    ),
+    (
+        UUID("01111111-1111-4111-8111-111111111111"),
+        UUID("02222222-2222-4222-8222-222222222222"),
+        UUID("03333333-3333-4333-8333-333333333333"),
+    ),
+)
 EXPECTED_TRACE_VARIANT_BY_SCRIPT_REF = {
     "script:e2e01-01:success": "SUCCESS",
     "script:e2e01-04-a:foreign-order": "FOREIGN_ORDER",
@@ -1531,6 +1568,8 @@ def _rebuild_exact_closure(
 
 def _exact_closure_from_synthetic_result(
     result: EvalCaseSutResult,
+    *,
+    request_understanding_record_id: UUID,
 ) -> ExactRunEvidenceClosure:
     evidence = result.evidence
     assert evidence.run_record is not None
@@ -1577,10 +1616,7 @@ def _exact_closure_from_synthetic_result(
         confidence=proposed.confidence,
     )
     understanding = RequestUnderstandingRecordV2(
-        request_understanding_record_id=_case_uuid(
-            str(result.execution_ref),
-            "request-understanding-v2",
-        ),
+        request_understanding_record_id=request_understanding_record_id,
         run_id=evidence.run_record.run_id,
         message_ref=message.message_id,
         schema_version="request_understanding_record.p0.v2",
@@ -1685,6 +1721,28 @@ def _exact_closure_from_synthetic_result(
         update={"occurred_at": evidence.run_record.completed_at}
     )
 
+    if evidence.gate_decisions:
+        assert len(evidence.gate_decisions) == 1
+        gate = evidence.gate_decisions[0]
+        gate_index = next(
+            index
+            for index, event in enumerate(trace_events)
+            if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+        )
+        trace_events[gate_index] = trace_events[gate_index].model_copy(
+            update={
+                "model_call_id": gate.model_call_id,
+                "context_manifest_id": gate.context_manifest_id,
+                "requested_tool_name": gate.requested_provider_tool_name,
+                "validated_task_state_version": (
+                    gate.validated_task_state_version
+                ),
+                "argument_binding_refs": gate.argument_binding_refs,
+                "task_id": task.task_id,
+                "request_unit_id": unit.request_unit_id,
+            }
+        )
+
     tool_calls = evidence.tool_calls
     tool_attempts = evidence.tool_attempts
     observations = evidence.observations
@@ -1727,6 +1785,8 @@ def _exact_closure_from_synthetic_result(
         tool_attempts = (attempt,)
 
     if observations:
+        assert tool_calls
+        call = tool_calls[0]
         observation_index = next(
             index
             for index, event in enumerate(trace_events)
@@ -1736,6 +1796,15 @@ def _exact_closure_from_synthetic_result(
             update={
                 "observed_at": trace_events[observation_index].occurred_at,
                 "recorded_at": trace_events[observation_index].occurred_at,
+            }
+        )
+        trace_events[observation_index] = trace_events[
+            observation_index
+        ].model_copy(
+            update={
+                "tool_call_id": call.tool_call_id,
+                "task_id": call.task_id,
+                "request_unit_id": call.request_unit_id,
             }
         )
         observations = (observation,)
@@ -1767,8 +1836,14 @@ def _exact_closure_from_synthetic_result(
 def _exact_closure_for_script(
     script_ref: str,
     *,
+    fixture_slot: int,
     execution_ref: UUID,
 ) -> tuple[ExactRunEvidenceClosure, AgentRunResult]:
+    (
+        sut_execution_ref,
+        script_execution_ref,
+        request_understanding_record_id,
+    ) = MAPPER_FIXTURE_IDENTITIES[fixture_slot]
     order_number = {
         "script:e2e01-01:success": "O-1001",
         "script:e2e01-04-b:nonexistent-order": "O-9999",
@@ -1781,11 +1856,11 @@ def _exact_closure_for_script(
         traces = InMemoryTraceCallbacks()
         provider = ScriptedModelProvider(
             ARTIFACTS.script_by_ref(script_ref),
-            script_execution_ref=_case_uuid(str(execution_ref), "script"),
+            script_execution_ref=script_execution_ref,
         )
         result = await SyntheticSut(traces).execute_case(
             execution_input=EvalCaseExecutionInput(
-                execution_ref=execution_ref,
+                execution_ref=sut_execution_ref,
                 messages=(
                     {
                         "role": "user",
@@ -1803,7 +1878,12 @@ def _exact_closure_for_script(
     result = asyncio.run(execute())
     assert result.evidence.agent_result is not None
     return (
-        _exact_closure_from_synthetic_result(result),
+        _exact_closure_from_synthetic_result(
+            result,
+            request_understanding_record_id=(
+                request_understanding_record_id
+            ),
+        ),
         result.evidence.agent_result,
     )
 
@@ -1922,6 +2002,7 @@ def _order_service_unavailable_closure() -> tuple[
 ]:
     closure, _result = _exact_closure_for_script(
         "script:e2e01-04-b:nonexistent-order",
+        fixture_slot=5,
         execution_ref=EXECUTION_REF_3,
     )
     task = closure.task_records[0].model_copy(
@@ -3046,21 +3127,83 @@ def _map_exact_result(
         harness_module,
         "map_exact_run_http_result_to_sut_result",
     )
-    return mapper(
+    calls: list[dict[str, object]] = []
+
+    def mapper_spy(**kwargs: object) -> EvalCaseSutResult:
+        calls.append(kwargs)
+        return mapper(**kwargs)
+
+    result = mapper_spy(
         execution_ref=execution_ref,
         http_status=http_status,
         agent_result=agent_result,
         closure=closure,
     )
+    assert calls == [
+        {
+            "execution_ref": execution_ref,
+            "http_status": http_status,
+            "agent_result": agent_result,
+            "closure": closure,
+        }
+    ]
+    return result
+
+
+def _mapper_traceback_state(
+    error: BaseException,
+) -> tuple[tuple[str, ...], frozenset[str], frozenset[type[object]]]:
+    visited: set[int] = set()
+    strings: set[str] = set()
+    value_types: set[type[object]] = set()
+
+    def visit(value: object) -> None:
+        value_type = type(value)
+        value_types.add(value_type)
+        if value_type is str:
+            strings.add(value)
+            return
+        if value is None or value_type in {bool, int, float, bytes, UUID}:
+            return
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if isinstance(value, BaseModel):
+            for field_name in type(value).model_fields:
+                visit(getattr(value, field_name))
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                visit(key)
+                visit(item)
+            return
+        if isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                visit(item)
+            return
+        if hasattr(value, "__dict__"):
+            visit(vars(value))
+
+    frame_names: list[str] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_globals.get("__name__") == "mini_agent.evaluation.harness":
+            frame_names.append(frame.f_code.co_name)
+            visit(dict(frame.f_locals))
+        traceback = traceback.tb_next
+    return tuple(frame_names), frozenset(strings), frozenset(value_types)
 
 
 def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
-    parameters = signature(
+    mapper_signature = signature(
         getattr(
             harness_module,
             "map_exact_run_http_result_to_sut_result",
         )
-    ).parameters
+    )
+    parameters = mapper_signature.parameters
     assert tuple(parameters) == (
         "execution_ref",
         "http_status",
@@ -3068,6 +3211,20 @@ def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
         "closure",
     )
     assert all(item.kind.name == "KEYWORD_ONLY" for item in parameters.values())
+    assert all(
+        item.default is item.empty
+        for item in parameters.values()
+    )
+    assert {
+        name: item.annotation
+        for name, item in parameters.items()
+    } == {
+        "execution_ref": "UUID",
+        "http_status": "int",
+        "agent_result": "AgentRunResult",
+        "closure": "ExactRunEvidenceClosure",
+    }
+    assert mapper_signature.return_annotation == "EvalCaseSutResult"
     assert {
         "case_id",
         "expectations",
@@ -3079,30 +3236,59 @@ def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
     }.isdisjoint(parameters)
 
 
+def test_exact_run_fixture_identities_are_opaque_and_external_ref_independent() -> None:
+    first_closure, first_result = _exact_closure_for_script(
+        "script:e2e01-01:success",
+        fixture_slot=0,
+        execution_ref=EXECUTION_REF_1,
+    )
+    second_closure, second_result = _exact_closure_for_script(
+        "script:e2e01-01:success",
+        fixture_slot=0,
+        execution_ref=UNKNOWN_EXECUTION_REF,
+    )
+
+    assert first_closure == second_closure
+    assert first_result == second_result
+    assert first_closure.run_record.run_id not in {
+        EXECUTION_REF_1,
+        UNKNOWN_EXECUTION_REF,
+    }
+    assert all(
+        identity.version == 4
+        for identity in MAPPER_FIXTURE_IDENTITIES[0]
+    )
+
+
 @pytest.mark.parametrize(
-    ("script_ref", "execution_ref", "expected_policy"),
+    ("fixture_slot", "script_ref", "execution_ref", "expected_policy"),
     [
         (
+            0,
             "script:e2e01-01:success",
             EXECUTION_REF_1,
             "DETERMINISTIC_ORDER_SUMMARY_V1",
         ),
         (
+            1,
             "script:e2e01-04-b:nonexistent-order",
             EXECUTION_REF_2,
             "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
         ),
         (
+            2,
             "script:fault-provider:unknown-tool-name",
             EXECUTION_REF_3,
             "FIXED_SAFE_PROCESSING_ERROR",
         ),
         (
+            3,
             "script:fault-runtime:state-advanced-before-gate",
             EXECUTION_REF_4,
             "FIXED_SAFE_PROCESSING_ERROR",
         ),
         (
+            4,
             "script:fault-presentation:invalid-schema",
             EXECUTION_REF_1,
             "FIXED_SAFE_PROCESSING_ERROR",
@@ -3110,12 +3296,14 @@ def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
     ],
 )
 def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
+    fixture_slot: int,
     script_ref: str,
     execution_ref: UUID,
     expected_policy: str,
 ) -> None:
     closure, agent_result = _exact_closure_for_script(
         script_ref,
+        fixture_slot=fixture_slot,
         execution_ref=execution_ref,
     )
     result = _map_exact_result(
@@ -3161,6 +3349,7 @@ def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
 def test_exact_run_mapper_projects_logical_observation_source_version_chain() -> None:
     closure, agent_result = _exact_closure_for_script(
         "script:e2e01-01:success",
+        fixture_slot=6,
         execution_ref=EXECUTION_REF_1,
     )
     result = _map_exact_result(
@@ -3218,6 +3407,87 @@ def test_exact_run_mapper_projects_input_invalid_without_synthetic_runtime_recor
 
 
 @pytest.mark.parametrize(
+    "stop_reason",
+    (
+        StopReason.PROVIDER_PROTOCOL_ERROR,
+        StopReason.RENDERER_INVARIANT_FAILED,
+    ),
+)
+def test_exact_run_mapper_projects_terminal_protocol_and_renderer_failures(
+    stop_reason: StopReason,
+) -> None:
+    if stop_reason is StopReason.RENDERER_INVARIANT_FAILED:
+        closure, source_result = _order_service_unavailable_closure()
+        agent_result = source_result.model_copy(
+            update={"message": "当前无法安全处理该请求，请稍后重试。"}
+        )
+    else:
+        closure, agent_result = _minimal_input_invalid_closure()
+    run = closure.run_record.model_copy(update={"stop_reason": stop_reason})
+    traces = tuple(
+        event.model_copy(update={"stop_reason": stop_reason})
+        if event.event_type is TraceEventType.RUN_STOPPED
+        else event
+        for event in closure.trace_events
+    )
+    terminal_closure = _rebuild_exact_closure(
+        closure,
+        run_record=run,
+        trace_events=traces,
+    )
+
+    result = _map_exact_result(
+        execution_ref=EXECUTION_REF_4,
+        closure=terminal_closure,
+        agent_result=agent_result,
+    )
+
+    assert result.evidence.run_record.stop_reason is stop_reason
+    assert result.evidence.observed_outcome is AgentOutcome.BLOCKED
+    assert result.safe_observable.response_policy == "FIXED_SAFE_PROCESSING_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("status", "stop_reason"),
+    (
+        (AgentRunStatus.COMPLETED, StopReason.PROCESS_RESTART_DETECTED),
+        (AgentRunStatus.RUNNING, None),
+    ),
+)
+def test_exact_run_mapper_rejects_restart_and_non_completed_runs(
+    status: AgentRunStatus,
+    stop_reason: StopReason | None,
+) -> None:
+    closure, agent_result = _minimal_input_invalid_closure()
+    run = closure.run_record.model_copy(
+        update={
+            "status": status,
+            "stop_reason": stop_reason,
+            "completed_at": (
+                closure.run_record.completed_at
+                if status is AgentRunStatus.COMPLETED
+                else None
+            ),
+        }
+    )
+    invalid_closure = closure.model_copy(update={"run_record": run})
+
+    errors = []
+    for _ in range(2):
+        with pytest.raises(EvalHarnessCommandError) as caught:
+            _map_exact_result(
+                execution_ref=EXECUTION_REF_4,
+                closure=invalid_closure,
+                agent_result=agent_result,
+            )
+        errors.append(caught.value)
+        assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+    assert errors[0] is not errors[1]
+
+
+@pytest.mark.parametrize(
     "mutation",
     ["http", "execution_ref", "run_id", "outcome", "fixed_message"],
 )
@@ -3256,6 +3526,16 @@ def test_exact_run_mapper_rejects_identity_outcome_and_policy_mismatch_boundedly
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         assert "raw-policy-secret" not in str(caught.value)
+        frame_names, strings, value_types = _mapper_traceback_state(
+            caught.value
+        )
+        assert frame_names == ("map_exact_run_http_result_to_sut_result",)
+        assert {
+            "raw-policy-secret",
+            "customer-A",
+        }.isdisjoint(strings)
+        assert AgentRunResult not in value_types
+        assert ExactRunEvidenceClosure not in value_types
     assert errors[0] is not errors[1]
 
 
@@ -4728,6 +5008,7 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
     } == {
         "AgentOutcome",
         "AgentRunStatus",
+        "CandidateRejectionReasonCode",
         "CandidateValidationDecision",
         "GateDecisionValue",
         "GateReasonCode",
@@ -4740,6 +5021,7 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
         "OrderStatus",
         "P0LogicalChildCode",
         "P0RecordCode",
+        "ReferenceSourceKindV2",
         "StopReason",
         "TaskDeltaOperation",
         "TaskStatus",
@@ -4748,6 +5030,7 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
         "ToolResultOutcome",
         "ToolTimeoutPhase",
         "TraceEventType",
+        "UncertaintyReasonCodeV2",
     }
 
 

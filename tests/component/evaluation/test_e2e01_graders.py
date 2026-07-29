@@ -2475,6 +2475,101 @@ def test_v1_and_v2_request_understanding_evidence_are_explicitly_mutually_exclus
         _v2_evidence(accepted_task_deltas_v2=())
 
 
+@pytest.mark.parametrize(
+    "bypass",
+    (
+        "v1_output",
+        "v1_record",
+        "v1_child",
+        "physical_envelope",
+        "missing_v2_record_with_child",
+        "missing_v2_record_with_transition",
+        "duplicate_v2_record",
+        "accepted_ref_mismatch",
+        "accepted_candidate_mismatch",
+    ),
+)
+@pytest.mark.parametrize("construction", ("model_copy", "model_construct"))
+def test_every_noncanonical_mixed_v2_bypass_fails_before_grading(
+    bypass: str,
+    construction: str,
+) -> None:
+    canonical = _v2_evidence()
+    legacy = _evidence()
+    update: dict[str, object]
+    if bypass == "v1_output":
+        update = {
+            "request_understanding_output": legacy.request_understanding_output
+        }
+    elif bypass == "v1_record":
+        update = {
+            "request_understanding_records": (
+                legacy.request_understanding_records
+            )
+        }
+    elif bypass == "v1_child":
+        update = {"accepted_task_deltas": legacy.accepted_task_deltas}
+    elif bypass == "physical_envelope":
+        update = {
+            "observation_persistence_envelopes": (
+                legacy.observation_persistence_envelopes
+            )
+        }
+    elif bypass == "missing_v2_record_with_child":
+        update = {"request_understanding_records_v2": ()}
+    elif bypass == "missing_v2_record_with_transition":
+        update = {
+            "request_understanding_records_v2": (),
+            "accepted_task_deltas_v2": (),
+        }
+    elif bypass == "duplicate_v2_record":
+        understanding = canonical.request_understanding_records_v2[0]
+        update = {
+            "request_understanding_records_v2": (
+                understanding,
+                understanding.model_copy(
+                    update={
+                        "request_understanding_record_id": UUID(int=951)
+                    }
+                ),
+            )
+        }
+    elif bypass == "accepted_ref_mismatch":
+        understanding = canonical.request_understanding_records_v2[0]
+        update = {
+            "request_understanding_records_v2": (
+                understanding.model_copy(
+                    update={"accepted_delta_refs": (UUID(int=952),)}
+                ),
+            )
+        }
+    else:
+        child = canonical.accepted_task_deltas_v2[0]
+        update = {
+            "accepted_task_deltas_v2": (
+                child.model_copy(update={"candidate_ref": UUID(int=953)}),
+            )
+        }
+
+    if construction == "model_copy":
+        bypassed = canonical.model_copy(update=update)
+    else:
+        values = {
+            field_name: getattr(canonical, field_name)
+            for field_name in EvalEvidence.model_fields
+        }
+        values.update(update)
+        bypassed = EvalEvidence.model_construct(**values)
+
+    for grader_name in GRADER_NAMES:
+        result = grader_registry()[grader_name].grade(
+            bypassed,
+            _expectations(),
+        )
+        assert result.status is EvalGraderStatus.FAIL
+        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+
+
 @pytest.mark.parametrize("grader_name", GRADER_NAMES)
 def test_every_registered_grader_passes_durable_v2_evidence(
     grader_name: str,
@@ -2491,7 +2586,18 @@ def test_every_registered_grader_passes_durable_v2_evidence(
 
 @pytest.mark.parametrize(
     "tamper",
-    ["source_hash", "source_span", "observation_version", "observation_ref"],
+    [
+        "source_hash",
+        "source_span",
+        "source_version",
+        "observation_resource",
+        "observation_tool",
+        "tool_task",
+        "tool_unit",
+        "gate",
+        "manifest_ref",
+        "trace_observation",
+    ],
 )
 def test_v2_logical_evidence_rejects_directed_provenance_tamper(
     tamper: str,
@@ -2519,7 +2625,38 @@ def test_v2_logical_evidence_rejects_directed_provenance_tamper(
                 update={"task_delta_candidates": (changed_candidate,)}
             ),
         )
-    elif tamper == "observation_version":
+    elif tamper == "source_version":
+        observation = evidence.observations[0].model_copy(
+            update={"source_version": "order-v7-tampered"}
+        )
+        updates["observations"] = (observation,)
+    elif tamper == "observation_resource":
+        observation = evidence.observations[0].model_copy(
+            update={"source_resource_ref": "O-2001"}
+        )
+        updates["observations"] = (observation,)
+    elif tamper == "observation_tool":
+        observation = evidence.observations[0].model_copy(
+            update={"source_tool": "get_shipment"}
+        )
+        updates["observations"] = (observation,)
+    elif tamper in {"tool_task", "tool_unit"}:
+        call = evidence.tool_calls[0].model_copy(
+            update={
+                (
+                    "task_id"
+                    if tamper == "tool_task"
+                    else "request_unit_id"
+                ): UUID(int=954)
+            }
+        )
+        updates["tool_calls"] = (call,)
+    elif tamper == "gate":
+        gate = evidence.gate_decisions[0].model_copy(
+            update={"gate_decision_id": UUID(int=955)}
+        )
+        updates["gate_decisions"] = (gate,)
+    elif tamper == "manifest_ref":
         manifest = evidence.context_manifests[1]
         updates["context_manifests"] = (
             evidence.context_manifests[0],
@@ -2527,38 +2664,43 @@ def test_v2_logical_evidence_rejects_directed_provenance_tamper(
                 update={
                     "observation_refs_and_versions": (
                         VersionedRecordRef(
-                            record_ref=OBSERVATION_ID,
-                            version="order-v7-tampered",
+                            record_ref=UUID(int=956),
+                            version=evidence.observations[0].source_version,
                         ),
                     )
                 }
             ),
         )
     else:
-        request_unit = evidence.request_units[0].model_copy(
-            update={"observation_refs": (UUID(int=940),)}
+        trace_events = tuple(
+            event.model_copy(update={"observation_ref": UUID(int=957)})
+            if event.event_type is TraceEventType.OBSERVATION_RECORDED
+            else event
+            for event in evidence.trace_events
         )
-        updates["request_units"] = (request_unit,)
+        updates["trace_events"] = trace_events
 
     tampered = _v2_evidence(**updates)
-    for grader_name in (
-        "RequestUnderstandingGrader",
-        "ObservationGrader",
-        "PersistenceGrader",
-        "TraceCompletenessGrader",
-    ):
+    for grader_name in GRADER_NAMES:
         result = grader_registry()[grader_name].grade(
             tampered,
             _expectations(),
         )
-        if tamper.startswith("source_") and grader_name == "ObservationGrader":
-            continue
-        if tamper.startswith("observation_") and grader_name == (
-            "RequestUnderstandingGrader"
-        ):
-            continue
-        assert result.status is EvalGraderStatus.FAIL
-        assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+        if result.status is EvalGraderStatus.FAIL:
+            assert result.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
+    assert any(
+        grader_registry()[grader_name]
+        .grade(tampered, _expectations())
+        .status
+        is EvalGraderStatus.FAIL
+        for grader_name in (
+            "RequestUnderstandingGrader",
+            "ToolCallGrader",
+            "ObservationGrader",
+            "PersistenceGrader",
+            "TraceCompletenessGrader",
+        )
+    )
 
 
 def test_v2_complete_task_transition_history_is_required_without_restart_cap() -> None:

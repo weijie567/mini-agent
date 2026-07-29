@@ -1132,10 +1132,11 @@ def test_v2_eval_dependency_is_additive_and_not_an_artifact_activation() -> None
             name
             for name in provider_type.__dict__
             if not name.startswith("__")
-        } == {"propose_next_move"}
+        } == {"propose_next_move", "plan_presentation"}
         method_signature = signature(provider_type.propose_next_move)
         assert tuple(method_signature.parameters) == ("self", "request")
-        assert "plan_presentation" not in provider_type.__dict__
+        presentation_signature = signature(provider_type.plan_presentation)
+        assert tuple(presentation_signature.parameters) == ("self", "request")
 
     assert tuple(graders_module.EvalEvidence.model_fields)[-3:] == (
         "request_understanding_records_v2",

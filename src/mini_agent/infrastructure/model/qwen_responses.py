@@ -182,7 +182,7 @@ def _v2_fresh_candidate_invalid_error(
 async def _v2_invoke_request_understanding(
     adapter: QwenResponsesAdapter,
     request: RequestUnderstandingInput,
-) -> RequestUnderstandingOutputV2:
+) -> tuple[str, RequestUnderstandingOutputV2 | None]:
     target_name = "submit_next_move"
     target_tool = {
         "type": "function",
@@ -201,14 +201,7 @@ async def _v2_invoke_request_understanding(
         "store": False,
         "stream": False,
     }
-    response: httpx.Response | None = None
-    envelope: dict[str, object] | None = None
-    raw_output: list[object] | None = None
-    function_calls: list[dict[str, object]] | None = None
-    function_call: dict[str, object] | None = None
     raw_arguments: str | None = None
-    arguments: dict[str, object] | None = None
-    framing_failed = False
     try:
         response = await adapter._client.post(
             adapter._endpoint,
@@ -222,14 +215,12 @@ async def _v2_invoke_request_understanding(
         candidate_envelope = response.json()
         if not isinstance(candidate_envelope, dict):
             raise ValueError
-        envelope = candidate_envelope
-        candidate_output = envelope.get("output")
+        candidate_output = candidate_envelope.get("output")
         if not isinstance(candidate_output, list):
             raise ValueError
-        raw_output = candidate_output
         function_calls = [
             item
-            for item in raw_output
+            for item in candidate_output
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
         if len(function_calls) != 1:
@@ -244,40 +235,31 @@ async def _v2_invoke_request_understanding(
         decoded_arguments = json.loads(raw_arguments)
         if not isinstance(decoded_arguments, dict):
             raise ValueError
-        arguments = decoded_arguments
+        if decoded_arguments is None:
+            raise ValueError
     except (
         httpx.HTTPError,
         json.JSONDecodeError,
         TypeError,
         ValueError,
     ):
-        framing_failed = True
+        return "PROTOCOL_ERROR", None
     except Exception:
-        framing_failed = True
-    response = None
-    envelope = None
-    raw_output = None
-    function_calls = None
-    function_call = None
-    if framing_failed or arguments is None:
-        arguments = None
-        raw_arguments = None
-        raise _fresh_protocol_error()
+        return "PROTOCOL_ERROR", None
 
     parsed_output: RequestUnderstandingOutputV2 | None = None
-    candidate_failed = False
     try:
         parsed_output = RequestUnderstandingOutputV2.model_validate_json(
             raw_arguments,
             strict=True,
         )
     except ValidationError:
-        candidate_failed = True
-    arguments = None
-    raw_arguments = None
-    if candidate_failed or parsed_output is None:
-        raise _v2_fresh_candidate_invalid_error()
-    return parsed_output
+        return "CANDIDATE_INVALID", None
+    except Exception:
+        return "PROTOCOL_ERROR", None
+    if parsed_output is None:
+        return "PROTOCOL_ERROR", None
+    return "SUCCESS", parsed_output
 
 
 class QwenResponsesAdapterV2(QwenResponsesAdapter):
@@ -287,4 +269,28 @@ class QwenResponsesAdapterV2(QwenResponsesAdapter):
     ) -> RequestUnderstandingOutputV2:
         if type(request) is not RequestUnderstandingInput:
             raise TypeError("request must be RequestUnderstandingInput")
-        return await _v2_invoke_request_understanding(self, request)
+        status, output = await _v2_invoke_request_understanding(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if status == "CANDIDATE_INVALID":
+            raise _v2_fresh_candidate_invalid_error()
+        if status != "SUCCESS" or output is None:
+            raise _fresh_protocol_error()
+        return output
+
+    async def plan_presentation(
+        self,
+        request: PresentationInput,
+    ) -> PresentationPlan:
+        plan: PresentationPlan | None = None
+        failed = False
+        try:
+            plan = await super().plan_presentation(request)
+        except ProviderProtocolError:
+            failed = True
+        if failed:
+            self = None  # type: ignore[assignment]
+            request = None  # type: ignore[assignment]
+            raise _fresh_protocol_error()
+        assert plan is not None
+        return plan

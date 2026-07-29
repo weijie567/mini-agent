@@ -531,6 +531,33 @@ def _validate_grader_inputs(
         raise TypeError("grader evidence must be EvalEvidence")
     if type(expectations) is not EvalCaseExpectations:
         raise TypeError("grader expectations must be authenticated")
+    try:
+        projection, observed_signature = _recursive_python_field_projection(
+            evidence,
+            set(),
+        )
+        canonical = EvalEvidence.model_validate(
+            projection,
+            strict=True,
+        )
+        _, canonical_signature = _recursive_python_field_projection(
+            canonical,
+            set(),
+        )
+    except (
+        AttributeError,
+        KeyError,
+        RecursionError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    if (
+        observed_signature != canonical_signature
+        or canonical != evidence
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
     return _observation_canonicalization_reason(evidence)
 
 
