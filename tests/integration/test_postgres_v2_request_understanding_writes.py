@@ -5,12 +5,14 @@ import json
 import sys
 import threading
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from pydantic_core import to_jsonable_python
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from mini_agent.application import persistence as application_persistence
 from mini_agent.application.persistence import (
@@ -24,6 +26,7 @@ from mini_agent.application.records import (
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     InsertOnlyWriteResult,
+    RecoveryWriteResult,
     SaveRequestUnderstandingV2NoTaskCommand,
     TransitionRunCommand,
 )
@@ -40,6 +43,9 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordReferenceModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+from mini_agent.infrastructure.persistence.recovery import (
+    PostgresRestartRecoveryAdapter,
+)
 
 _COMPONENT_APPLICATION_TESTS = (
     Path(__file__).parents[1] / "component" / "application"
@@ -48,6 +54,13 @@ sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_record_contracts import (  # noqa: E402
     _initial_graph,
     _initial_v2_graph,
+)
+
+_INTEGRATION_TESTS = Path(__file__).parent
+sys.path.append(str(_INTEGRATION_TESTS))
+from test_postgres_atomicity import (  # noqa: E402
+    _empty_graph_recovery_command,
+    _no_task_finalization_for_graph,
 )
 
 pytestmark = pytest.mark.anyio
@@ -726,5 +739,734 @@ async def test_concurrent_v2_writers_commit_at_most_one_complete_graph(
         assert len(loaded.input_binding_records) == 1
         assert len(loaded.conversation_task_links) == 1
         assert len(loaded.run_task_links) == 1
+    finally:
+        engine.dispose()
+
+
+def _assert_bounded_persistence_system_error(
+    error: Exception,
+    *,
+    forbidden_values: tuple[str, ...],
+) -> None:
+    safe_error_type = getattr(
+        postgres_persistence,
+        "P0PersistenceSystemError",
+        None,
+    )
+    assert safe_error_type is not None
+    with pytest.raises(TypeError):
+        safe_error_type("unsafe diagnostic")
+    assert type(error) is safe_error_type
+    assert error.args == ("PERSISTENCE_SYSTEM_FAILURE",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    projection = f"{error!s} {error!r} {error.args!r}"
+    assert all(value not in projection for value in forbidden_values)
+
+
+def _task_graph_family_counts(
+    adapter: PostgresRecordAdapter,
+) -> dict[P0RecordCode, int]:
+    family = (
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        P0RecordCode.TASK_RECORD,
+        P0RecordCode.REQUEST_UNIT_RECORD,
+        P0RecordCode.INPUT_BINDING_RECORD,
+        P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+        P0RecordCode.RUN_TASK_LINK_RECORD,
+    )
+    with adapter.session_factory() as session:
+        rows = tuple(
+            session.scalars(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code.in_(
+                        tuple(code.value for code in family)
+                    )
+                )
+            )
+        )
+    return {
+        code: sum(row.record_code == code.value for row in rows)
+        for code in family
+    }
+
+
+async def _assert_initial_graph_closure(
+    adapter: PostgresRecordAdapter,
+    command: CreateInitialTaskGraphV2Command,
+) -> None:
+    loaded = await adapter.load_exact_run_evidence_for_owner(
+        owner_scope=command.owner_scope,
+        run_id=command.expected_active_run_record.run_id,
+    )
+    assert loaded is not None
+    assert loaded.request_understanding_record == command.request_understanding.record
+    assert loaded.accepted_task_deltas == (
+        command.request_understanding.accepted_delta,
+    )
+    assert loaded.task_records == (command.initial_task.initial_record,)
+    assert loaded.request_unit_records == (
+        command.initial_request_unit.initial_record,
+    )
+    assert loaded.input_binding_records == (command.input_binding.record,)
+    assert loaded.conversation_task_links == (
+        command.conversation_task_link,
+    )
+    assert loaded.run_task_links == (command.run_task_link.active_record,)
+
+
+@pytest.mark.parametrize("drift", ("stale_root", "foreign_scope"))
+async def test_stale_and_foreign_trusted_roots_are_zero_write(
+    eval_postgres_namespace,
+    drift: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        await _seed_v2_roots(adapter, graph)
+        baseline = _database_snapshot(adapter)
+        if drift == "stale_root":
+            stale_conversation = graph.expected_conversation_record.model_copy(
+                update={
+                    "created_at": (
+                        graph.expected_conversation_record.created_at
+                        + timedelta(microseconds=1)
+                    )
+                }
+            )
+            command = graph.model_copy(
+                update={
+                    "expected_conversation_record": stale_conversation,
+                }
+            )
+            expected = ConditionalWriteResult.PROJECTION_CONFLICT
+        else:
+            command = graph.model_copy(
+                update={
+                    "owner_scope": graph.owner_scope.model_copy(
+                        update={"customer_id": "customer-B"}
+                    ),
+                }
+            )
+            expected = ConditionalWriteResult.NOT_APPLICABLE
+
+        assert (
+            await adapter.create_initial_task_graph_v2_if_current(command)
+            is expected
+        )
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        engine.dispose()
+
+
+async def test_partial_target_set_is_a_zero_write_conflict(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    try:
+        await _seed_v2_roots(adapter, command)
+        task_envelope = adapter._ru_v2_write_encode(
+            P0RecordCode.TASK_RECORD,
+            command.initial_task.initial_record,
+        )
+        with adapter.session_factory.begin() as session:
+            inserted = adapter._ru_v2_write_insert_targets(
+                session,
+                (task_envelope,),
+                owner_customer_id=command.owner_scope.customer_id,
+            )
+            assert len(inserted) == 1
+        baseline = _database_snapshot(adapter)
+
+        assert (
+            await adapter.create_initial_task_graph_v2_if_current(command)
+            is ConditionalWriteResult.PROJECTION_CONFLICT
+        )
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("corruption", "returns_conflict"),
+    (
+        ("wrong_physical_version", True),
+        ("physical_run_projection", False),
+        ("payload_record_code", False),
+        ("normalized_reference", False),
+    ),
+)
+async def test_replay_rejects_corrupt_target_without_mutation(
+    eval_postgres_namespace,
+    corruption: str,
+    returns_conflict: bool,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    try:
+        await _seed_v2_roots(adapter, command)
+        assert (
+            await adapter.create_initial_task_graph_v2_if_current(command)
+            is ConditionalWriteResult.APPLIED
+        )
+        with adapter.session_factory.begin() as session:
+            ru_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
+                )
+            )
+            assert ru_row is not None
+            if corruption == "wrong_physical_version":
+                ru_row.record_schema_version = (
+                    "request_understanding_record.p0.v1"
+                )
+            elif corruption == "physical_run_projection":
+                ru_row.run_id = uuid4()
+            elif corruption == "payload_record_code":
+                envelope = dict(ru_row.envelope)
+                envelope["record_code"] = P0RecordCode.TASK_RECORD.value
+                ru_row.envelope = envelope
+            else:
+                reference = session.scalar(
+                    select(P0RecordReferenceModel)
+                    .where(
+                        P0RecordReferenceModel.source_record_code
+                        == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
+                    )
+                    .order_by(P0RecordReferenceModel.ordinal)
+                    .limit(1)
+                )
+                assert reference is not None
+                reference.ordinal += 1000
+        baseline = _database_snapshot(adapter)
+
+        if returns_conflict:
+            assert (
+                await adapter.create_initial_task_graph_v2_if_current(command)
+                is ConditionalWriteResult.PROJECTION_CONFLICT
+            )
+        else:
+            with pytest.raises(P0PersistenceIntegrityError) as raised:
+                await adapter.create_initial_task_graph_v2_if_current(command)
+            assert raised.value.__cause__ is None
+            assert raised.value.__context__ is None
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "fault_site",
+    (
+        "versioned_encode",
+        "versioned_decode",
+        "physical_projection",
+        "post_insert_validation",
+        "owner_closure",
+        "recovery_anchor",
+    ),
+)
+async def test_private_v2_fault_matrix_rolls_back_to_exact_baseline(
+    eval_postgres_namespace,
+    monkeypatch,
+    fault_site: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    marker = f"injected_{fault_site}_failure"
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(marker)
+
+    try:
+        await _seed_v2_roots(adapter, command)
+        baseline = _database_snapshot(adapter)
+        if fault_site == "versioned_encode":
+            monkeypatch.setattr(
+                postgres_persistence,
+                "encode_persistence_record_versioned",
+                fail,
+            )
+        elif fault_site == "versioned_decode":
+            monkeypatch.setattr(
+                postgres_persistence,
+                "decode_persistence_record_versioned",
+                fail,
+            )
+        elif fault_site == "physical_projection":
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_projection_values",
+                classmethod(fail),
+            )
+        elif fault_site == "post_insert_validation":
+            original_validate_row = (
+                PostgresRecordAdapter._ru_v2_write_validate_row
+            )
+
+            def fail_target_row(
+                _cls,
+                session,
+                row,
+                **kwargs,
+            ):
+                if (
+                    row.record_code
+                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
+                ):
+                    fail()
+                return original_validate_row(
+                    session,
+                    row,
+                    **kwargs,
+                )
+
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_validate_row",
+                classmethod(fail_target_row),
+            )
+        elif fault_site == "owner_closure":
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_validate_closed_rows",
+                classmethod(fail),
+            )
+        else:
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_touch_recovery_anchor",
+                staticmethod(fail),
+            )
+
+        with pytest.raises(RuntimeError, match=marker):
+            await adapter.create_initial_task_graph_v2_if_current(command)
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        engine.dispose()
+
+
+async def test_record_insert_database_failure_is_bounded_and_zero_write(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    secret = "INJECTED_RECORD_INSERT_DATABASE_SECRET"
+
+    def fail_record_insert(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if "insert into p0_records" in statement.lower():
+            raise SQLAlchemyError(secret)
+
+    try:
+        await _seed_v2_roots(adapter, command)
+        baseline = _database_snapshot(adapter)
+        event.listen(engine, "before_cursor_execute", fail_record_insert)
+        with pytest.raises(Exception) as captured:
+            await adapter.create_initial_task_graph_v2_if_current(command)
+        _assert_bounded_persistence_system_error(
+            captured.value,
+            forbidden_values=(
+                secret,
+                command.owner_scope.customer_id,
+                command.expected_message_records[0].content,
+            ),
+        )
+        assert _database_snapshot(adapter) == baseline
+    finally:
+        if event.contains(engine, "before_cursor_execute", fail_record_insert):
+            event.remove(engine, "before_cursor_execute", fail_record_insert)
+        engine.dispose()
+
+
+async def test_initial_writer_locks_exact_run_before_other_trusted_roots(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _initial_v2_graph()
+    validated_codes: list[P0RecordCode] = []
+    original_validate_row = PostgresRecordAdapter._ru_v2_write_validate_row
+
+    def record_validation_order(
+        _cls,
+        session,
+        row,
+        *,
+        expected_code,
+        owner_customer_id,
+    ):
+        validated_codes.append(expected_code)
+        return original_validate_row(
+            session,
+            row,
+            expected_code=expected_code,
+            owner_customer_id=owner_customer_id,
+        )
+
+    try:
+        await _seed_v2_roots(adapter, command)
+        monkeypatch.setattr(
+            PostgresRecordAdapter,
+            "_ru_v2_write_validate_row",
+            classmethod(record_validation_order),
+        )
+        assert (
+            await adapter.create_initial_task_graph_v2_if_current(command)
+            is ConditionalWriteResult.APPLIED
+        )
+        expected_root_order = tuple(
+            sorted(
+                (
+                    P0RecordCode.AGENT_RUN_RECORD,
+                    P0RecordCode.CONVERSATION_RECORD,
+                    *(
+                        P0RecordCode.MESSAGE_RECORD
+                        for _message in command.expected_message_records
+                    ),
+                ),
+                key=lambda code: code.value,
+            )
+        )
+        assert tuple(validated_codes[: len(expected_root_order)]) == (
+            expected_root_order
+        )
+        assert validated_codes[0] is P0RecordCode.AGENT_RUN_RECORD
+    finally:
+        engine.dispose()
+
+
+async def test_no_task_and_initial_writers_commit_one_nonhybrid_closure(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    initial = _initial_v2_graph()
+    no_task = _no_task_from_graph(initial)
+    barrier = threading.Barrier(2)
+
+    def write_no_task():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            adapter.save_request_understanding_v2_no_task_if_current(no_task)
+        )
+
+    def write_initial():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(initial)
+        )
+
+    try:
+        await _seed_v2_roots(adapter, initial)
+        no_task_result, initial_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(write_no_task),
+                asyncio.to_thread(write_initial),
+            ),
+            timeout=15,
+        )
+        assert (
+            no_task_result is ConditionalWriteResult.APPLIED
+        ) is not (
+            initial_result is ConditionalWriteResult.APPLIED
+        )
+        assert {
+            no_task_result,
+            initial_result,
+        } == {
+            ConditionalWriteResult.APPLIED,
+            ConditionalWriteResult.PROJECTION_CONFLICT,
+        }
+        loaded = await adapter.load_exact_run_evidence_for_owner(
+            owner_scope=initial.owner_scope,
+            run_id=initial.expected_active_run_record.run_id,
+        )
+        assert loaded is not None
+        if no_task_result is ConditionalWriteResult.APPLIED:
+            assert loaded.request_understanding_record == (
+                no_task.request_understanding_record
+            )
+            assert loaded.accepted_task_deltas == ()
+            assert all(
+                count == 0
+                for code, count in _task_graph_family_counts(adapter).items()
+                if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+            )
+        else:
+            await _assert_initial_graph_closure(adapter, initial)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("winner", ("legacy", "v2"))
+async def test_legacy_and_v2_writers_serialize_both_lock_orders(
+    eval_postgres_namespace,
+    monkeypatch,
+    winner: str,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    legacy_adapter = PostgresRecordAdapter(session_factory)
+    v2_adapter = PostgresRecordAdapter(session_factory)
+    v2 = _initial_v2_graph()
+    legacy = _legacy_graph_for(v2)
+    winner_locked = threading.Event()
+    loser_attempted = threading.Event()
+    held = False
+
+    try:
+        await _seed_v2_roots(v2_adapter, v2)
+        if winner == "legacy":
+            original_legacy_validate = (
+                legacy_adapter._validate_physical_projection
+            )
+
+            def hold_legacy_after_run_lock(session, row, **kwargs):
+                nonlocal held
+                if (
+                    not held
+                    and row.record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value
+                ):
+                    held = True
+                    winner_locked.set()
+                    assert loser_attempted.wait(timeout=5)
+                return original_legacy_validate(session, row, **kwargs)
+
+            original_v2_lock_roots = (
+                PostgresRecordAdapter._ru_v2_write_lock_roots
+            )
+
+            def announce_v2_attempt(_cls, *args, **kwargs):
+                loser_attempted.set()
+                return original_v2_lock_roots(*args, **kwargs)
+
+            monkeypatch.setattr(
+                legacy_adapter,
+                "_validate_physical_projection",
+                hold_legacy_after_run_lock,
+            )
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_lock_roots",
+                classmethod(announce_v2_attempt),
+            )
+        else:
+            original_v2_validate = (
+                PostgresRecordAdapter._ru_v2_write_validate_row
+            )
+
+            def hold_v2_after_run_lock(
+                _cls,
+                session,
+                row,
+                *,
+                expected_code,
+                owner_customer_id,
+            ):
+                nonlocal held
+                if (
+                    not held
+                    and expected_code is P0RecordCode.AGENT_RUN_RECORD
+                ):
+                    held = True
+                    winner_locked.set()
+                    assert loser_attempted.wait(timeout=5)
+                return original_v2_validate(
+                    session,
+                    row,
+                    expected_code=expected_code,
+                    owner_customer_id=owner_customer_id,
+                )
+
+            original_legacy_row = legacy_adapter._row_for_identity
+
+            def announce_legacy_attempt(*args, **kwargs):
+                if (
+                    kwargs.get("record_code")
+                    is P0RecordCode.AGENT_RUN_RECORD
+                ):
+                    loser_attempted.set()
+                return original_legacy_row(*args, **kwargs)
+
+            monkeypatch.setattr(
+                PostgresRecordAdapter,
+                "_ru_v2_write_validate_row",
+                classmethod(hold_v2_after_run_lock),
+            )
+            monkeypatch.setattr(
+                legacy_adapter,
+                "_row_for_identity",
+                announce_legacy_attempt,
+            )
+
+        def apply_legacy():
+            return asyncio.run(
+                legacy_adapter.create_initial_task_graph_if_current(legacy)
+            )
+
+        def apply_v2():
+            return asyncio.run(
+                v2_adapter.create_initial_task_graph_v2_if_current(v2)
+            )
+
+        winner_call = apply_legacy if winner == "legacy" else apply_v2
+        loser_call = apply_v2 if winner == "legacy" else apply_legacy
+        winner_task = asyncio.create_task(asyncio.to_thread(winner_call))
+        assert await asyncio.to_thread(winner_locked.wait, 5)
+        loser_task = asyncio.create_task(asyncio.to_thread(loser_call))
+        winner_result, loser_result = await asyncio.wait_for(
+            asyncio.gather(winner_task, loser_task),
+            timeout=15,
+        )
+
+        assert winner_result is ConditionalWriteResult.APPLIED
+        assert loser_result is ConditionalWriteResult.PROJECTION_CONFLICT
+        counts = _task_graph_family_counts(v2_adapter)
+        assert all(count == 1 for count in counts.values())
+        with session_factory() as session:
+            ru_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value
+                )
+            )
+            assert ru_row is not None
+            assert ru_row.record_schema_version == (
+                "request_understanding_record.p0.v1"
+                if winner == "legacy"
+                else "request_understanding_record.p0.v2"
+            )
+    finally:
+        loser_attempted.set()
+        engine.dispose()
+
+
+async def test_recovery_and_v2_initial_writer_converge_without_orphans(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    writer = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    command = _initial_v2_graph()
+    barrier = threading.Barrier(2)
+    try:
+        await _seed_v2_roots(writer, command)
+        closure = await recovery.load_next_restart_recovery_closure()
+        assert closure is not None
+        assert closure.run_task_links == ()
+        recovery_command = _empty_graph_recovery_command(closure)
+
+        def write_v2():
+            barrier.wait(timeout=5)
+            return asyncio.run(
+                writer.create_initial_task_graph_v2_if_current(command)
+            )
+
+        def apply_recovery():
+            barrier.wait(timeout=5)
+            return asyncio.run(
+                recovery.claim_and_apply_restart_recovery(recovery_command)
+            )
+
+        writer_result, recovery_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(write_v2),
+                asyncio.to_thread(apply_recovery),
+            ),
+            timeout=15,
+        )
+        assert (
+            writer_result is ConditionalWriteResult.APPLIED
+        ) is not (recovery_result is RecoveryWriteResult.APPLIED)
+        if writer_result is ConditionalWriteResult.APPLIED:
+            assert recovery_result in {
+                RecoveryWriteResult.CLOSURE_CONFLICT,
+                RecoveryWriteResult.NOT_APPLICABLE,
+            }
+            await _assert_initial_graph_closure(writer, command)
+        else:
+            assert recovery_result is RecoveryWriteResult.APPLIED
+            assert writer_result in {
+                ConditionalWriteResult.PROJECTION_CONFLICT,
+                ConditionalWriteResult.NOT_APPLICABLE,
+            }
+            assert all(
+                count == 0
+                for count in _task_graph_family_counts(writer).values()
+            )
+    finally:
+        engine.dispose()
+
+
+async def test_finalization_and_v2_initial_writer_converge_without_orphans(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    writer = PostgresRecordAdapter(session_factory)
+    finalizer = PostgresRecordAdapter(session_factory)
+    command = _initial_v2_graph()
+    barrier = threading.Barrier(2)
+    try:
+        await _seed_v2_roots(writer, command)
+        finalization = _no_task_finalization_for_graph(command)
+
+        def write_v2():
+            barrier.wait(timeout=5)
+            return asyncio.run(
+                writer.create_initial_task_graph_v2_if_current(command)
+            )
+
+        def finalize():
+            barrier.wait(timeout=5)
+            return asyncio.run(finalizer.finalize_run_if_active(finalization))
+
+        writer_result, finalization_result = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(write_v2),
+                asyncio.to_thread(finalize),
+            ),
+            timeout=15,
+        )
+        assert (
+            writer_result is ConditionalWriteResult.APPLIED
+        ) is not (
+            finalization_result is ConditionalWriteResult.APPLIED
+        )
+        if writer_result is ConditionalWriteResult.APPLIED:
+            assert (
+                finalization_result
+                is ConditionalWriteResult.PROJECTION_CONFLICT
+            )
+            await _assert_initial_graph_closure(writer, command)
+        else:
+            assert (
+                finalization_result is ConditionalWriteResult.APPLIED
+            )
+            assert writer_result in {
+                ConditionalWriteResult.PROJECTION_CONFLICT,
+                ConditionalWriteResult.NOT_APPLICABLE,
+            }
+            assert all(
+                count == 0
+                for count in _task_graph_family_counts(writer).values()
+            )
     finally:
         engine.dispose()
