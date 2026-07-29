@@ -1079,9 +1079,10 @@ _REGISTRY = {
     ),
 }
 
-P0_PERSISTENCE_REGISTRY: Mapping[P0RecordCode, P0RecordSchemaSpec] = MappingProxyType(
-    _REGISTRY
-)
+_P0_V1_PERSISTENCE_REGISTRY: Mapping[
+    P0RecordCode,
+    P0RecordSchemaSpec,
+] = MappingProxyType(_REGISTRY)
 del _REGISTRY
 
 _CHILD_SPECS = {
@@ -1203,7 +1204,7 @@ def _reference_for_value(
 ) -> P0RecordReference:
     if rule.relation is None or rule.target_record_code is None:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
-    target_spec = P0_PERSISTENCE_REGISTRY[rule.target_record_code]
+    target_spec = _P0_V1_PERSISTENCE_REGISTRY[rule.target_record_code]
     if len(target_spec.identity_fields) != 1:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
     return P0RecordReference(
@@ -1345,7 +1346,7 @@ def _validate_external_references(
         reference = matches[0]
         if reference.target_record_code is not rule.target_record_code:
             _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
-        target_spec = P0_PERSISTENCE_REGISTRY[reference.target_record_code]
+        target_spec = _P0_V1_PERSISTENCE_REGISTRY[reference.target_record_code]
         actual_fields = tuple(
             field_name for field_name, _ in reference.target_logical_identity
         )
@@ -1524,7 +1525,7 @@ def _build_envelope(
     external_references: tuple[P0RecordReference, ...],
     logical_children: tuple[ContractModel, ...],
 ) -> P0PersistenceEnvelope:
-    spec = P0_PERSISTENCE_REGISTRY.get(record_code)
+    spec = _P0_V1_PERSISTENCE_REGISTRY.get(record_code)
     if spec is None:
         _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
     validated = _strict_record(spec, record)
@@ -1805,11 +1806,12 @@ def _classify_outer(
 
     if "record_schema_version" not in parsed:
         _raise_signal(P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION)
-    spec = P0_PERSISTENCE_REGISTRY[code]
+    spec = _P0_V1_PERSISTENCE_REGISTRY[code]
     raw_version = parsed["record_schema_version"]
     if raw_version != spec.record_schema_version:
         known_versions = {
-            item.record_schema_version for item in P0_PERSISTENCE_REGISTRY.values()
+            item.record_schema_version
+            for item in _P0_V1_PERSISTENCE_REGISTRY.values()
         }
         category = (
             P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
@@ -2184,14 +2186,24 @@ P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
         **{
             (
                 code,
-                P0_PERSISTENCE_REGISTRY[code].record_schema_version,
-            ): P0_PERSISTENCE_REGISTRY[code]
+                _P0_V1_PERSISTENCE_REGISTRY[code].record_schema_version,
+            ): _P0_V1_PERSISTENCE_REGISTRY[code]
             for code in P0RecordCode
         },
         (
             P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
             "request_understanding_record.p0.v2",
         ): _REQUEST_UNDERSTANDING_V2_SPEC,
+    }
+)
+
+P0_PERSISTENCE_REGISTRY: Mapping[
+    P0RecordCode,
+    P0RecordSchemaSpec,
+] = MappingProxyType(
+    {
+        **_P0_V1_PERSISTENCE_REGISTRY,
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD: _REQUEST_UNDERSTANDING_V2_SPEC,
     }
 )
 
@@ -2817,16 +2829,10 @@ def _classify_outer_versioned(
             P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
         )
     if raw_version != expected_schema_version:
-        if selected_spec is P0_PERSISTENCE_REGISTRY[expected_record_code]:
-            known_versions = {
-                P0_PERSISTENCE_REGISTRY[code].record_schema_version
-                for code in P0RecordCode
-            }
-        else:
-            known_versions = {
-                known_version
-                for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
-            }
+        known_versions = {
+            known_version
+            for _, known_version in P0_RECORD_SCHEMA_VERSION_CATALOG
+        }
         category = (
             P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
             if raw_version in known_versions
