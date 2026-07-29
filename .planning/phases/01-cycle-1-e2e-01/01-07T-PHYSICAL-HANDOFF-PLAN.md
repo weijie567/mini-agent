@@ -250,13 +250,37 @@ uv run pytest
 
 <rollback>
 
-Feature未merge时关闭PR。合并后、T未形成时普通revert handoff merge并复跑migration/full；不得reset/force。若T已形成，先revert T再revert handoff。physical数据未被本Packet修改。
+Feature未merge时关闭PR。合并后、T未形成时普通revert handoff merge并复跑migration/full；不得reset/force。
+
+若已有下游barrier，必须按`V → W → T → PHYSICAL-HANDOFF`的实际依赖逆序逐项普通revert，并在每一步复跑对应Core/Application/codec focused、migration与full gate；不得在W/V仍依赖T时先撤T，也不得reset/force。physical数据未被本Packet修改。
 
 </rollback>
 
 <handoff>
 
-交接必须报告base/head/tree、RED/GREEN/fix commits、实际文件、命令结果、0003 blob、review、overlay、PR/merge、post-merge barrier与rollback。
+交接必须使用以下显式模板：
+
+```text
+Task Packet: 01-07T-PHYSICAL-HANDOFF
+Base SHA / tree:
+Branch / Worktree:
+RED commit and expected failure:
+GREEN/fix commits:
+Reviewed exact head / tree:
+Actual changed files:
+Commands and exact results:
+Allowlist / containment result:
+0003 preserved blob:
+Contract changes:
+Security impact:
+Eval impact:
+Latest integration overlay evidence:
+PR / merge commit:
+Post-merge B_T_PHYSICAL_HANDOFF SHA / tree:
+Unresolved risks:
+Rollback:
+Recommended next step:
+```
 
 Agent完成不等于`B_T_PHYSICAL_HANDOFF`、`B_T`、`B_RU_V2_CONTRACT`或产品ready。
 
