@@ -112,7 +112,7 @@ if self.source_version is None:
 | `NOT_FOUND_OR_NOT_ACCESSIBLE` | forbidden | forbidden | forbidden | valid without payload |
 | `SYSTEM_FAILURE` | forbidden | forbidden | existing bounded code only | valid without payload |
 
-原有empty、wrong prefix/schema、63/65 hex、uppercase、leading/trailing whitespace、newline与bytes negative matrix必须继续失败。M的新增RED只把唯一`legacy_result`断言替换为`FOUND + summary + omitted source_version`抛出`ValidationError`且匹配`FOUND result requires source_version`；valid exact token仍成功并exact-copy。其他39-test baseline behavior保持不变。
+原有empty、wrong prefix/schema、63/65 hex、uppercase、leading/trailing whitespace、newline与bytes negative matrix必须继续失败。M的新增RED把唯一`legacy_result`断言替换为三项闭合矩阵：`FOUND + summary + omitted source_version`匹配`FOUND result requires source_version`；同时缺summary/version仍优先匹配`FOUND result requires order_summary`；携带summary/failure且缺version仍优先匹配`FOUND result cannot carry failure_code`。valid exact token仍成功并exact-copy，其他39-test baseline behavior保持不变。
 
 ## 3. Boundary nonchanges
 
@@ -185,7 +185,7 @@ dependencies:
 required_checks:
 
 - Gate A exact branch/worktree/base/tree/two-blob/clean-state preflight before RED edit。
-- focused baseline `39 passed`；RED必须只因missing source-version未被拒绝而非零；GREEN focused必须恢复`39 passed`。
+- focused baseline `39 passed`；RED必须只因missing source-version未被拒绝而非零；GREEN focused必须恢复`39 passed`，并覆盖summary/failure/version三种combined-invalid错误优先级。
 - Agent-visible ToolSpec source-version absence。
 - canonical environment：`uv sync --all-groups`、dev/test PostgreSQL healthy、`uv run alembic upgrade head`。
 - canonical full `uv run pytest`。
@@ -195,7 +195,7 @@ required_checks:
 
 commit_protocol:
 
-1. RED `test(01-07M): require get_order source version`只改owned test，把旧optional test重命名为`test_found_result_requires_strict_source_version_exactly`，对omitted version断言fixed bounded validation error；`order.py`仍为base blob。Focused命令必须恰因当前validator未抛错而失败。
+1. RED `test(01-07M): require get_order source version`只改owned test，把旧optional test重命名为`test_found_result_requires_strict_source_version_exactly`；对合法summary + omitted version断言新fixed error，并分别冻结missing summary与present failure code在同时missing version时的既有错误优先级；`order.py`仍为base blob。Focused命令必须恰因当前validator未拒绝第一种missing-version输入而失败。
 2. GREEN `feat(01-07M): close get_order source version contract`只改`src/mini_agent/core/order.py`既有validator，加入唯一missing-version gate；不得改imports、field/type alias、其他class/method或下游文件。
 3. 正常history相对B_DEPENDENCY恰为以上两个commit。Review finding只用append-only `fix(01-07M): ...` commit，仍限两文件，并对新exact head重跑全部checks/review；不得amend、rebase或force-push已审历史。
 
@@ -243,7 +243,7 @@ handoff_format: repository/remote/branch/worktree、exact base/planning/head/tre
   <name>Task 1: RED — replace the legacy FOUND + None oracle with the final matrix</name>
   <files>tests/component/core/test_memory_trace_presentation_contract.py</files>
   <read_first>Thin Slice §6.2.1 final matrix、01-07H temporary optional contract、exact B_DEPENDENCY Core test、K producer evidence</read_first>
-  <action>只改现有`test_found_result_accepts_optional_strict_source_version_exactly`函数：重命名为`test_found_result_requires_strict_source_version_exactly`；把`legacy_result`成功构造与`None`断言替换为`pytest.raises(ValidationError, match="FOUND result requires source_version")`包裹的`FOUND + _summary() + omitted source_version`；保留valid exact token构造与byte-for-byte断言。不要修改negative/non-FOUND tests、helper/constants/imports或任何source。运行focused command取得单一、预期的DID NOT RAISE类RED后提交精确subject。</action>
+  <action>只改现有`test_found_result_accepts_optional_strict_source_version_exactly`函数：重命名为`test_found_result_requires_strict_source_version_exactly`；把`legacy_result`成功构造与`None`断言替换为`pytest.raises(ValidationError, match="FOUND result requires source_version")`包裹的`FOUND + _summary() + omitted source_version`。在同一函数再加入两项combined-invalid oracle：`FOUND`同时缺summary/version必须匹配`FOUND result requires order_summary`；`FOUND + _summary() + failure_code="UNEXPECTED" + omitted version`必须匹配`FOUND result cannot carry failure_code`。保留valid exact token构造与byte-for-byte断言。不要修改negative/non-FOUND tests、helper/constants/imports或任何source。运行focused command取得单一、预期的DID NOT RAISE类RED后提交精确subject。</action>
   <verify>
     <automated>uv run pytest tests/component/core/test_memory_trace_presentation_contract.py -q</automated>
     RED必须非零且只由current validator仍允许missing version造成；`src/mini_agent/core/order.py`保持base blob。
@@ -463,6 +463,57 @@ after_methods = {
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
 }
 assert set(after_methods) == set(before_methods) == {MUTABLE_METHOD}
+before_method = before_methods[MUTABLE_METHOD]
+after_method = after_methods[MUTABLE_METHOD]
+assert type(after_method) is type(before_method)
+assert ast.dump(after_method.args, include_attributes=False) == ast.dump(
+    before_method.args,
+    include_attributes=False,
+)
+assert ast.dump(after_method.returns, include_attributes=False) == ast.dump(
+    before_method.returns,
+    include_attributes=False,
+)
+assert [
+    ast.dump(node, include_attributes=False)
+    for node in after_method.decorator_list
+] == [
+    ast.dump(node, include_attributes=False)
+    for node in before_method.decorator_list
+]
+assert after_method.type_comment == before_method.type_comment
+assert len(before_method.body) == len(after_method.body) == 2
+before_outcome_branch, before_return = before_method.body
+after_outcome_branch, after_return = after_method.body
+assert isinstance(before_outcome_branch, ast.If)
+assert isinstance(after_outcome_branch, ast.If)
+exact(before_source, after_source, before_return, after_return)
+assert ast.dump(
+    after_outcome_branch.test,
+    include_attributes=False,
+) == ast.dump(before_outcome_branch.test, include_attributes=False)
+assert [
+    ast.dump(node, include_attributes=False)
+    for node in after_outcome_branch.orelse
+] == [
+    ast.dump(node, include_attributes=False)
+    for node in before_outcome_branch.orelse
+]
+assert len(after_outcome_branch.body) == len(before_outcome_branch.body) + 1
+for left, right in zip(
+    before_outcome_branch.body,
+    after_outcome_branch.body[:-1],
+    strict=True,
+):
+    exact(before_source, after_source, left, right)
+expected_insertion = ast.parse(
+    'if self.source_version is None:\n'
+    '    raise ValueError("FOUND result requires source_version")\n'
+).body[0]
+assert ast.dump(
+    after_outcome_branch.body[-1],
+    include_attributes=False,
+) == ast.dump(expected_insertion, include_attributes=False)
 before_non_methods = [
     ast.dump(node, include_attributes=False)
     for node in before_class.body
@@ -507,6 +558,17 @@ after_other_test_nodes = [
 assert len(after_other_test_nodes) == len(before_other_test_nodes)
 for left, right in zip(before_other_test_nodes, after_other_test_nodes, strict=True):
     exact(before_test, after_test, left, right)
+
+target_source = segment(after_test, after_targets[0])
+for required_fragment in (
+    'match="FOUND result requires source_version"',
+    'match="FOUND result requires order_summary"',
+    'match="FOUND result cannot carry failure_code"',
+    'failure_code="UNEXPECTED"',
+    "source_version=VALID_SOURCE_VERSION",
+    "assert versioned_result.source_version == VALID_SOURCE_VERSION",
+):
+    assert target_source.count(required_fragment) == 1, required_fragment
 
 for tree in (after_tree, after_test_tree):
     counts = {
