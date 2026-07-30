@@ -687,6 +687,18 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
             return left + right if left is not None and right is not None else None
         return None
 
+    def import_roots(tree: ast.AST) -> set[str]:
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(
+                    alias.name.split(".", maxsplit=1)[0]
+                    for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                roots.add(node.module.split(".", maxsplit=1)[0])
+        return roots
+
     application_imports = [
         node
         for node in ast.walk(models_tree)
@@ -760,13 +772,15 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
             "import_module",
         }
     }
-    assert not {
-        alias.name.split(".", maxsplit=1)[0]
-        for node in ast.walk(models_tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        for alias in node.names
-        if alias.name.split(".", maxsplit=1)[0]
-        in {"builtins", "importlib", "sys"}
+    unsafe_import_roots = {"builtins", "importlib", "sys"}
+    assert not import_roots(models_tree) & unsafe_import_roots
+    adversarial_imports = ast.parse(
+        "from importlib import import_module as load_module\n"
+        "from builtins import vars as namespace\n"
+    )
+    assert import_roots(adversarial_imports) & unsafe_import_roots == {
+        "builtins",
+        "importlib",
     }
 
     physical_literal = _literal_pair_tuple(
