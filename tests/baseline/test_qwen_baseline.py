@@ -9,6 +9,8 @@ import httpx
 import pytest
 
 from mini_agent.application.records import (
+    EvalExecutionFailurePhase,
+    EvalExecutionSafeErrorCode,
     EvalResultStatus,
 )
 from mini_agent.bootstrap import OfflineE2E01Composition
@@ -69,20 +71,22 @@ async def test_qwen_baseline_uses_real_composition_or_persists_not_run(
         for name in ("DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL")
     )
     network_calls = 0
-    if missing_environment:
-        async def forbidden_external_http(
-            *_args: object,
-            **_kwargs: object,
-        ) -> None:
-            nonlocal network_calls
-            network_calls += 1
-            raise AssertionError("missing baseline cannot access network")
 
-        monkeypatch.setattr(
-            httpx.AsyncHTTPTransport,
-            "handle_async_request",
-            forbidden_external_http,
+    async def forbidden_external_http(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        nonlocal network_calls
+        network_calls += 1
+        raise AssertionError(
+            "inactive lifecycle cannot access Provider transport"
         )
+
+    monkeypatch.setattr(
+        httpx.AsyncHTTPTransport,
+        "handle_async_request",
+        forbidden_external_http,
+    )
 
     try:
         composition = await OfflineE2E01Composition.start(
@@ -109,16 +113,22 @@ async def test_qwen_baseline_uses_real_composition_or_persists_not_run(
         persisted = await records.list_eval_results(
             eval_run_id=eval_run_id,
         )
+        persisted_failures = (
+            await records.list_eval_execution_failures(
+                eval_run_id=eval_run_id,
+            )
+        )
 
         assert persisted == outcome.results
-        assert tuple(result.case_id for result in persisted) == (
-            "E2E01-01",
-            "E2E01-04-A",
-            "E2E01-04-B",
-        )
         if missing_environment:
+            assert tuple(result.case_id for result in persisted) == (
+                "E2E01-01",
+                "E2E01-04-A",
+                "E2E01-04-B",
+            )
             assert outcome.command_passed is False
             assert outcome.execution_failures == ()
+            assert persisted_failures == ()
             assert network_calls == 0
             for result in persisted:
                 assert result.status is EvalResultStatus.NOT_RUN
@@ -131,16 +141,24 @@ async def test_qwen_baseline_uses_real_composition_or_persists_not_run(
             pytest.skip("MISSING_REQUIRED_ENV")
 
         assert network_calls == 0
-        assert outcome.execution_failures == ()
+        assert outcome.command_passed is False
+        assert outcome.results == ()
+        assert persisted == ()
+        assert persisted_failures == outcome.execution_failures
+        assert tuple(
+            failure.case_id for failure in persisted_failures
+        ) == (
+            "E2E01-01",
+            "E2E01-04-A",
+            "E2E01-04-B",
+        )
         assert all(
-            result.status in {EvalResultStatus.PASS, EvalResultStatus.FAIL}
-            for result in persisted
+            failure.failure_phase
+            is EvalExecutionFailurePhase.CASE_SETUP
+            and failure.safe_error_code
+            is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+            and failure.trace_ref is None
+            for failure in persisted_failures
         )
-        critical_failures = tuple(
-            failure
-            for result in persisted
-            for failure in result.critical_failures
-        )
-        assert critical_failures == ()
     finally:
         engine.dispose()

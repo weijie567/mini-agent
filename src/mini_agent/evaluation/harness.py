@@ -394,6 +394,9 @@ _FAILURE_CODE_BY_PHASE = {
         EvalExecutionSafeErrorCode.RESULT_COMPLETENESS_FAILED
     ),
 }
+_EXECUTABLE_CASE_LIFECYCLE_STATUSES = frozenset(
+    {"EXECUTABLE", "REGRESSION_GATE"}
+)
 
 
 def _fresh_command_error() -> EvalHarnessCommandError:
@@ -2291,6 +2294,39 @@ class OfflineEvalHarness:
                 lane=lane,
                 results=(),
                 execution_failures=(failure,),
+                command_passed=False,
+            )
+
+        selected_cases = tuple(
+            self._artifacts.case_by_id(case_id)
+            for case_id in selected_ids
+        )
+        nonexecutable_cases = tuple(
+            case
+            for case in selected_cases
+            if (
+                type(case.lifecycle_status) is not str
+                or case.lifecycle_status
+                not in _EXECUTABLE_CASE_LIFECYCLE_STATUSES
+            )
+        )
+        if nonexecutable_cases:
+            for case in nonexecutable_cases:
+                failures.append(
+                    await self._append_failure(
+                        eval_run_id=eval_run_id,
+                        lane=lane,
+                        phase=EvalExecutionFailurePhase.CASE_SETUP,
+                        case=case,
+                        attempt=attempt,
+                        trace_ref=None,
+                        lane_artifact=lane_artifact,
+                    )
+                )
+            return EvalLaneRunOutcome(
+                lane=lane,
+                results=(),
+                execution_failures=tuple(failures),
                 command_passed=False,
             )
 
