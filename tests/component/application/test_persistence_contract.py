@@ -37,7 +37,6 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     SaveInputBindingCommand,
     SaveObservationCommand,
-    SaveRequestUnderstandingCommand,
     TrustedOwnerScope,
 )
 from mini_agent.core.common import freeze_json_value
@@ -57,12 +56,10 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.request_understanding import InputAuthority, TaskDeltaOperation
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     CandidateValidationDecision,
     CandidateValidationRecord,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -121,8 +118,12 @@ conversation_record|owner_customer_id|DIRECT_OWNER|-|-|1|1|0
 message_record|conversation_id|TOP_LEVEL_P0_REFERENCE|conversation_id|conversation_record|1|1|0
 request_understanding_record|run_id|TOP_LEVEL_P0_REFERENCE|run_id|agent_run_record|1|1|0
 request_understanding_record|message_ref|TOP_LEVEL_P0_REFERENCE|message_ref|message_record|1|1|0
+request_understanding_record|contextualization.resolved_reference_candidates[].source_ref|TOP_LEVEL_P0_REFERENCE|contextualization_resolved_source_ref|message_record|0|-|0
+request_understanding_record|contextualization.source_message_refs[]|TOP_LEVEL_P0_REFERENCE|contextualization_source_message_ref|message_record|1|-|1
+request_understanding_record|task_delta_candidates[].input_candidates[].source_ref|TOP_LEVEL_P0_REFERENCE|task_delta_input_source_ref|message_record|0|-|0
 request_understanding_record|accepted_delta_refs[]|LOGICAL_CHILD_CORRELATION|-|-|0|-|1
-request_understanding_record|candidate_validation[].candidate_ref,next_move_candidate_ref?|PAYLOAD_CORRELATION|-|-|0|-|0
+request_understanding_record|candidate_validation[].candidate_ref|PARENT_LOCAL_CORRELATION|-|-|0|-|1
+request_understanding_record|next_move_candidate_ref?|PAYLOAD_CORRELATION|-|-|0|1|0
 task_record|owner_customer_id|DIRECT_OWNER|-|-|1|1|0
 task_record|last_outcome_ref?|PAYLOAD_CORRELATION|-|-|0|1|0
 request_unit_record|task_id|TOP_LEVEL_P0_REFERENCE|task_id|task_record|1|1|0
@@ -186,6 +187,7 @@ eval_execution_failure_record|diagnostic_ref?|RESTRICTED_DIAGNOSTIC_CORRELATION|
 accepted_task_delta|candidate_ref|PARENT_LOCAL_CORRELATION|-|-|1|1|0
 accepted_task_delta|message_ref|PARENT_FIELD_EQUALITY|-|-|1|1|0
 accepted_task_delta|input_binding_refs[]|CHILD_TOP_LEVEL_P0_REFERENCE|input_binding_ref|input_binding_record|1|-|1
+accepted_task_delta|task_id|CHILD_TOP_LEVEL_P0_REFERENCE|accepted_delta_task_id|task_record|1|1|0
 task_state_transition|task_id|PARENT_FIELD_EQUALITY|-|-|1|1|0
 task_state_transition|request_unit_id|CHILD_TOP_LEVEL_P0_REFERENCE|request_unit_id|request_unit_record|1|1|0
 task_state_transition|reason_ref|PAYLOAD_CORRELATION|-|-|1|1|0
@@ -245,15 +247,6 @@ def _record_cases() -> tuple[RecordCase, ...]:
         ordered_at=UTC_NOW,
         status_updated_at=UTC_NOW + timedelta(minutes=1),
     )
-    accepted_delta = AcceptedTaskDelta(
-        accepted_delta_id=_uuid(41),
-        candidate_ref=_uuid(40),
-        message_ref=_uuid(2),
-        operation=TaskDeltaOperation.ADD_GOAL,
-        goal_text="查询订单 O-1001",
-        input_binding_refs=(_uuid(8),),
-        accepted_at=UTC_NOW,
-    )
     task_transition = TaskStateTransition(
         task_id=_uuid(4),
         request_unit_id=_uuid(5),
@@ -290,24 +283,6 @@ def _record_cases() -> tuple[RecordCase, ...]:
                 content="查询订单 O-1001",
                 received_at=UTC_NOW,
             ),
-        ),
-        RecordCase(
-            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-            RequestUnderstandingRecord(
-                run_id=_uuid(3),
-                message_ref=_uuid(2),
-                schema_version="request_understanding_record.p0.v1",
-                candidate_validation=(
-                    CandidateValidationRecord(
-                        candidate_ref=_uuid(40),
-                        decision=CandidateValidationDecision.ACCEPT,
-                    ),
-                ),
-                accepted_delta_refs=(_uuid(41),),
-                validated_task_state_version=1,
-                next_move_candidate_ref=_uuid(42),
-            ),
-            logical_children=(accepted_delta,),
         ),
         RecordCase(
             P0RecordCode.TASK_RECORD,
@@ -685,23 +660,7 @@ def test_relation_aware_commands_supply_all_five_external_codec_relations() -> N
     )
 
 
-def test_logical_child_commands_are_sufficient_for_the_existing_codec() -> None:
-    understanding_case = _case(P0RecordCode.REQUEST_UNDERSTANDING_RECORD)
-    understanding_command = SaveRequestUnderstandingCommand(
-        record=understanding_case.record,
-        accepted_deltas=understanding_case.logical_children,
-    )
-    understanding_envelope = encode_persistence_record(
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-        understanding_command.record,
-        logical_children=understanding_command.accepted_deltas,
-    )
-    assert len(understanding_envelope.payload.logical_children) == 1
-    assert (
-        understanding_envelope.payload.logical_children[0].child_code
-        is P0LogicalChildCode.ACCEPTED_TASK_DELTA
-    )
-
+def test_task_transition_command_is_sufficient_for_the_generic_codec() -> None:
     task_case = _case(P0RecordCode.TASK_RECORD)
     request_unit_case = _case(P0RecordCode.REQUEST_UNIT_RECORD)
     transition = task_case.logical_children[0]
@@ -782,7 +741,7 @@ def test_command_derived_external_relations_still_fail_closed_when_swapped() -> 
 
 def test_registry_is_exact_immutable_and_closed() -> None:
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
-    legacy = _v1_registry()
+    non_ru = _non_ru_registry()
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
 
     assert tuple(code.value for code in P0RecordCode) == EXPECTED_RECORD_CODES
@@ -804,21 +763,22 @@ def test_registry_is_exact_immutable_and_closed() -> None:
         (ru_code, RU_V2_SCHEMA_VERSION)
     ]
 
-    assert isinstance(legacy, MappingProxyType)
-    assert tuple(legacy) == tuple(P0RecordCode)
-    assert len(legacy) == 17
-    for code in P0RecordCode:
+    assert isinstance(non_ru, MappingProxyType)
+    assert tuple(non_ru) == tuple(
+        code for code in P0RecordCode if code is not ru_code
+    )
+    assert len(non_ru) == 16
+    for code in non_ru:
         v1_spec = catalog[(code, f"{code.value}.p0.v1")]
-        assert legacy[code] is v1_spec
-        if code is not ru_code:
-            assert P0_PERSISTENCE_REGISTRY[code] is v1_spec
+        assert non_ru[code] is v1_spec
+        assert P0_PERSISTENCE_REGISTRY[code] is v1_spec
 
     with pytest.raises(TypeError):
         P0_PERSISTENCE_REGISTRY[P0RecordCode.CONVERSATION_RECORD] = (
             P0_PERSISTENCE_REGISTRY[P0RecordCode.MESSAGE_RECORD]
         )
     with pytest.raises(TypeError):
-        legacy[P0RecordCode.CONVERSATION_RECORD] = legacy[
+        non_ru[P0RecordCode.CONVERSATION_RECORD] = non_ru[
             P0RecordCode.MESSAGE_RECORD
         ]
 
@@ -833,7 +793,7 @@ def test_registry_is_exact_immutable_and_closed() -> None:
 def test_projection_matrices_are_exact_and_reference_targets_are_closed() -> None:
     top_level_rules = tuple(
         rule
-        for spec in _v1_registry().values()
+        for spec in P0_PERSISTENCE_REGISTRY.values()
         for rule in spec.projection_decisions
     )
     child_rules = tuple(
@@ -852,9 +812,9 @@ def test_projection_matrices_are_exact_and_reference_targets_are_closed() -> Non
         if rule.classification.value in reference_classes
     )
 
-    assert len(top_level_rules) == 66
-    assert len(child_rules) == 7
-    assert len(reference_rules) == 45
+    assert len(top_level_rules) == 70
+    assert len(child_rules) == 8
+    assert len(reference_rules) == 49
     assert (
         sum(
             rule.classification.value == "EXTERNAL_REQUIRED_P0_REFERENCE"
@@ -891,7 +851,7 @@ def test_all_projection_decision_signatures_match_the_canonical_matrix() -> None
                 "1" if rule.unique else "0",
             )
         )
-        for registry in (_v1_registry(), P0_LOGICAL_CHILD_SPECS)
+        for registry in (P0_PERSISTENCE_REGISTRY, P0_LOGICAL_CHILD_SPECS)
         for owner_code, spec in registry.items()
         for rule in spec.projection_decisions
     ]
@@ -991,7 +951,7 @@ def test_source_external_and_child_references_are_recomputed_and_sorted() -> Non
         assert actual == expected[case.code]
         assert len(envelope.record_references) == len(set(envelope.record_references))
         total_references += len(envelope.record_references)
-    assert total_references == 43
+    assert total_references == 40
 
 
 @pytest.mark.parametrize(
@@ -1334,7 +1294,7 @@ def test_envelope_input_rejects_non_native_python_values(
     surface: str,
 ) -> None:
     code = (
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        P0RecordCode.TOOL_CALL_RECORD
         if surface == "child_datetime"
         else P0RecordCode.MESSAGE_RECORD
     )
@@ -1357,7 +1317,7 @@ def test_envelope_input_rejects_non_native_python_values(
     elif surface == "child_datetime":
         child = envelope.payload.logical_children[0]
         data = json.loads(child.model_dump_json())["data"]
-        data["accepted_at"] = UTC_NOW
+        data["started_at"] = UTC_NOW
         forged_child = child.model_copy(update={"data": freeze_json_value(data)})
         forged = envelope.model_copy(
             update={
@@ -1478,35 +1438,6 @@ def test_duplicate_source_projection_fails_closed() -> None:
     )
 
 
-def test_accepted_delta_is_locally_closed_against_parent() -> None:
-    case = _case(P0RecordCode.REQUEST_UNDERSTANDING_RECORD)
-    child = case.logical_children[0]
-
-    invalid_cases = (
-        ((), P0PersistenceIntegrityCategory.CHILD_MISMATCH),
-        (
-            (child.model_copy(update={"message_ref": _uuid(70)}),),
-            P0PersistenceIntegrityCategory.CHILD_MISMATCH,
-        ),
-        (
-            (child.model_copy(update={"candidate_ref": _uuid(71)}),),
-            P0PersistenceIntegrityCategory.CHILD_MISMATCH,
-        ),
-        (
-            (child.model_copy(update={"input_binding_refs": (_uuid(8), _uuid(8))}),),
-            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH,
-        ),
-    )
-    for children, expected_category in invalid_cases:
-        with pytest.raises(P0PersistenceIntegrityError) as raised:
-            encode_persistence_record(
-                case.code,
-                case.record,
-                logical_children=children,
-            )
-        assert raised.value.category is expected_category
-
-
 def test_tool_attempt_children_exactly_cover_attempt_count() -> None:
     case = _case(P0RecordCode.TOOL_CALL_RECORD)
     child = case.logical_children[0]
@@ -1567,13 +1498,12 @@ def test_task_transition_is_locally_valid_but_remains_graph_required() -> None:
 @pytest.mark.parametrize(
     "record_code",
     (
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
         P0RecordCode.TASK_RECORD,
         P0RecordCode.TOOL_CALL_RECORD,
     ),
 )
 @pytest.mark.parametrize("tamper", ("metadata", "code", "parent", "identity", "data"))
-def test_all_three_child_payloads_reject_each_tamper_surface(
+def test_all_generic_child_payloads_reject_each_tamper_surface(
     record_code: P0RecordCode,
     tamper: str,
 ) -> None:
@@ -1687,7 +1617,7 @@ def test_decode_recomputes_all_metadata_and_rejects_tampering(
     code = (
         P0RecordCode.CONVERSATION_RECORD
         if tamper == "owner"
-        else P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+        else P0RecordCode.TASK_RECORD
         if tamper == "child"
         else P0RecordCode.MESSAGE_RECORD
     )
@@ -1798,14 +1728,13 @@ def test_exact_source_model_mirrors_and_specialized_version_are_enforced() -> No
     (
         P0RecordCode.CONVERSATION_RECORD,
         P0RecordCode.MESSAGE_RECORD,
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
         P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
         P0RecordCode.RUN_TASK_LINK_RECORD,
         P0RecordCode.EVAL_RESULT_RECORD,
         P0RecordCode.EVAL_EXECUTION_FAILURE_RECORD,
     ),
 )
-def test_all_seven_record_schema_mirrors_fail_closed(
+def test_all_six_generic_record_schema_mirrors_fail_closed(
     record_code: P0RecordCode,
 ) -> None:
     case = _case(record_code)
@@ -1858,7 +1787,7 @@ def test_integrity_error_is_bounded_opaque_and_discards_unsafe_context() -> None
 
 
 @pytest.mark.parametrize("case", _record_cases(), ids=lambda case: case.code.value)
-def test_all_17_records_strict_json_round_trip(case: RecordCase) -> None:
+def test_all_16_generic_records_strict_json_round_trip(case: RecordCase) -> None:
     envelope = encode_persistence_record(
         case.code,
         case.record,
@@ -1884,8 +1813,7 @@ def test_all_17_records_strict_json_round_trip(case: RecordCase) -> None:
     assert decoded.logical_children == case.logical_children
 
 
-# 01-07E CODEC_EXPAND contract.  Imports deliberately live with the additive
-# tests so the protected v1 fixture/import surface above remains byte-stable.
+# Request Understanding v2 remains an exact-version-only codec contract.
 import ast
 import inspect
 import warnings
@@ -1911,12 +1839,13 @@ from mini_agent.core.task_state import (
 RU_V2_SCHEMA_VERSION = "request_understanding_record.p0.v2"
 
 
-def _v1_registry() -> MappingProxyType:
+def _non_ru_registry() -> MappingProxyType:
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
     return MappingProxyType(
         {
             code: catalog[(code, f"{code.value}.p0.v1")]
             for code in P0RecordCode
+            if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
         }
     )
 
@@ -2280,22 +2209,20 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
     )
 
 
-def test_version_catalog_is_exact_immutable_and_only_ru_is_dual() -> None:
+def test_version_catalog_is_exact_immutable_and_current_only() -> None:
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
-    legacy = _v1_registry()
+    non_ru = _non_ru_registry()
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
 
     assert isinstance(catalog, MappingProxyType)
-    assert len(catalog) == 18
+    assert len(catalog) == 17
     assert {code for code, _ in catalog} == set(P0RecordCode)
     counts = Counter(code for code, _ in catalog)
-    assert all(
-        count
-        == (2 if code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD else 1)
-        for code, count in counts.items()
-    )
-    for code, spec in legacy.items():
+    assert set(counts.values()) == {1}
+    for code, spec in non_ru.items():
         assert catalog[(code, f"{code.value}.p0.v1")] is spec
+        assert P0_PERSISTENCE_REGISTRY[code] is spec
+    assert (ru_code, f"{ru_code.value}.p0.v1") not in catalog
 
     v2_spec = catalog[
         (ru_code, RU_V2_SCHEMA_VERSION)
@@ -2314,16 +2241,12 @@ def test_version_catalog_is_exact_immutable_and_only_ru_is_dual() -> None:
     assert len(P0_PERSISTENCE_REGISTRY) == 17
     assert P0_PERSISTENCE_REGISTRY[ru_code] is v2_spec
     assert P0_PERSISTENCE_REGISTRY[ru_code].source_model is RequestUnderstandingRecordV2
-    assert legacy[ru_code].source_model is RequestUnderstandingRecord
-    for code in P0RecordCode:
-        if code is not ru_code:
-            assert P0_PERSISTENCE_REGISTRY[code] is legacy[code]
     assert len(P0_LOGICAL_CHILD_SPECS) == 3
     assert (
         P0_LOGICAL_CHILD_SPECS[
             P0LogicalChildCode.ACCEPTED_TASK_DELTA
         ].source_model
-        is AcceptedTaskDelta
+        is AcceptedTaskDeltaV2
     )
 
 
@@ -2377,8 +2300,10 @@ def test_versioned_codec_signatures_require_explicit_exact_pair() -> None:
 
 
 @pytest.mark.parametrize("case", _record_cases(), ids=lambda case: case.code.value)
-def test_all_17_v1_pairs_have_legacy_semantic_parity(case: RecordCase) -> None:
-    version = _v1_registry()[case.code].record_schema_version
+def test_all_16_non_ru_pairs_have_generic_semantic_parity(
+    case: RecordCase,
+) -> None:
+    version = _non_ru_registry()[case.code].record_schema_version
     versioned = persistence_module.encode_persistence_record_versioned(
         case.code,
         version,
@@ -2386,13 +2311,13 @@ def test_all_17_v1_pairs_have_legacy_semantic_parity(case: RecordCase) -> None:
         external_references=case.external_references,
         logical_children=case.logical_children,
     )
-    legacy = encode_persistence_record(
+    generic = encode_persistence_record(
         case.code,
         case.record,
         external_references=case.external_references,
         logical_children=case.logical_children,
     )
-    assert versioned == legacy
+    assert versioned == generic
 
     decoded = persistence_module.decode_persistence_record_versioned(
         versioned.model_dump_json(),
@@ -2400,12 +2325,12 @@ def test_all_17_v1_pairs_have_legacy_semantic_parity(case: RecordCase) -> None:
         expected_schema_version=version,
         correlation_ref=_uuid(299),
     )
-    legacy_decoded = decode_persistence_record(
-        legacy.model_dump_json(),
+    generic_decoded = decode_persistence_record(
+        generic.model_dump_json(),
         expected_record_code=case.code,
         correlation_ref=_uuid(299),
     )
-    assert decoded == legacy_decoded
+    assert decoded == generic_decoded
 
 
 def test_ru_v2_projection_specs_are_exact_8_and_4() -> None:
@@ -2601,7 +2526,7 @@ def test_ru_v2_references_are_exact_sorted_and_duplicate_paths_collapse() -> Non
     (
         (
             (P0RecordCode.REQUEST_UNDERSTANDING_RECORD, RU_V2_SCHEMA_VERSION),
-            "v1",
+            "message",
             P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH,
         ),
         (
@@ -2610,7 +2535,7 @@ def test_ru_v2_references_are_exact_sorted_and_duplicate_paths_collapse() -> Non
                 "request_understanding_record.p0.v1",
             ),
             "v2",
-            P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
         ),
         (
             (P0RecordCode.MESSAGE_RECORD, RU_V2_SCHEMA_VERSION),
@@ -2632,11 +2557,13 @@ def test_versioned_encode_exact_pair_never_infers_or_falls_back(
     record_kind: str,
     category: P0PersistenceIntegrityCategory,
 ) -> None:
-    v1_case = _case(P0RecordCode.REQUEST_UNDERSTANDING_RECORD)
+    message_case = _case(P0RecordCode.MESSAGE_RECORD)
     v2_case = _request_understanding_v2_case("partial")
-    record = v1_case.record if record_kind == "v1" else v2_case.record
+    record = message_case.record if record_kind == "message" else v2_case.record
     children = (
-        v1_case.logical_children if record_kind == "v1" else v2_case.children
+        message_case.logical_children
+        if record_kind == "message"
+        else v2_case.children
     )
     with pytest.raises(P0PersistenceIntegrityError) as raised:
         persistence_module.encode_persistence_record_versioned(
@@ -2649,12 +2576,6 @@ def test_versioned_encode_exact_pair_never_infers_or_falls_back(
 
 
 def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None:
-    v1 = _case(P0RecordCode.REQUEST_UNDERSTANDING_RECORD)
-    v1_envelope = encode_persistence_record(
-        v1.code,
-        v1.record,
-        logical_children=v1.logical_children,
-    )
     v2_envelope = _encode_v2(_request_understanding_v2_case("partial"))
 
     cases: tuple[
@@ -2662,14 +2583,9 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         ...,
     ] = (
         (
-            v1_envelope,
-            RU_V2_SCHEMA_VERSION,
-            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
-        ),
-        (
             v2_envelope,
             "request_understanding_record.p0.v1",
-            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
         ),
         (
             v2_envelope,
@@ -2700,7 +2616,7 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
     for raw, category in (
         (
             outer,
-            P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
         ),
         (inner, P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH),
         (source, P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED),
@@ -2710,34 +2626,14 @@ def test_versioned_decode_rejects_cross_version_and_metadata_confusion() -> None
         assert raised.value.category is category
 
 
-def test_active_switch_preserves_v1_compatibility_until_contract() -> None:
+def test_current_switch_requires_exact_ru_v2_codec() -> None:
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
-    legacy_registry = _v1_registry()
-    v1_version = f"{ru_code.value}.p0.v1"
 
     assert P0_PERSISTENCE_REGISTRY[ru_code] is catalog[
         (ru_code, RU_V2_SCHEMA_VERSION)
     ]
-    assert legacy_registry[ru_code] is catalog[(ru_code, v1_version)]
-    assert P0_PERSISTENCE_REGISTRY[ru_code] is not legacy_registry[ru_code]
-
-    v1_case = _case(ru_code)
-    legacy_envelope = encode_persistence_record(
-        v1_case.code,
-        v1_case.record,
-        external_references=v1_case.external_references,
-        logical_children=v1_case.logical_children,
-    )
-    explicit_v1_envelope = persistence_module.encode_persistence_record_versioned(
-        v1_case.code,
-        v1_version,
-        v1_case.record,
-        external_references=v1_case.external_references,
-        logical_children=v1_case.logical_children,
-    )
-    assert explicit_v1_envelope == legacy_envelope
-    assert legacy_envelope.record_schema_version == v1_version
+    assert (ru_code, f"{ru_code.value}.p0.v1") not in catalog
 
     case = _request_understanding_v2_case("partial")
     with pytest.raises(P0PersistenceIntegrityError) as raised:
@@ -2748,7 +2644,7 @@ def test_active_switch_preserves_v1_compatibility_until_contract() -> None:
         )
     assert (
         raised.value.category
-        is P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
     )
 
     envelope = _encode_v2(case)
@@ -3821,17 +3717,17 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         assert not decoder_name_references
         assert not decoder_attribute_references
 
-    legacy = _v1_registry()
+    non_ru = _non_ru_registry()
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-    assert len(P0_PERSISTENCE_REGISTRY) == len(legacy) == len(P0RecordCode) == 17
+    assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
+    assert len(non_ru) == 16
     assert (
         P0_PERSISTENCE_REGISTRY[ru_code].record_schema_version
         == RU_V2_SCHEMA_VERSION
     )
-    for code in P0RecordCode:
-        assert legacy[code].record_schema_version == f"{code.value}.p0.v1"
-        if code is not ru_code:
-            assert P0_PERSISTENCE_REGISTRY[code] is legacy[code]
+    for code, spec in non_ru.items():
+        assert spec.record_schema_version == f"{code.value}.p0.v1"
+        assert P0_PERSISTENCE_REGISTRY[code] is spec
 
     decoded = _decode_v2(_encode_v2(_request_understanding_v2_case("partial")))
     for forbidden_claim in (
@@ -3846,10 +3742,10 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         assert not hasattr(decoded, forbidden_claim)
 
 
-def test_codec_expand_preserves_all_legacy_projection_counts() -> None:
+def test_current_codec_projection_counts_are_exact() -> None:
     top = tuple(
         rule
-        for spec in _v1_registry().values()
+        for spec in P0_PERSISTENCE_REGISTRY.values()
         for rule in spec.projection_decisions
     )
     child = tuple(
@@ -3867,7 +3763,7 @@ def test_codec_expand_preserves_all_legacy_projection_counts() -> None:
         for rule in (*top, *child)
         if rule.classification.value in reference_classes
     )
-    assert (len(top), len(child), len(references)) == (66, 7, 45)
+    assert (len(top), len(child), len(references)) == (70, 8, 49)
 
 
 @pytest.mark.parametrize("selected_version", ("v1", "v2"))
@@ -3923,10 +3819,10 @@ def test_versioned_decode_bounds_non_string_outer_version_before_membership(
 
 
 @pytest.mark.parametrize("case", _record_cases(), ids=lambda case: case.code.value)
-def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
+def test_all_16_non_ru_versioned_decode_outer_categories_match_generic(
     case: RecordCase,
 ) -> None:
-    legacy_registry = _v1_registry()
+    non_ru_registry = _non_ru_registry()
     envelope = encode_persistence_record(
         case.code,
         case.record,
@@ -3935,7 +3831,7 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
     )
     other_active_version = next(
         spec.record_schema_version
-        for code, spec in legacy_registry.items()
+        for code, spec in non_ru_registry.items()
         if code is not case.code
     )
 
@@ -3978,8 +3874,8 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
         ),
     )
 
-    for raw, legacy_category, versioned_category in mutations:
-        with pytest.raises(P0PersistenceIntegrityError) as legacy_raised:
+    for raw, generic_category, versioned_category in mutations:
+        with pytest.raises(P0PersistenceIntegrityError) as generic_raised:
             decode_persistence_record(
                 raw,
                 expected_record_code=case.code,
@@ -3989,10 +3885,10 @@ def test_all_17_v1_versioned_decode_outer_version_categories_match_legacy(
             persistence_module.decode_persistence_record_versioned(
                 raw,
                 expected_record_code=case.code,
-                expected_schema_version=legacy_registry[
+                expected_schema_version=non_ru_registry[
                     case.code
                 ].record_schema_version,
                 correlation_ref=_uuid(299),
             )
-        assert legacy_raised.value.category is legacy_category
+        assert generic_raised.value.category is generic_category
         assert versioned_raised.value.category is versioned_category
