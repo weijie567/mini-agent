@@ -1,8 +1,8 @@
 ---
-phase: 01
-reviewed: 2026-07-30T12:59:50Z
+phase: 01-cycle-1-e2e-01
+reviewed: 2026-07-30T15:23:37Z
 depth: standard
-reviewed_head: 11d6d0886d34a64b37ca34b0cfbc1aa1434b3044
+reviewed_head: 8e75d33de8e25b3d38f09c6b289a95f7db06eb8d
 files_reviewed: 73
 files_reviewed_list:
   - AGENTS.md
@@ -79,117 +79,101 @@ files_reviewed_list:
   - tests/integration/test_postgres_recovery.py
   - tests/integration/test_postgres_v2_request_understanding_writes.py
 findings:
-  critical: 1
-  warning: 2
+  critical: 0
+  warning: 0
   info: 0
-  total: 3
-status: issues_found
+  total: 0
+status: clean
 ---
 
 # Phase 01：代码审查报告
 
-**Reviewed:** 2026-07-30T12:59:50Z
+**Reviewed:** 2026-07-30T15:23:37Z
 **Depth:** standard
 **Files Reviewed:** 73
-**Status:** issues_found
+**Status:** clean
 
 ## Summary
 
-本次在独立 review-artifact Worktree 中，对 Phase 01 从 activation base `624475681847be5a8e463e32dafd28a0483b213b` 到 exact HEAD `11d6d0886d34a64b37ca34b0cfbc1aa1434b3044` 的 73 个显式文件执行 standard review。审查覆盖可信 Session / HTTP 身份边界、Request Understanding v2、Runtime 状态与持久化、Control Gateway、read Tool、恢复、Qwen Adapter、真实 offline Composition、PostgreSQL exact-Run Evidence、Eval Harness / Grader / artifacts 及相关 Component / Integration / E2E 测试。
+本次在 exact-integration-SHA review-artifact Worktree 中，对 Phase 01 固定的 73 个显式文件执行 post-remediation standard review。审查覆盖可信 Session / HTTP 身份边界、Request Understanding v2、Runtime 状态与持久化、Control Gateway、read Tool、恢复、Qwen Adapter、offline Composition、PostgreSQL exact owner-scoped Evidence、Eval Harness / Grader / authenticated artifacts，以及相关 Component / Integration / E2E 测试。
 
-- `CONFIRMED`：requested = accepted = unique = 73；每项均为仓库内 regular tracked file，literal `git ls-files -- <path>` 精确返回单一路径；HEAD 与 tree 分别为 `11d6d0886d34a64b37ca34b0cfbc1aa1434b3044`、`2814fdccb79a6739b33156a4ca13e104ea64daf2`。
-- `CONFIRMED`：未运行 Graphify；review 前工作树干净。
-- `CONFIRMED`：定向执行 127 项高风险测试，结果为 `127 passed in 37.35s`；覆盖 Qwen Adapter、PresentationPolicy、AgentRunService、ReadToolExecutor、RestartRecoveryService 与真实 HTTP → Runtime → PostgreSQL → Eval E2E。
-- `CONFIRMED`：`git diff --check` 对 scope 内变更无输出。
-- `OPEN`：未执行 canonical 全量 `uv run pytest`；没有在本次 review 重跑 migration chain 或完整 Component / Integration suite。
-- `CONFIRMED`：`DASHSCOPE_API_KEY` 与 `DASHSCOPE_BASE_URL` 在 review 环境中均缺失，因此未运行 credentialed Qwen Baseline；不能据此形成真实 Qwen PASS / FAIL。
+- `CONFIRMED`：requested = accepted = unique = 73；每项均为仓库内 regular tracked file，literal tracked 输出精确等于单个相对路径；workflow transcript scope 数量一致，未出现 outside-repository 或 file-not-found skip。
+- `CONFIRMED`：审查 HEAD 为 `8e75d33de8e25b3d38f09c6b289a95f7db06eb8d`，commit tree 为 `2a36dc2231cdc8410b6874f2462014b337ccafa3`；审查开始前 tracked worktree 干净。
+- `CONFIRMED`：前次 `CR-01`、`WR-01`、`WR-02` 均已关闭；下文记录可复现证据。
+- `CONFIRMED`：本轮未发现新的 Critical、Warning 或 Info。所有 reviewed files 满足本次 correctness、security 与 maintainability 审查标准。
+- `CONFIRMED`：未运行 Graphify，也未修改任何 source、test、active canonical owner 或 artifact 数据文件。
 
-审查发现 1 个 Critical 与 2 个 Warning。未发现可证实的 Info 项。`CR-01` 必须完成修复、验证和重新 exact-head review，不得以 owner 裁决替代修复；两个 Warning 必须修复，或由对应 canonical owner 按治理规则显式裁决。上述条件满足前，Phase 01 不得推进 lifecycle / release gate。
+## Remediation Closure
 
-## Critical
+### CR-01：RESOLVED — Qwen credential transport 强制 HTTPS
 
-### CR-01：Qwen Adapter 允许通过明文 HTTP 发送 API Key
+`src/mini_agent/infrastructure/model/qwen_responses.py:46-88` 先用 `httpx.URL` 解析 endpoint，只接受 `scheme == "https"` 且 host 非空；HTTP、无 host、不可解析 URL 与无效依赖均在 transport 前失败。所有构造失败分支在抛出前清空 `self`、`base_url`、`api_key`、`client` 与 `parsed_url` 的局部引用。
 
-**File:** `src/mini_agent/infrastructure/model/qwen_responses.py:46-64`
+`tests/component/model/test_qwen_responses_adapter.py:270-372` 通过 reachable traceback graph 检查验证：错误链与 qwen module frame locals 中不可达 base URL、API key、adapter、client 或 parsed URL；HTTP / invalid URL 不创建 transport；重复失败返回独立的新异常对象。
 
-**Issue:** `CONFIRMED`：构造器把 `http` 和 `https` 都视为合法 scheme；随后 `_invoke_presentation()`（125–132 行）和 `_v2_invoke_request_understanding()`（204–211 行）无条件把真实 `api_key` 放入 `Authorization: Bearer ...`。credentialed runner 又直接消费 `DASHSCOPE_BASE_URL`。因此 `DASHSCOPE_BASE_URL=http://...` 是当前代码接受的配置，并会在真实网络请求中明文传输凭据。Spec 给出的 DashScope endpoint 是 HTTPS；现有测试没有断言 HTTP endpoint 必须在发起 transport 前失败。`OPEN`：是否还要把 host 限定为批准的地域 / Workspace endpoint，应由 Provider / security owner 裁决；但最低限度的 HTTPS 要求不依赖该裁决。
+### WR-01：RESOLVED — 非 executable Case 在执行前整批 fail closed
 
-**Fix:**
+`src/mini_agent/evaluation/harness.py:397-400,2302-2332` 只允许 `EXECUTABLE` 与 `REGRESSION_GATE`，并在 pair completeness、Provider / Adapter 构造、SUT、nonce、Trace、Grader、Result staging / persistence 之前解析并检查全部 selected Case。任一 Case 非 executable 时，整批返回空 `results`、`command_passed=False`，仅为受阻 Case 追加无 `trace_ref` 的 bounded `CASE_SETUP_FAILED`。
 
-```python
-try:
-    parsed_url = httpx.URL(base_url)
-except Exception:
-    raise ValueError("base_url must be a valid HTTPS URL") from None
-if parsed_url.scheme != "https" or parsed_url.host is None:
-    raise ValueError("base_url must be a valid HTTPS URL")
-```
+`tests/integration/evaluation/test_e2e01_offline_harness.py:2714-2847,7500-7575` 覆盖全 `CONTRACT_DEFINED`、mixed lifecycle、`REGRESSION_GATE` 与带 credential 的 Qwen lane；断言受阻批次不会触达 Provider、Qwen adapter / transport、SUT、nonce、Trace、Grader 或 Result。`tests/e2e/test_e2e01_http_eval.py:178-206` 进一步验证真实 offline HTTP composition 不会为当前 `CONTRACT_DEFINED` Case 产生 `PASS` Result。
 
-同时增加 negative test：传入 `http://...` 时构造或 baseline preflight 必须 fail closed，MockTransport / external transport 调用次数保持为 0；若批准代理或地域 endpoint，需要以显式 allowlist 表达，不能回退到任意 HTTP。
+### WR-02：RESOLVED — active owner 状态描述已对齐 exact HEAD
 
-## Warnings
+`docs/evaluation/agent-evaluation-strategy.md`、`docs/evaluation/p0-eval-coverage-matrix.md`、`docs/implementation/e2e01-thin-slice-implementation-spec.md`、`docs/implementation/e2e01-thin-slice-multi-agent-plan.md`、`PROJECT_DIRECTION.md`、`README.md`、`AGENTS.md` 与 `docs/business-capabilities.md` 已统一区分：
 
-### WR-01：Harness 可把 `CONTRACT_DEFINED` Case 持久化为 `PASS`
+- 已存在并可复现的 offline HTTP → Runtime → PostgreSQL evidence、真实 `EvalCaseSut`、exact owner-scoped Evidence reader 与 credential-aware Qwen runner；
+- 仍为 `CONTRACT_DEFINED` 的 authenticated Case / manifest / loader，以及执行前 lifecycle fail-closed；
+- 尚未形成的 lifecycle-valid Trajectory / E2E Result、真实 credentialed Qwen Baseline、canonical 应用启动、回归报告与 production readiness。
 
-**File:** `src/mini_agent/evaluation/harness.py:2324-2464`
-
-**Issue:** `CONFIRMED`：Harness 选择 Case 后直接执行、持久化 `EvalResultRecord`，并在所有结果为 `PASS` 时设置 `command_passed=True`，没有检查 `case.lifecycle_status`。与此同时 artifact loader 在 `src/mini_agent/evaluation/artifacts.py:351`、`492-493` 强制 manifest 与每个 Case 都是 `CONTRACT_DEFINED`；`evals/cases/e2e01-thin-slice.v1.json` 与 manifest 也保持该值。canonical Eval owner 在 `docs/evaluation/agent-evaluation-strategy.md:273-282` 明确规定 `CONTRACT_DEFINED` 尚无可运行 Harness / Fixture，且“不得把 `CONTRACT_DEFINED` 记为通过”。本次实际通过的 E2E test 在 `tests/e2e/test_e2e01_http_eval.py:178-193` 正好证明当前链会对这批 Case 产出 `command_passed=True` 和 `PASS` records。这会让 lifecycle 尚未裁决的执行证据被下游误用为 gate PASS。
-
-**Fix:** 在 lifecycle 尚为 `CONTRACT_DEFINED` 时先修复代码侧的 fail-closed 边界，不得用当前错误的 `PASS` 结果反向推进 lifecycle。Harness 应在任何受测执行或 Result staging 前拒绝非 `EXECUTABLE` / `REGRESSION_GATE` Case：
-
-```python
-executable = {"EXECUTABLE", "REGRESSION_GATE"}
-if any(
-    self._artifacts.case_by_id(case_id).lifecycle_status not in executable
-    for case_id in selected_ids
-):
-    return EvalLaneRunOutcome(
-        lane=lane,
-        results=(),
-        execution_failures=(lifecycle_failure,),
-        command_passed=False,
-    )
-```
-
-在 lifecycle 尚未切换时，测试应断言不会写入 `PASS`，而不是以 `command_passed=True` 证明 release gate。待其余 post-execution quality gate 通过后，再由 canonical Coverage Matrix owner 根据已经对齐的实现事实裁决 lifecycle；随后由独立 Eval implementation Packet 同步 Case artifact、manifest、authenticated hash 与 loader 的 closed value，并重跑适用门禁。这个后继 activation 不得与当前 fail-closed 修复混为一次未经审查的状态跳变。
-
-### WR-02：Active 状态 owner 仍把 exact HEAD 已实现的纵向组件写成 `NOT_FOUND`
-
-**File:** `docs/evaluation/p0-eval-coverage-matrix.md:7`
-
-**Issue:** `CONFIRMED`：该 active Eval mapping 在 7、269–282 行仍称真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root、HTTP / Trajectory / E2E Result 与 credentialed runner 未出现；`docs/evaluation/agent-evaluation-strategy.md:483`、`PROJECT_DIRECTION.md:347`、`README.md:15,68` 也保留同类结论。exact HEAD 已存在 `OfflineE2E01Composition`（`src/mini_agent/bootstrap.py:518`）、真实 `execute_case`（811 行）、PostgreSQL exact owner-scoped reader（`src/mini_agent/infrastructure/persistence/postgres.py:947`）、Harness wiring（`src/mini_agent/bootstrap.py:1022`）和 credential-aware Qwen runner（`src/mini_agent/evaluation/harness.py:1991`）；本次定向 E2E 又实际通过。Case lifecycle 是否晋级仍是独立 owner 决策，但“实现是否存在”已不是 `NOT_FOUND`。当前漂移会把后续 planning 错误路由成重复实现，也违反项目的 owner-first cross-file alignment 规则。
-
-**Fix:** 在任何 lifecycle 晋级之前，先按 single-writer owner 顺序更新 canonical Eval owner 的实现事实：把真实 offline vertical 与 credential-aware runner 标为 `CONFIRMED / IMPLEMENTED`，把本环境 credentialed result 保持为 `NOT_RUN`，并明确此时 lifecycle 仍是 `CONTRACT_DEFINED`。随后按 owner 引用关系分别同步 `PROJECT_DIRECTION.md`、`README.md`、`AGENTS.md` 与 `docs/business-capabilities.md` 的状态横幅。只有事实前提已对齐且其余 post-execution quality gate 通过后，Coverage Matrix owner 才进行一次 lifecycle 裁决；不得先在错误事实下裁决再重复裁决，也不得把“代码存在 / offline E2E 可复现”扩大成 canonical product startup、真实 Qwen Result、production readiness 或整个 P0 完成。
+这些状态没有把代码存在或测试通过扩大为 lifecycle activation、产品完成或生产就绪。
 
 ## Verification
 
-执行命令：
+exact HEAD 仓库级 canonical 门禁证据：
 
 ```text
-PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider -q \
-  tests/component/model/test_qwen_responses_adapter.py \
-  tests/component/core/test_presentation_policy.py \
-  tests/component/application/test_agent_run_service.py \
-  tests/component/application/test_read_tool_executor.py \
-  tests/component/application/test_restart_recovery_service.py \
-  tests/e2e/test_e2e01_http_eval.py
+uv sync --all-groups
+docker compose up --wait -d db
+docker compose --profile test up --wait -d db-test
+uv run alembic upgrade head
+PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider
 ```
 
 结果：
 
 ```text
-127 passed in 37.35s
+2004 passed, 1 deselected, 12 warnings in 122.94s
 ```
+
+本次 reviewer 额外执行的补救定向回归：
+
+```text
+PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider -q \
+  tests/component/model/test_qwen_responses_adapter.py \
+  tests/integration/evaluation/test_e2e01_offline_harness.py \
+  tests/e2e/test_e2e01_http_eval.py \
+  -k 'rejects_invalid_url or rejects_invalid_injected_dependency or contract_defined or mixed_lifecycle or regression_gate'
+
+14 passed, 403 deselected in 13.50s
+```
+
+其他机械检查：
+
+- `git diff --check`：通过，无输出。
+- Case artifact SHA-256：`58622417bf2221ded9951a8f41c29bdfd2d5fbe71109ade64c1b52f27ede4440`，与 authenticated manifest 一致。
+- Model Script artifact SHA-256：`2b42415c1c705b30b34f7a80d810726d59f7891da52daa390208d62fa1aa7176`，与 authenticated manifest 一致。
 
 未执行：
 
-- canonical 全量 `uv run pytest`
-- `uv run alembic upgrade head`
-- `uv run pytest -m qwen_baseline`（两项必需环境变量均缺失）
-- lint / type-check / build（项目尚无 canonical 命令）
+- `uv run pytest -m qwen_baseline`：本次审查禁止外部 Qwen 调用，也未使用真实 secret。
+- lint / type-check / build：项目尚无 canonical 命令。
+
+## Remaining Non-Claims
+
+本报告不证明 Case 已进入 `EXECUTABLE` / `REGRESSION_GATE`，不形成 lifecycle-valid Trajectory / E2E PASS / FAIL，不证明真实 credentialed Qwen Baseline、canonical 产品启动、回归报告、production readiness 或 P0 产品完成。
 
 ---
 
-_Reviewed: 2026-07-30T12:59:50Z_
+_Reviewed: 2026-07-30T15:23:37Z_
 _Reviewer: Codex (gsd-code-reviewer)_
 _Depth: standard_
