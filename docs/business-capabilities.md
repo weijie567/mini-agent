@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜P0 业务能力说明
 
-更新日期：2026-07-30<br>
+更新日期：2026-07-31<br>
 文档状态：P0 目标业务范围  
 适用读者：业务、产品、研发、测试及项目评审人员
 
-> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。仓库当前已完成第一最薄 `E2E01-01/04` 的 W1 / W2、RU v2 contract closure、offline Composition、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped evidence reader、HTTP → Runtime → PostgreSQL 纵向装配和 credential-aware Qwen runner；direct Composition tests 已对本人订单与非本人 / 不存在安全等价形成可复现 evidence，exact code / gate ancestor `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。但 artifacts、manifest、loader 与 canonical Case lifecycle 仍为 `CONTRACT_DEFINED`（Requirements / Phase lifecycle 仍为 `0/8`），尚无 lifecycle-valid Trajectory / E2E Result、真实 credentialed Qwen Baseline Result、canonical 产品启动或回归报告；E2E-01 其余 Case、E2E-02、RAG / policy 与模拟退款完整链也不属于当前已实现切片。因此本文描述的仍是 **P0 目标能力与验收边界**，不代表完整 P0 已开发完成或接入生产系统；详细实现状态与证据见[多 Agent 实施计划](implementation/e2e01-thin-slice-multi-agent-plan.md)。
+> 本文回答“P0 用哪一条最小但完整的业务纵向切片证明 Agent 架构成立”。仓库已完成第一最薄 `E2E01-01/04` 的 W1 / W2、RU v2 contract closure、offline Composition、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped evidence reader、HTTP → Runtime → PostgreSQL 纵向装配和 credential-aware Qwen runner。六个 authenticated physical Case、manifest 与 loader 当前为 `REGRESSION_GATE`；默认 `uv run pytest` 覆盖全部 16 个 authenticated variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，exact security re-review barrier `22c4cfa...` 的 canonical 串行套件为 `2007 passed, 1 deselected, 12 warnings`。Controlled UAT 由获授权的 `CODEX_INTEGRATOR` 直接驱动同一纵向链并作 scoped `PASS`，但 `end_user_uat` 仍为 `NOT_RUN`。真实 credentialed Qwen Baseline Result、canonical 产品启动、E2E-01 其余 Case、E2E-02、RAG / policy 与模拟退款完整链仍不属于已完成能力。因此本文描述的仍是 **P0 目标能力与验收边界**，不代表完整 P0 已开发完成、生产就绪或接入真实电商系统；详细实现状态与证据见[多 Agent 实施计划](implementation/e2e01-thin-slice-multi-agent-plan.md)与[Phase 01 Eval Results](../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。
 
 ## 1. P0 目标与定位
 
