@@ -66,7 +66,7 @@ integration PR → main
 
 `W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。RU v2 contract closure、01-08 vertical integration 与 01-08A runner 依次由 PR #149、#153、#156 与 #158 形成 reviewed barriers；Phase Review 的 CR-01 / WR-01 分别由 PR #161 / #162 修复。完整 writer、allowlist、barrier、失败 lineage 与执行顺序只以[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)为准；README 不维护第二套 execution map 或计数。用户已明确暂时停用 Graphify；后续不运行或引用 Graphify，也不把 freshness 作为当前或后续 barrier 门禁。Historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) 与 Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) 只保留 review evidence，不 rebase / force-push。
 
-Post-execution review / fix closure、Validation、controlled UAT、Eval activation / Results / regression gate 与 mandatory Security re-review 已完成。当前 release closure 只剩 execution-plan / `.planning` 派生状态的手工同步、`RTA-D01` 最终用户裁决，以及显式 integration → `main` PR 的合并决定；禁止用 stock lifecycle API 自动推进 [STATE](.planning/STATE.md)、[ROADMAP](.planning/ROADMAP.md) 或 [REQUIREMENTS](.planning/REQUIREMENTS.md)。
+Post-execution review / fix closure、Validation、controlled UAT、Eval activation / Results / regression gate、mandatory Security re-review、execution-plan 与 `.planning` 派生状态同步均已完成。当前 release gate 只剩 `RTA-D01` 最终用户裁决，以及显式 integration → `main` PR 的合并决定；Phase completion transition在两项决定完成前保持锁定，禁止用 stock lifecycle API 自动推进 [STATE](.planning/STATE.md)、[ROADMAP](.planning/ROADMAP.md) 或 [REQUIREMENTS](.planning/REQUIREMENTS.md)。
 
 ## GSD
 
