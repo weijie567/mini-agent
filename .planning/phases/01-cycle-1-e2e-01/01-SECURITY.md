@@ -4,8 +4,11 @@ phase_name: cycle-1-e2e-01
 status: SECURED_WITH_ACCEPTED_RISK
 security_gate: PASS
 derived_non_normative: true
-audit_base_sha: 04442c9262a8a94e9c2c87a89831e99e41aa1418
+audit_base_sha: c88a684f9510290c8570e0d4090ccb97b38afd80
+initial_audit_base_sha: 04442c9262a8a94e9c2c87a89831e99e41aa1418
 audit_date: 2026-07-31
+mandatory_review_trigger: REGRESSION_GATE_AND_RELEASE_GATE
+release_gate_risk_confirmation: PENDING_USER_DECISION
 asvs_level: 1
 asvs_level_basis: INFERRED_FROM_GSD_DEFAULT
 block_on: open
@@ -54,13 +57,15 @@ unregistered_flags: 0
 
 **Block Policy:** `open`
 
-结论为 **PASS WITH ACCEPTED RISK**。本次审计在 exact base
+结论为 **PASS WITH ACCEPTED RISK**。初审在 exact base
 `04442c9262a8a94e9c2c87a89831e99e41aa1418` 上核验了全部 49 个
 `*-PLAN.md`、24 个 `*-SUMMARY.md`、active canonical owners、Phase review /
-validation / eval-review、当前实现和测试。32 个 Plan 含 `<threat_model>`，
-共有 236 个源记录；按 `(Plan 文件, threat_id)` 保留后得到 236/236 无损映射。
-仅按 `threat_id` 去重会得到 212 个 ID，并错误丢失 24 个历史 / replacement
-重复记录，因此本报告不以去重数替代 gate 分母。
+validation / eval-review、当时实现和测试。目标 Case 推进为 `REGRESSION_GATE` 后，
+本报告又在 exact integration
+`c88a684f9510290c8570e0d4090ccb97b38afd80` 完成 mandatory re-review。32 个 Plan
+含 `<threat_model>`，共有 236 个源记录；按 `(Plan 文件, threat_id)` 保留后得到
+236/236 无损映射。仅按 `threat_id` 去重会得到 212 个 ID，并错误丢失 24 个历史 /
+replacement 重复记录，因此本报告不以去重数替代 gate 分母。
 
 ## 1. 审计边界与结论纪律
 
@@ -93,8 +98,8 @@ validation / eval-review、当前实现和测试。32 个 Plan 含 `<threat_mode
 
 本次没有 `OPEN`。`01-REVIEW.md` 的 exact reviewed head 早于本次 base，因此只作
 支持材料；最终实现证据以本次 base 上的源码核验、focused fault injection 与完整
-串行测试为准。`RTA-D01` 的 acceptance 则来自新合并的 canonical owner ruling，
-不是 Plan 或测试自证。
+串行测试为准。`RTA-D01` 的 acceptance 来自 PR #175 合并的 canonical owner
+ruling，不是 Plan 或测试自证。
 
 ### 1.3 机械盘点与会计不变量
 
@@ -286,14 +291,16 @@ canonical acceptance 和 active 实现证据共同决定：
 | Out of scope | 不覆盖真实生产 SLO、其他 Tool、RAG / Evidence、确认、ActionPolicy、`create_refund`、幂等或 `RESULT_UNKNOWN` |
 | Mandatory review triggers | 引入任何 Action / 副作用；建立 canonical 产品启动或生产可用性目标；引入 Trace outbox / async delivery；关键事件分类变化；目标 Case 从 `EXECUTABLE` 推进到 `REGRESSION_GATE`；进入任何 release gate 之前 |
 | Acceptance authority | scoped canonical owner ruling；不是 `01-07A-PLAN.md` 自证，也不是测试通过推导 |
+| Latest mandatory review | exact `c88a684f9510290c8570e0d4090ccb97b38afd80`；`REGRESSION_GATE` 未扩大 read-only scope，未引入 Action、canonical startup、Trace outbox / async delivery 或事件分类变化 |
+| Release decision | canonical acceptance 当前仍有效；是否在本次 Phase 1 release gate 继续接受，保留给用户最终裁决。拒绝接受将阻断 release，而不是把风险改写为 `CLOSED` |
 | Audit date | 2026-07-31 |
 
 `EVB-D01` 虽在 Plan 中同为 `ACCEPT / BOUNDED`，但其当前 strict bounded grader
 实现已验证 mitigation，因此不进入本 accepted-risk log。
 
-## 11. 验证命令与结果
+## 11. 初审验证命令与结果（historical）
 
-所有命令均在 `/private/tmp/phase01-security-audit-r2`、branch
+以下命令均在初审 Worktree `/private/tmp/phase01-security-audit-r2`、branch
 `codex/phase01-security-audit-r2`、HEAD
 `04442c9262a8a94e9c2c87a89831e99e41aa1418` 执行。
 
@@ -337,11 +344,64 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider
   Qwen 网络调用。
 - 12 个 warning 为 Starlette / httpx cookie API deprecation，不改变本次 threat
   accounting 或 acceptance 结论。
-- `01-EVAL-REVIEW.md` 记录的 lifecycle-valid Trajectory / E2E Result、CI regression
-  gate 和真实 credentialed Qwen baseline 缺口仍是 Eval / release readiness 缺口；
-  本报告不把它们误写成已完成。
+- 在该 historical base 上，lifecycle-valid Trajectory / E2E Result 与 regression
+  gate 尚未出现；本段保留初审事实，不覆盖第 12 节的 current mandatory re-review。
 
-## 12. 最终 Gate 与非声明
+## 12. Security Audit 2026-07-31 — `REGRESSION_GATE` Mandatory Re-review
+
+### 12.1 触发与 delta
+
+触发条件已经发生：六个 authenticated physical Case 从 `EXECUTABLE` 推进为
+`REGRESSION_GATE`，并进入 default `uv run pytest`。从 canonical owner ruling
+`04442c9262a8a94e9c2c87a89831e99e41aa1418` 到本次 exact audit barrier
+`c88a684f9510290c8570e0d4090ccb97b38afd80`：
+
+- 没有新增或修改 Phase `PLAN.md` / `<threat_model>`；49 Plans、32 个 threat
+  models、236 source occurrences 与 212 unique IDs 的会计分母保持不变。
+- 产品 Runtime 的可信身份、owner-scoped `get_order`、Trace / persistence
+  原子性、Tool / Action surface 均未扩张；没有引入 Action、副作用、canonical
+  application startup、Trace outbox / async delivery 或关键事件分类变化。
+- Eval delta 只包括 controlled UAT、lifecycle-valid Result / aggregate report、
+  Request Understanding grader false-positive 修复、全部 16 authenticated variants
+  的默认 gate，以及 Case / manifest / loader 的 `REGRESSION_GATE` 原子同步。
+- PR #175 建立的 `RTA-D01` canonical acceptance 仍限定于 read-only thin slice。
+  PR #183 只批准 regression-gate synchronization，不改变、扩大或消除该风险。
+
+因此本次触发不会产生新的 threat source occurrence，也没有把 `RTA-D01` 改写为
+`CLOSED`。它验证的是现有 acceptance 的适用范围仍未漂移。
+
+### 12.2 Current exact commands
+
+所有命令均在 `/private/tmp/phase01-security-audit-r3`、branch
+`codex/phase01-security-audit-r3`、HEAD
+`c88a684f9510290c8570e0d4090ccb97b38afd80` 执行。
+
+| Evidence | Result | Security meaning |
+|---|---|---|
+| §11.1 同一 acceptance / transfer focused set | `79 passed in 16.53s` | 关键 Trace / terminal persistence 失败仍 fail closed；恢复、最小披露、strict reader 与 Grader 绕过控制未退化 |
+| artifact consistency + strict loader | `30 passed in 0.27s` | `REGRESSION_GATE` bytes / digest / closed values 一致；重新认证的 lifecycle downgrade 仍拒绝 |
+| `tests/e2e/test_e2e01_http_eval.py` | `6 passed in 55.84s` | 全部 16 variants 经 HTTP → Runtime → PostgreSQL；非本人 / 不存在、参数漂移、Provider / Presentation fault 保持 bounded 且无私有披露 |
+| canonical serial full suite | `2007 passed, 1 deselected, 12 warnings in 147.45s` | current exact tree 的默认 regression gate 通过；deselected 项仍是 non-release credentialed Qwen lane |
+
+当前 [Eval re-audit](01-EVAL-REVIEW.md) 为 `79/100 / NEEDS_WORK /
+critical_gap_count: 0`：Component、Trajectory、E2E 三层已在 scoped deterministic
+offline gate 中覆盖；`EFFICIENCY`、end-user UX、hosted CI、canonical startup /
+monitoring 与真实 credentialed Qwen 仍不属于已完成生产能力。
+
+### 12.3 Mandatory review disposition
+
+- `RTA-D01`: `ACCEPTED / BOUNDED / UNCHANGED`
+- `threats_closed: 235`
+- `threats_accepted: 1`
+- `threats_open: 0`
+- `security_gate: PASS WITH ACCEPTED RISK`
+- `release_gate_risk_confirmation: PENDING_USER_DECISION`
+
+若用户在最终 release gate 不继续接受 `RTA-D01`，本次 release 必须阻断并先建立新的
+canonical mitigation / owner ruling；不得把拒绝接受静默转换为 `OPEN` 已解决或
+`CLOSED`。
+
+## 13. 最终 Gate 与非声明
 
 ### Gate
 
@@ -359,8 +419,9 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider
 
 - 不声明 accepted risk 已消除，也不把 `PASS` 解释为 production readiness。
 - 不声明 canonical 应用启动、生产部署或 P0 产品已完成。
-- 不声明 lifecycle-valid Trajectory / E2E Eval Result、回归报告、CI gate 或真实
-  credentialed Qwen baseline 已完成。
+- scoped lifecycle-valid Trajectory / E2E Result、aggregate report 与 default local
+  `REGRESSION_GATE` 已存在；本报告不把它们扩写成 hosted CI、真实 credentialed
+  Qwen baseline、完整 E2E-01 / P0 或 production readiness。
 - 不声明真实电商、支付、退款、物流集成；`create_refund` 仍只允许表示后续 P0 的
   模拟退款动作。
 - 不声明 Evidence Binding、精确确认、ActionPolicy、幂等副作用与 `RESULT_UNKNOWN`
