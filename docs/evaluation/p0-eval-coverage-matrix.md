@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜P0 Eval Coverage Matrix
 
-更新日期：2026-07-27<br>
+更新日期：2026-07-30<br>
 状态：P0 规范性评测覆盖契约  
 适用范围：两条 P0 E2E、跨组件风险、首批 Eval Case family 与激活顺序
 
-> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 versioned Fixture / Dataset artifacts 与 loader、`ScriptedModelProvider`、`QwenResponsesAdapter`、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery 及对应测试；现有 Harness 执行只使用 synthetic / in-memory SUT 与 Port，不是真实 Runtime / HTTP / PostgreSQL 纵向链。真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root、HTTP / Trajectory / E2E Result、credentialed Qwen Baseline 与结果报告仍未出现；下列 Case 当前均为 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
+> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 versioned Fixture / Dataset artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、HTTP → Runtime → PostgreSQL 离线纵向装配和 credential-aware Qwen runner。exact code / gate ancestor `851c06c79438a3be3a6968d31ec54485e0ee3c82` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。定向 Composition 测试可以形成纵向 evidence，但真实 artifacts 通过 `OfflineEvalHarness` 时仍以 `CONTRACT_DEFINED` 在 Harness 派发 SUT 前 fail closed；没有 lifecycle-valid `PASS / FAIL`、真实 credentialed Qwen Baseline Result 或回归报告。下列 Case 当前均保持 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
 
 ## 1. Owner 与使用规则
 
@@ -197,7 +197,7 @@ release_gate = FAIL
 → 回复与 Trace
 ```
 
-上述两个 Case 的具体编码与双轨执行契约见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。创建 Spec 或只完成 Component / in-process Eval machinery 都不改变生命周期状态；只有真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 和真实 HTTP / Trajectory / E2E 执行能够生成可复现的结构化 Eval Result 后，Case 才能改为 `EXECUTABLE`。
+上述两个 Case 的具体编码与双轨执行契约见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。创建 Spec、完成 Component machinery 或形成直接离线纵向 evidence 都不自动改变生命周期状态。真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与 HTTP → Runtime → PostgreSQL 纵向装配已经出现，只构成激活前提；仍须先完成 post-execution quality gate，再由本文 owner 裁决目标 Case 是否进入 `EXECUTABLE`，最后通过独立 Eval implementation Packet 同步 authenticated artifacts / manifest / loader，才能生成 lifecycle-valid 结构化 Eval Result。
 
 ### Cycle 2：完成 E2E-01
 
@@ -266,20 +266,20 @@ grading:
     - T
 ```
 
-完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码，其 artifacts / loader、Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness` 和结构化 Result / Failure machinery 已落盘。当前 Harness 测试仍依赖 `SyntheticSut` 与 in-memory Trace / Result fake，缺少真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 和 HTTP / Trajectory / E2E Result，因此 Case 仍不可执行；`E2E01-05` 等待 Cycle 2 的 scoped contract。
+完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码，其 artifacts / loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已落盘。定向 Composition 测试已形成 HTTP → Runtime → PostgreSQL 纵向 evidence；machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则通过 Harness 的 lifecycle gate fail closed。因此 Case 当前仍不可执行，尚无 lifecycle-valid Result；`E2E01-05` 等待 Cycle 2 的 scoped contract。
 
 ## 9. 当前验证状态
 
 | 项目 | 状态 |
 |---|---|
 | Strategy 与 Case contract | `CONFIRMED`：已由 active 文档定义 |
-| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED / COMPONENT_MACHINERY_PRESENT`：artifacts / loader、双 Provider Adapter、13 个确定性 Grader、in-process Harness 与结构化 Result / Failure machinery 已出现；尚无真实纵向运行结果 |
+| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED / OFFLINE_VERTICAL_IMPLEMENTED / LIFECYCLE_NOT_ACTIVATED`：artifacts / loader、双 Provider Adapter、13 个确定性 Grader、Harness、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已出现；直接纵向 evidence 不等于 lifecycle-valid Result |
 | `G-RAG-INFRA` | `CONTRACT_DEFINED / PARTIAL_PREREQUISITE`：固定 pgvector Compose 与基础 migration 已出现；RAG capability probe、Corpus / Index 和 Gate Result 均未出现，不能宣称 RAG 基础设施 Gate 已激活 |
 | 15 个 Case family | `CONTRACT_DEFINED` |
-| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / LOADABLE_ARTIFACT_PRESENT`：authenticated loader 可加载并校验；因没有真实 `EvalCaseSut` 纵向链，仍不是可执行 Dataset |
-| Eval loader / Provider / Grader / Harness / Result machinery | `CONFIRMED / COMPONENT_ONLY`：exact-base focused suite 的 191 项测试通过；Harness 测试使用 `SyntheticSut` 与 in-memory Trace / Result fake，Qwen Adapter 测试使用 MockTransport |
-| 真实 Eval 纵向链 | `NOT_FOUND`：真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与 HTTP / Trajectory / E2E Result 均未出现 |
-| Qwen Baseline / Regression Report | `ADAPTER_PRESENT / REAL_RUN_NOT_FOUND`：`QwenResponsesAdapter` 与空 `NOT_RUN` 零网络 preflight 已出现；credentialed runner、真实 Baseline Result 与报告未出现 |
+| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / LOADABLE_ARTIFACT_PRESENT`：authenticated loader 可加载并校验；真实纵向链已存在，但 artifacts / manifest / loader 尚未获 owner 激活，仍不是 lifecycle-executable Dataset |
+| Eval loader / Provider / Grader / Harness / Result machinery | `CONFIRMED / OFFLINE_VERTICAL_PRESENT`：exact `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`；test-only executable machinery 与真实 `CONTRACT_DEFINED` Harness gate 已分离 |
+| 真实 Eval 纵向链 | `CONFIRMED / IMPLEMENTED`：`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader 与 HTTP → Runtime → PostgreSQL 定向 evidence 已出现；尚无 lifecycle-valid Case Result 或发布 Gate |
+| Qwen Baseline / Regression Report | `RUNNER_PRESENT / REAL_RUN_NOT_RUN / REPORT_NOT_FOUND`：credential-aware runner 与 missing-env 空 `NOT_RUN` 已出现；真实 credentialed Baseline Result 与回归报告未出现 |
 | 普通质量、延迟和成本阈值 | `OPEN` |
 | 线上监控与真实产品指标 | `OPEN`，且不属于当前已验证能力 |
 
