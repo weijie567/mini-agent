@@ -49,15 +49,15 @@ _PHYSICAL_CODE_VERSION_PAIRS = (
         "request_understanding_record",
         "request_understanding_record.p0.v1",
     ),
-    (
-        "request_understanding_record",
-        "request_understanding_record.p0.v2",
-    ),
     ("request_unit_record", "request_unit_record.p0.v1"),
     ("run_task_link_record", "run_task_link_record.p0.v1"),
     ("task_record", "task_record.p0.v1"),
     ("tool_call_record", "tool_call_record.p0.v1"),
     ("trace_event_record", "trace_event_record.p0.v1"),
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v2",
+    ),
 )
 _CODE_VERSION_PAIRS = tuple(sorted(_PHYSICAL_CODE_VERSION_PAIRS))
 _CODE_VERSION_CHECK = " OR ".join(

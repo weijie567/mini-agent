@@ -678,6 +678,40 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
     models_tree = ast.parse(models_source)
     application_catalog_name = "P0_RECORD_SCHEMA_VERSION_CATALOG"
 
+    def folded_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = folded_string(node.left)
+            right = folded_string(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+
+    application_imports = [
+        node
+        for node in ast.walk(models_tree)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("mini_agent.application")
+        )
+        or (
+            isinstance(node, ast.Import)
+            and any(
+                alias.name.startswith("mini_agent.application")
+                for alias in node.names
+            )
+        )
+    ]
+    assert len(application_imports) == 1
+    application_import = application_imports[0]
+    assert isinstance(application_import, ast.ImportFrom)
+    assert application_import.module == "mini_agent.application.persistence"
+    assert [
+        (alias.name, alias.asname)
+        for alias in application_import.names
+    ] == [("P0RecordCode", None)]
+
     assert not any(
         (
             isinstance(node, ast.ImportFrom)
@@ -696,8 +730,7 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
             and node.attr == application_catalog_name
         )
         or (
-            isinstance(node, ast.Constant)
-            and node.value == application_catalog_name
+            folded_string(node) == application_catalog_name
         )
         for node in ast.walk(models_tree)
     )
@@ -715,6 +748,53 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
             "vars",
         }
     }
+    assert not {
+        node.attr
+        for node in ast.walk(models_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {
+            "__dict__",
+            "__globals__",
+            "__module__",
+            "__subclasses__",
+            "import_module",
+        }
+    }
+    assert not {
+        alias.name.split(".", maxsplit=1)[0]
+        for node in ast.walk(models_tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+        if alias.name.split(".", maxsplit=1)[0]
+        in {"builtins", "importlib", "sys"}
+    }
+
+    physical_literal = _literal_pair_tuple(
+        models_tree,
+        "_PHYSICAL_CODE_VERSION_PAIRS",
+    )
+    assert physical_literal == _EXPANDED_CODE_VERSION_PAIRS
+    assert len(physical_literal) == len(set(physical_literal)) == 18
+
+    code_version_assignments = [
+        node
+        for node in models_tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_CODE_VERSION_PAIRS"
+        )
+    ]
+    assert len(code_version_assignments) == 1
+    expected_derivation = ast.parse(
+        "tuple(sorted(_PHYSICAL_CODE_VERSION_PAIRS))",
+        mode="eval",
+    ).body
+    assert ast.dump(
+        code_version_assignments[0].value,
+        include_attributes=False,
+    ) == ast.dump(expected_derivation, include_attributes=False)
 
     assert len(persistence_models._RECORD_CODES) == 17
     assert set(persistence_models._RECORD_CODES) == {
