@@ -11,9 +11,9 @@
 - 受控 Runtime、Session / HTTP Adapter、PostgreSQL record / `get_order` Adapter 与恢复路径；
 - `e2e01-thin-fixture-v1`、versioned Eval artifacts、双 Provider Adapter、13 个确定性 Grader、Harness 及结构化 Result / Failure machinery；
 - `OfflineE2E01Composition`、real `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、直接 HTTP → Runtime → PostgreSQL 离线纵向 evidence 与 credential-aware Qwen runner；
-- `B_RU_V2_CONTRACT = 5c84e0e...`、`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d08...` 已形成；Phase Review 的 Qwen HTTPS / traceback secret 与 Harness lifecycle findings 已修复，exact code / gate ancestor `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。
+- `B_RU_V2_CONTRACT = 5c84e0e...`、`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d08...` 已形成；Phase Review findings、controlled UAT、Eval / Security re-review 与 lifecycle activation 均已完成，exact security re-review barrier `22c4cfa...` 的 canonical offline gate 为 `2007 passed, 1 deselected, 12 warnings`。
 
-这表示第一最薄离线纵向实现与 direct Composition evidence 已可复现，不表示 canonical 产品进程、Case 或完整 P0 已通过。真实 artifacts、manifest、loader 与 canonical lifecycle 继续保持 `CONTRACT_DEFINED`；它们通过 `OfflineEvalHarness` 时会在 Harness 派发 SUT 前 fail closed，不能形成 lifecycle-valid `PASS / FAIL`。当前仍没有 canonical 应用启动、真实 credentialed Qwen Baseline Result、回归报告或 production readiness。
+这表示第一最薄 scoped deterministic offline slice 已形成真实 `REGRESSION_GATE`：六个 authenticated physical Case 的全部 16 个 variants 经 `OfflineEvalHarness → HTTP → Runtime → PostgreSQL` 得到 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，并进入默认 `uv run pytest`。Controlled UAT 由获授权的 `CODEX_INTEGRATOR` 直接执行并作 scoped `PASS`，但 `end_user_uat` 为 `NOT_RUN`。当前仍没有 canonical 应用启动、真实 credentialed Qwen Baseline、hosted CI、完整 E2E-01 / P0 或 production readiness；`RTA-D01` 是否在 release gate 继续接受以及是否合并到 `main` 仍待用户裁决。
 
 实时范围与权威边界见：
 
@@ -66,7 +66,7 @@ integration PR → main
 
 `W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。RU v2 contract closure、01-08 vertical integration 与 01-08A runner 依次由 PR #149、#153、#156 与 #158 形成 reviewed barriers；Phase Review 的 CR-01 / WR-01 分别由 PR #161 / #162 修复。完整 writer、allowlist、barrier、失败 lineage 与执行顺序只以[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)为准；README 不维护第二套 execution map 或计数。用户已明确暂时停用 Graphify；后续不运行或引用 Graphify，也不把 freshness 作为当前或后续 barrier 门禁。Historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) 与 Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) 只保留 review evidence，不 rebase / force-push。
 
-当前下一步是 post-execution quality gate：review / fix closure、validation、Eval、Security、受控 UAT 与 release decision。`E2E01-01/04` Case 仍为 `CONTRACT_DEFINED`，Requirements / Phase lifecycle 仍为 `0/8`；只有完整 quality gate 通过后，才由 canonical Coverage Matrix owner 裁决 Case lifecycle，并通过独立 Eval Packet 同步 authenticated artifacts / manifest / loader。派生 [STATE](.planning/STATE.md) 与 [ROADMAP](.planning/ROADMAP.md) 必须在 owner 裁决后再手工推进，不能反向覆盖 active owner。
+Post-execution review / fix closure、Validation、controlled UAT、Eval activation / Results / regression gate 与 mandatory Security re-review 已完成。当前 release closure 只剩 execution-plan / `.planning` 派生状态的手工同步、`RTA-D01` 最终用户裁决，以及显式 integration → `main` PR 的合并决定；禁止用 stock lifecycle API 自动推进 [STATE](.planning/STATE.md)、[ROADMAP](.planning/ROADMAP.md) 或 [REQUIREMENTS](.planning/REQUIREMENTS.md)。
 
 ## GSD
 
