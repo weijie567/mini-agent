@@ -1446,12 +1446,17 @@ W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 �
 - Fixture / Dataset 版本一致性；
 - 受影响 active 文件的 cross-file impact scan。
 
-最终门禁以仓库中真实出现且验证通过的配置为准，唯一 canonical 命令清单见 `AGENTS.md` 第 6 节。W1/W2 已使依赖同步、根目录 Compose 数据库、migration 与当前 `uv run pytest` 套件可执行，并为已合并的 Core / Application、Runtime、Infrastructure 与 Eval component / integration 行为提供证据；由于 canonical Composition Root、real `EvalCaseSut`，以及它们与已实现 PostgreSQL evidence reader及真实 HTTP → Runtime → PostgreSQL → Eval 的纵向装配仍未出现，该套件不得描述成 Trajectory / E2E gate。
+最终门禁以仓库中真实出现且验证通过的配置为准，唯一 canonical 命令清单见 `AGENTS.md` 第 6 节。W1/W2、01-08 与 01-08A 已使依赖同步、根目录 Compose 数据库、migration、显式 `OfflineE2E01Composition`、real `EvalCaseSut`、PostgreSQL exact owner-scoped evidence reader 及直接 HTTP → Runtime → PostgreSQL 离线纵向 evidence 可由当前 `uv run pytest` 套件复现；exact code / gate ancestor `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。真实 artifacts、manifest、loader 与 Case lifecycle 仍为 `CONTRACT_DEFINED`，通过 Harness 时会在派发 SUT 前 fail closed，因此该套件仍不得描述成 lifecycle-valid Trajectory / E2E Eval gate、回归报告、canonical 产品启动或 readiness。
 
-以下仍只是 Implementation Spec 的后续目标，当前不得宣称可执行：
+Credential-aware Qwen runner 及其 opt-in 命令已经实现，但默认 suite 通过 `-m "not qwen_baseline"` 排除真实外部 marker。缺少凭据时，该命令持久化空 `NOT_RUN` 后 expected skip；凭据存在但 Case 未激活时，也会在 Provider transport 前产生 bounded lifecycle failure。两者都不构成真实 credentialed Qwen Baseline Result：
 
 ```bash
 uv run pytest -m qwen_baseline
+```
+
+Canonical 产品进程启动仍是后续目标；当前不得宣称下列命令可用：
+
+```bash
 uv run uvicorn mini_agent.main:app --reload
 ```
 
@@ -1577,13 +1582,13 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | GSD | `ACTIVE / EFFECTIVE / B_01_08A_FORMED / POST_EXECUTION_QUALITY_NEXT` | activation PR #10生效；execution-map denominator继续固定为42；01-08A handoff / runner PR #155–#158已形成`B_01_08A = 11d6d08...`，本次r7只索引已reviewed execution evidence并切换后继到post-execution quality |
 | W1 Infra / Runtime | `OFFLINE_VERTICAL_IMPLEMENTED / PRODUCT_STARTUP_PARTIAL` | W1/W2已实现Core / Application / Runtime / Session HTTP / PostgreSQL与恢复边界；PR #153新增显式offline Composition Root与真实纵向装配；仍不含canonical产品进程入口、默认local Provider或生产外部系统接入 |
 | W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / REAL_OFFLINE_SUT_AND_QWEN_RUNNER_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；PR #29实现Provider Adapter、Harness、Graders与Result/Failure machinery；PR #153装配real HTTP / Runtime / PostgreSQL Eval SUT；PR #158增加credential-aware Qwen runner；仍无credentialed Qwen Baseline Result |
-| W1 集成验证 | `CONFIRMED / B_01_08A_POST_MERGE` | 在仓库根目录执行canonical依赖同步、两个Compose health gate、`uv run alembic upgrade head`与串行`uv run pytest`；`B_01_08A`为`1991 passed, 1 deselected, 12 warnings`，missing-env marker为持久化三条`NOT_RUN`后`1 skipped`，tracked tree clean |
+| W1 集成验证 | `CONFIRMED / POST_REVIEW_REMEDIATION` | `B_01_08A`初始 post-merge gate为`1991 passed, 1 deselected, 12 warnings`；Phase Review 的Qwen HTTPS / traceback secret与Harness lifecycle findings经PR #161/#162修复后，exact code / gate ancestor `851c06c...`的canonical依赖同步、两个Compose health gate、Alembic与串行full为`2004 passed, 1 deselected, 12 warnings` |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
 | W2 dispatch | `RU_V2_CONTRACT_AND_01_08A_REVIEWED_MERGED / B_01_08A_FORMED / POST_EXECUTION_QUALITY_NEXT` | PR #149形成`B_RU_V2_CONTRACT = 5c84e0e...`；PR #153形成`B_01_08 = b8a2cf3...`；PR #156形成`B_01_08A_COMPOSITION = c59eaea...`；PR #158最终形成`B_01_08A = 11d6d08...`、tree `2814fdc...` |
-| `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED / REAL_OFFLINE_EXECUTION_AND_RUNNER_EVIDENCE_AVAILABLE` | 01-08已有真实HTTP→Runtime→PostgreSQL→Eval结果，01-08A已有credential-aware runner与missing-env `NOT_RUN`证据；canonical Coverage Matrix owner尚未完成lifecycle裁决，本execution owner不得自行改为`EXECUTABLE`或`PASS` |
+| `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED / REAL_OFFLINE_EXECUTION_AND_RUNNER_EVIDENCE_AVAILABLE` | 01-08已有直接HTTP→Runtime→PostgreSQL离线纵向evidence，01-08A已有credential-aware runner与missing-env `NOT_RUN`证据；尚无lifecycle-valid Eval Result，canonical Coverage Matrix owner尚未完成lifecycle裁决，本execution owner不得自行改为`EXECUTABLE`或`PASS` |
 
-W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08/01-08A均已有reviewed feature和post-merge证据；numbered Plan 01-08也已出现并执行。Canonical lifecycle与派生checkbox在Coverage Matrix owner裁决前仍保持`0/8`，本execution owner不维护第二份完成分子、Plan/Summary计数或lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08/01-08A均已有reviewed feature和post-merge证据；numbered Plan 01-08也已出现并执行。Canonical Case lifecycle仍为`CONTRACT_DEFINED`，Requirements / Phase checkbox在Coverage Matrix owner裁决前保持`0/8`；本execution owner不维护第二份完成分子、Plan/Summary计数或lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
 
-Cross-file impact scan确认01-08/01-08A实现证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`、`README.md`、`AGENTS.md`以及Business / Eval owner状态横幅；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle。
+Cross-file status PR #163–#168已按single-writer顺序对齐Eval Strategy、Coverage Matrix、Project Direction、Business、`AGENTS.md`与`README.md`；本Packet关闭第8节与本节的execution-owner旧状态，不修改marker-bounded execution map、分母或任何Case / Requirement / Phase lifecycle。派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`须等待canonical lifecycle裁决后手工推进，W2 Validation由后续validation gate拥有；它们当前不得反向覆盖已对齐的active owner。
 
-下一步从exact `B_01_08A = 11d6d0886d34a64b37ca34b0cfbc1aa1434b3044`进入post-execution quality gate；review artifact、validation、Eval/Security/UAT与release decision仍须服从各自既有受控入口，不得把本次feature exact-head review替代整个Phase quality gate。各 active / derived owner 的状态对齐使用独立single-writer Packet，不能替换`B_01_08A`或推进未裁决的Case / Requirement / Phase lifecycle。当前缺少`DASHSCOPE_API_KEY`与`DASHSCOPE_BASE_URL`，因此实际credentialed baseline仍为`NOT_RUN / SKIPPED`，且不得把runner实现解释为credentialed Qwen结果、canonical lifecycle PASS、产品启动或readiness。
+产品实现 barrier仍是exact `B_01_08A = 11d6d0886d34a64b37ca34b0cfbc1aa1434b3044`；后续review artifact复审、validation、Eval/Security/UAT与release decision必须使用包含review remediation和status alignment的最新exact integration descendant，且服从各自受控入口。修复或状态PR都不替换`B_01_08A`、不自行推进Case / Requirement / Phase lifecycle，也不得把feature exact-head review替代整个Phase quality gate。当前缺少`DASHSCOPE_API_KEY`与`DASHSCOPE_BASE_URL`，因此实际credentialed baseline仍为`NOT_RUN / SKIPPED`，且不得把runner实现解释为credentialed Qwen结果、canonical lifecycle PASS、产品启动或readiness。
