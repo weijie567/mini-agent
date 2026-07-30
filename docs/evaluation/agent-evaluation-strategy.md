@@ -465,7 +465,7 @@ EvalExecutionFailureRecord
 
 该记录使对应命令和 Eval Run 失败，但不把基础设施 / Harness 故障误报成 Case 业务断言结果，也不计入 `PASS / FAIL / SKIPPED / NOT_RUN`。如果失败前已经形成满足上表的安全 Trace、Outcome 和至少一个 Grader 结果，则可以正常落盘 `FAIL`；否则 expected Case result 缺失本身由 `RESULT_COMPLETENESS` failure 记录并使命令失败。Failure Record 只保存安全 reason code 和受限诊断引用，不保存 secret、原始 Token、完整 Prompt 或不必要 PII。
 
-当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT；Component / integration machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则继续保持 `CONTRACT_DEFINED` 并在任何受测执行前 fail closed。因此现有证据确认纵向组件与直接离线 HTTP 轨迹存在，但不构成 lifecycle-valid Case `PASS / FAIL`、回归报告或发布 Gate。
+当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT；Component / integration machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则继续保持 `CONTRACT_DEFINED`，通过 `OfflineEvalHarness` 时会在 Harness 派发 SUT 前 fail closed。定向 Composition 测试可以直接调用离线 SUT 形成纵向 evidence，但不绕过 Harness 的 lifecycle gate。因此现有证据确认纵向组件与直接离线 HTTP 轨迹存在，但不构成 lifecycle-valid Case `PASS / FAIL`、回归报告或发布 Gate。
 
 ## 9. P0 Coverage 与激活顺序
 
@@ -515,7 +515,7 @@ EvalExecutionFailureRecord
 - Intent、Tool Calling、Memory 和 RAG 已定义各自目标 Eval obligations。
 - P0 至少需要 Component、Trajectory 和 E2E 三层 Eval。
 - 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned Fixture / Case / script / lane artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader 和离线 Composition Root。
-- 直接 HTTP → Runtime → PostgreSQL 纵向证据、owner-scoped 非本人 / 不存在安全等价以及 credential-aware Qwen runner 均已实现；exact `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。当前真实 Case 仍以 `CONTRACT_DEFINED` fail closed，不能把这些实现证据记成 Case `PASS`。
+- 直接 HTTP → Runtime → PostgreSQL 纵向证据、owner-scoped 非本人 / 不存在安全等价以及 credential-aware Qwen runner 均已实现；exact `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。当前真实 Case 通过 `OfflineEvalHarness` 时仍以 `CONTRACT_DEFINED` fail closed，不能把这些实现证据记成 Case `PASS`。
 
 ### 11.2 `NOT_FOUND`
 
