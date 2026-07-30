@@ -34,7 +34,7 @@
       "path": "evals/cases/e2e01-thin-slice.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-thin-dataset-v1",
-      "sha256": "58622417bf2221ded9951a8f41c29bdfd2d5fbe71109ade64c1b52f27ede4440"
+      "sha256": "7cfe4942299382e54c2ff96848a68a6d8dfe1097c98d098cf84426a2162b91cc"
     },
     {
       "artifact_id": "e2e01-thin-model-scripts",
@@ -57,7 +57,7 @@
     "e2e01-thin-model-scripts",
     "e2e01-thin-lanes"
   ],
-  "case_lifecycle_status": "CONTRACT_DEFINED",
+  "case_lifecycle_status": "EXECUTABLE",
   "eval_result_artifacts_created": false,
   "baseline_result_artifacts_created": false
 }

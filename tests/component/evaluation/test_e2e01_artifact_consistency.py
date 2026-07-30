@@ -389,7 +389,7 @@ def test_fixture_is_the_single_synthetic_source_for_all_consumers() -> None:
     assert "O-9999" not in orders
 
 
-def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
+def test_every_case_maps_requirements_and_is_executable() -> None:
     fixture = _load_json(FIXTURE_PATH)
     dataset = _load_json(CASES_PATH)
     manifest = _load_json(MANIFEST_PATH)
@@ -410,7 +410,7 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
 
     fixture_refs = _ref_ids(fixture)
     for case in cases:
-        assert case["lifecycle_status"] == "CONTRACT_DEFINED"
+        assert case["lifecycle_status"] == "EXECUTABLE"
         assert len(case["requirement_refs"]) >= 3
         assert all(
             requirement_ref.startswith("docs/") and "::" in requirement_ref
@@ -465,8 +465,8 @@ def test_every_case_maps_requirements_and_stays_contract_defined() -> None:
             "runtime_version": manifest["versions"]["runtime_version"],
         }
 
-    assert {case["lifecycle_status"] for case in cases} == {"CONTRACT_DEFINED"}
-    assert manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
+    assert {case["lifecycle_status"] for case in cases} == {"EXECUTABLE"}
+    assert manifest["case_lifecycle_status"] == "EXECUTABLE"
     assert manifest["eval_result_artifacts_created"] is False
     assert manifest["baseline_result_artifacts_created"] is False
 
