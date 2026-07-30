@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -33,6 +34,23 @@ from mini_agent.bootstrap import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _exact_source_version() -> str:
+    completed = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    assert len(revision) == 40
+    assert all(character in "0123456789abcdef" for character in revision)
+    return f"git:{revision}"
+
+
+EXACT_SOURCE_VERSION = _exact_source_version()
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 TARGET_CASE_IDS = (
     "E2E01-01",
@@ -76,12 +94,8 @@ class _MonotonicClock:
 def _artifacts():
     return load_e2e01_artifacts(
         REPO_ROOT,
-        candidate_version=(
-            "git:5c84e0e170e42853af85526805d904bf12671eaa"
-        ),
-        runtime_version=(
-            "git:5c84e0e170e42853af85526805d904bf12671eaa"
-        ),
+        candidate_version=EXACT_SOURCE_VERSION,
+        runtime_version=EXACT_SOURCE_VERSION,
     )
 
 
@@ -221,7 +235,9 @@ async def test_real_http_runtime_postgres_produces_lifecycle_valid_results(
         assert persisted_failures == ()
         assert all(
             result.version_manifest.candidate_version
-            == "git:5c84e0e170e42853af85526805d904bf12671eaa"
+            == EXACT_SOURCE_VERSION
+            and result.version_manifest.runtime_version
+            == EXACT_SOURCE_VERSION
             for result in persisted
         )
         for direct_result in (success, foreign, nonexistent):
