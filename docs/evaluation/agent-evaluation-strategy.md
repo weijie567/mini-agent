@@ -274,12 +274,12 @@ EvalRunConfig
 
 | 状态 | 含义 |
 |---|---|
-| `CONTRACT_DEFINED` | 已定义目标与断言，但尚无可运行 Harness 或 Fixture |
-| `EXECUTABLE` | 已有可复现入口，能产生结构化结果 |
+| `CONTRACT_DEFINED` | 已定义目标与断言；可以已有 loadable artifacts、Component machinery 或 direct execution seam，但尚未获 canonical owner 激活进入 Harness-dispatched 受测执行并产生 lifecycle-valid 结构化结果 |
+| `EXECUTABLE` | authenticated artifacts、manifest 与 loader 已按 owner 裁决同步激活，且可复现入口能产生 lifecycle-valid 结构化结果 |
 | `REGRESSION_GATE` | 已纳入持续门禁，失败会阻止对应发布范围 |
 | `RETIRED` | 已由新 Case 取代，并保留 `supersedes` 追溯 |
 
-不得把 `CONTRACT_DEFINED` 记为通过，也不得把跳过未实现能力记为成功。
+Fixture、Harness、SUT 或 direct Composition seam 的物理存在不自动改变 lifecycle。不得把 `CONTRACT_DEFINED` 记为通过，也不得把跳过未实现能力记为成功。
 
 ## 6. Dataset 治理
 
