@@ -215,21 +215,22 @@ async def test_composed_http_rejects_identity_fields_and_bad_sessions_before_run
             transport=transport,
             base_url="http://testserver",
         ) as client:
+            client.cookies.set("p0_session", RAW_ALICE_SESSION)
             identity_override = await client.post(
                 "/v1/agent/runs",
-                cookies={"p0_session": RAW_ALICE_SESSION},
                 json={
                     "message": "订单 O-1001 状态怎么样？",
                     "customer_id": "customer-B",
                 },
             )
+            client.cookies.clear()
             missing = await client.post(
                 "/v1/agent/runs",
                 json={"message": "订单 O-1001 状态怎么样？"},
             )
+            client.cookies.set("p0_session", "raw-unknown-session")
             unknown = await client.post(
                 "/v1/agent/runs",
-                cookies={"p0_session": "raw-unknown-session"},
                 json={"message": "订单 O-1001 状态怎么样？"},
             )
 
