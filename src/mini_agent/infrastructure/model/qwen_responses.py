@@ -43,21 +43,48 @@ class QwenResponsesAdapterV2:
         api_key: str,
         client: httpx.AsyncClient,
     ) -> None:
+        parsed_url: httpx.URL | None = None
         if (
             not isinstance(base_url, str)
             or not base_url
             or base_url != base_url.strip()
         ):
+            self = None  # type: ignore[assignment]
+            base_url = None  # type: ignore[assignment]
+            api_key = None  # type: ignore[assignment]
+            client = None  # type: ignore[assignment]
+            parsed_url = None
             raise ValueError("base_url must be a concrete injected value")
+        parse_failed = False
         try:
             parsed_url = httpx.URL(base_url)
         except Exception:
-            raise ValueError("base_url must be a valid HTTP URL") from None
-        if parsed_url.scheme not in {"http", "https"} or parsed_url.host is None:
-            raise ValueError("base_url must be a valid HTTP URL")
+            parse_failed = True
+        if (
+            parse_failed
+            or parsed_url is None
+            or parsed_url.scheme != "https"
+            or not parsed_url.host
+        ):
+            self = None  # type: ignore[assignment]
+            base_url = None  # type: ignore[assignment]
+            api_key = None  # type: ignore[assignment]
+            client = None  # type: ignore[assignment]
+            parsed_url = None
+            raise ValueError("base_url must be a valid HTTPS URL")
         if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
+            self = None  # type: ignore[assignment]
+            base_url = None  # type: ignore[assignment]
+            api_key = None  # type: ignore[assignment]
+            client = None  # type: ignore[assignment]
+            parsed_url = None
             raise ValueError("api_key must be a concrete injected value")
         if not isinstance(client, httpx.AsyncClient):
+            self = None  # type: ignore[assignment]
+            base_url = None  # type: ignore[assignment]
+            api_key = None  # type: ignore[assignment]
+            client = None  # type: ignore[assignment]
+            parsed_url = None
             raise TypeError("client must be an injected httpx.AsyncClient")
         self._endpoint = f"{base_url.rstrip('/')}/responses"
         self._api_key = api_key
