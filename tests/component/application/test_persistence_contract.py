@@ -2085,10 +2085,17 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
 
     for tree in (source_tree, test_tree):
         assert not any(
-            isinstance(node, ast.Import)
-            and any(
-                alias.name == "mini_agent.core.task_state"
-                for alias in node.names
+            (
+                isinstance(node, ast.Import)
+                and any(
+                    alias.name == "mini_agent.core.task_state"
+                    for alias in node.names
+                )
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "mini_agent.core"
+                and any(alias.name == "task_state" for alias in node.names)
             )
             for node in ast.walk(tree)
         )
@@ -2111,7 +2118,7 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
             node.attr
             for node in ast.walk(tree)
             if isinstance(node, ast.Attribute)
-            and node.attr in removed_v1_types
+            and node.attr in {*removed_v1_types, "task_state"}
         }
         assert not {
             node.id
