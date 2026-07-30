@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Annotated, Literal, Protocol, get_args
 from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid4, uuid5
 
+import httpx
 from pydantic import BaseModel, Field, create_model, model_validator
 from pydantic_core import TzInfo
 
@@ -75,6 +76,9 @@ from mini_agent.evaluation.graders import (
 from mini_agent.evaluation.scripted_provider import (
     RuntimeFaultDirective,
     ScriptedModelProviderV2,
+)
+from mini_agent.infrastructure.model.qwen_responses import (
+    QwenResponsesAdapterV2,
 )
 
 
@@ -291,6 +295,15 @@ class EvalCaseSut(Protocol):
     ) -> EvalCaseSutResult | None: ...
 
 
+class QwenBaselineSut(Protocol):
+    async def execute_qwen_case(
+        self,
+        *,
+        execution_input: EvalCaseExecutionInput,
+        qwen_provider: QwenResponsesAdapterV2,
+    ) -> EvalCaseSutResult | None: ...
+
+
 class EvalTraceCallbacks(Protocol):
     async def append_eval_case_graded(self, event: TraceEvent) -> None: ...
 
@@ -341,6 +354,14 @@ class QwenBaselinePreflight(AuditOnlyModel):
         ):
             raise ValueError("not-ready baseline requires an empty NOT_RUN record")
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class _QwenBaselineExecution:
+    sut: QwenBaselineSut
+    base_url: str
+    api_key: str
+    transport_factory: Callable[[], httpx.AsyncBaseTransport] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1883,6 +1904,7 @@ class OfflineEvalHarness:
         *,
         artifacts: LoadedE2E01Artifacts,
         sut: EvalCaseSut,
+        qwen_sut: QwenBaselineSut | None = None,
         trace_callbacks: EvalTraceCallbacks,
         result_port: EvalResultPort,
         clock: Callable[[], datetime],
@@ -1903,6 +1925,7 @@ class OfflineEvalHarness:
             raise TypeError("nonce_factory must be callable")
         self._artifacts = private_artifacts
         self._sut = sut
+        self._qwen_sut = qwen_sut
         self._trace_callbacks = trace_callbacks
         self._result_port = result_port
         self._clock = clock
@@ -1964,6 +1987,177 @@ class OfflineEvalHarness:
             raise _fresh_command_error()
         return outcome
 
+    async def run_qwen_baseline(
+        self,
+        *,
+        eval_run_id: UUID,
+        environment: Mapping[str, str],
+        attempt: int = 1,
+        case_ids: Sequence[str] | None = None,
+        transport_factory: (
+            Callable[[], httpx.AsyncBaseTransport] | None
+        ) = None,
+    ) -> EvalLaneRunOutcome:
+        if not _canonical_singleton_state_is_closed():
+            _restore_canonical_singleton_state()
+            raise _fresh_command_error()
+        outcome: EvalLaneRunOutcome | None = None
+        singleton_state_failed = False
+        singleton_state_restored = False
+        try:
+            outcome = await self._run_qwen_baseline_impl(
+                eval_run_id=eval_run_id,
+                environment=environment,
+                attempt=attempt,
+                case_ids=case_ids,
+                transport_factory=transport_factory,
+            )
+            singleton_state_failed = (
+                not _canonical_singleton_state_is_closed()
+            )
+        finally:
+            singleton_state_restored = (
+                _restore_canonical_singleton_state()
+            )
+        if (
+            singleton_state_failed
+            or not singleton_state_restored
+            or outcome is None
+        ):
+            raise _fresh_command_error()
+        return outcome
+
+    async def _run_qwen_baseline_impl(
+        self,
+        *,
+        eval_run_id: UUID,
+        environment: Mapping[str, str],
+        attempt: int,
+        case_ids: Sequence[str] | None,
+        transport_factory: (
+            Callable[[], httpx.AsyncBaseTransport] | None
+        ),
+    ) -> EvalLaneRunOutcome:
+        private_eval_run_id = _detached_closed_uuid(eval_run_id)
+        if private_eval_run_id is None:
+            raise _fresh_command_error()
+        eval_run_id = private_eval_run_id
+        try:
+            lane_artifact = self._artifacts.lane_by_name(
+                "qwen_baseline"
+            )
+            selected_ids = (
+                tuple(lane_artifact.case_refs)
+                if case_ids is None
+                else tuple(case_ids)
+            )
+            required_env = tuple(
+                lane_artifact.credential_policy.get(
+                    "required_env",
+                    (),
+                )
+            )
+            private_environment = dict(environment)
+            pair_ids = {"E2E01-04-A", "E2E01-04-B"}
+            selected_pair = set(selected_ids) & pair_ids
+            if (
+                type(attempt) is not int
+                or attempt < 1
+                or not selected_ids
+                or len(selected_ids) != len(set(selected_ids))
+                or not all(
+                    type(case_id) is str and case_id
+                    for case_id in selected_ids
+                )
+                or not set(selected_ids) <= set(lane_artifact.case_refs)
+                or selected_pair not in (set(), pair_ids)
+                or not all(
+                    type(name) is str and name
+                    for name in required_env
+                )
+                or not all(
+                    type(name) is str
+                    and type(value) is str
+                    and name in required_env
+                    for name, value in private_environment.items()
+                )
+                or (
+                    transport_factory is not None
+                    and not callable(transport_factory)
+                )
+            ):
+                raise ValueError("Qwen baseline input is invalid")
+        except Exception:
+            raise _fresh_command_error()
+
+        preflights = tuple(
+            build_qwen_baseline_preflight(
+                artifacts=self._artifacts,
+                eval_run_id=eval_run_id,
+                case_id=case_id,
+                attempt=attempt,
+                environment=private_environment,
+                real_sut=self._qwen_sut,
+                completed_at=self._clock(),
+            )
+            for case_id in selected_ids
+        )
+        if not all(preflight.ready for preflight in preflights):
+            if (
+                any(preflight.ready for preflight in preflights)
+                or len(
+                    {
+                        preflight.reason
+                        for preflight in preflights
+                    }
+                )
+                != 1
+            ):
+                raise _fresh_command_error()
+            records: list[EvalResultRecord] = []
+            for preflight in preflights:
+                if preflight.not_run_record is None:
+                    raise _fresh_command_error()
+                records.append(
+                    await append_qwen_not_run_record(
+                        result_port=self._result_port,
+                        record=preflight.not_run_record,
+                    )
+                )
+            return EvalLaneRunOutcome(
+                lane="qwen_baseline",
+                results=tuple(records),
+                execution_failures=(),
+                command_passed=False,
+            )
+
+        qwen_sut = self._qwen_sut
+        api_key = private_environment.get("DASHSCOPE_API_KEY")
+        base_url = private_environment.get("DASHSCOPE_BASE_URL")
+        if (
+            qwen_sut is None
+            or type(api_key) is not str
+            or not api_key
+            or api_key != api_key.strip()
+            or type(base_url) is not str
+            or not base_url
+            or base_url != base_url.strip()
+        ):
+            raise _fresh_command_error()
+        return await self._run_lane_impl(
+            eval_run_id=eval_run_id,
+            lane="qwen_baseline",
+            attempt=attempt,
+            case_ids=selected_ids,
+            script_ref_by_case=None,
+            qwen_execution=_QwenBaselineExecution(
+                sut=qwen_sut,
+                base_url=base_url,
+                api_key=api_key,
+                transport_factory=transport_factory,
+            ),
+        )
+
     async def _run_lane_impl(
         self,
         *,
@@ -1972,6 +2166,7 @@ class OfflineEvalHarness:
         attempt: int = 1,
         case_ids: Sequence[str] | None = None,
         script_ref_by_case: Mapping[str, str] | None = None,
+        qwen_execution: _QwenBaselineExecution | None = None,
     ) -> EvalLaneRunOutcome:
         private_eval_run_id = _detached_closed_uuid(eval_run_id)
         if private_eval_run_id is None:
@@ -1983,7 +2178,12 @@ class OfflineEvalHarness:
         try:
             if (
                 type(lane) is not str
-                or lane != "offline_gate"
+                or lane
+                != (
+                    "qwen_baseline"
+                    if qwen_execution is not None
+                    else "offline_gate"
+                )
                 or type(attempt) is not int
                 or attempt < 1
             ):
@@ -2129,6 +2329,7 @@ class OfflineEvalHarness:
                 attempt=attempt,
                 case=case,
                 selected_script_ref=script_selection.get(case_id),
+                qwen_execution=qwen_execution,
             )
             if failure is not None:
                 failures.append(failure)
@@ -2315,6 +2516,7 @@ class OfflineEvalHarness:
         attempt: int,
         case: EvalCaseArtifact,
         selected_script_ref: str | None,
+        qwen_execution: _QwenBaselineExecution | None,
     ) -> tuple[_StagedCase | None, EvalExecutionFailureRecord | None]:
         case_setup_failed = False
         expectations: EvalCaseExpectations | None = None
@@ -2374,14 +2576,19 @@ class OfflineEvalHarness:
                 case,
                 execution_ref=sut_execution_ref,
             )
-            provider = ScriptedModelProviderV2(
-                script,
-                script_execution_ref=provider_execution_ref,
-            )
-            runtime_fault = provider.take_runtime_fault_directive()
+            if qwen_execution is None:
+                provider = ScriptedModelProviderV2(
+                    script,
+                    script_execution_ref=provider_execution_ref,
+                )
+                runtime_fault = provider.take_runtime_fault_directive()
         except Exception:
             case_setup_failed = True
-        if case_setup_failed or provider is None or execution_input is None:
+        if (
+            case_setup_failed
+            or execution_input is None
+            or (qwen_execution is None and provider is None)
+        ):
             return None, await self._append_failure(
                 eval_run_id=eval_run_id,
                 lane=lane_artifact.lane,
@@ -2398,11 +2605,43 @@ class OfflineEvalHarness:
         sut_result: EvalCaseSutResult | None = None
         try:
             try:
-                sut_result = await self._sut.execute_case(
-                    execution_input=execution_input,
-                    scripted_provider=provider,
-                    runtime_fault=runtime_fault,
-                )
+                if qwen_execution is None:
+                    assert provider is not None
+                    sut_result = await self._sut.execute_case(
+                        execution_input=execution_input,
+                        scripted_provider=provider,
+                        runtime_fault=runtime_fault,
+                    )
+                else:
+                    transport = (
+                        None
+                        if qwen_execution.transport_factory is None
+                        else qwen_execution.transport_factory()
+                    )
+                    if (
+                        transport is not None
+                        and not isinstance(
+                            transport,
+                            httpx.AsyncBaseTransport,
+                        )
+                    ):
+                        raise TypeError(
+                            "Qwen transport must be an async transport"
+                        )
+                    async with httpx.AsyncClient(
+                        transport=transport,
+                    ) as client:
+                        qwen_provider = QwenResponsesAdapterV2(
+                            base_url=qwen_execution.base_url,
+                            api_key=qwen_execution.api_key,
+                            client=client,
+                        )
+                        sut_result = (
+                            await qwen_execution.sut.execute_qwen_case(
+                                execution_input=execution_input,
+                                qwen_provider=qwen_provider,
+                            )
+                        )
             except Exception:
                 sut_failed = True
             authenticated_pending_case = (
@@ -2479,7 +2718,9 @@ class OfflineEvalHarness:
             )
         provider_exhaustion_failed = False
         try:
-            provider.assert_exhausted()
+            if qwen_execution is None:
+                assert provider is not None
+                provider.assert_exhausted()
         except Exception:
             provider_exhaustion_failed = True
         if provider_exhaustion_failed:
@@ -2988,7 +3229,7 @@ def build_qwen_baseline_preflight(
     case_id: str,
     attempt: int,
     environment: Mapping[str, str],
-    real_sut: EvalCaseSut | None,
+    real_sut: QwenBaselineSut | None,
     completed_at: datetime,
 ) -> QwenBaselinePreflight:
     if type(artifacts) is not LoadedE2E01Artifacts:
