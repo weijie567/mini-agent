@@ -61,58 +61,305 @@ class CandidateOnlyProvider:
         raise NotImplementedError
 
 
-def _folded_static_string(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+_LEGACY_APPLICATION_RU_V1_IDENTIFIERS = frozenset(
+    {
+        "AcceptedTaskDelta",
+        "CandidateValidationRecord",
+        "CreateInitialTaskGraphCommand",
+        "ModelProvider",
+        "RequestUnderstandingOutput",
+        "RequestUnderstandingRecord",
+        "SaveRequestUnderstandingCommand",
+        "create_initial_task_graph_if_current",
+        "load_accepted_task_delta_for_owner",
+        "load_request_understanding_for_owner",
+    }
+)
+_TARGETED_APPLICATION_MODULES = frozenset(
+    {
+        "mini_agent.application.ports",
+        "mini_agent.application.records",
+        "mini_agent.core.request_understanding",
+        "mini_agent.core.task_state",
+    }
+)
+_STATIC_VALUE_MISSING = object()
+
+
+def _static_value(node: ast.AST) -> object:
+    if isinstance(node, ast.Constant):
         return node.value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _folded_static_string(node.left)
-        right = _folded_static_string(node.right)
-        return left + right if left is not None and right is not None else None
+    if isinstance(node, (ast.List, ast.Tuple)):
+        values = tuple(_static_value(value) for value in node.elts)
+        if any(value is _STATIC_VALUE_MISSING for value in values):
+            return _STATIC_VALUE_MISSING
+        return list(values) if isinstance(node, ast.List) else values
+    if isinstance(node, ast.Dict):
+        keys = tuple(_static_value(key) for key in node.keys if key is not None)
+        values = tuple(_static_value(value) for value in node.values)
+        if (
+            len(keys) != len(node.keys)
+            or any(value is _STATIC_VALUE_MISSING for value in (*keys, *values))
+        ):
+            return _STATIC_VALUE_MISSING
+        try:
+            return dict(zip(keys, values, strict=True))
+        except (TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = _static_value(node.operand)
+        if not isinstance(operand, (int, float, complex)):
+            return _STATIC_VALUE_MISSING
+        return +operand if isinstance(node.op, ast.UAdd) else -operand
+    if isinstance(node, ast.BinOp):
+        left = _static_value(node.left)
+        right = _static_value(node.right)
+        if left is _STATIC_VALUE_MISSING or right is _STATIC_VALUE_MISSING:
+            return _STATIC_VALUE_MISSING
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right  # type: ignore[operator]
+            if isinstance(node.op, ast.Mult):
+                return left * right  # type: ignore[operator]
+            if isinstance(node.op, ast.Mod) and isinstance(left, str):
+                return left % right
+        except (KeyError, TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
     if isinstance(node, ast.JoinedStr):
-        parts = tuple(_folded_static_string(value) for value in node.values)
-        return "".join(parts) if all(part is not None for part in parts) else None
+        rendered: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                rendered.append(value.value)
+                continue
+            if not isinstance(value, ast.FormattedValue):
+                return _STATIC_VALUE_MISSING
+            static_value = _static_value(value.value)
+            if static_value is _STATIC_VALUE_MISSING:
+                return _STATIC_VALUE_MISSING
+            if value.conversion == ord("r"):
+                static_value = repr(static_value)
+            elif value.conversion == ord("s"):
+                static_value = str(static_value)
+            elif value.conversion == ord("a"):
+                static_value = ascii(static_value)
+            format_spec = (
+                _static_value(value.format_spec)
+                if value.format_spec is not None
+                else ""
+            )
+            if not isinstance(format_spec, str):
+                return _STATIC_VALUE_MISSING
+            try:
+                rendered.append(format(static_value, format_spec))
+            except (TypeError, ValueError):
+                return _STATIC_VALUE_MISSING
+        return "".join(rendered)
+    if isinstance(node, ast.Slice):
+        lower = _static_value(node.lower) if node.lower is not None else None
+        upper = _static_value(node.upper) if node.upper is not None else None
+        step = _static_value(node.step) if node.step is not None else None
+        if any(
+            value is _STATIC_VALUE_MISSING for value in (lower, upper, step)
+        ):
+            return _STATIC_VALUE_MISSING
+        if not all(value is None or isinstance(value, int) for value in (lower, upper, step)):
+            return _STATIC_VALUE_MISSING
+        return slice(lower, upper, step)
+    if isinstance(node, ast.Subscript):
+        container = _static_value(node.value)
+        key = _static_value(node.slice)
+        if container is _STATIC_VALUE_MISSING or key is _STATIC_VALUE_MISSING:
+            return _STATIC_VALUE_MISSING
+        try:
+            return container[key]  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            return _STATIC_VALUE_MISSING
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "join"
-        and len(node.args) == 1
-        and not node.keywords
     ):
-        separator = _folded_static_string(node.func.value)
-        values = node.args[0]
-        if separator is not None and isinstance(values, (ast.List, ast.Tuple)):
-            parts = tuple(_folded_static_string(value) for value in values.elts)
-            return (
-                separator.join(parts)
-                if all(part is not None for part in parts)
-                else None
+        receiver = _static_value(node.func.value)
+        args = tuple(_static_value(value) for value in node.args)
+        keywords = {
+            keyword.arg: _static_value(keyword.value)
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        if (
+            any(value is _STATIC_VALUE_MISSING for value in args)
+            or len(keywords) != len(node.keywords)
+            or any(value is _STATIC_VALUE_MISSING for value in keywords.values())
+        ):
+            return _STATIC_VALUE_MISSING
+        try:
+            if (
+                node.func.attr == "join"
+                and isinstance(receiver, str)
+                and len(args) == 1
+                and not keywords
+            ):
+                return receiver.join(args[0])  # type: ignore[arg-type]
+            if node.func.attr == "format" and isinstance(receiver, str):
+                return receiver.format(*args, **keywords)
+            if (
+                node.func.attr == "replace"
+                and isinstance(receiver, str)
+                and len(args) in {2, 3}
+                and not keywords
+            ):
+                return receiver.replace(*args)  # type: ignore[arg-type]
+            if (
+                node.func.attr == "get"
+                and isinstance(receiver, dict)
+                and len(args) in {1, 2}
+                and not keywords
+            ):
+                return receiver.get(*args)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
+    return _STATIC_VALUE_MISSING
+
+
+def _folded_static_string(node: ast.AST) -> str | None:
+    value = _static_value(node)
+    return value if isinstance(value, str) else None
+
+
+def _legacy_application_executable_hits(
+    source: str,
+    *,
+    filename: str,
+) -> set[tuple[str, int, str]]:
+    tree = ast.parse(source)
+    exempt_node_ids: set[int] = set()
+    for node in ast.walk(tree):
+        targets: tuple[ast.expr, ...] = ()
+        if isinstance(node, ast.Assign):
+            targets = tuple(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+        if any(
+            isinstance(target, ast.Name)
+            and target.id == "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
+            for target in targets
+        ):
+            exempt_node_ids.update(id(descendant) for descendant in ast.walk(node))
+        if isinstance(node, ast.keyword):
+            label = _folded_static_string(node.value)
+            if (
+                node.arg == "family_name"
+                and label in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+            ) or (
+                node.arg == "field_name"
+                and label is not None
+                and any(
+                    label.startswith(f"{identifier}.")
+                    for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+                )
+            ):
+                exempt_node_ids.update(
+                    id(descendant) for descendant in ast.walk(node)
+                )
+
+    hits: set[tuple[str, int, str]] = set()
+
+    def add_hit(node: ast.AST, detail: str) -> None:
+        hits.add((filename, getattr(node, "lineno", 0), detail))
+
+    targeted_module_tails = {
+        module.rsplit(".", maxsplit=1)[-1]
+        for module in _TARGETED_APPLICATION_MODULES
+    }
+    dynamic_export_names = {"__getattr__", "__getattribute__"}
+    for node in ast.walk(tree):
+        if id(node) not in exempt_node_ids:
+            folded_value = _folded_static_string(node)
+            if folded_value in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, f"folded-target:{folded_value}")
+        if isinstance(node, ast.ImportFrom):
+            module_name = node.module or ""
+            if any(alias.name == "*" for alias in node.names) and (
+                module_name in _TARGETED_APPLICATION_MODULES
+                or module_name.rsplit(".", maxsplit=1)[-1]
+                in targeted_module_tails
+            ):
+                add_hit(node, "target-module-star-import")
+            for alias in node.names:
+                if alias.name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, alias.name)
+        if isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            if node.name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.name)
+            if node.name in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.name}")
+        if isinstance(node, ast.Name):
+            if node.id in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.id)
+            if node.id in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.id}")
+        if isinstance(node, ast.Attribute):
+            if node.attr in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.attr)
+            if node.attr in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.attr}")
+            if (
+                node.attr == "__dict__"
+                and isinstance(node.value, ast.Name)
+                and (
+                    node.value.id == "module"
+                    or node.value.id.endswith("_module")
+                )
+            ):
+                add_hit(node, "dynamic-module-__dict__")
+        if isinstance(node, ast.Call):
+            call_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else None
+                )
             )
-    return None
+            if call_name in {"getattr", "hasattr", "setattr", "delattr"} and len(
+                node.args
+            ) >= 2:
+                folded_name = _folded_static_string(node.args[1])
+                if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, f"reflective-target:{folded_name}")
+            if call_name == "get" and node.args:
+                folded_name = _folded_static_string(node.args[0])
+                if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, f"mapping-get-target:{folded_name}")
+            if call_name in {
+                "__import__",
+                "getmodule",
+                "globals",
+                "import_module",
+                "locals",
+            }:
+                add_hit(node, f"dynamic-access:{call_name}")
+            if (
+                call_name == "vars"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and (
+                    node.args[0].id == "module"
+                    or node.args[0].id.endswith("_module")
+                )
+            ):
+                add_hit(node, "dynamic-module-vars")
+        if isinstance(node, ast.Subscript):
+            folded_key = _folded_static_string(node.slice)
+            if folded_key in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, f"subscript-target:{folded_key}")
+    return hits
 
 
 def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
-    legacy_identifiers = frozenset(
-        {
-            "AcceptedTaskDelta",
-            "CandidateValidationRecord",
-            "CreateInitialTaskGraphCommand",
-            "ModelProvider",
-            "RequestUnderstandingOutput",
-            "RequestUnderstandingRecord",
-            "SaveRequestUnderstandingCommand",
-            "create_initial_task_graph_if_current",
-            "load_accepted_task_delta_for_owner",
-            "load_request_understanding_for_owner",
-        }
-    )
-    targeted_modules = frozenset(
-        {
-            "mini_agent.application.ports",
-            "mini_agent.application.records",
-            "mini_agent.core.request_understanding",
-            "mini_agent.core.task_state",
-        }
-    )
     repo_root = Path(__file__).parents[3]
     owned_paths = (
         repo_root / "src/mini_agent/application/records.py",
@@ -123,65 +370,25 @@ def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
     executable_hits: set[tuple[str, int, str]] = set()
 
     for owned_path in owned_paths:
-        tree = ast.parse(owned_path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.module in targeted_modules and any(
-                    alias.name == "*" for alias in node.names
-                ):
-                    executable_hits.add(
-                        (owned_path.name, node.lineno, "target-module-star-import")
-                    )
-                for alias in node.names:
-                    if alias.name in legacy_identifiers:
-                        executable_hits.add(
-                            (owned_path.name, node.lineno, alias.name)
-                        )
-            if isinstance(
-                node,
-                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-            ) and node.name in legacy_identifiers:
-                executable_hits.add((owned_path.name, node.lineno, node.name))
-            if isinstance(node, ast.Name) and node.id in legacy_identifiers:
-                executable_hits.add((owned_path.name, node.lineno, node.id))
-            if isinstance(node, ast.Attribute) and node.attr in legacy_identifiers:
-                executable_hits.add((owned_path.name, node.lineno, node.attr))
-            if isinstance(node, ast.Call):
-                call_name = (
-                    node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else (
-                        node.func.attr
-                        if isinstance(node.func, ast.Attribute)
-                        else None
-                    )
-                )
-                if call_name in {"getattr", "hasattr", "setattr"} and len(
-                    node.args
-                ) >= 2:
-                    folded_name = _folded_static_string(node.args[1])
-                    if folded_name in legacy_identifiers:
-                        executable_hits.add(
-                            (owned_path.name, node.lineno, folded_name)
-                        )
-                if call_name in {"__import__", "getmodule", "import_module"}:
-                    executable_hits.add(
-                        (owned_path.name, node.lineno, call_name)
-                    )
-            if isinstance(node, ast.Subscript):
-                folded_key = _folded_static_string(node.slice)
-                if folded_key in legacy_identifiers:
-                    executable_hits.add(
-                        (owned_path.name, node.lineno, folded_key)
-                    )
+        executable_hits.update(
+            _legacy_application_executable_hits(
+                owned_path.read_text(encoding="utf-8"),
+                filename=owned_path.name,
+            )
+        )
 
     assert not executable_hits
-    assert not legacy_identifiers.intersection(vars(application_records_module))
-    assert not legacy_identifiers.intersection(vars(application_ports_module))
     legacy_port_members = frozenset(
-        name for name in legacy_identifiers if name[:1].islower()
+        name
+        for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+        if name[:1].islower()
     )
-    assert not legacy_port_members.intersection(vars(RuntimeRecordPort))
+    assert all(
+        not hasattr(module, name)
+        for module in (application_records_module, application_ports_module)
+        for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+    )
+    assert all(not hasattr(RuntimeRecordPort, name) for name in legacy_port_members)
     assert application_ports_module.ModelProviderV2 is ModelProviderV2
     assert (
         application_records_module.SaveRequestUnderstandingV2NoTaskCommand
@@ -191,6 +398,25 @@ def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
         application_records_module.CreateInitialTaskGraphV2Command
         is CreateInitialTaskGraphV2Command
     )
+
+
+def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -> None:
+    mutations = (
+        'getattr(module, "Request{}Output".format("Understanding"))',
+        'getattr(module, "xRequestUnderstandingOutput"[1:])',
+        'getattr(module, "%s%s" % ("RequestUnderstanding", "Output"))',
+        'legacy_name = "RequestUnderstandingOutput"\ngetattr(module, legacy_name)',
+        'vars(module).get("RequestUnderstandingOutput")',
+        'module.__dict__.get("RequestUnderstandingOutput")',
+        'globals()["RequestUnderstandingOutput"]',
+        "from mini_agent.application.records import *",
+        "def __getattr__(name):\n    return None",
+    )
+    for mutation in mutations:
+        assert _legacy_application_executable_hits(
+            mutation,
+            filename="mutation.py",
+        ), mutation
 
 
 def _assert_signature(
