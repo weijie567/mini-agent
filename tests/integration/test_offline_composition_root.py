@@ -149,6 +149,16 @@ def _execution_input(artifacts) -> EvalCaseExecutionInput:
     )
 
 
+def _scripted_provider(artifacts) -> ScriptedModelProviderV2:
+    case = artifacts.case_by_id("E2E01-01")
+    script_refs = tuple(case.input["model_script_refs"])
+    assert len(script_refs) == 1
+    return ScriptedModelProviderV2(
+        artifacts.script_by_ref(script_refs[0]),
+        script_execution_ref=uuid4(),
+    )
+
+
 def _qwen_request_output(
     raw_input: dict[str, object],
 ) -> RequestUnderstandingOutputV2:
@@ -599,7 +609,7 @@ async def test_qwen_seam_rejects_non_exact_provider_with_fresh_errors(
             )
             rejected = (
                 object(),
-                ScriptedModelProviderV2,
+                _scripted_provider(_artifacts()),
                 subclass,
             )
             errors = []
