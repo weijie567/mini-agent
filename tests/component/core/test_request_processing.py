@@ -2992,52 +2992,9 @@ def _legacy_core_source_hits(
             getattr(node, "col_offset", -1),
         )
 
-    def latest_assignment(
-        name: str,
-        *,
-        before: ast.AST,
-    ) -> tuple[ast.AST, ast.AST] | bool | None:
-        use_scope = lexical_scope(before)
-        local_bindings = [
-            item
-            for item in assignments_by_name.get(name, ())
-            if lexical_scope(item[0]) is use_scope
-        ]
-        if use_scope is not tree and (
-            local_bindings or name in parameter_names(use_scope)
-        ):
-            dominating = [
-                item
-                for item in local_bindings
-                if position(item[0]) < position(before)
-            ]
-            return max(
-                dominating,
-                key=lambda item: position(item[0]),
-                default=False,
-            )
-        module_candidates = [
-            item
-            for item in assignments_by_name.get(name, ())
-            if lexical_scope(item[0]) is tree
-            and position(item[0]) < position(before)
-        ]
-        return max(
-            module_candidates,
-            key=lambda item: position(item[0]),
-            default=None,
-        )
-
-    def name_refers_to_module(
-        name: str,
-        *,
-        before: ast.AST,
-        seen: frozenset[str] = frozenset(),
-    ) -> bool:
-        if name in seen:
-            return False
+    def resolution_scopes(node: ast.AST) -> list[ast.AST]:
         scopes: list[ast.AST] = []
-        current_scope = lexical_scope(before)
+        current_scope = lexical_scope(node)
         scopes.append(current_scope)
         current = current_scope
         while current in parents:
@@ -3064,8 +3021,92 @@ def _legacy_core_source_hits(
             current = parent
         if tree not in scopes:
             scopes.append(tree)
+        return scopes
 
-        for scope in scopes:
+    def parameter_default(scope: ast.AST, name: str) -> ast.AST | None:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return None
+        positional = (*scope.args.posonlyargs, *scope.args.args)
+        defaults_by_name = (
+            {
+                argument.arg: default
+                for argument, default in zip(
+                    positional[-len(scope.args.defaults) :],
+                    scope.args.defaults,
+                    strict=True,
+                )
+            }
+            if scope.args.defaults
+            else {}
+        )
+        defaults_by_name.update(
+            {
+                argument.arg: default
+                for argument, default in zip(
+                    scope.args.kwonlyargs,
+                    scope.args.kw_defaults,
+                    strict=True,
+                )
+                if default is not None
+            }
+        )
+        return defaults_by_name.get(name)
+
+    def latest_assignment(
+        name: str,
+        *,
+        before: ast.AST,
+    ) -> tuple[ast.AST, ast.AST] | bool | None:
+        scopes = resolution_scopes(before)
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        )
+        for index, scope in enumerate(scopes):
+            scope_bindings = [
+                item
+                for item in assignments_by_name.get(name, ())
+                if lexical_scope(item[0]) is scope
+            ]
+            has_binding = bool(
+                scope_bindings or name in parameter_names(scope)
+            )
+            if not has_binding:
+                continue
+            candidates = (
+                scope_bindings
+                if deferred_lookup and index > 0
+                else [
+                    item
+                    for item in scope_bindings
+                    if position(item[0]) < position(before)
+                ]
+            )
+            return max(
+                candidates,
+                key=lambda item: position(item[0]),
+                default=False,
+            )
+        return None
+
+    def name_refers_to_module(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        scopes = resolution_scopes(before)
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        )
+
+        for index, scope in enumerate(scopes):
             scope_assignments = [
                 (node, value)
                 for node, value in assignments_by_name.get(name, ())
@@ -3095,9 +3136,22 @@ def _legacy_core_source_hits(
             binding_candidates = [
                 (node, value)
                 for node, value in (*scope_assignments, *scope_imports)
-                if position(node) < position(before)
+                if (
+                    deferred_lookup
+                    and index > 0
+                )
+                or position(node) < position(before)
             ]
             if not binding_candidates:
+                default = parameter_default(scope, name)
+                if default is not None:
+                    if isinstance(default, ast.Name):
+                        return name_refers_to_module(
+                            default.id,
+                            before=scope,
+                            seen=seen,
+                        )
+                    return _dotted_ast_name(default) in relevant_modules
                 if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
                     continue
                 return False
@@ -3815,6 +3869,36 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "        return getattr(core_module, input())\n"
         ),
         (
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            + module_import
+        ),
+        (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    return inner\n"
+        ),
+        (
+            module_import
+            + "def consumer(core_module=core_module):\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    reflect = getattr\n"
+            "    def inner():\n"
+            "        return reflect(core_module, input())\n"
+        ),
+        (
+            "def outer():\n"
+            "    namespace = globals()\n"
+            "    def inner():\n"
+            "        namespace[input()] = object()\n"
+        ),
+        (
             module_import
             + "class Consumer:\n"
             "    result = getattr(core_module, input())\n"
@@ -4055,6 +4139,27 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             + "class Consumer:\n"
             "    core_module = object()\n"
             "    result = getattr(core_module, input())"
+        ),
+        (
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            + module_import
+            + "core_module = object()\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    reflect = getattr\n"
+            "    reflect = lambda value, name: None\n"
+            "    def inner():\n"
+            "        return reflect(core_module, input())"
+        ),
+        (
+            "def outer():\n"
+            "    namespace = globals()\n"
+            "    namespace = {}\n"
+            "    def inner():\n"
+            "        namespace[input()] = object()"
         ),
     )
     for safe_source in safe_sources:
