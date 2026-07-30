@@ -259,8 +259,12 @@ def _legacy_application_executable_hits(
     filename: str,
 ) -> set[tuple[str, int, str]]:
     tree = ast.parse(source)
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     exempt_node_ids: set[int] = set()
-    runtime_oracle_call_ids: set[int] = set()
     accepted_delta_family = next(
         identifier
         for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
@@ -290,18 +294,6 @@ def _legacy_application_executable_hits(
                 exempt_node_ids.update(
                     id(descendant) for descendant in ast.walk(node)
                 )
-        if (
-            isinstance(node, ast.FunctionDef)
-            and node.name
-            == "test_application_ru_v1_records_and_ports_are_not_executable"
-        ):
-            runtime_oracle_call_ids.update(
-                id(descendant)
-                for descendant in ast.walk(node)
-                if isinstance(descendant, ast.Call)
-                and isinstance(descendant.func, ast.Name)
-                and descendant.func.id == "hasattr"
-            )
 
     hits: set[tuple[str, int, str]] = set()
 
@@ -325,6 +317,11 @@ def _legacy_application_executable_hits(
                 imported_module = f"{node.module}.{alias.name}"
                 if imported_module in _TARGETED_APPLICATION_MODULES:
                     targeted_module_aliases.add(alias.asname or alias.name)
+                if (
+                    node.module == "mini_agent.application.ports"
+                    and alias.name == "RuntimeRecordPort"
+                ):
+                    targeted_module_aliases.add(alias.asname or alias.name)
 
     def dotted_name(node: ast.AST) -> str | None:
         parts: list[str] = []
@@ -337,48 +334,233 @@ def _legacy_application_executable_hits(
         parts.append(current.id)
         return ".".join(reversed(parts))
 
+    for _ in range(len(tuple(ast.walk(tree))) + 1):
+        aliases_before = len(targeted_module_aliases)
+        for node in ast.walk(tree):
+            targets: tuple[ast.expr, ...] = ()
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets = tuple(node.targets)
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+                value = node.value
+            if value is None:
+                continue
+            value_name = dotted_name(value)
+            if not (
+                value_name in _TARGETED_APPLICATION_MODULES
+                or (
+                    isinstance(value, ast.Name)
+                    and value.id in targeted_module_aliases
+                )
+            ):
+                continue
+            targeted_module_aliases.update(
+                target.id
+                for target in targets
+                if isinstance(target, ast.Name)
+            )
+        if len(targeted_module_aliases) == aliases_before:
+            break
+
     def is_targeted_container(node: ast.AST) -> bool:
         if isinstance(node, ast.Name):
             return (
                 node.id in targeted_module_aliases
                 or node.id == "module"
                 or node.id.endswith("_module")
-                or node.id == "RuntimeRecordPort"
             )
         return dotted_name(node) in _TARGETED_APPLICATION_MODULES
 
-    static_name_domains: dict[str, frozenset[str]] = {}
+    def lexical_scope(node: ast.AST) -> ast.AST:
+        current = node
+        while id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(
+                current,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ):
+                return current
+        return tree
 
-    def static_string_domain(node: ast.AST) -> frozenset[str] | None:
+    def target_binds_name(target: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(descendant, ast.Name)
+            and isinstance(descendant.ctx, ast.Store)
+            and descendant.id == name
+            for descendant in ast.walk(target)
+        )
+
+    def direct_static_string_domain(node: ast.AST) -> frozenset[str] | None:
         value = _static_value(node)
         if isinstance(value, (list, set, tuple)) and all(
             isinstance(item, str) for item in value
         ):
             return frozenset(value)
-        if isinstance(node, ast.Name):
-            return static_name_domains.get(node.id)
         return None
 
-    for _ in range(3):
-        for node in ast.walk(tree):
-            targets: tuple[ast.expr, ...] = ()
-            value_node: ast.AST | None = None
-            if isinstance(node, ast.Assign):
-                targets = tuple(node.targets)
-                value_node = node.value
-            elif isinstance(node, ast.AnnAssign):
-                targets = (node.target,)
-                value_node = node.value
-            if value_node is not None:
-                domain = static_string_domain(value_node)
-                if domain is not None:
-                    for target in targets:
-                        if isinstance(target, ast.Name):
-                            static_name_domains[target.id] = domain
-            if isinstance(node, (ast.For, ast.comprehension)):
-                domain = static_string_domain(node.iter)
-                if domain is not None and isinstance(node.target, ast.Name):
-                    static_name_domains[node.target.id] = domain
+    def assigned_value_in_scope(
+        name: str,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+    ) -> ast.AST | None:
+        assignments: list[tuple[int, int, ast.AST]] = []
+        ambiguous_binding = False
+        for candidate in ast.walk(scope):
+            if candidate is scope or lexical_scope(candidate) is not scope:
+                continue
+            if getattr(candidate, "lineno", 0) >= getattr(before, "lineno", 0):
+                continue
+            targets: tuple[ast.AST, ...] = ()
+            value: ast.AST | None = None
+            if isinstance(candidate, ast.Assign):
+                targets = tuple(candidate.targets)
+                value = candidate.value
+            elif isinstance(candidate, ast.AnnAssign):
+                targets = (candidate.target,)
+                value = candidate.value
+            elif isinstance(candidate, ast.NamedExpr):
+                targets = (candidate.target,)
+                value = candidate.value
+            elif isinstance(
+                candidate,
+                (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
+            ):
+                targets = (candidate.target,)
+            if not any(target_binds_name(target, name) for target in targets):
+                continue
+            if (
+                value is None
+                or len(targets) != 1
+                or not isinstance(targets[0], ast.Name)
+            ):
+                ambiguous_binding = True
+                continue
+            assignments.append(
+                (
+                    getattr(candidate, "lineno", 0),
+                    getattr(candidate, "col_offset", 0),
+                    value,
+                )
+            )
+        if ambiguous_binding or len(assignments) != 1:
+            return None
+        return max(assignments, key=lambda item: item[:2])[2]
+
+    def static_string_domain(
+        node: ast.AST,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+        visited: frozenset[str] = frozenset(),
+    ) -> frozenset[str] | None:
+        direct = direct_static_string_domain(node)
+        if direct is not None:
+            return direct
+        if not isinstance(node, ast.Name) or node.id in visited:
+            return None
+        assigned = assigned_value_in_scope(node.id, before=before, scope=scope)
+        if assigned is None:
+            return None
+        return static_string_domain(
+            assigned,
+            before=before,
+            scope=scope,
+            visited=visited | {node.id},
+        )
+
+    def nearest_loop_domain(
+        name_node: ast.Name,
+        *,
+        call: ast.Call,
+    ) -> tuple[bool, frozenset[str] | None]:
+        name = name_node.id
+        scope = lexical_scope(call)
+        current: ast.AST = call
+        while id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(current, (ast.For, ast.AsyncFor)) and target_binds_name(
+                current.target,
+                name,
+            ):
+                return True, static_string_domain(
+                    current.iter,
+                    before=call,
+                    scope=scope,
+                )
+            if isinstance(
+                current,
+                (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp),
+            ):
+                for generator in reversed(current.generators):
+                    if target_binds_name(generator.target, name):
+                        return True, static_string_domain(
+                            generator.iter,
+                            before=call,
+                            scope=scope,
+                        )
+            if current is scope:
+                break
+        return False, None
+
+    def is_exact_runtime_oracle_call(node: ast.Call) -> bool:
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id != "hasattr"
+            or len(node.args) != 2
+            or node.keywords
+            or not isinstance(node.args[0], ast.Name)
+            or not isinstance(node.args[1], ast.Name)
+        ):
+            return False
+        function = lexical_scope(node)
+        if (
+            not isinstance(function, ast.FunctionDef)
+            or function.name
+            != "test_application_ru_v1_records_and_ports_are_not_executable"
+        ):
+            return False
+        container_name = node.args[0].id
+        member_name = node.args[1].id
+        expected_iterable: str | None = None
+        if (
+            container_name
+            in {"application_records_module", "application_ports_module"}
+            and member_name == "legacy_name"
+        ):
+            expected_iterable = "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
+        elif (
+            container_name == "RuntimeRecordPort"
+            and member_name == "legacy_port_member"
+        ):
+            expected_iterable = "legacy_port_members"
+        if expected_iterable is None:
+            return False
+
+        current: ast.AST = node
+        while id(current) in parents:
+            current = parents[id(current)]
+            if current is function:
+                return False
+            if not isinstance(current, (ast.For, ast.AsyncFor)):
+                continue
+            if not (
+                isinstance(current.target, ast.Name)
+                and current.target.id == member_name
+                and isinstance(current.iter, ast.Name)
+                and current.iter.id == expected_iterable
+            ):
+                return False
+            return not any(
+                isinstance(descendant, ast.Name)
+                and isinstance(descendant.ctx, ast.Store)
+                and descendant.id == member_name
+                for statement in current.body
+                for descendant in ast.walk(statement)
+            )
+        return False
 
     dynamic_export_names = {"__getattr__", "__getattribute__"}
     for node in ast.walk(tree):
@@ -437,18 +619,18 @@ def _legacy_application_executable_hits(
                 if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
                     add_hit(node, f"reflective-target:{folded_name}")
                 if (
-                    id(node) not in runtime_oracle_call_ids
+                    not is_exact_runtime_oracle_call(node)
                     and is_targeted_container(node.args[0])
                     and folded_name is None
                 ):
-                    dynamic_domain = (
-                        static_name_domains.get(node.args[1].id)
+                    has_loop_domain, dynamic_domain = (
+                        nearest_loop_domain(node.args[1], call=node)
                         if isinstance(node.args[1], ast.Name)
-                        else None
+                        else (False, None)
                     )
                     if dynamic_domain is None or dynamic_domain.intersection(
                         _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
-                    ):
+                    ) or not has_loop_domain:
                         add_hit(node, f"dynamic-module-reflection:{call_name}")
             if call_name == "get" and node.args:
                 folded_name = _folded_static_string(node.args[0])
@@ -499,12 +681,11 @@ def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
         for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
         if name[:1].islower()
     )
-    assert all(
-        not hasattr(module, name)
-        for module in (application_records_module, application_ports_module)
-        for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
-    )
-    assert all(not hasattr(RuntimeRecordPort, name) for name in legacy_port_members)
+    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+        assert not hasattr(application_records_module, legacy_name)
+        assert not hasattr(application_ports_module, legacy_name)
+    for legacy_port_member in legacy_port_members:
+        assert not hasattr(RuntimeRecordPort, legacy_port_member)
     assert application_ports_module.ModelProviderV2 is ModelProviderV2
     assert (
         application_records_module.SaveRequestUnderstandingV2NoTaskCommand
@@ -539,6 +720,28 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
         (
             "import mini_agent.core.request_understanding as core_module\n"
             "getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    assert not hasattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "ru = core_module\n"
+            "getattr(ru, input())"
+        ),
+        (
+            "from mini_agent.application.ports import RuntimeRecordPort as RRP\n"
+            "getattr(RRP, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def check():\n"
+            "    for name in ('safe_name',):\n"
+            "        assert not hasattr(core_module, name)\n"
+            "    for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        getattr(core_module, name)"
         ),
         "from mini_agent.application.records import *",
         "def __getattr__(name):\n    return None",
