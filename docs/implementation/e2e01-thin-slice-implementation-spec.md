@@ -1,10 +1,10 @@
 # 第一最薄 E2E-01｜Implementation Spec
 
 更新日期：2026-07-31
-状态：`ACTIVE / CONTRACT_DEFINED`  
+状态：`ACTIVE / REGRESSION_GATE / RELEASE_DECISION_PENDING`
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
-> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划和 `AGENTS.md`。仓库当前已有可复现的 offline Composition、real `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、Harness 与直接 HTTP → Runtime → PostgreSQL 纵向 evidence，但第 16 节 Definition of Done、post-execution quality gate 与 Coverage Matrix lifecycle 裁决尚未全部完成；authenticated artifacts、manifest 与 loader 继续保持 `CONTRACT_DEFINED`，通过 Harness 时在派发 SUT 前 fail closed。因此本文件状态仍为 `ACTIVE / CONTRACT_DEFINED`，不得把实现存在或 direct evidence 记为 Case `PASS`。
+> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划、`AGENTS.md` 与 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。当前六个 authenticated physical Case、manifest 与 loader 已原子进入 `REGRESSION_GATE`；默认 `uv run pytest` 覆盖全部 16 个 variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical 串行门禁为 `2007 passed, 1 deselected, 12 warnings`。Controlled UAT、Eval re-audit 与 mandatory Security re-review 已完成；`RTA-D01` 是否在最终 release gate 继续接受以及是否合并到 `main` 仍待用户裁决。该状态只证明本 scoped deterministic offline slice，不证明 canonical 产品启动、真实 credentialed Qwen Baseline、完整 E2E-01 / P0 或 production readiness。
 
 ## 1. 权威边界
 
@@ -1821,7 +1821,7 @@ completed_at
 
 ### 13.4 v1 修订与审计边界
 
-本次对 `e2e01-thin-slice.v1.json` Case 与 model script 的修订是进入 `EXECUTABLE` 前的 contract bug fix：原 stale-state 与 fact-bearing presentation 期望不能通过 frozen strict DTO，因此按 canonical DTO / Port 边界原位修正 v1，而不保留一条不可执行的版本化路径。当前不存在绑定这些字节的 Baseline 或 `EvalResultRecord`，Case lifecycle 保持 `CONTRACT_DEFINED`，本次修订不构成 Case 执行、Baseline 形成或 Eval PASS。
+本节记录进入 `EXECUTABLE` 前的 historical contract bug fix：当时对 `e2e01-thin-slice.v1.json` Case 与 model script 的修订只修复原 stale-state 与 fact-bearing presentation 期望，使其满足 frozen strict DTO，并不构成 Case 执行、Baseline 形成或 Eval PASS；在该历史修订点还不存在绑定这些字节的 Baseline 或 `EvalResultRecord`，lifecycle 当时保持 `CONTRACT_DEFINED`。后续 lifecycle activation、Result 与 `REGRESSION_GATE` 状态以 Eval canonical owner 及其 authenticated manifest 为准，不反写本段历史判断。
 
 Git commit / PR 保存变更历史；`evals/manifests/e2e01-thin-slice.v1.json` 只重算并固定 Case 与 model script 的 exact-byte SHA-256。不得修改其他 artifact hash、lifecycle 或 result / baseline 标记来伪造迁移历史。
 
@@ -1886,7 +1886,7 @@ uv run pytest -m qwen_baseline
 uv run uvicorn mini_agent.main:app --reload
 ```
 
-W1 已建立依赖、Compose PostgreSQL / pgvector、空业务 migration、Core / Application contract 与 Eval artifact consistency，并已将相应可复现子集登记到 `AGENTS.md`。这不使本节的 `uvicorn`、HTTP / Trajectory / E2E 或 Qwen Baseline 命令自动变为可执行；它们仍须等待后续实现与独立验证。
+当前默认 `uv run pytest` 已通过 `OfflineE2E01Composition` 执行真实 HTTP → Runtime → PostgreSQL Trajectory / E2E，并生成 lifecycle-valid Result；credential-aware Qwen runner 也已实现，缺凭据时保持零网络 `NOT_RUN`。本节的 `uvicorn` 仍只是目标命令，仓库尚未建立 canonical 产品启动入口；真实 credentialed Qwen Baseline 仍为 `NOT_RUN`。目标命令不得因相邻离线能力已实现而自动升级为 canonical 命令。
 
 ## 15. Plan 输入：实现依赖约束（`NON_NORMATIVE`）
 
@@ -1926,3 +1926,10 @@ W1 已建立依赖、Compose PostgreSQL / pgvector、空业务 migration、Core 
 - Coverage Matrix 的两个首切片 Case 只有在上述命令可复现后才改为 `EXECUTABLE`；只有进入持续门禁后才改为 `REGRESSION_GATE`。
 
 任何一项缺失都不得用“文档已定义”“Mock 可手工演示”或“模型看起来回答正确”替代。
+
+截至 exact quality evidence barrier `22c4cfa...`，上述 scoped DoD 已由源码、migration、
+受控 UAT、16 个 lifecycle-valid Results、default local `REGRESSION_GATE`、独立
+Eval / Security re-review 与 `2007 passed, 1 deselected, 12 warnings` 的串行套件
+建立可复现证据。该结论不把本节未拥有的 canonical app startup、真实 credentialed
+Qwen、hosted CI、完整 E2E-01 / P0 或 production readiness 纳入完成范围；最终
+release 仍受 `RTA-D01` 用户裁决与 integration → `main` 合并决定约束。
