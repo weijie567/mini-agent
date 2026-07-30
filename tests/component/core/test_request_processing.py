@@ -3033,6 +3033,61 @@ def _legacy_core_source_hits(
             continue
         for target in targets:
             assignments_by_name.setdefault(target.id, []).append((node, value))
+
+    def literal_truthiness(node: ast.AST) -> bool | None:
+        if isinstance(node, ast.Constant):
+            return bool(node.value)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return bool(node.elts)
+        if isinstance(node, ast.Dict):
+            return bool(node.keys)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            operand_truthiness = literal_truthiness(node.operand)
+            return (
+                None
+                if operand_truthiness is None
+                else not operand_truthiness
+            )
+        return None
+
+    def parent_contains(ancestor: ast.AST, descendant: ast.AST) -> bool:
+        current = descendant
+        while current in parents:
+            current = parents[current]
+            if current is ancestor:
+                return True
+        return False
+
+    def binding_is_literal_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if isinstance(parent, ast.If):
+                truthiness = literal_truthiness(parent.test)
+                if truthiness is not None:
+                    in_body = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.body
+                    )
+                    in_orelse = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.orelse
+                    )
+                    if (
+                        in_body
+                        and not truthiness
+                        or in_orelse
+                        and truthiness
+                    ):
+                        return True
+            current = parent
+        return False
+
     def static_sequence_value(
         value: ast.AST,
         *,
@@ -3071,7 +3126,11 @@ def _legacy_core_source_hits(
         if tree not in scopes:
             scopes.append(tree)
 
-        for scope in scopes:
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        )
+        for index, scope in enumerate(scopes):
             candidates = [
                 (binding_node, binding_value)
                 for binding_node, binding_value in assignments_by_name.get(
@@ -3080,13 +3139,23 @@ def _legacy_core_source_hits(
                 )
                 if (
                     lexical_scope(binding_node) is scope
-                    and (
-                        getattr(binding_node, "lineno", -1),
-                        getattr(binding_node, "col_offset", -1),
+                    and not binding_is_literal_unreachable(
+                        binding_node,
+                        scope,
                     )
-                    < (
-                        getattr(before, "lineno", -1),
-                        getattr(before, "col_offset", -1),
+                    and (
+                        deferred_lookup
+                        and index > 0
+                        or (
+                            (
+                                getattr(binding_node, "lineno", -1),
+                                getattr(binding_node, "col_offset", -1),
+                            )
+                            < (
+                                getattr(before, "lineno", -1),
+                                getattr(before, "col_offset", -1),
+                            )
+                        )
                     )
                 )
             ]
@@ -3292,22 +3361,9 @@ def _legacy_core_source_hits(
         *,
         seen: frozenset[str] = frozenset(),
     ) -> bool | None:
-        if isinstance(node, ast.Constant):
-            return bool(node.value)
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            return bool(node.elts)
-        if isinstance(node, ast.Dict):
-            return bool(node.keys)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            operand_truthiness = static_truthiness(
-                node.operand,
-                seen=seen,
-            )
-            return (
-                None
-                if operand_truthiness is None
-                else not operand_truthiness
-            )
+        direct_truthiness = literal_truthiness(node)
+        if direct_truthiness is not None:
+            return direct_truthiness
         if isinstance(node, ast.Name) and node.id not in seen:
             scopes = [lexical_scope(node)]
             current = scopes[0]
@@ -3337,6 +3393,10 @@ def _legacy_core_source_hits(
                     )
                     if (
                         lexical_scope(binding_node) is scope
+                        and not binding_is_literal_unreachable(
+                            binding_node,
+                            scope,
+                        )
                         and position(binding_node) < position(node)
                     )
                 ]
@@ -4705,10 +4765,35 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    return getattr(core_module, input())\n"
         ),
         (
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+        ),
+        (
             "import mini_agent.core.request_processing as target_module\n"
             "def consumer(values=(target_module,)):\n"
             "    (core_module,) = values\n"
             "    return getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+            "if False:\n"
+            "    values = (object(),)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "flag = False\n"
+            "if False:\n"
+            "    flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())\n"
         ),
         (
             module_import
@@ -5118,6 +5203,30 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "def consumer(values=(object(),)):\n"
             "    (core_module,) = values\n"
             "    return getattr(core_module, input())"
+        ),
+        (
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (object(),)"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (object(),)\n"
+            "if False:\n"
+            "    values = (target_module,)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "flag = True\n"
+            "if False:\n"
+            "    flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
         ),
         (
             "import mini_agent.core.request_processing as target_module\n"
