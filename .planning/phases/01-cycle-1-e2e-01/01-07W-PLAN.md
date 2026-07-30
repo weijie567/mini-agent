@@ -21,14 +21,14 @@ must_haves:
     - "RuntimeRecordPort不再暴露create_initial_task_graph_if_current、load_request_understanding_for_owner或load_accepted_task_delta_for_owner；两个exact-v2 conditional write methods及其他非RU Port保持原signature与最小披露语义。"
     - "records.py与ports.py不再导入Application所不需要的RequestUnderstandingOutput、RequestUnderstandingRecord或AcceptedTaskDelta v1；Core v1 type definitions只留给后续01-07V，不在W越权修改。"
     - "owned Component contracts以AST/API guard证明legacy definition/import/member/direct、alias、star或reflective lookup为零，同时证明V2后缀symbols、bounded errors、trusted-owner roots与atomic write合同未退化。"
-    - "reviewed merge与post-merge gate只形成B_W，不推进01-07V、Case lifecycle、Trajectory/E2E或产品readiness。"
+    - "reviewed merge与post-merge gate只形成B_W；当前Eval owner仍有一个allowlist外RequestUnderstandingOutput v1 consumer，必须先通过pre-01-07V owner-remediation gate，不能由W越界删除或把B_W误称为已解锁V。"
   artifacts:
     - "Application records/ports current-v2-only public surface及四文件absence/presence Component evidence。"
     - "ModelProviderV2 exact signatures、两个RU-v2 writer Port、owner-scoped current read inventory与其他Application contracts回归证据。"
   key_links:
     - "B_T → 01-07W → B_W。"
     - "AgentRunService → ModelProviderV2 → SaveRequestUnderstandingV2NoTaskCommand / CreateInitialTaskGraphV2Command → exact-v2 RuntimeRecordPort methods。"
-    - "B_W只解锁01-07V；Core v1 contract closure必须从exact B_W另行签发。"
+    - "B_W → pre-01-07V Eval-owner remediation gate → 01-07V；Core v1 contract closure只能在该blocker关闭后从新的exact共同barrier另行签发。"
 ---
 
 # Phase 1 Plan 01-07W｜Application Port / records v1-contract closure
@@ -60,9 +60,11 @@ Output: 四文件TDD feature。RED冻结legacy absence/current-v2 presence；GRE
 - `CONFIRMED`：四文件focused baseline为`373 passed`。
 - `CONFIRMED`：`records.py`对`RequestUnderstandingRecord` / `AcceptedTaskDelta`的可执行使用只属于`SaveRequestUnderstandingCommand`与`CreateInitialTaskGraphCommand`；`CandidateValidationDecision`仍被v2 validators使用，不能随v1 command误删。
 - `CONFIRMED`：`ports.py`的v1 surface为`ModelProvider → RequestUnderstandingOutput`、legacy graph command/method，以及两个返回v1 Core record的owner-scoped reader；当前production Runtime、Provider/Eval和Infrastructure均无这些方法的direct caller。
-- `CONFIRMED`：allowlist外出现的legacy exact names仅为Core 01-07V definitions/consumers或既有absence-contract字符串；W不得把静态guard字符串误判为可执行caller，也不得修改这些文件。
+- `CONFIRMED`：allowlist外大部分legacy exact names为Core 01-07V definitions/consumers或既有absence-contract字符串；W不得把静态guard字符串误判为可执行caller，也不得修改这些文件。
+- `CONFIRMED / DOWNSTREAM BLOCKER`：`tests/component/evaluation/test_e2e01_artifact_consistency.py`（exact `B_T` blob `25cbbc7d1134c4c7c12611f3b0b179e15427e98c`）仍在line 19导入并于line 550实例化Core v1 `RequestUnderstandingOutput`。该文件曾属01-07S Eval ownership，当前实现与01-07S的v2-only acceptance不一致；它不阻断W四文件closure，但阻断01-07V在自身Core allowlist内删除v1 type。
 - `CONFIRMED`：current Application v2 surface为`ModelProviderV2`、`SaveRequestUnderstandingV2AcceptedCommand`、`SaveRequestUnderstandingV2NoTaskCommand`、`CreateInitialTaskGraphV2Command`、`save_request_understanding_v2_no_task_if_current`与`create_initial_task_graph_v2_if_current`。
-- `OPEN / NONCLAIM`：W不删除Core `RequestUnderstandingOutput`、`RequestUnderstandingRecord`、`AcceptedTaskDelta`或v1 reducer；这些只可由01-07V从exact `B_W`处理。
+- `OPEN / NONCLAIM`：W不删除Core `RequestUnderstandingOutput`、`RequestUnderstandingRecord`、`AcceptedTaskDelta`或v1 reducer；这些只可由01-07V在Eval owner remediation形成新的exact共同barrier后处理，不能直接以raw `B_W`为feature base。
+- `OPEN / BLOCKED-BY-OWNER-REMEDIATION`：`B_W`形成后，Integrator必须先为上述Eval consumer完成owner裁决、独立Task Packet、reviewed merge与post-merge gate，再签发01-07V；不得让W或V越权修改该Eval test，也不得把01-07S Plan目标当作当前已实现事实。
 - `OPEN / NONCLAIM`：W不扫描、迁移、回填或删除historical physical RU-v1 rows，不改migration，不激活01-07R。
 - `OPEN / NONCLAIM`：W不完成zero/all-REJECT或multi-ACCEPT产品结果、atomic failure恢复、真实HTTP Trajectory/E2E、Case PASS或产品readiness。
 
@@ -143,7 +145,7 @@ Plan branch/worktree只拥有本Plan文件。feature必须从上述exact `B_T`�
 - `RuntimeRecordPort.load_request_understanding_for_owner`；
 - `RuntimeRecordPort.load_accepted_task_delta_for_owner`。
 
-owned tests删除对应imports、v1 fixture builders、v1 command/graph tests、field/cardinality cases与legacy Port signature/read-shape cases。
+owned tests删除对应imports、v1 fixture builders、v1 command/graph tests、field/cardinality cases与legacy Port signature/read-shape cases；其中`test_record_contracts.py`的v1-only `CandidateValidationRecord` import/fixtures也必须删除，`CandidateValidationRecordV2`与`CandidateValidationDecision`保留。
 
 W必须保留：
 
@@ -166,9 +168,10 @@ RED必须在两个owned test文件增加结构化absence/presence证据，并在
 - exact `Name` / `Attribute` direct reference；
 - `getattr` / `hasattr` / `setattr`、module/global subscript、`__import__` / `import_module`及`inspect.getmodule`等reflective access；
 - compile-time folded DTO/member name字符串；不得用拆词、format、join或下标绕过；
-- runtime module/class export absence。
+- runtime module/class export absence；
+- 两个owned test自身不再import/instantiate `RequestUnderstandingOutput`、`RequestUnderstandingRecord`、`AcceptedTaskDelta`或`CandidateValidationRecord` v1，也不再通过legacy fixtures间接构造这些types。
 
-guard只扫描两个production source，legacy target list自身和安全错误中的family label不算executable dependency；带显式`V2`后缀的symbols不得被模糊substring误报。
+guard必须结构化扫描全部四个owned files：两份production source检查import/definition/reference/reflection/export，两份owned tests检查import/fixture/construct/signature/member access。guard中唯一集中声明的exact target literal set，以及v2安全错误中的family-label字符串，不算executable dependency；除此之外不得豁免目标名称。带显式`V2`后缀的symbols不得被模糊substring误报。
 
 `test_record_contracts.py`移除`_request_understanding`、`_accepted_delta`、`_initial_graph`及仅服务legacy command的tests。current v2 command的owner/message/run roots、zero/all-REJECT与exact-one accepted closure、strict/frozen/extra、nested exact-type、timestamp、InputBinding/Task/RequestUnit/link/cardinality证据必须保留。
 
@@ -181,7 +184,7 @@ guard只扫描两个production source，legacy target list自身和安全错误�
 3. findings只用append-only allowlist fix commits关闭。
 4. exact review验证first parent exact `B_T`、linear/no merge、四文件scope、Application legacy executable依赖为零、Core/Infra/codec blobs不变。
 5. PASS后在包含本Plan merge的latest integration做throwaway overlay，证明owned blobs与reviewed patch一致。
-6. reviewed feature串行merge后复跑focused、Application/Runtime/Infrastructure neighbors与canonical full；共同tree才形成`B_W`并解锁01-07V。
+6. reviewed feature串行merge后复跑focused、Application/Runtime/Infrastructure neighbors与canonical full；共同tree才形成`B_W`。随后进入pre-01-07V Eval-owner remediation gate，不能直接签发V。
 
 </interfaces>
 
@@ -208,7 +211,7 @@ guard只扫描两个production source，legacy target list自身和安全错误�
   <files>exact four-file allowlist</files>
   <action>运行containment、AST/API guard、focused、Application/Runtime/Infrastructure neighbors、integration/full及independent review；PASS后overlay、串行merge与post-merge canonical gates。不得同步status或提前启动V。</action>
   <verify><automated>uv run pytest</automated></verify>
-  <done>共同post-merge tree形成可复现B_W。</done>
+  <done>共同post-merge tree形成可复现B_W，并把allowlist外Eval blocker交接给pre-01-07V owner-remediation gate。</done>
 </task>
 
 </tasks>
@@ -217,14 +220,15 @@ guard只扫描两个production source，legacy target list自身和安全错误�
 
 ```bash
 git diff --check
-uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -q
-uv run pytest tests/component/application -q
-uv run pytest tests/integration/test_agent_run_service_v2_persistence.py tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_v2_request_understanding_writes.py -q
-uv run pytest tests/integration -q
 uv sync --all-groups
 docker compose up --wait -d db
 docker compose --profile test up --wait -d db-test
 uv run alembic upgrade head
+uv run pytest tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -q
+uv run pytest tests/component/application -q
+uv run pytest tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/component/model/test_qwen_responses_adapter.py -q
+uv run pytest tests/integration/test_agent_run_service_v2_persistence.py tests/integration/test_postgres_record_adapters.py tests/integration/test_postgres_atomicity.py tests/integration/test_postgres_v2_request_understanding_writes.py -q
+uv run pytest tests/integration -q
 uv run pytest
 ```
 
@@ -233,6 +237,7 @@ uv run pytest
 - first feature commit parent exact `06cf4e45b89cfb3d403b1e09e832a0d13e62f8c2`，linear/no merge；
 - changed files exact四文件；
 - six exact legacy public targets（`ModelProvider`、两个commands与三个RuntimeRecordPort members）及其v1 return/import dependencies为零；
+- owned tests的`RequestUnderstandingOutput`、`RequestUnderstandingRecord`、`AcceptedTaskDelta`与`CandidateValidationRecord` v1 executable dependency为零；
 - three v2 commands、ModelProviderV2及两个v2 conditional Port methods保持exact；
 - allowlist外Core/Infra/codec/migration blobs不变；
 - independent review `0/0/0/0`；
@@ -255,7 +260,7 @@ uv run pytest
 
 <eval_impact>
 
-`COMPONENT CONTRACT UPDATE ONLY`：更新Application records/Ports Component evidence；Eval Provider/mapper已在01-07S收敛到v2，W不新增/激活Dataset Case，不改变Trajectory/E2E Result、grader或42 denominator。
+`COMPONENT CONTRACT UPDATE ONLY / DOWNSTREAM EVAL GAP RECORDED`：更新Application records/Ports Component evidence；active Eval Provider/mapper已在01-07S收敛到v2，但artifact-consistency test仍有一个v1 DTO subcase，必须由pre-01-07V Eval-owner remediation单独迁移。W不触碰该test、不新增/激活Dataset Case，不改变Trajectory/E2E Result、grader或42 denominator。
 
 </eval_impact>
 
@@ -286,6 +291,7 @@ Eval impact:
 Latest integration overlay evidence:
 PR / merge commit:
 Post-merge B_W SHA / tree:
+Pre-01-07V Eval-owner blocker status:
 Unresolved risks:
 Rollback:
 Recommended next step:
@@ -297,9 +303,9 @@ Agent完成不等于`B_W`、`B_RU_V2_CONTRACT`、01-08或P0产品完成。
 
 <cross_file_impact>
 
-- execution-owner r4拥有`B_T → W → V`顺序；本Plan只签发W。
+- execution-owner r4原定`B_T → W → V`顺序；exact `B_T` preflight确认W可执行，但V存在allowlist外Eval consumer blocker。W后必须先由dedicated execution-owner Packet更新marker-bounded map，再走pre-01-07V Eval-owner remediation gate；不得以本Plan静默覆盖旧map，也不得直接签发V。
 - T physical handoff、codec Plan与历史migration正文不改；physical18继续由Infrastructure/migration owner持有。
-- Core v1 types与其Component tests留给V；W不越界删除。
+- Core v1 types与其Component tests留给V；W不越界删除。`test_e2e01_artifact_consistency.py`留给独立Eval owner remediation，W/V均不得修改。
 - derived State/Roadmap/Requirements/status仍由dedicated status Packet更新；W不越界修改。
 - active canonical owner无需语义改写；本Packet只实施已批准execution-map closure。
 - Graphify保持闲置。
