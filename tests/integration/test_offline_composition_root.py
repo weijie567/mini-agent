@@ -23,7 +23,10 @@ from mini_agent.core.identity import CustomerContext
 from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, StopReason
 from mini_agent.evaluation.artifacts import load_e2e01_artifacts
 from mini_agent.infrastructure.persistence.database import build_session_factory
-from mini_agent.infrastructure.persistence.models import MockOrderModel
+from mini_agent.infrastructure.persistence.models import (
+    MockOrderModel,
+    P0RecordModel,
+)
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
 from mini_agent.bootstrap import (
@@ -81,25 +84,77 @@ def _order_row_count(session_factory) -> int:
         return int(
             session.scalar(select(func.count()).select_from(MockOrderModel))
             or 0
+    )
+
+
+def _record_row_count(session_factory) -> int:
+    with session_factory() as session:
+        return int(
+            session.scalar(select(func.count()).select_from(P0RecordModel))
+            or 0
         )
 
 
+def _tampered_artifacts(mutation: str):
+    artifacts = _artifacts()
+    raw_fixture = thaw_json_value(artifacts.fixture)
+    if mutation == "session_unknown":
+        raw_fixture["sessions"][0]["customer_id"] = "customer-B"
+    elif mutation == "session_missing":
+        raw_fixture["sessions"][0].pop("trust_boundary")
+    elif mutation == "session_duplicate":
+        raw_fixture["sessions"].append(dict(raw_fixture["sessions"][0]))
+    elif mutation == "order_unknown":
+        raw_fixture["orders"][0]["private_note"] = "not-allowed"
+    elif mutation == "order_missing":
+        raw_fixture["orders"][0].pop("owner_customer_id")
+    elif mutation == "order_duplicate":
+        raw_fixture["orders"].append(dict(raw_fixture["orders"][0]))
+    elif mutation == "sentinel_unknown":
+        raw_fixture["nonexistent_order_sentinels"][0]["owner"] = "unknown"
+    elif mutation == "sentinel_missing":
+        raw_fixture["nonexistent_order_sentinels"][0].pop("seed_behavior")
+    elif mutation == "sentinel_duplicate":
+        raw_fixture["nonexistent_order_sentinels"].append(
+            dict(raw_fixture["nonexistent_order_sentinels"][0])
+        )
+    elif mutation == "sentinel_overlap":
+        sentinel = raw_fixture["nonexistent_order_sentinels"][0]
+        sentinel["fixture_ref"] = "order-sentinel:O-1001"
+        sentinel["order_number"] = "O-1001"
+    else:
+        raise AssertionError("unknown fixture mutation")
+    return artifacts.model_copy(
+        update={"fixture": freeze_json_value(raw_fixture)}
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "session_unknown",
+        "session_missing",
+        "session_duplicate",
+        "order_unknown",
+        "order_missing",
+        "order_duplicate",
+        "sentinel_unknown",
+        "sentinel_missing",
+        "sentinel_duplicate",
+        "sentinel_overlap",
+    ),
+)
 async def test_strict_fixture_tamper_fails_before_database_side_effect(
     eval_postgres_namespace,
+    mutation: str,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
     session_factory = build_session_factory(engine)
-    artifacts = _artifacts()
-    raw_fixture = thaw_json_value(artifacts.fixture)
-    raw_fixture["sessions"][0]["customer_id"] = "customer-B"
-    tampered = artifacts.model_copy(
-        update={"fixture": freeze_json_value(raw_fixture)}
-    )
 
     try:
         with pytest.raises(OfflineCompositionError) as captured:
             await OfflineE2E01Composition.start(
-                artifacts=tampered,
+                artifacts=_tampered_artifacts(mutation),
                 session_factory=session_factory,
                 clock=_MonotonicClock(),
                 uuid_factory=uuid4,
@@ -110,6 +165,7 @@ async def test_strict_fixture_tamper_fails_before_database_side_effect(
         assert error.__cause__ is None
         assert error.__context__ is None
         assert "customer-B" not in f"{error!s} {error!r}"
+        assert _record_row_count(session_factory) == 0
         assert _order_row_count(session_factory) == 0
     finally:
         engine.dispose()

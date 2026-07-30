@@ -8,9 +8,14 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
+import mini_agent.bootstrap as bootstrap_module
 from mini_agent.application.persistence import P0RecordCode
-from mini_agent.application.records import EvalResultStatus
-from mini_agent.core.trace import AgentOutcome, TraceEventType
+from mini_agent.application.records import (
+    EvalResultStatus,
+    TrustedOwnerScope,
+)
+from mini_agent.core.identity import CustomerContext
+from mini_agent.core.trace import AgentOutcome, TraceEvent, TraceEventType
 from mini_agent.evaluation.artifacts import load_e2e01_artifacts
 from mini_agent.evaluation.harness import (
     EvalCaseExecutionInput,
@@ -21,7 +26,10 @@ from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import P0RecordModel
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
-from mini_agent.bootstrap import OfflineE2E01Composition
+from mini_agent.bootstrap import (
+    OfflineCompositionError,
+    OfflineE2E01Composition,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +104,12 @@ async def _execute_direct(composition, artifacts, case_id: str):
     )
 
 
+def _assert_bounded_composition_error(error: OfflineCompositionError) -> None:
+    assert error.args == ("OFFLINE_COMPOSITION_FAILED",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
 async def test_real_http_runtime_postgres_and_eval_gate_pass(
     eval_postgres_namespace,
 ) -> None:
@@ -138,6 +152,13 @@ async def test_real_http_runtime_postgres_and_eval_gate_pass(
 
         assert foreign is not None
         assert nonexistent is not None
+        assert len(
+            {
+                success.evidence.trace_ref,
+                foreign.evidence.trace_ref,
+                nonexistent.evidence.trace_ref,
+            }
+        ) == 3
         assert foreign.safe_observable == nonexistent.safe_observable
         assert foreign.evidence.observations == ()
         assert nonexistent.evidence.observations == ()
@@ -187,6 +208,220 @@ async def test_real_http_runtime_postgres_and_eval_gate_pass(
             assert all(
                 event.run_id == result.trace_ref for event in trace
             )
+    finally:
+        engine.dispose()
+
+
+async def test_per_case_app_service_and_provider_instances_are_isolated(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    artifacts = _artifacts()
+    handlers = []
+    create_agent_app = bootstrap_module.create_agent_app
+
+    def capture_handler(*, session_auth, handler):
+        handlers.append(handler)
+        return create_agent_app(
+            session_auth=session_auth,
+            handler=handler,
+        )
+
+    monkeypatch.setattr(
+        bootstrap_module,
+        "create_agent_app",
+        capture_handler,
+    )
+    try:
+        composition = await OfflineE2E01Composition.start(
+            artifacts=artifacts,
+            session_factory=session_factory,
+            clock=_MonotonicClock(),
+            uuid_factory=uuid4,
+        )
+        providers = (
+            _provider(artifacts, "E2E01-01"),
+            _provider(artifacts, "E2E01-04-A"),
+        )
+        apps = tuple(
+            composition.build_case_app(
+                scripted_provider=provider,
+                runtime_fault=provider.take_runtime_fault_directive(),
+            )
+            for provider in providers
+        )
+
+        assert apps[0] is not apps[1]
+        assert handlers[0] is not handlers[1]
+        assert handlers[0]._service is not handlers[1]._service
+        assert handlers[0]._service._model_provider is providers[0]
+        assert handlers[1]._service._model_provider is providers[1]
+    finally:
+        engine.dispose()
+
+
+async def test_same_id_different_trace_payload_is_rejected_before_mapping(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    artifacts = _artifacts()
+    original_reader = PostgresRecordAdapter.list_trace_events_for_owner
+
+    async def mismatched_trace(self, *, owner_scope, run_id):
+        events = await original_reader(
+            self,
+            owner_scope=owner_scope,
+            run_id=run_id,
+        )
+        poisoned = events[0].model_copy(
+            update={
+                "occurred_at": events[0].occurred_at
+                + timedelta(seconds=1)
+            }
+        )
+        return (poisoned, *events[1:])
+
+    monkeypatch.setattr(
+        PostgresRecordAdapter,
+        "list_trace_events_for_owner",
+        mismatched_trace,
+    )
+    try:
+        composition = await OfflineE2E01Composition.start(
+            artifacts=artifacts,
+            session_factory=session_factory,
+            clock=_MonotonicClock(),
+            uuid_factory=uuid4,
+        )
+        with pytest.raises(OfflineCompositionError) as captured:
+            await _execute_direct(
+                composition,
+                artifacts,
+                "E2E01-01",
+            )
+
+        _assert_bounded_composition_error(captured.value)
+    finally:
+        engine.dispose()
+
+
+async def test_missing_exact_closure_is_rejected_after_http_execution(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    artifacts = _artifacts()
+
+    async def missing_closure(_self, *, owner_scope, run_id):
+        return None
+
+    monkeypatch.setattr(
+        PostgresRecordAdapter,
+        "load_exact_run_evidence_for_owner",
+        missing_closure,
+    )
+    try:
+        composition = await OfflineE2E01Composition.start(
+            artifacts=artifacts,
+            session_factory=session_factory,
+            clock=_MonotonicClock(),
+            uuid_factory=uuid4,
+        )
+        with pytest.raises(OfflineCompositionError) as captured:
+            await _execute_direct(
+                composition,
+                artifacts,
+                "E2E01-01",
+            )
+
+        _assert_bounded_composition_error(captured.value)
+    finally:
+        engine.dispose()
+
+
+async def test_trace_callbacks_reject_unknown_owner_and_mismatched_run(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    artifacts = _artifacts()
+
+    try:
+        composition = await OfflineE2E01Composition.start(
+            artifacts=artifacts,
+            session_factory=session_factory,
+            clock=_MonotonicClock(),
+            uuid_factory=uuid4,
+        )
+        unknown_event = TraceEvent(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.EVAL_CASE_GRADED,
+            occurred_at=NOW,
+            run_id=uuid4(),
+            case_id="E2E01-01",
+        )
+        with pytest.raises(OfflineCompositionError) as unknown_captured:
+            await composition.append_eval_case_graded(unknown_event)
+        _assert_bounded_composition_error(unknown_captured.value)
+
+        result = await _execute_direct(
+            composition,
+            artifacts,
+            "E2E01-01",
+        )
+        assert result is not None
+        run_id = result.evidence.trace_ref
+        assert run_id is not None
+        alice_scope = composition._owner_scope_by_run[run_id]
+        composition._owner_scope_by_run[run_id] = (
+            TrustedOwnerScope.from_customer_context(
+                CustomerContext(
+                    subject_ref="fixture-subject:session:bob",
+                    customer_id="customer-B",
+                    auth_scopes=frozenset({"orders:read"}),
+                    authenticated_at=NOW,
+                    session_ref_hash="fixture-session-bob-hash",
+                )
+            )
+        )
+        wrong_owner_event = unknown_event.model_copy(
+            update={
+                "trace_event_id": uuid4(),
+                "run_id": run_id,
+            }
+        )
+        with pytest.raises(OfflineCompositionError) as owner_captured:
+            await composition.append_eval_case_graded(wrong_owner_event)
+        _assert_bounded_composition_error(owner_captured.value)
+
+        composition._owner_scope_by_run[run_id] = alice_scope
+        original_reader = PostgresRecordAdapter.list_trace_events_for_owner
+
+        async def mismatched_run(self, *, owner_scope, run_id):
+            events = await original_reader(
+                self,
+                owner_scope=owner_scope,
+                run_id=run_id,
+            )
+            return (
+                events[0].model_copy(update={"run_id": uuid4()}),
+                *events[1:],
+            )
+
+        monkeypatch.setattr(
+            PostgresRecordAdapter,
+            "list_trace_events_for_owner",
+            mismatched_run,
+        )
+        with pytest.raises(OfflineCompositionError) as trace_captured:
+            await composition.reload_trace(run_id)
+        _assert_bounded_composition_error(trace_captured.value)
     finally:
         engine.dispose()
 
