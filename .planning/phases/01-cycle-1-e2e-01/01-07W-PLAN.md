@@ -266,9 +266,9 @@ uv run pytest
 
 <rollback>
 
-未merge：关闭draft PR并保留RED/review证据。已merge但V未形成：普通revert W merge并复跑Application、Runtime/Infrastructure neighbors与full，恢复`B_T`定义的隔离compatibility surface；revert产生新SHA/tree，不得冒充原exact barrier，也不得reset/force。
+未merge：关闭draft PR并保留RED/review证据。W已merge且尚无任何execution-owner / Eval remediation下游merge：普通revert W merge并复跑Application、Runtime/Infrastructure neighbors与full，恢复`B_T`定义的隔离compatibility surface；revert产生新SHA/tree，不得冒充原exact barrier，也不得reset/force。
 
-若已有下游`B_RU_V2_CONTRACT`，按`V → W`逆序普通revert并逐步复跑对应gate。W不迁移physical rows，rollback不得声称恢复或删除数据库内容。
+一旦pre-01-07V链已有下游merge，不得直接revert W。实际依赖为`W → execution-owner map alignment → Eval-owner remediation → V`；必须按`V（若已merge）→ Eval-owner remediation → execution-owner map/status alignment → W`逆序逐项普通revert，并在每一步复跑该owner gate及最终canonical full。任何额外derived status merge也必须在其所描述的source/barrier之前逆序回退或显式重对齐。W与Eval remediation都不迁移physical rows，rollback不得声称恢复或删除数据库内容。
 
 </rollback>
 
