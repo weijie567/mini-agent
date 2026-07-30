@@ -2739,10 +2739,25 @@ def _folded_static_string(node: ast.AST) -> str | None:
     return None
 
 
-def _legacy_core_hits(path: Path) -> tuple[str, ...]:
-    tree = ast.parse(path.read_text(), filename=str(path))
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_ast_name(node.value)
+        if prefix is not None:
+            return f"{prefix}.{node.attr}"
+    return None
+
+
+def _legacy_core_source_hits(
+    source: str,
+    *,
+    filename: str,
+    ignore_target_catalog: bool = False,
+) -> tuple[str, ...]:
+    tree = ast.parse(source, filename=filename)
     ignored_literal_nodes: set[int] = set()
-    if path == Path(__file__):
+    if ignore_target_catalog:
         for node in tree.body:
             if (
                 isinstance(node, ast.Assign)
@@ -2755,12 +2770,89 @@ def _legacy_core_hits(path: Path) -> tuple[str, ...]:
                     id(descendant) for descendant in ast.walk(node.value)
                 )
 
-    hits: list[str] = []
     relevant_modules = {
         "mini_agent.core.request_processing",
         "mini_agent.core.request_understanding",
         "mini_agent.core.task_state",
     }
+    relevant_module_tails = {
+        module_name.rsplit(".", maxsplit=1)[-1]
+        for module_name in relevant_modules
+    }
+    module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in relevant_modules:
+                    module_aliases.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "mini_agent.core":
+                for alias in node.names:
+                    if alias.name in relevant_module_tails:
+                        module_aliases.add(alias.asname or alias.name)
+
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in module_aliases
+            ):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id not in module_aliases
+                    ):
+                        module_aliases.add(target.id)
+                        changed = True
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def is_relevant_module(node: ast.AST) -> bool:
+        dotted_name = _dotted_ast_name(node)
+        return (
+            isinstance(node, ast.Name)
+            and node.id in module_aliases
+        ) or dotted_name in relevant_modules
+
+    def enclosing_function(node: ast.AST) -> ast.FunctionDef | None:
+        current = parents.get(node)
+        while current is not None:
+            if isinstance(current, ast.FunctionDef):
+                return current
+            current = parents.get(current)
+        return None
+
+    def is_exact_runtime_absence_call(node: ast.Call) -> bool:
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id != "hasattr"
+            or len(node.args) != 2
+            or not is_relevant_module(node.args[0])
+            or not isinstance(node.args[1], ast.Name)
+            or node.args[1].id != "legacy_name"
+        ):
+            return False
+        negation = parents.get(node)
+        assertion = parents.get(negation) if negation is not None else None
+        function = enclosing_function(node)
+        return (
+            isinstance(negation, ast.UnaryOp)
+            and isinstance(negation.op, ast.Not)
+            and isinstance(assertion, ast.Assert)
+            and function is not None
+            and function.name
+            == "test_request_understanding_core_has_no_legacy_v1_executable_surface"
+        )
+
+    hits: list[str] = []
+    dynamic_export_names = {"__getattr__", "__getattribute__"}
     for node in ast.walk(tree):
         folded = _folded_static_string(node)
         if (
@@ -2782,13 +2874,85 @@ def _legacy_core_hits(path: Path) -> tuple[str, ...]:
         ):
             if node.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
                 hits.append(f"{node.lineno}:definition:{node.name}")
+            if (
+                node.name in dynamic_export_names
+                and isinstance(parents.get(node), ast.Module)
+            ):
+                hits.append(f"{node.lineno}:dynamic-export:{node.name}")
         elif isinstance(node, ast.Name):
             if node.id in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
                 hits.append(f"{node.lineno}:name:{node.id}")
         elif isinstance(node, ast.Attribute):
             if node.attr in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
                 hits.append(f"{node.lineno}:attribute:{node.attr}")
+            if node.attr in dynamic_export_names and is_relevant_module(
+                node.value
+            ):
+                hits.append(
+                    f"{node.lineno}:dynamic-export-attribute:{node.attr}"
+                )
+            if node.attr == "__dict__" and is_relevant_module(node.value):
+                hits.append(f"{node.lineno}:dynamic-module-dict")
+        elif isinstance(node, ast.Call):
+            call_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else None
+                )
+            )
+            if (
+                call_name in {"getattr", "hasattr", "setattr", "delattr"}
+                and len(node.args) >= 2
+                and is_relevant_module(node.args[0])
+            ):
+                reflected_name = _folded_static_string(node.args[1])
+                if (
+                    reflected_name is None
+                    and not is_exact_runtime_absence_call(node)
+                ):
+                    hits.append(
+                        f"{node.lineno}:dynamic-module-reflection:{call_name}"
+                    )
+            if (
+                call_name == "vars"
+                and node.args
+                and is_relevant_module(node.args[0])
+            ):
+                hits.append(f"{node.lineno}:dynamic-module-vars")
+            if call_name in {"__import__", "import_module"}:
+                hits.append(f"{node.lineno}:dynamic-import:{call_name}")
+            if (
+                call_name == "get"
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Call)
+                and isinstance(node.func.value.func, ast.Name)
+                and node.func.value.func.id in {"globals", "locals"}
+                and node.args
+                and _folded_static_string(node.args[0]) is None
+            ):
+                hits.append(
+                    f"{node.lineno}:dynamic-namespace:{node.func.value.func.id}"
+                )
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in {"globals", "locals"}
+            and _folded_static_string(node.slice) is None
+        ):
+            hits.append(f"{node.lineno}:dynamic-namespace:{node.value.func.id}")
     return tuple(sorted(set(hits)))
+
+
+def _legacy_core_hits(path: Path) -> tuple[str, ...]:
+    return _legacy_core_source_hits(
+        path.read_text(),
+        filename=str(path),
+        ignore_target_catalog=path == Path(__file__),
+    )
 
 
 def test_request_understanding_core_has_no_legacy_v1_executable_surface() -> None:
@@ -2810,20 +2974,58 @@ def test_request_understanding_core_has_no_legacy_v1_executable_surface() -> Non
     }
 
     assert not hits
-    for module in (
-        request_understanding_module,
-        task_state_module,
-        request_processing_module,
-    ):
-        for legacy_name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
-            assert legacy_name not in vars(module)
+    for legacy_name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+        assert not hasattr(request_understanding_module, legacy_name)
+        assert not hasattr(task_state_module, legacy_name)
+        assert not hasattr(request_processing_module, legacy_name)
 
-    assert "RequestUnderstandingInput" in vars(request_understanding_module)
-    assert "RequestUnderstandingOutputV2" in vars(request_understanding_module)
-    assert "AcceptedTaskDeltaV2" in vars(task_state_module)
-    assert "CandidateValidationRecordV2" in vars(task_state_module)
-    assert "RequestUnderstandingRecordV2" in vars(task_state_module)
-    assert "validate_and_reduce_initial_request_v2" in vars(
-        request_processing_module
+    assert hasattr(request_understanding_module, "RequestUnderstandingInput")
+    assert hasattr(request_understanding_module, "RequestUnderstandingOutputV2")
+    assert hasattr(task_state_module, "AcceptedTaskDeltaV2")
+    assert hasattr(task_state_module, "CandidateValidationRecordV2")
+    assert hasattr(task_state_module, "RequestUnderstandingRecordV2")
+    assert hasattr(
+        request_processing_module,
+        "validate_and_reduce_initial_request_v2",
     )
-    assert "revalidate_next_move_v2" in vars(request_processing_module)
+    assert hasattr(request_processing_module, "revalidate_next_move_v2")
+
+
+def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() -> None:
+    module_import = (
+        "import mini_agent.core.request_processing as core_module\n"
+    )
+    legacy_target = min(_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS)
+    mutations = (
+        module_import + "getattr(core_module, input())",
+        module_import + "hasattr(core_module, input())",
+        module_import + "setattr(core_module, input(), None)",
+        module_import + "vars(core_module).get(input())",
+        module_import + "core_module.__dict__.get(input())",
+        module_import + "alias = core_module\ngetattr(alias, input())",
+        "import importlib\nimportlib.import_module(input())",
+        "from importlib import import_module\nimport_module(input())",
+        "__import__(input())",
+        "globals().get(input())",
+        (
+            "def __getattr__(name):\n"
+            "    return globals().get(name + 'V2')\n"
+        ),
+        module_import + f'getattr(core_module, "{legacy_target}")',
+    )
+    for mutation in mutations:
+        assert _legacy_core_source_hits(
+            mutation,
+            filename="mutation.py",
+        ), mutation
+
+    safe_sources = (
+        module_import
+        + f'getattr(core_module, "{legacy_target}V2", None)',
+        'label = "historical request-understanding v1 absence"',
+    )
+    for safe_source in safe_sources:
+        assert not _legacy_core_source_hits(
+            safe_source,
+            filename="safe_source.py",
+        ), safe_source
