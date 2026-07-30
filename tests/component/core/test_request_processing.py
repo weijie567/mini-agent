@@ -3036,57 +3036,77 @@ def _legacy_core_source_hits(
     ) -> bool:
         if name in seen:
             return False
-        use_scope = lexical_scope(before)
-        local_assignments = [
-            (node, value)
-            for node, value in assignments_by_name.get(name, ())
-            if lexical_scope(node) is use_scope
-        ]
-        local_imports = [
-            (node, is_target)
-            for node, is_target in module_import_bindings_by_name.get(name, ())
-            if lexical_scope(node) is use_scope
-        ]
-        has_local_binding = (
-            use_scope is not tree
-            and (
-                local_assignments
-                or local_imports
-                or name in parameter_names(use_scope)
-            )
-        )
-        binding_candidates: list[tuple[ast.AST, ast.AST | bool]] = []
-        if has_local_binding:
-            binding_candidates.extend(
-                (node, value)
-                for node, value in (*local_assignments, *local_imports)
-                if position(node) < position(before)
-            )
-        else:
-            binding_candidates.extend(
+        scopes: list[ast.AST] = []
+        current_scope = lexical_scope(before)
+        scopes.append(current_scope)
+        current = current_scope
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                if not (
+                    isinstance(
+                        current,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    )
+                    and isinstance(parent, ast.ClassDef)
+                ):
+                    scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+
+        for scope in scopes:
+            scope_assignments = [
                 (node, value)
                 for node, value in assignments_by_name.get(name, ())
-                if lexical_scope(node) is tree
-                and position(node) < position(before)
-            )
-            binding_candidates.extend(
+                if lexical_scope(node) is scope
+            ]
+            scope_imports = [
                 (node, is_target)
                 for node, is_target in module_import_bindings_by_name.get(
                     name,
                     (),
                 )
-                if lexical_scope(node) is tree
-                and position(node) < position(before)
+                if lexical_scope(node) is scope
+            ]
+            has_binding = bool(
+                scope_assignments
+                or scope_imports
+                or name in parameter_names(scope)
             )
-        if not binding_candidates:
-            return False
-        binding_node, value = max(
-            binding_candidates,
-            key=lambda item: position(item[0]),
-        )
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, ast.AST):
+            if not has_binding:
+                continue
+            declared_global_or_nonlocal = any(
+                isinstance(node, (ast.Global, ast.Nonlocal))
+                and name in node.names
+                for node in ast.walk(scope)
+                if node is scope or lexical_scope(node) is scope
+            )
+            binding_candidates = [
+                (node, value)
+                for node, value in (*scope_assignments, *scope_imports)
+                if position(node) < position(before)
+            ]
+            if not binding_candidates:
+                if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
+                    continue
+                return False
+            binding_node, value = max(
+                binding_candidates,
+                key=lambda item: position(item[0]),
+            )
+            if isinstance(value, bool):
+                return value
             if isinstance(value, ast.Name):
                 return name_refers_to_module(
                     value.id,
@@ -3259,6 +3279,26 @@ def _legacy_core_source_hits(
             current = parents.get(current)
         return None
 
+    def name_refers_to_pytest(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        assignment = latest_assignment(name, before=before)
+        if assignment is False:
+            return False
+        if assignment is None:
+            return name in pytest_aliases
+        assignment_node, value = assignment
+        return isinstance(value, ast.Name) and name_refers_to_pytest(
+            value.id,
+            before=assignment_node,
+            seen=seen | {name},
+        )
+
     def runtime_absence_function_is_exact(function: ast.FunctionDef) -> bool:
         runtime_loops = [
             node
@@ -3314,23 +3354,32 @@ def _legacy_core_source_hits(
                 isinstance(node, ast.Attribute)
                 and node.attr == "__dict__"
                 and isinstance(node.value, ast.Name)
-                and node.value.id in pytest_aliases
+                and name_refers_to_pytest(
+                    node.value.id,
+                    before=node,
+                )
             )
             or (
                 isinstance(node, ast.Call)
                 and normalized_call_name(node) == "vars"
                 and len(node.args) == 1
                 and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in pytest_aliases
+                and name_refers_to_pytest(
+                    node.args[0].id,
+                    before=node,
+                )
             )
             or (
                 isinstance(node, ast.Call)
                 and normalized_call_name(node) == "getattr"
                 and len(node.args) >= 2
                 and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in pytest_aliases
+                and name_refers_to_pytest(
+                    node.args[0].id,
+                    before=node,
+                )
                 and _folded_static_string(node.args[1])
-                in {"importorskip", "skip", "xfail"}
+                in {"__dict__", "importorskip", "skip", "xfail"}
             )
             for node in ast.walk(function)
         )
@@ -3373,8 +3422,12 @@ def _legacy_core_source_hits(
         ]
         module_critical_rebindings.extend(
             node
-            for node, _is_target in module_import_bindings_by_name.get(
+            for critical_name in {
+                "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS",
                 "hasattr",
+            }
+            for node, _is_target in module_import_bindings_by_name.get(
+                critical_name,
                 (),
             )
             if lexical_scope(node) is tree
@@ -3413,6 +3466,7 @@ def _legacy_core_source_hits(
         )
         return (
             catalog_is_exact
+            and function in tree.body
             and not function.decorator_list
             and not has_parameters
             and len(runtime_loops) == 1
@@ -3476,6 +3530,21 @@ def _legacy_core_source_hits(
             for alias in node.names:
                 if alias.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
                     hits.append(f"{node.lineno}:import:{alias.name}")
+                if (
+                    alias.name == "__dict__"
+                    and (
+                        node.module in relevant_modules
+                        or (
+                            node.level > 0
+                            and (node.module or "").rsplit(
+                                ".",
+                                maxsplit=1,
+                            )[-1]
+                            in relevant_module_tails
+                        )
+                    )
+                ):
+                    hits.append(f"{node.lineno}:module-dict-import")
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets, _ = assignment_target_values(node)
             if any(target.id == "pytestmark" for target in targets):
@@ -3527,6 +3596,8 @@ def _legacy_core_source_hits(
                 and is_relevant_module(node.args[0])
             ):
                 reflected_name = _folded_static_string(node.args[1])
+                if reflected_name == "__dict__":
+                    hits.append(f"{node.lineno}:dynamic-module-dict")
                 if (
                     reflected_name is None
                     and not is_exact_runtime_absence_call(node)
@@ -3738,6 +3809,35 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "        return getattr(core_module, input())\n"
         ),
         (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "class Consumer:\n"
+            "    result = getattr(core_module, input())\n"
+            "    core_module = object()\n"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    global core_module\n"
+            "    result = getattr(core_module, input())\n"
+            "    core_module = object()\n"
+        ),
+        (
+            "from mini_agent.core.request_processing "
+            "import __dict__ as namespace\n"
+            "namespace.get(input())\n"
+        ),
+        (
+            module_import
+            + 'namespace = getattr(core_module, "__dict__")\n'
+            "namespace.get(input())\n"
+        ),
+        (
             "import types as core_module, "
             "mini_agent.core.request_processing as core_module\n"
             "getattr(core_module, input())\n"
@@ -3883,6 +3983,34 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             '    skipped = skipper("disabled")\n'
             + runtime_loop
         ),
+        (
+            catalog_source
+            + runtime_imports
+            + "from sys import warnoptions as "
+            "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    pytest_alias = pytest\n"
+            '    skipper = pytest_alias.__dict__["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    namespace = getattr(pytest, "__dict__")\n'
+            '    skipper = namespace["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
     )
     for runtime_downgrade in runtime_downgrades:
         assert _legacy_core_source_hits(
@@ -3921,6 +4049,12 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "import mini_agent.core.request_processing as core_module, "
             "types as core_module\n"
             "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "class Consumer:\n"
+            "    core_module = object()\n"
+            "    result = getattr(core_module, input())"
         ),
     )
     for safe_source in safe_sources:
