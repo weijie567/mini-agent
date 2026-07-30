@@ -64,6 +64,9 @@ from mini_agent.infrastructure.auth.p0_session import (
     P0SessionAuthAdapter,
     P0SessionFixture,
 )
+from mini_agent.infrastructure.model.qwen_responses import (
+    QwenResponsesAdapterV2,
+)
 from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
@@ -727,8 +730,57 @@ class OfflineE2E01Composition:
             hook = self._runtime_fault_hook(runtime_fault)
         except OfflineCompositionError:
             raise
-        service = AgentRunService(
+        return self._build_closed_case_app(
             model_provider=scripted_provider,
+            provider_lane="offline_gate",
+            after_revalidation_hook=hook,
+        )
+
+    def build_qwen_case_app(
+        self,
+        *,
+        qwen_provider: QwenResponsesAdapterV2,
+    ) -> FastAPI:
+        self._ensure_ready()
+        if type(qwen_provider) is not QwenResponsesAdapterV2:
+            raise _fresh_composition_error()
+        return self._build_closed_case_app(
+            model_provider=qwen_provider,
+            provider_lane="qwen_baseline",
+            after_revalidation_hook=None,
+        )
+
+    def _build_closed_case_app(
+        self,
+        *,
+        model_provider: ScriptedModelProviderV2 | QwenResponsesAdapterV2,
+        provider_lane: str,
+        after_revalidation_hook: AfterRevalidationHook | None,
+    ) -> FastAPI:
+        if (
+            (
+                type(model_provider) is ScriptedModelProviderV2
+                and (
+                    provider_lane != "offline_gate"
+                    or (
+                        after_revalidation_hook is not None
+                        and not callable(after_revalidation_hook)
+                    )
+                )
+            )
+            or (
+                type(model_provider) is QwenResponsesAdapterV2
+                and (
+                    provider_lane != "qwen_baseline"
+                    or after_revalidation_hook is not None
+                )
+            )
+            or type(model_provider)
+            not in {ScriptedModelProviderV2, QwenResponsesAdapterV2}
+        ):
+            raise _fresh_composition_error()
+        service = AgentRunService(
+            model_provider=model_provider,
             registry_snapshot=self._registry_snapshot,
             toolset_artifact_port=self._records,
             conversation_record_port=self._records,
@@ -742,11 +794,11 @@ class OfflineE2E01Composition:
             deterministic_renderer=DeterministicRenderer(),
             clock=self._clock,
             uuid_factory=self._uuid_factory,
-            provider_lane="offline_gate",
+            provider_lane=provider_lane,
             redaction_policy_version=(
                 self._fixture.redaction_policy_version
             ),
-            after_revalidation_hook=hook,
+            after_revalidation_hook=after_revalidation_hook,
         )
         return create_agent_app(
             session_auth=self._session_auth,
@@ -787,7 +839,51 @@ class OfflineE2E01Composition:
             input_failed = True
         if input_failed or opaque_session_id is None:
             raise _fresh_composition_error()
+        return await self._execute_http_case(
+            execution_input=execution_input,
+            opaque_session_id=opaque_session_id,
+            app=app,
+        )
 
+    async def execute_qwen_case(
+        self,
+        *,
+        execution_input: EvalCaseExecutionInput,
+        qwen_provider: QwenResponsesAdapterV2,
+    ) -> EvalCaseSutResult | None:
+        self._ensure_ready()
+        input_failed = False
+        opaque_session_id: str | None = None
+        app: FastAPI | None = None
+        try:
+            if (
+                type(execution_input) is not EvalCaseExecutionInput
+                or type(qwen_provider) is not QwenResponsesAdapterV2
+            ):
+                raise TypeError("invalid Qwen Case execution dependency")
+            opaque_session_id = self._fixture.raw_session_id_for_ref(
+                execution_input.trusted_context_fixture_ref
+            )
+            app = self.build_qwen_case_app(
+                qwen_provider=qwen_provider,
+            )
+        except Exception:
+            input_failed = True
+        if input_failed or opaque_session_id is None or app is None:
+            raise _fresh_composition_error()
+        return await self._execute_http_case(
+            execution_input=execution_input,
+            opaque_session_id=opaque_session_id,
+            app=app,
+        )
+
+    async def _execute_http_case(
+        self,
+        *,
+        execution_input: EvalCaseExecutionInput,
+        opaque_session_id: str,
+        app: FastAPI,
+    ) -> EvalCaseSutResult | None:
         response: httpx.Response | None = None
         request_failed = False
         try:
