@@ -38,10 +38,8 @@ from mini_agent.core.common import (
 )
 from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     CandidateValidationDecision,
     InputBinding,
-    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -326,40 +324,6 @@ _TOP_LEVEL_PROJECTIONS: Mapping[P0RecordCode, tuple[_P0ProjectionDecision, ...]]
                     value_projector=_one("conversation_id"),
                     minimum=1,
                     maximum=1,
-                ),
-            ),
-            _R.REQUEST_UNDERSTANDING_RECORD: (
-                _decision(
-                    "run_id",
-                    _D.TOP_LEVEL_P0_REFERENCE,
-                    relation="run_id",
-                    target_record_code=_R.AGENT_RUN_RECORD,
-                    value_projector=_one("run_id"),
-                    minimum=1,
-                    maximum=1,
-                ),
-                _decision(
-                    "message_ref",
-                    _D.TOP_LEVEL_P0_REFERENCE,
-                    relation="message_ref",
-                    target_record_code=_R.MESSAGE_RECORD,
-                    value_projector=_one("message_ref"),
-                    minimum=1,
-                    maximum=1,
-                ),
-                _decision(
-                    "accepted_delta_refs[]",
-                    _D.LOGICAL_CHILD_CORRELATION,
-                    value_projector=_many("accepted_delta_refs"),
-                    unique=True,
-                ),
-                _decision(
-                    "candidate_validation[].candidate_ref,next_move_candidate_ref?",
-                    _D.PAYLOAD_CORRELATION,
-                    value_projector=_combined(
-                        _nested_many("candidate_validation", "candidate_ref"),
-                        _optional("next_move_candidate_ref"),
-                    ),
                 ),
             ),
             _R.TASK_RECORD: (
@@ -880,31 +844,6 @@ _TOP_LEVEL_PROJECTIONS: Mapping[P0RecordCode, tuple[_P0ProjectionDecision, ...]]
 _CHILD_PROJECTIONS: Mapping[P0LogicalChildCode, tuple[_P0ProjectionDecision, ...]] = (
     MappingProxyType(
         {
-            P0LogicalChildCode.ACCEPTED_TASK_DELTA: (
-                _decision(
-                    "candidate_ref",
-                    _D.PARENT_LOCAL_CORRELATION,
-                    value_projector=_one("candidate_ref"),
-                    minimum=1,
-                    maximum=1,
-                ),
-                _decision(
-                    "message_ref",
-                    _D.PARENT_FIELD_EQUALITY,
-                    value_projector=_one("message_ref"),
-                    minimum=1,
-                    maximum=1,
-                ),
-                _decision(
-                    "input_binding_refs[]",
-                    _D.CHILD_TOP_LEVEL_P0_REFERENCE,
-                    relation="input_binding_ref",
-                    target_record_code=_R.INPUT_BINDING_RECORD,
-                    value_projector=_many("input_binding_refs"),
-                    minimum=1,
-                    unique=True,
-                ),
-            ),
             P0LogicalChildCode.TASK_STATE_TRANSITION: (
                 _decision(
                     "task_id",
@@ -967,7 +906,7 @@ def _record_spec(
     )
 
 
-_REGISTRY = {
+_NON_RU_REGISTRY = {
     P0RecordCode.CONVERSATION_RECORD: _record_spec(
         P0RecordCode.CONVERSATION_RECORD,
         ConversationRecord,
@@ -980,13 +919,6 @@ _REGISTRY = {
         MessageRecord,
         ("message_id",),
         version_mirror_field="schema_version",
-    ),
-    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: _record_spec(
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-        RequestUnderstandingRecord,
-        ("run_id",),
-        version_mirror_field="schema_version",
-        allowed_child_codes=(P0LogicalChildCode.ACCEPTED_TASK_DELTA,),
     ),
     P0RecordCode.TASK_RECORD: _record_spec(
         P0RecordCode.TASK_RECORD,
@@ -1079,21 +1011,13 @@ _REGISTRY = {
     ),
 }
 
-_P0_V1_PERSISTENCE_REGISTRY: Mapping[
+_NON_RU_PERSISTENCE_REGISTRY: Mapping[
     P0RecordCode,
     P0RecordSchemaSpec,
-] = MappingProxyType(_REGISTRY)
-del _REGISTRY
+] = MappingProxyType(_NON_RU_REGISTRY)
+del _NON_RU_REGISTRY
 
-_CHILD_SPECS = {
-    P0LogicalChildCode.ACCEPTED_TASK_DELTA: _P0LogicalChildSchemaSpec(
-        child_code=P0LogicalChildCode.ACCEPTED_TASK_DELTA,
-        source_model=AcceptedTaskDelta,
-        parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
-        identity_fields=("accepted_delta_id",),
-        closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
-        projection_decisions=_CHILD_PROJECTIONS[P0LogicalChildCode.ACCEPTED_TASK_DELTA],
-    ),
+_NON_RU_CHILD_SPECS = {
     P0LogicalChildCode.TASK_STATE_TRANSITION: _P0LogicalChildSchemaSpec(
         child_code=P0LogicalChildCode.TASK_STATE_TRANSITION,
         source_model=TaskStateTransition,
@@ -1114,10 +1038,13 @@ _CHILD_SPECS = {
     ),
 }
 
-P0_LOGICAL_CHILD_SPECS: Mapping[P0LogicalChildCode, _P0LogicalChildSchemaSpec] = (
-    MappingProxyType(_CHILD_SPECS)
+_NON_RU_LOGICAL_CHILD_SPECS: Mapping[
+    P0LogicalChildCode,
+    _P0LogicalChildSchemaSpec,
+] = (
+    MappingProxyType(_NON_RU_CHILD_SPECS)
 )
-del _CHILD_SPECS
+del _NON_RU_CHILD_SPECS
 
 
 def _raise_signal(category: P0PersistenceIntegrityCategory) -> None:
@@ -1204,7 +1131,7 @@ def _reference_for_value(
 ) -> P0RecordReference:
     if rule.relation is None or rule.target_record_code is None:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
-    target_spec = _P0_V1_PERSISTENCE_REGISTRY[rule.target_record_code]
+    target_spec = _NON_RU_PERSISTENCE_REGISTRY[rule.target_record_code]
     if len(target_spec.identity_fields) != 1:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
     return P0RecordReference(
@@ -1346,7 +1273,9 @@ def _validate_external_references(
         reference = matches[0]
         if reference.target_record_code is not rule.target_record_code:
             _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
-        target_spec = _P0_V1_PERSISTENCE_REGISTRY[reference.target_record_code]
+        target_spec = _NON_RU_PERSISTENCE_REGISTRY[
+            reference.target_record_code
+        ]
         actual_fields = tuple(
             field_name for field_name, _ in reference.target_logical_identity
         )
@@ -1428,31 +1357,7 @@ def _child_payloads(
         _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
 
     child_records = tuple(child for _, child in validated_children)
-    if parent_spec.record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
-        parent = parent_record
-        accepted_refs = tuple(parent.accepted_delta_refs)
-        child_ids = tuple(child.accepted_delta_id for child in child_records)
-        if (
-            len(accepted_refs) != len(set(accepted_refs))
-            or len(child_ids) != len(set(child_ids))
-            or set(accepted_refs) != set(child_ids)
-        ):
-            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-        for child in child_records:
-            if child.message_ref != parent.message_ref:
-                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-            matches = tuple(
-                candidate
-                for candidate in parent.candidate_validation
-                if candidate.candidate_ref == child.candidate_ref
-            )
-            if (
-                len(matches) != 1
-                or matches[0].decision is not CandidateValidationDecision.ACCEPT
-            ):
-                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-        validated_children.sort(key=lambda item: str(item[1].accepted_delta_id))
-    elif parent_spec.record_code is P0RecordCode.TASK_RECORD:
+    if parent_spec.record_code is P0RecordCode.TASK_RECORD:
         parent = parent_record
         identities = tuple(
             (
@@ -1525,9 +1430,14 @@ def _build_envelope(
     external_references: tuple[P0RecordReference, ...],
     logical_children: tuple[ContractModel, ...],
 ) -> P0PersistenceEnvelope:
-    spec = _P0_V1_PERSISTENCE_REGISTRY.get(record_code)
+    spec = _NON_RU_PERSISTENCE_REGISTRY.get(record_code)
     if spec is None:
-        _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+        category = (
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+            if record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+            else P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
+        )
+        _raise_signal(category)
     validated = _strict_record(spec, record)
     identity = _logical_identity(validated, spec.identity_fields)
     owner, source_references = _top_level_projection(spec, validated)
@@ -1578,6 +1488,10 @@ def encode_persistence_record(
     try:
         if not isinstance(record_code, P0RecordCode):
             _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+        if record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
+            _raise_signal(
+                P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+            )
         result = _build_envelope(
             record_code,
             record,
@@ -1806,12 +1720,12 @@ def _classify_outer(
 
     if "record_schema_version" not in parsed:
         _raise_signal(P0PersistenceIntegrityCategory.MISSING_RECORD_SCHEMA_VERSION)
-    spec = _P0_V1_PERSISTENCE_REGISTRY[code]
+    spec = _NON_RU_PERSISTENCE_REGISTRY[code]
     raw_version = parsed["record_schema_version"]
     if raw_version != spec.record_schema_version:
         known_versions = {
             item.record_schema_version
-            for item in _P0_V1_PERSISTENCE_REGISTRY.values()
+            for item in _NON_RU_PERSISTENCE_REGISTRY.values()
         }
         category = (
             P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
@@ -1986,6 +1900,11 @@ def decode_persistence_record(
 ) -> DecodedP0PersistenceRecord:
     if type(correlation_ref) is not UUID:
         raise TypeError("correlation_ref must be UUID")
+    if expected_record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
+        raise _public_error(
+            P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
+            correlation_ref,
+        )
 
     category: P0PersistenceIntegrityCategory | None = None
     result: DecodedP0PersistenceRecord | None = None
@@ -2003,10 +1922,8 @@ def decode_persistence_record(
     return result
 
 
-# 01-07E CODEC_EXPAND is intentionally appended after the complete legacy
-# module.  The imports and definitions below form an additive, non-routable
-# exact-version surface; the active registry and legacy entry points above
-# remain unchanged.
+# Request Understanding remains an exact-version-only codec surface. Generic
+# codec entry points above intentionally serve only the 16 non-RU families.
 from pydantic import BaseModel as _P0V2BaseModel
 
 from mini_agent.core.task_state import (
@@ -2178,6 +2095,16 @@ _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
     }
 )
 
+P0_LOGICAL_CHILD_SPECS: Mapping[
+    P0LogicalChildCode,
+    _P0LogicalChildSchemaSpec,
+] = MappingProxyType(
+    {
+        P0LogicalChildCode.ACCEPTED_TASK_DELTA: _ACCEPTED_TASK_DELTA_V2_SPEC,
+        **_NON_RU_LOGICAL_CHILD_SPECS,
+    }
+)
+
 P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
     tuple[P0RecordCode, str],
     P0RecordSchemaSpec,
@@ -2186,9 +2113,9 @@ P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
         **{
             (
                 code,
-                _P0_V1_PERSISTENCE_REGISTRY[code].record_schema_version,
-            ): _P0_V1_PERSISTENCE_REGISTRY[code]
-            for code in P0RecordCode
+                spec.record_schema_version,
+            ): spec
+            for code, spec in _NON_RU_PERSISTENCE_REGISTRY.items()
         },
         (
             P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
@@ -2202,8 +2129,14 @@ P0_PERSISTENCE_REGISTRY: Mapping[
     P0RecordSchemaSpec,
 ] = MappingProxyType(
     {
-        **_P0_V1_PERSISTENCE_REGISTRY,
-        P0RecordCode.REQUEST_UNDERSTANDING_RECORD: _REQUEST_UNDERSTANDING_V2_SPEC,
+        **{
+            code: (
+                _REQUEST_UNDERSTANDING_V2_SPEC
+                if code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                else _NON_RU_PERSISTENCE_REGISTRY[code]
+            )
+            for code in P0RecordCode
+        },
     }
 )
 
