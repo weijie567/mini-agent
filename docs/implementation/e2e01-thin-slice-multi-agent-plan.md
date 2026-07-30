@@ -511,7 +511,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 <!-- P0-RU-V2-EXECUTION-MAP:START -->
 ```json
 {
-  "manifest_version": "p0-ru-v2-execution-map-r5",
+  "manifest_version": "p0-ru-v2-execution-map-r6",
   "canonical_input": {
     "owner_path": "docs/implementation/e2e01-thin-slice-implementation-spec.md",
     "manifest_version": "p0-ru-v2-cutover-r1",
@@ -587,6 +587,23 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
         "tests/component/evaluation/test_e2e01_artifact_consistency.py"
       ],
       "feature_base_rule": "01-07V-EVAL-HANDOFF-uses-exact-B_W-not-the-execution-owner-or-plan-merge"
+    },
+    "qwen_runner_preflight_remediation": {
+      "status": "CONFIRMED_COMPOSITION_EVAL_OWNERSHIP_GAP",
+      "input_barrier": "B_01_08",
+      "input_sha": "b8a2cf3efb16138e63769b75aa4950cfec0fae28",
+      "input_tree": "584e5bb2ff7e86e4851a87b3d7af0a29b984f59f",
+      "blocking_finding": "01-08A Eval ownership cannot connect the reviewed QwenResponsesAdapterV2 to the real HTTP Runtime because OfflineE2E01Composition deliberately exposes only a ScriptedModelProviderV2 execution seam and the Composition Root is an Integrator-owned single-writer boundary",
+      "remediation_packet": "01-08A-COMPOSITION-HANDOFF",
+      "output_barrier": "B_01_08A_COMPOSITION",
+      "preserves_product_packet_id": true,
+      "preserved_product_packet_id": "01-08A",
+      "denominator_delta": 0,
+      "owned_files": [
+        "src/mini_agent/bootstrap.py",
+        "tests/integration/test_offline_composition_root.py"
+      ],
+      "feature_base_rule": "01-08A-COMPOSITION-HANDOFF-uses-exact-B_01_08-not-the-execution-owner-or-plan-merge"
     }
   },
   "pre_core_status_chain": [
@@ -1149,6 +1166,70 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
       ]
     }
   ],
+  "post_contract_route": {
+    "input_barrier": "B_01_08",
+    "input_sha": "b8a2cf3efb16138e63769b75aa4950cfec0fae28",
+    "input_tree": "584e5bb2ff7e86e4851a87b3d7af0a29b984f59f",
+    "waves": [
+      {
+        "input_barrier": "B_01_08",
+        "output_barrier": "B_01_08A_COMPOSITION",
+        "packets": [
+          {
+            "packet_id": "01-08A-COMPOSITION-HANDOFF",
+            "writer": "Composition Root Integrator sole writer",
+            "branch": "codex/e2e01-01-qwen-composition-handoff",
+            "worktree_id": "e2e01-01-qwen-composition-handoff",
+            "owned_files": [
+              "src/mini_agent/bootstrap.py",
+              "tests/integration/test_offline_composition_root.py"
+            ],
+            "remediation": true,
+            "denominator_delta": 0,
+            "acceptance_requires": [
+              "existing-offline-scripted-provider-execution-contract-remains-exact-and-unchanged",
+              "new-qwen-execution-seam-accepts-only-QwenResponsesAdapterV2-and-no-runtime-fault-directive",
+              "qwen-provider-lane-is-qwen_baseline-and-each-case-receives-a-distinct-injected-adapter-and-app-service",
+              "qwen-http-result-uses-the-same-authenticated-owner-bound-exact-closure-and-eval-mapper",
+              "no-global-provider-client-credential-read-or-network-owned-by-composition",
+              "mock-transport-integration-proves-real-http-runtime-postgres-evidence-with-zero-external-network",
+              "feature-starts-from-exact-B_01_08-not-the-execution-owner-or-plan-merge"
+            ]
+          }
+        ]
+      },
+      {
+        "input_barrier": "B_01_08A_COMPOSITION",
+        "output_barrier": "B_01_08A",
+        "packets": [
+          {
+            "packet_id": "01-08A",
+            "writer": "Eval credentialed Qwen runner sole writer",
+            "branch": "codex/e2e01-01-qwen-baseline-runner",
+            "worktree_id": "e2e01-01-qwen-baseline-runner",
+            "owned_files": [
+              "src/mini_agent/evaluation/harness.py",
+              "tests/integration/evaluation/test_e2e01_offline_harness.py",
+              "tests/baseline/test_qwen_baseline.py"
+            ],
+            "acceptance_requires": [
+              "runner-connects-only-reviewed-QwenResponsesAdapterV2-to-reviewed-composition-qwen-seam",
+              "each-case-uses-a-distinct-injected-qwen-adapter-with-no-global-client-or-provider",
+              "case-and-script-expectations-remain-authenticated-harness-only-and-never-enter-the-provider-or-sut-input",
+              "missing-DASHSCOPE_API_KEY-or-DASHSCOPE_BASE_URL-persists-empty-NOT_RUN-and-performs-zero-network",
+              "credential-complete-path-runs-only-under-explicit-qwen_baseline-marker",
+              "qwen-results-remain-informational-and-do-not-define-an-ordinary-pass-rate-release-gate",
+              "no-failure-taxonomy-artifact-grader-threshold-lifecycle-or-composition-change",
+              "feature-starts-from-exact-B_01_08A_COMPOSITION-not-the-execution-owner-or-plan-merge"
+            ]
+          }
+        ]
+      }
+    ],
+    "denominator_delta": 0,
+    "credential_state_at_preflight": "MISSING_REQUIRED_ENV",
+    "missing_credential_outcome": "NOT_RUN_OR_PYTEST_SKIPPED_WITH_ZERO_NETWORK"
+  },
   "serial_order": [
     "01-07F",
     "01-07E",
@@ -1252,16 +1333,31 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
       "physical-v1-representation-retirement-01-07R-not-activated",
       "composition-root-http-eval-not-proven",
       "readiness-not-proven"
+    ],
+    "B_01_08": [
+      "credentialed-qwen-runner-not-implemented",
+      "credentialed-qwen-result-not-run",
+      "canonical-case-lifecycle-owner-not-aligned",
+      "canonical-product-startup-not-implemented",
+      "readiness-not-proven"
+    ],
+    "B_01_08A_COMPOSITION": [
+      "credentialed-qwen-runner-not-implemented",
+      "credentialed-qwen-result-not-run",
+      "canonical-case-lifecycle-owner-not-aligned",
+      "canonical-product-startup-not-implemented",
+      "readiness-not-proven"
     ]
   },
-  "next_after_contract": "01-08"
+  "next_after_contract": "01-08",
+  "next_after_B_01_08": "01-08A-COMPOSITION-HANDOFF"
 }
 ```
 <!-- P0-RU-V2-EXECUTION-MAP:END -->
 
 该map只拥有execution拆分，不覆盖Thin Slice、Intent、Memory、Tool、Business或Eval语义；symbolic barrier只有对应Packet完成exact-head review、latest-integration replay与串行merge后才实例化。F与E可以使用独立Worktree，但F先从status-aligned `B_O_STATUS`形成`B_F`，E只能再从reviewed `B_F`形成`B_FE_EXPAND`；两者不再从`B_DH`同base并行。`B_FE_EXPAND`仍是non-routable additive barrier，不能被解释为active registry、PostgreSQL、Runtime、Provider/Eval、v1 contract或readiness已经切换。
 
-`p0-ru-v2-execution-map-r5`保留r4的physical handoff与T/W/V产品Packet ID，并记录exact `B_W`上的01-07V preflight blocker：Eval owner的artifact-consistency Component test仍直接import并construct Core v1 `RequestUnderstandingOutput`，V不能在自身Core allowlist内删除该type。r5在`B_W`与V之间插入denominator-neutral的`01-07V-EVAL-HANDOFF`，只允许该Eval test把stale new-goal base-version case迁移到exact v2 schema/contextualization并保留PresentationPlan拒绝证据；不修改Eval artifacts、Dataset、grader、production source或42分母。handoff feature必须从exact `B_W`启动，不能使用execution-owner/Plan merge；reviewed merge与post-merge gate形成`B_V_READY`后，V只能从该新barrier启动。该remediation不提供Core v1 alias/fallback，不推进Trajectory/E2E/Case lifecycle，也不声称physical v1 rows或01-07R已处理。
+`p0-ru-v2-execution-map-r6`保留r5的全部42分母、physical handoff与T/W/V产品Packet ID，并在exact `B_01_08 = b8a2cf3efb16138e63769b75aa4950cfec0fae28`记录01-08A preflight发现的Composition / Eval ownership gap。01-08A不能在Eval三文件ownership内把Qwen Adapter接入只接受`ScriptedModelProviderV2`的Composition Root，也不能复制HTTP / Runtime / PostgreSQL / exact-closure装配。因此r6增加denominator-neutral的`01-08A-COMPOSITION-HANDOFF`：只允许Integrator在`bootstrap.py`及其Integration test中增加exact Qwen provider injection seam，保留现有offline seam，并以MockTransport证明零外网的真实HTTP纵向链。其reviewed merge形成`B_01_08A_COMPOSITION`后，原01-08A才可由Eval sole writer连接既有Qwen Adapter、Harness与marker baseline；两个Packet都不得从execution-owner或Plan merge启动。当前环境缺少两项DASHSCOPE输入，真实baseline只能记录`NOT_RUN / SKIPPED`且零网络；这不阻止runner实现，但禁止伪造credentialed PASS、普通阈值或lifecycle结论。
 
 01-07C / 01-07G 已从共同 execution base `3f0753f7bef87fc02f314e28fe8b07860a819701` 完成“单目标Plan → owner feature → exact-head review → latest-integration overlay → 串行merge”。01-07G planning / feature PR #48/#50形成merge `bfc63c9444ee1af204cc3806eac7e7e84fc1bb19`；01-07C原feature PR #51因review发现`run_id`与durable contextualization缺口而关闭保留，r1 Plan / feature PR #52/#53关闭问题并形成共同 barrier `B_CG = 327b39da45cdcf564609a5385d52c4264da2c669`、tree `49ad0f3f5fc2c0cbe507763aca12bb6825fb7887`。该barrier的default full offline suite为`1493 passed, 1 deselected, 12 warnings`；Graphify受控全量重建为`3098 nodes / 16904 edges / 68 hyperedges / 135 communities`，记录`699`个dangling endpoint、`687`组directed与`713`组undirected collapse candidate、`0` missing endpoint与`0` self-loop。Status-evidence review发现Project Direction仍保留C未开始快照后，独立exact one-file owner PR #54以`0/0/0` review与1493-test full gate关闭并merge `ffcc562487be458073f4229e4f6f7b353bc8d9e0`；该证据对齐不替换`B_CG`。01-07C / 01-07G因此为`COMPLETE / EVIDENCE_INDEXED`。
 
@@ -1459,16 +1555,16 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | 项目级 Codex roles | `CONFIRMED` | `.codex/config.toml`、`.codex/agents/*.toml` |
 | 多 Agent 执行计划 | `CONFIRMED` | 本文 |
 | GitHub PR 远程流程 | `REMOTE_CONNECTED / PUBLIC / BASE_BRANCHES_PROTECTED` | `origin=https://github.com/weijie567/mini-agent.git`；D/H feature PR #59/#60形成`B_DH = 4a7e802...`，01-07N Plan/owner PR #62/#63形成remediation merge `a4b1edb...`，01-07O Plan/owner PR #64/#65形成`7332091...`；流程建立审计记录见 [PR #1](https://github.com/weijie567/mini-agent/pull/1)；两个 base branch 均要求 PR、对管理员生效并禁止 force push / deletion；当前没有 required status checks，因为 CI workflow 尚未建立 |
-| GSD | `ACTIVE / EFFECTIVE / T_W_REVIEWED_MERGED / B_W_FORMED / V_EVAL_HANDOFF_NEXT` | activation PR #10生效；K/L/M/Q形成`B_DEPENDENCY → B_DEPENDENCY_M → B_Q`；execution-map r2 PR #107加入Y/Z/AA并固定42 denominator；PR #138–#144完成physical handoff、T与W的execution/Plan/feature串行链，形成`B_W = 556ab06...` |
-| W1 Infra / Runtime | `CONTRACT_IMPLEMENTED / PARTIAL` | [PR #5](https://github.com/weijie567/mini-agent/pull/5) 与 [PR #4](https://github.com/weijie567/mini-agent/pull/4) 已按序合并；存在 `src/`、`pyproject.toml`、`uv.lock`、`compose.yaml`、空业务 migration、Core / Application contracts 与 PostgreSQL namespace tests；不含完整 Adapter、HTTP 或 orchestration |
-| W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；[PR #29](https://github.com/weijie567/mini-agent/pull/29) 已实现Provider Adapter、Harness、Graders与Result/Failure machinery；尚无real HTTP/PostgreSQL Eval SUT或credentialed Baseline Result |
-| W1 集成验证 | `CONFIRMED` | 在仓库根目录执行 `uv sync --all-groups`、两个 Compose health gate、`uv run alembic upgrade head`、`uv run pytest` 与 `uv run pytest -n 8`；serial / xdist 均 `125 passed`，测试 namespace 清理为 0 |
+| GSD | `ACTIVE / EFFECTIVE / B_01_08_FORMED / 01_08A_COMPOSITION_HANDOFF_NEXT` | activation PR #10生效；execution-map denominator继续固定为42；01-07V closure与01-08 Plan / oracle / feature PR #148–#153已形成`B_01_08 = b8a2cf3...`，本次r6只修订01-08A acceptance route |
+| W1 Infra / Runtime | `OFFLINE_VERTICAL_IMPLEMENTED / PRODUCT_STARTUP_PARTIAL` | W1/W2已实现Core / Application / Runtime / Session HTTP / PostgreSQL与恢复边界；PR #153新增显式offline Composition Root与真实纵向装配；仍不含canonical产品进程入口、默认local Provider或生产外部系统接入 |
+| W1 Fixture / Eval artifacts | `CONTRACT_IMPLEMENTED / EVAL_MACHINERY_AND_REAL_OFFLINE_SUT_IMPLEMENTED` | [PR #3](https://github.com/weijie567/mini-agent/pull/3) 已双审合并5个versioned JSON artifacts；PR #29实现Provider Adapter、Harness、Graders与Result/Failure machinery；PR #153已装配real HTTP / Runtime / PostgreSQL Eval SUT；仍无credentialed Qwen runner或Baseline Result |
+| W1 集成验证 | `CONFIRMED / B_01_08_POST_MERGE` | 在仓库根目录执行canonical依赖同步、两个Compose health gate、`uv run alembic upgrade head`与串行`uv run pytest`；`B_01_08`为`1975 passed, 1 deselected, 12 warnings`，tracked tree clean |
 | W2.0 contract freeze | `CONFIRMED / MERGED` | [PR #9](https://github.com/weijie567/mini-agent/pull/9) 已合并；integration exact head `85eb2a7fc4cc131e67e44dbba132b526e36ae6a3` |
-| W2 dispatch | `RUNTIME / INFRA / EVAL / TRACE / EVIDENCE_BOUNDARY / C_G_D_H_N_O_F_E_I_P_K_L_M_Q_Y_Z_AA_J_S_U_X_T_W REVIEWED_MERGED / B_W_FORMED / V_EVAL_HANDOFF_NEXT` | T/W已按r4从physical handoff barrier串行关闭Application codec与Port/records v1 surface；`B_W = 556ab06...`、tree `f28f7f1...`通过owned 374、Application 700、Eval/model 59、PostgreSQL 134、integration 582与canonical full `1966 passed, 1 deselected, 12 warnings`。V preflight确认一个Eval-owned v1 DTO consumer，下一步先执行01-07V-EVAL-HANDOFF |
-| `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED` | 尚无运行证据 |
+| W2 dispatch | `RU_V2_CONTRACT_AND_01_08_REVIEWED_MERGED / B_01_08_FORMED / QWEN_COMPOSITION_HANDOFF_NEXT` | PR #149形成`B_RU_V2_CONTRACT = 5c84e0e...`；PR #150签发01-08；oracle PR #151/#152与feature PR #153形成`B_01_08 = b8a2cf3...`、tree `584e5bb...`，post-merge canonical full为`1975 passed, 1 deselected, 12 warnings` |
+| `E2E01-01/04` 生命周期 | `CONTRACT_DEFINED / REAL_OFFLINE_EXECUTION_EVIDENCE_AVAILABLE` | 01-08已有真实HTTP→Runtime→PostgreSQL→Eval结果，但canonical Coverage Matrix owner尚未完成lifecycle裁决；本execution owner不得自行改为PASS |
 
-W0、W1、W2.0 contract freeze、GSD activation、Plans 01-01–01-04、inserted completed Packets 01-04D/E/F/G/H、01-07A/B/C/D/E/F/G/H/I/K/L/M/N/O/P/Q/Y/Z/AA/J/S/U/X/T/W、replacement 01-05R/01-06R与01-07已有完成证据；numbered Plan evidence口径仍是7/8，canonical lifecycle与派生checkbox仍保持0/8。当前reviewed feature完成证据为37/42；Phase目录中有44份`*-PLAN.md` artifact与24份Summary。PR #107、01-07X preflight remediation、01-07T physical handoff remediation与本次01-07V Eval handoff remediation只修订execution/acceptance route；`01-07T-PHYSICAL-HANDOFF`与`01-07V-EVAL-HANDOFF`均为denominator-neutral remediation，不增加42 target。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
+W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08均已有reviewed feature和post-merge证据；numbered Plan 01-08也已出现并执行。Canonical lifecycle与派生checkbox在Coverage Matrix owner裁决前仍保持`0/8`，本execution owner不维护第二份完成分子、Plan/Summary计数或lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与本次01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。Plan签发、execution-map落盘、owner remediation、status索引或prose closure都不等于后续Task Packet实现完成。
 
-Cross-file impact scan确认S/U/X/T/W Plan与feature证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`与`README.md`；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle，也不改变reviewed `B_W`。
+Cross-file impact scan确认01-08实现证据尚未同步到派生`.planning/PROJECT.md`、`.planning/STATE.md`、`.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、W2 Validation、`PROJECT_DIRECTION.md`、`README.md`、`AGENTS.md`以及Business / Eval owner状态横幅；这些文件不在本active execution-owner single-writer allowlist中，后续只能由各自dedicated status Packet对齐。本次只更新marker-bounded canonical execution map与其owned current-status prose，不重写现有Plan/Summary历史正文，不推进Case/Requirement/Phase lifecycle。
 
-下一步从exact `B_W = 556ab06cedccabc5e862647570a47adecab33b90`签发denominator-neutral的01-07V-EVAL-HANDOFF；execution-owner、Plan或status merge不得替换该remediation feature base。handoff reviewed merge与post-merge gate形成`B_V_READY`后，01-07V只能从该新exact barrier启动，不得继续使用raw `B_W`。`B_W`仍只覆盖exact-one accepted E2E01与已定义fault routes；Core v1 contract、physical RU-v1 retirement、zero/all-REJECT、multi-ACCEPT、atomic failure恢复、真实HTTP Trajectory/E2E、Case PASS与产品readiness仍未完成。
+下一步从exact `B_01_08 = b8a2cf3efb16138e63769b75aa4950cfec0fae28`签发denominator-neutral的01-08A-COMPOSITION-HANDOFF；execution-owner、Plan或status merge不得替换该remediation feature base。handoff reviewed merge与post-merge gate形成`B_01_08A_COMPOSITION`后，01-08A只能从该新exact barrier启动。当前缺少`DASHSCOPE_API_KEY`与`DASHSCOPE_BASE_URL`，因此实际credentialed baseline仍为`NOT_RUN / SKIPPED`，且不得把01-08离线PASS、handoff或runner实现解释为credentialed Qwen结果、canonical lifecycle PASS、产品启动或readiness。
