@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜Agent Evaluation Strategy
 
-更新日期：2026-07-27<br>
+更新日期：2026-07-30<br>
 状态：P0 规范性评测策略  
 适用范围：P0 Agent 的 Eval-driven development、Dataset、Grader、评测门禁、报告与架构决策证据
 
-> 本文定义目标评测契约，不把当前 Component / in-process Eval machinery 描述成真实 Runtime / HTTP / PostgreSQL 纵向 E2E。仓库当前已有第一最薄 E2E-01 的 versioned Fixture / Case / script / lane artifacts 与 loader、`ScriptedModelProvider`、`QwenResponsesAdapter`、13 个确定性 Grader、`OfflineEvalHarness`、结构化 `EvalResultRecord` / `EvalExecutionFailureRecord` 及对应测试。真实 `EvalCaseSut`、从 PostgreSQL 权威记录组装 `EvalEvidence` 的 reader、Composition Root、credentialed Qwen runner / Baseline Result、真实 HTTP / Trajectory / E2E 运行结果、报告与线上监控仍为 `NOT_FOUND`；普通质量阈值仍为 `OPEN`。
+> 本文定义目标评测契约，并区分“实现存在”“可复现离线纵向证据”“Case lifecycle”与“发布 Gate”。仓库当前已有第一最薄 E2E-01 的 versioned Fixture / Case / script / lane artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、HTTP → Runtime → PostgreSQL 离线纵向装配和 credential-aware Qwen runner。exact integration `851c06c79438a3be3a6968d31ec54485e0ee3c82` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。但 Case artifacts 与 canonical lifecycle 仍是 `CONTRACT_DEFINED`；Harness 现会在 SUT / Provider / Trace / Grader / Result 前持久化 bounded `CASE_SETUP_FAILED`，不得形成 `PASS / FAIL`。真实 credentialed Qwen Baseline Result 仍为 `NOT_RUN`，canonical 产品启动、回归报告与线上监控仍为 `NOT_FOUND`，普通质量阈值仍为 `OPEN`。
 
 ## 1. 文档所有权与适用边界
 
@@ -465,7 +465,7 @@ EvalExecutionFailureRecord
 
 该记录使对应命令和 Eval Run 失败，但不把基础设施 / Harness 故障误报成 Case 业务断言结果，也不计入 `PASS / FAIL / SKIPPED / NOT_RUN`。如果失败前已经形成满足上表的安全 Trace、Outcome 和至少一个 Grader 结果，则可以正常落盘 `FAIL`；否则 expected Case result 缺失本身由 `RESULT_COMPLETENESS` failure 记录并使命令失败。Failure Record 只保存安全 reason code 和受限诊断引用，不保存 secret、原始 Token、完整 Prompt 或不必要 PII。
 
-当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。现有 Harness 测试只注入 `SyntheticSut`、in-memory Trace callback 和 in-memory Result Port；这些证据证明的是结构化记录与 in-process orchestration，不是从 PostgreSQL 权威记录组装 `EvalEvidence` 的 reader，也不是真实 HTTP / Trajectory / E2E Result 或报告。
+当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT；Component / integration machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则继续保持 `CONTRACT_DEFINED`，通过 `OfflineEvalHarness` 时会在 Harness 派发 SUT 前 fail closed。定向 Composition 测试可以直接调用离线 SUT 形成纵向 evidence，但不绕过 Harness 的 lifecycle gate。因此现有证据确认纵向组件与直接离线 HTTP 轨迹存在，但不构成 lifecycle-valid Case `PASS / FAIL`、回归报告或发布 Gate。
 
 ## 9. P0 Coverage 与激活顺序
 
@@ -480,7 +480,7 @@ EvalExecutionFailureRecord
 5. 进入 E2E-02，增加 RAG、ActionPolicy、安全副作用和故障恢复。
 6. 运行 Baseline 后再设置普通质量 Gate。
 
-`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。对应 artifacts / loader、Provider Adapter、Grader、in-process Harness 和结构化记录已经出现，但在真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与可复现的真实 HTTP / Trajectory / E2E Result 出现前，Case 仍只是 `CONTRACT_DEFINED`。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
+`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与可复现的直接 HTTP / Runtime / PostgreSQL 纵向证据已经出现；这只满足 lifecycle 裁决所需的实现事实前提，不自动完成裁决。当前 Case、manifest 与 loader 仍关闭在 `CONTRACT_DEFINED`，Harness 也据此拒绝形成 `PASS / FAIL`。只有 post-execution quality gate 完成、Coverage Matrix owner 将目标 Case 裁决为 `EXECUTABLE`，并由独立 Eval implementation Packet 同步 authenticated artifacts / loader 后，才能生成 lifecycle-valid 结构化结果。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
 
 ## 10. Eval 作为架构决策证据
 
@@ -514,13 +514,14 @@ EvalExecutionFailureRecord
 - P0 业务范围、两条 E2E 和安全不变量已有 active owner。
 - Intent、Tool Calling、Memory 和 RAG 已定义各自目标 Eval obligations。
 - P0 至少需要 Component、Trajectory 和 E2E 三层 Eval。
-- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned Fixture / Case / script / lane artifacts 与 loader、`ScriptedModelProvider`、`QwenResponsesAdapter`、13 个确定性 Grader、`OfflineEvalHarness` 和结构化 Result / Failure machinery；exact-base focused suite 的 191 项测试通过。Harness 测试注入的是 `SyntheticSut` 与 in-memory Trace / Result fake，因此这些仍是 Component / in-process 证据，不是 HTTP / Trajectory / E2E 运行结果。
+- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned Fixture / Case / script / lane artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader 和离线 Composition Root。
+- 直接 HTTP → Runtime → PostgreSQL 纵向证据、owner-scoped 非本人 / 不存在安全等价以及 credential-aware Qwen runner 均已实现；exact `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。当前真实 Case 通过 `OfflineEvalHarness` 时仍以 `CONTRACT_DEFINED` fail closed，不能把这些实现证据记成 Case `PASS`。
 
 ### 11.2 `NOT_FOUND`
 
-- `OfflineEvalHarness` 可调用的真实 `EvalCaseSut`、从 PostgreSQL 权威记录组装 `EvalEvidence` 的 reader、Composition Root，以及真实 HTTP / Trajectory / E2E 运行结果。
-- credentialed Qwen runner 与真实 Baseline Result；当前只有 `QwenResponsesAdapter` Component 实现和产生空 `NOT_RUN` 记录的零网络 preflight。
-- 回归报告、已运行的发布 Gate 和线上监控结果。
+- lifecycle-activated authenticated Case / manifest / loader，以及基于它们生成的有效 `E2E01-01/04 PASS / FAIL`、已运行发布 Gate 和回归报告。
+- 真实 credentialed Qwen Baseline Result；runner 已实现，缺少凭据时只产生空 `NOT_RUN`，Case 未激活时在任何 Provider transport 前产生 bounded lifecycle failure。
+- canonical 产品进程启动与线上监控结果。
 
 ### 11.3 `OPEN`
 
