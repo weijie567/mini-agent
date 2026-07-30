@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜P0 Eval Coverage Matrix
 
-更新日期：2026-07-30<br>
+更新日期：2026-07-31<br>
 状态：P0 规范性评测覆盖契约  
 适用范围：两条 P0 E2E、跨组件风险、首批 Eval Case family 与激活顺序
 
-> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 versioned Fixture / Dataset artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、HTTP → Runtime → PostgreSQL 离线纵向装配和 credential-aware Qwen runner。exact code / gate ancestor `851c06c79438a3be3a6968d31ec54485e0ee3c82` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。定向 Composition 测试可以形成纵向 evidence，但真实 artifacts 通过 `OfflineEvalHarness` 时仍以 `CONTRACT_DEFINED` 在 Harness 派发 SUT 前 fail closed；没有 lifecycle-valid `PASS / FAIL`、真实 credentialed Qwen Baseline Result 或回归报告。下列 Case 当前均保持 `CONTRACT_DEFINED`，不得解释为已经执行或通过。
+> 本文是从 active owner 派生的验证映射，不重新定义业务或组件语义。当前仓库已有 versioned Fixture / Dataset artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、HTTP → Runtime → PostgreSQL 离线纵向装配和 credential-aware Qwen runner。exact code / gate ancestor `851c06c79438a3be3a6968d31ec54485e0ee3c82` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`；post-execution code review、Validation、Eval review、Security audit 与 controlled UAT 已合并至 exact integration barrier `0784683861626894b54997f870a9ad637bca006a`。本文在该 barrier 上批准 `E2E01-01/04` 及其首批 authenticated parameterized artifacts 进入独立 activation Packet；在该 Packet 完成 authenticated artifacts / manifest / loader 原子同步前，有效 lifecycle 仍是 `CONTRACT_DEFINED`，没有 lifecycle-valid `PASS / FAIL`、真实 credentialed Qwen Baseline Result 或回归报告。`APPROVED_FOR_EXECUTABLE` 不得解释为已经执行或通过。
 
 ## 1. Owner 与使用规则
 
@@ -42,7 +42,13 @@ Case 的期望行为必须追溯到：
 | `REGRESSION_GATE` | 已纳入持续门禁 |
 | `RETIRED` | 已被新 Case 取代并保留追溯 |
 
-当前 15 个 Case family 全部是 `CONTRACT_DEFINED`。
+生命周期决策与有效状态分开记录：
+
+- `activation_decision: APPROVED_FOR_EXECUTABLE` 表示 owner 已批准一个独立 implementation Packet 将指定 Case 与 authenticated artifacts 原子切换为 `EXECUTABLE`，不是新的 lifecycle 状态。
+- 批准不自行改变 artifact bytes、manifest digest 或 loader 认证值。Packet 合并前的有效状态仍是 `CONTRACT_DEFINED`。
+- 只有同步后的真实 artifacts 通过 Harness 生成结构化 Result，才能声称 lifecycle-valid `PASS / FAIL`；只有另行纳入持续门禁后才能进入 `REGRESSION_GATE`。
+
+当前 15 个 Case family 中，`E2E01-01/04` 已获 `APPROVED_FOR_EXECUTABLE`，其余 13 个未获激活批准；在 activation Packet 合并前，15 个 Case family 的有效 lifecycle 仍是 `CONTRACT_DEFINED`。
 
 ### 2.2 Grader 记号
 
@@ -66,7 +72,7 @@ Case 的期望行为必须追溯到：
 | `G-CROSS` | 两条切片贯通后的多目标行为门禁 |
 | `G-TRACE` | 关键决策、权威引用、状态变化、失败和停止原因可追溯 |
 
-这些都是目标 Gate，不是当前已经运行的发布门禁。所有 Case 仍为 `CONTRACT_DEFINED`；除 `G-CF` 的“不得发生”语义外，普通质量、延迟和成本阈值必须等待可运行 Dataset 与 Baseline。
+这些都是目标 Gate，不是当前已经运行的发布门禁。activation Packet 合并前所有 Case 的有效 lifecycle 仍为 `CONTRACT_DEFINED`；除 `G-CF` 的“不得发生”语义外，普通质量、延迟和成本阈值必须等待可运行 Dataset 与 Baseline。
 
 ## 3. P0 Case family 总表
 
@@ -199,6 +205,45 @@ release_gate = FAIL
 
 上述两个 Case 的具体编码与双轨执行契约见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)。创建 Spec、完成 Component machinery 或形成直接离线纵向 evidence 都不自动改变生命周期状态。真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader、Composition Root 与 HTTP → Runtime → PostgreSQL 纵向装配已经出现，只构成激活前提；仍须先完成 post-execution quality gate，再由本文 owner 裁决目标 Case 是否进入 `EXECUTABLE`，最后通过独立 Eval implementation Packet 同步 authenticated artifacts / manifest / loader，才能生成 lifecycle-valid 结构化 Eval Result。
 
+#### 2026-07-31 lifecycle owner 裁决
+
+```text
+decision_id: E2E01-CYCLE1-ACTIVATION-2026-07-31
+decision_barrier: 0784683861626894b54997f870a9ad637bca006a
+case_families:
+  - E2E01-01
+  - E2E01-04
+activation_decision: APPROVED_FOR_EXECUTABLE
+effective_lifecycle_before_activation_packet: CONTRACT_DEFINED
+```
+
+裁决依据：
+
+- exact code / gate ancestor `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`。
+- [Phase 01 Code Review](../../.planning/phases/01-cycle-1-e2e-01/01-REVIEW.md) 为 `clean`，确认 lifecycle fail-closed remediation 已关闭。
+- [Phase 01 Validation](../../.planning/phases/01-cycle-1-e2e-01/01-W2-VALIDATION.md) 已覆盖 42/42 implementation targets，未发现新的 test gap。
+- [Phase 01 Eval Review](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-REVIEW.md) 的 `NEEDS_WORK` 原因明确收敛为 lifecycle activation、valid Result 与 regression gate，未发现需要先修改 Case expectations 的实现缺陷。
+- [Phase 01 Security](../../.planning/phases/01-cycle-1-e2e-01/01-SECURITY.md) 为 `PASS WITH ACCEPTED RISK`；236 个 threat occurrences 中 235 个关闭，`RTA-D01` 依 scoped canonical owner ruling 保持有界接受。
+- [Phase 01 Controlled UAT](../../.planning/phases/01-cycle-1-e2e-01/01-UAT.md) 由 `CODEX_INTEGRATOR` 以 `DIRECT_CONTROLLED_EXECUTION` 驱动 16 个隔离 PostgreSQL schema 的 HTTP → Runtime → PostgreSQL 场景并判定 scoped `PASS`；`end_user_uat` 仍为 `NOT_RUN`。
+
+批准范围包括下列六个已认证 physical artifacts；参数化变体不新增 Case family：
+
+1. `E2E01-01`
+2. `E2E01-04-A`
+3. `E2E01-04-B`
+4. `E2E01-01+SEC-ARGUMENT-BINDING`
+5. `E2E01-01+FAULT-PROVIDER-PROTOCOL`
+6. `E2E01-01+FAULT-PRESENTATION-PROTOCOL`
+
+activation Packet 必须：
+
+- 从上述 exact barrier 创建独立 Eval-owned feature Worktree，只同步这六个 artifacts 的 lifecycle、manifest / digest、loader authentication 与对应 contract tests；不得改写 Case expectations、Grader 语义、业务 owner 或 Provider 行为。
+- 保持整批 fail-closed：authenticated bytes、manifest、loader 常量或 lifecycle 不一致时，不得调用 SUT、Provider、Trace、Grader 或生成普通 Result。
+- 在 offline deterministic lane 生成逐 Case 结构化 Result，并保留缺失 Qwen credential 时的零网络 `NOT_RUN`；本裁决不要求真实 credentialed Qwen Baseline。
+- 经 focused tests、canonical 串行全套测试和独立 exact-head review 后串行合并。
+
+满足上述原子同步条件时，`E2E01-01/04` 的有效 lifecycle 按本裁决转为 `EXECUTABLE`，无需再次解释业务或 Case 语义；Result、聚合报告与 `REGRESSION_GATE` 仍须分别以实际执行和后续门禁证据建立。
+
 ### Cycle 2：完成 E2E-01
 
 - 激活 `E2E01-02/03/05/06`；`E2E01-05` 必须与一个确实需要 `get_shipment` 的配对 Case 在同一可用工具集中运行。
@@ -266,17 +311,17 @@ grading:
     - T
 ```
 
-完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码，其 artifacts / loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已落盘。定向 Composition 测试已形成 HTTP → Runtime → PostgreSQL 纵向 evidence；machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则通过 Harness 的 lifecycle gate fail closed。因此 Case 当前仍不可执行，尚无 lifecycle-valid Result；`E2E01-05` 等待 Cycle 2 的 scoped contract。
+完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码，其 artifacts / loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已落盘。定向 Composition 测试已形成 HTTP → Runtime → PostgreSQL 纵向 evidence；machinery 测试使用明确标注的 test-only `EXECUTABLE` bundle，真实 authenticated artifacts 则通过 Harness 的 lifecycle gate fail closed。本文现已批准独立 activation Packet；在其完成原子同步前 Case 仍不可执行，尚无 lifecycle-valid Result。`E2E01-05` 等待 Cycle 2 的 scoped contract。
 
 ## 9. 当前验证状态
 
 | 项目 | 状态 |
 |---|---|
 | Strategy 与 Case contract | `CONFIRMED`：已由 active 文档定义 |
-| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED / OFFLINE_VERTICAL_IMPLEMENTED / LIFECYCLE_NOT_ACTIVATED`：artifacts / loader、双 Provider Adapter、13 个确定性 Grader、Harness、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已出现；直接纵向 evidence 不等于 lifecycle-valid Result |
+| 第一最薄 E2E-01 Implementation Spec | `CONTRACT_DEFINED / OFFLINE_VERTICAL_IMPLEMENTED / ACTIVATION_APPROVED_SYNC_PENDING`：artifacts / loader、双 Provider Adapter、13 个确定性 Grader、Harness、结构化 Result / Failure machinery、真实离线 SUT、PostgreSQL evidence reader 与 Composition Root 已出现；直接纵向 evidence 与 activation approval 均不等于 lifecycle-valid Result |
 | `G-RAG-INFRA` | `CONTRACT_DEFINED / PARTIAL_PREREQUISITE`：固定 pgvector Compose 与基础 migration 已出现；RAG capability probe、Corpus / Index 和 Gate Result 均未出现，不能宣称 RAG 基础设施 Gate 已激活 |
-| 15 个 Case family | `CONTRACT_DEFINED` |
-| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / LOADABLE_ARTIFACT_PRESENT`：authenticated loader 可加载并校验；真实纵向链已存在，但 artifacts / manifest / loader 尚未获 owner 激活，仍不是 lifecycle-executable Dataset |
+| 15 个 Case family | `E2E01-01/04: APPROVED_FOR_EXECUTABLE / EFFECTIVE_CONTRACT_DEFINED_UNTIL_SYNC`；其余 13 个 `CONTRACT_DEFINED` |
+| E2E01 versioned Dataset / Fixture artifacts | `CONTRACT_DEFINED / LOADABLE_ARTIFACT_PRESENT / ACTIVATION_APPROVED_SYNC_PENDING`：authenticated loader 可加载并校验；真实纵向链已存在，但 artifacts / manifest / loader 尚未完成原子 lifecycle 同步，仍不是 lifecycle-executable Dataset |
 | Eval loader / Provider / Grader / Harness / Result machinery | `CONFIRMED / OFFLINE_VERTICAL_PRESENT`：exact `851c06c...` 的 canonical offline gate 为 `2004 passed, 1 deselected, 12 warnings`；test-only executable machinery 与真实 `CONTRACT_DEFINED` Harness gate 已分离 |
 | 真实 Eval 纵向链 | `CONFIRMED / IMPLEMENTED`：`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader 与 HTTP → Runtime → PostgreSQL 定向 evidence 已出现；尚无 lifecycle-valid Case Result 或发布 Gate |
 | Qwen Baseline / Regression Report | `RUNNER_PRESENT / REAL_RUN_NOT_RUN / REPORT_NOT_FOUND`：credential-aware runner 与 missing-env 空 `NOT_RUN` 已出现；真实 credentialed Baseline Result 与回归报告未出现 |
