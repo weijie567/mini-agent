@@ -26,10 +26,10 @@ REFERENCED = (
 )
 EXPECTED_HASHES = {
     REFERENCED[0]: "3940f5755ab001339d254077b36b3ae2965e590adee43ea0fb4e1d7cd2648c33",
-    REFERENCED[1]: "7cfe4942299382e54c2ff96848a68a6d8dfe1097c98d098cf84426a2162b91cc",
+    REFERENCED[1]: "65524cb244d4856c02beed6eca970170f6088038a26d31b92cc0d0a8216441a6",
     REFERENCED[2]: "2b42415c1c705b30b34f7a80d810726d59f7891da52daa390208d62fa1aa7176",
     REFERENCED[3]: "61e43e8a560c3b31d1444759360941bb038d41a94ee1326be7c8cce52808158d",
-    MANIFEST: "29eb501028b9971dc052c44f3bd7226d9f5200597cba327662150079fe5ec800",
+    MANIFEST: "cf7683133145cf5c2c161b396be852ce4c226e3bc9d3154fd2b1dc8149166cb9",
 }
 
 
@@ -71,7 +71,7 @@ def test_loads_exact_five_artifacts_and_binds_caller_versions() -> None:
 
     assert bundle.candidate_version == "candidate:c35687d"
     assert bundle.runtime_version == "runtime:01-08"
-    assert bundle.manifest["case_lifecycle_status"] == "EXECUTABLE"
+    assert bundle.manifest["case_lifecycle_status"] == "REGRESSION_GATE"
     assert bundle.manifest["eval_result_artifacts_created"] is False
     assert bundle.manifest["baseline_result_artifacts_created"] is False
     assert {case.case_id for case in bundle.cases} == {
@@ -100,6 +100,52 @@ def test_manifest_tamper_fails_integrity_before_json_parse(tmp_path: Path) -> No
     (root / MANIFEST).write_bytes(b"{not-json")
 
     with pytest.raises(ArtifactIntegrityError):
+        load_e2e01_artifacts(root, candidate_version="candidate")
+
+
+def test_authenticated_manifest_lifecycle_downgrade_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_artifacts(tmp_path)
+    manifest = _read_json(root, MANIFEST)
+    manifest["case_lifecycle_status"] = "EXECUTABLE"
+    _write_json(root, MANIFEST, manifest)
+    _reauthenticate_manifest(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="version manifest closed values are invalid",
+    ):
+        load_e2e01_artifacts(root, candidate_version="candidate")
+
+
+def test_authenticated_case_lifecycle_downgrade_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_artifacts(tmp_path)
+    cases = _read_json(root, REFERENCED[1])
+    for case in cases["cases"]:  # type: ignore[union-attr]
+        case["lifecycle_status"] = "EXECUTABLE"
+    _write_json(root, REFERENCED[1], cases)
+
+    manifest = _read_json(root, MANIFEST)
+    case_entry = next(
+        entry
+        for entry in manifest["artifacts"]  # type: ignore[union-attr]
+        if entry["artifact_id"] == "e2e01-thin-cases"
+    )
+    case_entry["sha256"] = hashlib.sha256(
+        (root / REFERENCED[1]).read_bytes()
+    ).hexdigest()
+    _write_json(root, MANIFEST, manifest)
+    _reauthenticate_manifest(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="case lifecycle is not REGRESSION_GATE",
+    ):
         load_e2e01_artifacts(root, candidate_version="candidate")
 
 
