@@ -7105,7 +7105,7 @@ def _qwen_output_for_input(
                     f"qwen-test:{message_ref}",
                 ),
                 operation=TaskDeltaOperation.ADD_GOAL,
-                goal_patch="查询订单状态",
+                goal_patch="查询指定订单状态",
                 input_candidates=(
                     InputCandidate(
                         name="order_id",
@@ -7310,17 +7310,19 @@ def test_qwen_runner_uses_distinct_adapters_without_script_oracle(
         nonce_factory=nonce_factory,
     )
 
-    def forbidden_scripted_provider(
-        _self: object,
-        *_args: object,
-        **_kwargs: object,
-    ) -> None:
-        raise AssertionError("qwen runner cannot build Scripted Provider")
+    class ForbiddenScriptedProvider(ScriptedModelProviderV2):
+        def __init__(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise AssertionError(
+                "qwen runner cannot build Scripted Provider"
+            )
 
     monkeypatch.setattr(
-        ScriptedModelProviderV2,
-        "__init__",
-        forbidden_scripted_provider,
+        "mini_agent.evaluation.harness.ScriptedModelProviderV2",
+        ForbiddenScriptedProvider,
     )
     outcome = _run_qwen(
         harness,
@@ -7331,12 +7333,18 @@ def test_qwen_runner_uses_distinct_adapters_without_script_oracle(
         transport_factory=transport_factory,
     )
 
-    assert outcome.command_passed is True
     assert outcome.execution_failures == ()
     assert len(outcome.results) == 3
-    assert {result.status for result in outcome.results} == {
-        EvalResultStatus.PASS
-    }
+    for result in outcome.results:
+        assert result.status is EvalResultStatus.PASS, (
+            result.case_id,
+            tuple(
+                grader.grader_name
+                for grader in result.grader_results
+                if grader.status is not EvalGraderStatus.PASS
+            ),
+        )
+    assert outcome.command_passed is True
     assert len(port.results) == 3
     assert len(qwen_sut.qwen_calls) == 3
     providers = tuple(
