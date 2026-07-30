@@ -2865,6 +2865,10 @@ def _legacy_core_source_hits(
         str,
         list[tuple[ast.AST, bool]],
     ] = {}
+    callable_import_bindings_by_name: dict[
+        str,
+        list[tuple[ast.AST, str | bool]],
+    ] = {}
 
     def record_module_import_binding(
         *,
@@ -2880,6 +2884,20 @@ def _legacy_core_source_hits(
         ]
         bindings.append((node, is_target))
 
+    def record_callable_import_binding(
+        *,
+        name: str,
+        node: ast.Import | ast.ImportFrom,
+        normalized_name: str | bool,
+    ) -> None:
+        bindings = callable_import_bindings_by_name.setdefault(name, [])
+        bindings[:] = [
+            binding
+            for binding in bindings
+            if binding[0] is not node
+        ]
+        bindings.append((node, normalized_name))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -2890,6 +2908,15 @@ def _legacy_core_source_hits(
                     is_target=(
                         alias.asname is not None
                         and alias.name in relevant_modules
+                    ),
+                )
+                record_callable_import_binding(
+                    name=bound_name,
+                    node=node,
+                    normalized_name=(
+                        "__pytest_module__"
+                        if alias.name == "pytest"
+                        else False
                     ),
                 )
                 if (
@@ -2927,6 +2954,27 @@ def _legacy_core_source_hits(
                             and alias.name in relevant_module_tails
                         )
                     ),
+                )
+                normalized_callable_import: str | bool = False
+                if (
+                    node.module == "builtins"
+                    and alias.name in builtin_callable_names
+                ):
+                    normalized_callable_import = alias.name
+                elif (
+                    node.module == "importlib"
+                    and alias.name == "import_module"
+                ):
+                    normalized_callable_import = "import_module"
+                elif (
+                    node.module == "pytest"
+                    and alias.name in {"importorskip", "skip", "xfail"}
+                ):
+                    normalized_callable_import = alias.name
+                record_callable_import_binding(
+                    name=bound_name,
+                    node=node,
+                    normalized_name=normalized_callable_import,
                 )
             if (
                 node.module == "mini_agent.core"
@@ -3023,6 +3071,47 @@ def _legacy_core_source_hits(
             scopes.append(tree)
         return scopes
 
+    def node_contains(ancestor: ast.AST, descendant: ast.AST) -> bool:
+        current = descendant
+        while current in parents:
+            current = parents[current]
+            if current is ancestor:
+                return True
+        return False
+
+    def is_definition_time_expression(node: ast.AST) -> bool:
+        scope = lexical_scope(node)
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return False
+        roots: list[ast.AST] = [
+            *scope.args.defaults,
+            *(
+                default
+                for default in scope.args.kw_defaults
+                if default is not None
+            ),
+        ]
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            roots.extend(scope.decorator_list)
+            if scope.returns is not None:
+                roots.append(scope.returns)
+        roots.extend(
+            annotation
+            for argument in (
+                *scope.args.posonlyargs,
+                *scope.args.args,
+                *scope.args.kwonlyargs,
+            )
+            if (annotation := argument.annotation) is not None
+        )
+        return any(
+            root is node or node_contains(root, node)
+            for root in roots
+        )
+
     def parameter_default(scope: ast.AST, name: str) -> ast.AST | None:
         if not isinstance(
             scope,
@@ -3059,23 +3148,36 @@ def _legacy_core_source_hits(
         name: str,
         *,
         before: ast.AST,
-    ) -> tuple[ast.AST, ast.AST] | bool | None:
+    ) -> tuple[ast.AST, ast.AST | str | bool] | bool | None:
         scopes = resolution_scopes(before)
         deferred_lookup = isinstance(
             scopes[0],
             (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
-        )
+        ) and not is_definition_time_expression(before)
         for index, scope in enumerate(scopes):
-            scope_bindings = [
+            scope_bindings: list[
+                tuple[ast.AST, ast.AST | str | bool]
+            ] = [
                 item
                 for item in assignments_by_name.get(name, ())
                 if lexical_scope(item[0]) is scope
             ]
+            scope_bindings.extend(
+                item
+                for item in callable_import_bindings_by_name.get(name, ())
+                if lexical_scope(item[0]) is scope
+            )
             has_binding = bool(
                 scope_bindings or name in parameter_names(scope)
             )
             if not has_binding:
                 continue
+            declared_global_or_nonlocal = any(
+                isinstance(node, (ast.Global, ast.Nonlocal))
+                and name in node.names
+                for node in ast.walk(scope)
+                if node is scope or lexical_scope(node) is scope
+            )
             candidates = (
                 scope_bindings
                 if deferred_lookup and index > 0
@@ -3085,11 +3187,17 @@ def _legacy_core_source_hits(
                     if position(item[0]) < position(before)
                 ]
             )
-            return max(
-                candidates,
-                key=lambda item: position(item[0]),
-                default=False,
-            )
+            if candidates:
+                return max(
+                    candidates,
+                    key=lambda item: position(item[0]),
+                )
+            default = parameter_default(scope, name)
+            if default is not None:
+                return scope, default
+            if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
+                continue
+            return False
         return None
 
     def name_refers_to_module(
@@ -3104,7 +3212,7 @@ def _legacy_core_source_hits(
         deferred_lookup = isinstance(
             scopes[0],
             (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
-        )
+        ) and not is_definition_time_expression(before)
 
         for index, scope in enumerate(scopes):
             scope_assignments = [
@@ -3159,15 +3267,46 @@ def _legacy_core_source_hits(
                 binding_candidates,
                 key=lambda item: position(item[0]),
             )
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, ast.Name):
-                return name_refers_to_module(
-                    value.id,
-                    before=binding_node,
-                    seen=seen | {name},
+            def binding_targets_module(
+                candidate_node: ast.AST,
+                candidate_value: ast.AST | bool,
+            ) -> bool:
+                if isinstance(candidate_value, bool):
+                    return candidate_value
+                if isinstance(candidate_value, ast.Name):
+                    return name_refers_to_module(
+                        candidate_value.id,
+                        before=candidate_node,
+                        seen=seen | {name},
+                    )
+                return _dotted_ast_name(candidate_value) in relevant_modules
+
+            resolved_value = binding_targets_module(binding_node, value)
+            if resolved_value:
+                return True
+            active_function = scopes[0]
+            if isinstance(
+                active_function,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                called_before_rebind = any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == active_function.name
+                    and position(node) < position(binding_node)
+                    for node in ast.walk(tree)
                 )
-            return _dotted_ast_name(value) in relevant_modules
+                prior_target_binding = any(
+                    position(candidate_node) < position(binding_node)
+                    and binding_targets_module(
+                        candidate_node,
+                        candidate_value,
+                    )
+                    for candidate_node, candidate_value in binding_candidates
+                )
+                if called_before_rebind and prior_target_binding:
+                    return True
+            return False
         return False
 
     def normalized_callable_name(
@@ -3183,6 +3322,14 @@ def _legacy_core_source_hits(
             return None
         if assignment is not None:
             assignment_node, value = assignment
+            if isinstance(value, str):
+                return (
+                    None
+                    if value == "__pytest_module__"
+                    else value
+                )
+            if isinstance(value, bool):
+                return None
             if isinstance(value, ast.Name):
                 return normalized_callable_name(
                     value.id,
@@ -3347,6 +3494,10 @@ def _legacy_core_source_hits(
         if assignment is None:
             return name in pytest_aliases
         assignment_node, value = assignment
+        if isinstance(value, str):
+            return value == "__pytest_module__"
+        if isinstance(value, bool):
+            return False
         return isinstance(value, ast.Name) and name_refers_to_pytest(
             value.id,
             before=assignment_node,
@@ -3874,6 +4025,13 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             + module_import
         ),
         (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "consumer()\n"
+            "core_module = object()\n"
+        ),
+        (
             "def outer():\n"
             "    def inner():\n"
             "        return getattr(core_module, input())\n"
@@ -3881,9 +4039,48 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    return inner\n"
         ),
         (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+            "    inner()\n"
+            "    core_module = object()\n"
+        ),
+        (
             module_import
             + "def consumer(core_module=core_module):\n"
             "    return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "def consumer("
+            "value=getattr(core_module, input())"
+            "):\n"
+            "    return value\n"
+            "core_module = object()\n"
+        ),
+        (
+            module_import
+            + "def consumer(reflect=getattr):\n"
+            "    return reflect(core_module, input())\n"
+        ),
+        (
+            "def consumer(namespace=globals()):\n"
+            "    namespace[input()] = object()\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    global reflect\n"
+            "    result = reflect(core_module, input())\n"
+            "    reflect = lambda value, name: None\n"
+        ),
+        (
+            "reflect = lambda value, name: None\n"
+            "from builtins import getattr as reflect\n"
+            + module_import
+            + "reflect(core_module, input())\n"
         ),
         (
             "def outer():\n"
@@ -4052,6 +4249,15 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
         (
             catalog_source
             + runtime_imports
+            + "skipper = lambda reason: None\n"
+            "from pytest import skip as skipper\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
             + "import pytest\n"
             "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
             '    skipper = pytest.__dict__["skip"]\n'
@@ -4160,6 +4366,28 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    namespace = {}\n"
             "    def inner():\n"
             "        namespace[input()] = object()"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "core_module = object()\n"
+            "consumer()"
+        ),
+        (
+            module_import
+            + "def consumer(reflect=lambda value, name: None):\n"
+            "    return reflect(core_module, input())"
+        ),
+        (
+            "def consumer(namespace={}):\n"
+            "    namespace[input()] = object()"
+        ),
+        (
+            "from builtins import getattr as reflect\n"
+            "reflect = lambda value, name: None\n"
+            + module_import
+            + "reflect(core_module, input())"
         ),
     )
     for safe_source in safe_sources:
