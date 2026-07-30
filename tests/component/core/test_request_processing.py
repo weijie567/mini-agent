@@ -2808,7 +2808,12 @@ def _legacy_core_source_hits(
             current = parents[current]
             if isinstance(
                 current,
-                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
             ):
                 return current
         return tree
@@ -2860,19 +2865,32 @@ def _legacy_core_source_hits(
         str,
         list[tuple[ast.AST, bool]],
     ] = {}
+
+    def record_module_import_binding(
+        *,
+        name: str,
+        node: ast.Import | ast.ImportFrom,
+        is_target: bool,
+    ) -> None:
+        bindings = module_import_bindings_by_name.setdefault(name, [])
+        bindings[:] = [
+            binding
+            for binding in bindings
+            if binding[0] is not node
+        ]
+        bindings.append((node, is_target))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
-                module_import_bindings_by_name.setdefault(
-                    bound_name,
-                    [],
-                ).append(
-                    (
-                        node,
+                record_module_import_binding(
+                    name=bound_name,
+                    node=node,
+                    is_target=(
                         alias.asname is not None
-                        and alias.name in relevant_modules,
-                    )
+                        and alias.name in relevant_modules
+                    ),
                 )
                 if (
                     alias.name in relevant_modules
@@ -2895,18 +2913,20 @@ def _legacy_core_source_hits(
                     if node.module is not None
                     else alias.name
                 )
-                module_import_bindings_by_name.setdefault(
-                    bound_name,
-                    [],
-                ).append(
-                    (
-                        node,
+                record_module_import_binding(
+                    name=bound_name,
+                    node=node,
+                    is_target=(
                         imported_name in relevant_modules
                         or (
                             node.module == "mini_agent.core"
                             and alias.name in relevant_module_tails
-                        ),
-                    )
+                        )
+                        or (
+                            node.level > 0
+                            and alias.name in relevant_module_tails
+                        )
+                    ),
                 )
             if (
                 node.module == "mini_agent.core"
@@ -3289,6 +3309,19 @@ def _legacy_core_source_hits(
             (
                 isinstance(node, ast.Attribute)
                 and node.attr in {"importorskip", "skip", "xfail"}
+            )
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "__dict__"
+                and isinstance(node.value, ast.Name)
+                and node.value.id in pytest_aliases
+            )
+            or (
+                isinstance(node, ast.Call)
+                and normalized_call_name(node) == "vars"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in pytest_aliases
             )
             or (
                 isinstance(node, ast.Call)
@@ -3693,6 +3726,23 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    return getattr(core_module, input())\n"
         ),
         (
+            "def consumer():\n"
+            "    from . import request_processing as core_module\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "class Unrelated:\n"
+            "    core_module = object()\n"
+            "    def consumer(self):\n"
+            "        return getattr(core_module, input())\n"
+        ),
+        (
+            "import types as core_module, "
+            "mini_agent.core.request_processing as core_module\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
             module_import
             + "reflect = getattr\n"
             "def unrelated():\n"
@@ -3815,6 +3865,24 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             '    skipped = skipper("disabled")\n'
             + runtime_loop
         ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipper = pytest.__dict__["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipper = vars(pytest)["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
     )
     for runtime_downgrade in runtime_downgrades:
         assert _legacy_core_source_hits(
@@ -3848,6 +3916,11 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             module_import
             + "def consumer(core_module):\n"
             "    return getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as core_module, "
+            "types as core_module\n"
+            "getattr(core_module, input())"
         ),
     )
     for safe_source in safe_sources:
