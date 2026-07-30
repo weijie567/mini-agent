@@ -2805,86 +2805,167 @@ def _legacy_core_source_hits(
         module_name.rsplit(".", maxsplit=1)[-1]
         for module_name in relevant_modules
     }
-    module_aliases: set[str] = set()
+    imported_module_aliases: set[str] = set()
     importlib_aliases: set[str] = set()
-    callable_aliases: dict[str, str] = {
-        name: name
-        for name in {
-            "__import__",
-            "delattr",
-            "getattr",
-            "globals",
-            "hasattr",
-            "locals",
-            "setattr",
-            "vars",
-        }
+    builtins_aliases: set[str] = set()
+    builtin_callable_names = {
+        "__import__",
+        "delattr",
+        "getattr",
+        "globals",
+        "hasattr",
+        "locals",
+        "setattr",
+        "vars",
     }
+    imported_callable_aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name in relevant_modules:
-                    module_aliases.add(alias.asname or alias.name.split(".")[0])
+                    imported_module_aliases.add(
+                        alias.asname or alias.name.split(".")[0]
+                    )
                 if alias.name == "importlib":
                     importlib_aliases.add(alias.asname or alias.name)
+                if alias.name == "builtins":
+                    builtins_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             if node.module == "mini_agent.core":
                 for alias in node.names:
                     if alias.name in relevant_module_tails:
-                        module_aliases.add(alias.asname or alias.name)
+                        imported_module_aliases.add(alias.asname or alias.name)
             if node.module == "builtins":
                 for alias in node.names:
-                    if alias.name in callable_aliases:
-                        callable_aliases[alias.asname or alias.name] = (
-                            alias.name
-                        )
+                    if alias.name in builtin_callable_names:
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = alias.name
             if node.module == "importlib":
                 for alias in node.names:
                     if alias.name == "import_module":
-                        callable_aliases[alias.asname or alias.name] = (
-                            "import_module"
-                        )
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = "import_module"
 
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
+    def assignment_target_values(
+        node: ast.AST,
+    ) -> tuple[tuple[ast.Name, ...], ast.AST | None]:
+        if isinstance(node, ast.Assign):
+            return (
+                tuple(
+                    target
+                    for target in node.targets
+                    if isinstance(target, ast.Name)
+                ),
+                node.value,
+            )
+        if isinstance(node, ast.AnnAssign):
+            return (
+                (node.target,) if isinstance(node.target, ast.Name) else (),
+                node.value,
+            )
+        if isinstance(node, ast.NamedExpr):
+            return (
+                (node.target,) if isinstance(node.target, ast.Name) else (),
+                node.value,
+            )
+        return (), None
+
+    assignments_by_name: dict[str, list[tuple[ast.AST, ast.AST]]] = {}
+    for node in ast.walk(tree):
+        targets, value = assignment_target_values(node)
+        if value is None:
+            continue
+        for target in targets:
+            assignments_by_name.setdefault(target.id, []).append((node, value))
+
+    def position(node: ast.AST) -> tuple[int, int]:
+        return (
+            getattr(node, "lineno", -1),
+            getattr(node, "col_offset", -1),
+        )
+
+    def latest_assignment(
+        name: str,
+        *,
+        before: ast.AST,
+    ) -> tuple[ast.AST, ast.AST] | None:
+        candidates = [
+            item
+            for item in assignments_by_name.get(name, ())
+            if position(item[0]) < position(before)
+        ]
+        return max(candidates, key=lambda item: position(item[0]), default=None)
+
+    def name_refers_to_module(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        assignment = latest_assignment(name, before=before)
+        if assignment is not None:
+            assignment_node, value = assignment
+            if isinstance(value, ast.Name):
+                return name_refers_to_module(
+                    value.id,
+                    before=assignment_node,
+                    seen=seen | {name},
+                )
+            return _dotted_ast_name(value) in relevant_modules
+        return name in imported_module_aliases
+
+    def normalized_callable_name(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> str | None:
+        if name in seen:
+            return None
+        assignment = latest_assignment(name, before=before)
+        if assignment is not None:
+            assignment_node, value = assignment
+            if isinstance(value, ast.Name):
+                return normalized_callable_name(
+                    value.id,
+                    before=assignment_node,
+                    seen=seen | {name},
+                )
             if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in module_aliases
+                isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in builtins_aliases
+                and value.attr in builtin_callable_names
             ):
-                for target in node.targets:
-                    if (
-                        isinstance(target, ast.Name)
-                        and target.id not in module_aliases
-                    ):
-                        module_aliases.add(target.id)
-                        changed = True
-            if isinstance(node, ast.Assign):
-                normalized_callable: str | None = None
-                if isinstance(node.value, ast.Name):
-                    normalized_callable = callable_aliases.get(node.value.id)
-                elif (
-                    isinstance(node.value, ast.Attribute)
-                    and node.value.attr == "import_module"
-                    and isinstance(node.value.value, ast.Name)
-                    and node.value.value.id in importlib_aliases
-                ):
-                    normalized_callable = "import_module"
-                if normalized_callable is not None:
-                    for target in node.targets:
-                        if (
-                            isinstance(target, ast.Name)
-                            and callable_aliases.get(target.id)
-                            != normalized_callable
-                        ):
-                            callable_aliases[target.id] = normalized_callable
-                            changed = True
+                return value.attr
+            if (
+                isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in importlib_aliases
+                and value.attr == "import_module"
+            ):
+                return "import_module"
+            return None
+        if name in imported_callable_aliases:
+            return imported_callable_aliases[name]
+        if name in builtin_callable_names:
+            return name
+        return None
 
     def normalized_call_name(node: ast.Call) -> str | None:
         if isinstance(node.func, ast.Name):
-            return callable_aliases.get(node.func.id, node.func.id)
+            return normalized_callable_name(node.func.id, before=node)
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in builtins_aliases
+            and node.func.attr in builtin_callable_names
+        ):
+            return node.func.attr
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "import_module"
@@ -2896,32 +2977,30 @@ def _legacy_core_source_hits(
             return node.func.attr
         return None
 
-    namespace_aliases: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            is_namespace_value = (
-                isinstance(node.value, ast.Call)
-                and normalized_call_name(node.value)
-                in {"globals", "locals", "vars"}
-                and not node.value.args
-                and not node.value.keywords
-            ) or (
-                isinstance(node.value, ast.Name)
-                and node.value.id in namespace_aliases
+    def name_refers_to_namespace(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        assignment = latest_assignment(name, before=before)
+        if assignment is None:
+            return False
+        assignment_node, value = assignment
+        if isinstance(value, ast.Name):
+            return name_refers_to_namespace(
+                value.id,
+                before=assignment_node,
+                seen=seen | {name},
             )
-            if not is_namespace_value:
-                continue
-            for target in node.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id not in namespace_aliases
-                ):
-                    namespace_aliases.add(target.id)
-                    changed = True
+        return (
+            isinstance(value, ast.Call)
+            and normalized_call_name(value) in {"globals", "locals", "vars"}
+            and not value.args
+            and not value.keywords
+        )
 
     parents = {
         child: parent
@@ -2929,11 +3008,11 @@ def _legacy_core_source_hits(
         for child in ast.iter_child_nodes(parent)
     }
 
-    def is_relevant_module(node: ast.AST) -> bool:
+    def is_relevant_module(node: ast.AST, *, at: ast.AST | None = None) -> bool:
         dotted_name = _dotted_ast_name(node)
         return (
             isinstance(node, ast.Name)
-            and node.id in module_aliases
+            and name_refers_to_module(node.id, before=at or node)
         ) or dotted_name in relevant_modules
 
     def enclosing_function(node: ast.AST) -> ast.FunctionDef | None:
@@ -3007,11 +3086,45 @@ def _legacy_core_source_hits(
             and node.id == "legacy_name"
             and isinstance(node.ctx, ast.Store)
         ]
+        runtime_loop_index = (
+            function.body.index(runtime_loops[0])
+            if len(runtime_loops) == 1
+            else -1
+        )
+        prefix_is_straight_line = (
+            runtime_loop_index >= 0
+            and all(
+                isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Assert))
+                for statement in function.body[:runtime_loop_index]
+            )
+        )
+        has_early_termination = any(
+            isinstance(
+                node,
+                (ast.Raise, ast.Return, ast.Yield, ast.YieldFrom),
+            )
+            for node in ast.walk(function)
+        )
+        has_skip_call = any(
+            isinstance(node, ast.Call)
+            and (
+                normalized_call_name(node) in {"skip", "xfail"}
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"skip", "xfail"}
+                )
+            )
+            for node in ast.walk(function)
+        )
         return (
             catalog_is_exact
+            and not function.decorator_list
             and len(runtime_loops) == 1
             and runtime_absence_loop_is_exact(runtime_loops[0])
             and legacy_name_stores == [runtime_loops[0].target]
+            and prefix_is_straight_line
+            and not has_early_termination
+            and not has_skip_call
         )
 
     def is_exact_runtime_absence_call(node: ast.Call) -> bool:
@@ -3042,7 +3155,7 @@ def _legacy_core_source_hits(
             and not node.keywords
         ) or (
             isinstance(node, ast.Name)
-            and node.id in namespace_aliases
+            and name_refers_to_namespace(node.id, before=node)
         )
 
     hits: list[str] = []
@@ -3062,6 +3175,15 @@ def _legacy_core_source_hits(
             for alias in node.names:
                 if alias.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
                     hits.append(f"{node.lineno}:import:{alias.name}")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets, _ = assignment_target_values(node)
+            if any(target.id == "pytestmark" for target in targets):
+                hits.append(f"{node.lineno}:runtime-oracle-skip-marker")
+        elif (
+            isinstance(node, ast.AugAssign)
+            and is_namespace_mapping(node.target)
+        ):
+            hits.append(f"{node.lineno}:dynamic-namespace-augassign")
         elif isinstance(
             node,
             (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
@@ -3147,6 +3269,25 @@ def _legacy_core_source_hits(
                 hits.append(
                     f"{node.lineno}:dynamic-namespace-mutation:{call_name}"
                 )
+            if (
+                call_name
+                in {
+                    "__setitem__",
+                    "clear",
+                    "pop",
+                    "popitem",
+                    "setdefault",
+                    "update",
+                }
+                and isinstance(node.func, ast.Attribute)
+                and _dotted_ast_name(node.func.value)
+                in {"dict", "builtins.dict"}
+                and node.args
+                and is_namespace_mapping(node.args[0])
+            ):
+                hits.append(
+                    f"{node.lineno}:unbound-namespace-mutation:{call_name}"
+                )
         elif (
             isinstance(node, ast.Subscript)
             and is_namespace_mapping(node.value)
@@ -3216,11 +3357,20 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
         module_import + "core_module.__dict__.get(input())",
         module_import + "alias = core_module\ngetattr(alias, input())",
         module_import
+        + "alias: object = core_module\ngetattr(alias, input())",
+        module_import
         + "reflect = getattr\nreflect(core_module, input())",
+        module_import
+        + "reflect: object = getattr\nreflect(core_module, input())",
         (
             "from builtins import getattr as reflect\n"
             + module_import
             + "reflect(core_module, input())"
+        ),
+        (
+            "import builtins\n"
+            + module_import
+            + "reflect = builtins.getattr\nreflect(core_module, input())"
         ),
         "import importlib\nimportlib.import_module(input())",
         (
@@ -3235,6 +3385,12 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
         "globals().setdefault(input(), object())",
         "globals().update({input(): object()})",
         "namespace = locals()\nnamespace[input()] = object()",
+        "namespace: dict = globals()\nnamespace[input()] = object()",
+        "namespace = globals()\nnamespace |= {input(): object()}",
+        (
+            "namespace = globals()\n"
+            "dict.update(namespace, {input(): object()})"
+        ),
         (
             "def __getattr__(name):\n"
             "    return globals().get(name + 'V2')\n"
@@ -3259,10 +3415,75 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             filename="mutation.py",
         ), mutation
 
+    catalog_source = (
+        "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = frozenset("
+        f"{tuple(sorted(_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS))!r}"
+        ")\n"
+    )
+    runtime_imports = (
+        "import mini_agent.core.request_processing as request_processing_module\n"
+        "import mini_agent.core.request_understanding as "
+        "request_understanding_module\n"
+        "import mini_agent.core.task_state as task_state_module\n"
+    )
+    runtime_loop = (
+        "    for legacy_name in "
+        "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:\n"
+        "        assert not hasattr(request_understanding_module, legacy_name)\n"
+        "        assert not hasattr(task_state_module, legacy_name)\n"
+        "        assert not hasattr(request_processing_module, legacy_name)\n"
+    )
+    runtime_downgrades = (
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    return\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    pytest.skip("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "@pytest.mark.skip\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+    )
+    for runtime_downgrade in runtime_downgrades:
+        assert _legacy_core_source_hits(
+            runtime_downgrade,
+            filename="runtime_downgrade.py",
+            ignore_target_catalog=True,
+        ), runtime_downgrade
+
     safe_sources = (
         module_import
         + f'getattr(core_module, "{legacy_target}V2", None)',
         'label = "historical request-understanding v1 absence"',
+        (
+            module_import
+            + "alias = core_module\n"
+            "alias = object()\n"
+            "getattr(alias, input())"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "reflect = lambda value, name: None\n"
+            "reflect(core_module, input())"
+        ),
+        (
+            "namespace = globals()\n"
+            "namespace = {}\n"
+            "namespace[input()] = object()"
+        ),
     )
     for safe_source in safe_sources:
         assert not _legacy_core_source_hits(
