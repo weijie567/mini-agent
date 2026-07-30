@@ -24,7 +24,7 @@
 
 ### Active
 
-- [ ] 执行 [REQUIREMENTS.md](REQUIREMENTS.md) 映射的 Phase 1 `E2E01-01/04`，但只有 canonical lifecycle 与硬证据同步完成后才标记完成。
+- [ ] 完成 [REQUIREMENTS.md](REQUIREMENTS.md) 映射的 Phase 1 release transition。`E2E01-01/04`实现与quality evidence已完成，checkbox只因`RTA-D01`用户确认和integration → `main`合并决定待定而保持未勾选。
 
 ### Planned Mapping
 
@@ -41,9 +41,10 @@
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
 - 当前 active phase：Phase 1，Coverage Matrix Cycle 1 的 `E2E01-01/04`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
-- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`，通过367 Harness、725 owned、762 Plan focused、40 migration、1493 full（1 deselected）、双review与Graphify gate；lifecycle仍为0/8。
-- 当前 immediate gate：01-07K/L/M/Q/Y/Z/AA/J均已完成reviewed feature、latest-integration overlay、串行merge与适用post-merge gate；当前磁盘有38份`*-PLAN.md` artifact与24份Summary，目标Packet完成证据为`32/42`，numbered Plan evidence仍为`7/8`，Case / Requirement lifecycle仍为`0/8`。`B_ACTIVE`只覆盖J Plan明确的exact-one accepted E2E01与已定义candidate-invalid/protocol/source-version fault routes；zero/all-REJECT、multi-ACCEPT、atomic failure恢复、v1 contract closure、Composition Root、真实HTTP Trajectory/E2E、credentialed Qwen baseline与产品readiness仍未完成。下一实现入口是从exact `B_ACTIVE`分别签发01-07S/U，串行形成`B_SU`后再按`X → T → W → V`关闭v1 surface；本两文件状态对齐不创建第二道implementation barrier。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
-- 当前 Case 生命周期仍由 Coverage Matrix 拥有；本文件和其他 `.planning/` 文件不能将 Case 标为 `EXECUTABLE` 或 `REGRESSION_GATE`。
+- 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
+- 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
+- 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
+- 当前release closure只有两项用户决定：是否继续接受`RTA-D01`有界availability residual risk，以及是否将准备好的integration → `main` Phase 1 PR合并。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## 不属于 GSD 派生层的事项
 
@@ -93,9 +94,10 @@
 | 01-07Q Application codec active switch | Oracle remediation与Plan/category/feature PR #102–#106切换public active RU codec mapping并保留v1隔离面 | `COMPLETE / B_Q = 2b9fde6...` |
 | 01-07Y / 01-07Z / 01-07AA J prerequisites | Execution-map r2与PR #108–#120增加v2 reducer、Application write contracts、PostgreSQL atomic writers及quality-gate remediation | `COMPLETE / B_J_READY = b8d32d5...` |
 | 01-07J Runtime v2 active switch | Plan、exact-reader scope alignment与feature PR #121–#124；双独立review、merge-tree equality与post-merge full gate通过 | `COMPLETE / SCOPED B_ACTIVE = 7f92b5e...` |
-| 01-07S/U/X/T/W/V v1 contract closure | 依唯一map按`{S,U} → X → T → W → V`删除各owner v1 surface，V必须最后执行 | `01-07S/U READY_FROM_B_ACTIVE` |
-| 01-08 vertical integration | 等待`B_RU_V2_CONTRACT`；Integrator只装配真实HTTP→Runtime→PostgreSQL→Eval链 | `BLOCKED_BY_B_RU_V2_CONTRACT` |
-| 01-08A credentialed Qwen runner | 等待01-08 reviewed merge后由Eval owner签发；缺凭据只能记录`NOT_RUN / SKIPPED` | `BLOCKED_BY_01-08` |
+| 01-07S/U/X/T/W/V v1 contract closure | 依唯一map按`{S,U} → X → T → W → V`删除各owner v1 surface，V最后执行 | `COMPLETE / B_RU_V2_CONTRACT = 5c84e0e...` |
+| 01-08 vertical integration | Integrator装配真实HTTP→Runtime→PostgreSQL→Eval离线链 | `COMPLETE / B_01_08 = b8a2cf3...` |
+| 01-08A credential-aware Qwen runner | runner与zero-network missing-env路径已完成；真实credentialed运行需要外部配置 | `COMPLETE / B_01_08A = 11d6d08... / REAL_QWEN_NOT_RUN` |
+| Post-execution quality | review / fix、Validation、controlled UAT、Eval/Security re-review与regression gate | `COMPLETE / RELEASE_DECISIONS_PENDING` |
 
 ## 完成证据规则
 

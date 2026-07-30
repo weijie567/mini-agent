@@ -2,23 +2,24 @@
 phase: 01-cycle-1-e2e-01
 slug: cycle-1-e2e-01-w2
 scope: phase-01-plan-task-feedback-through-01-08A-post-remediation
-status: nyquist_plan_task_feedback_complete_through_01_08A
+status: nyquist_plan_task_feedback_and_post_quality_alignment_complete
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-07-27"
-audited: "2026-07-30"
+audited: "2026-07-31"
 audit_base_sha: 7097641424b88a814bd2f3510ebd563b3cfd40b4
 audit_base_tree: ab393e73986feddc4ca3dd771312bfd142cfae36
 plan_artifacts: 49
 summary_artifacts: 24
 implementation_targets: "42/42"
-canonical_lifecycle: "0/8"
+canonical_lifecycle: "E2E01-01/04_REGRESSION_GATE"
+release_transition: "PENDING_USER_DECISIONS"
 ---
 
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只索引Phase 01截至01-08A及post-remediation exact integration head的Plan-task自动化反馈证据。`nyquist_compliant: true`只表示49份Plan artifact中的适用task均已被自动化行为测试或合同反馈覆盖，不推进Case / artifact / manifest / loader生命周期，也不表示Requirement、Phase、Trajectory / E2E Eval、真实Qwen Baseline或release完成。Case、指标、Critical failure与生命周期仍由canonical Eval owner持有。
+> 本文件只索引Phase 01截至01-08A及post-execution quality gate的Plan-task自动化反馈证据。`nyquist_compliant: true`本身不推进Case lifecycle；canonical Eval owner已在后续独立PR中将六个authenticated physical Case推进为`REGRESSION_GATE`。本文件只同步该事实，不表示真实Qwen Baseline、canonical产品启动、production readiness或release decision完成。
 
 ## Test Infrastructure
 
@@ -30,8 +31,8 @@ canonical_lifecycle: "0/8"
 | Full suite | `uv run pytest` |
 | Infra preflight | `uv sync --all-groups`；检查persistent `db`与disposable `db-test`可用；`uv run alembic upgrade head`验证development DB，migration regression test在`db-test`独立fresh schema执行 |
 | Product barriers | `B_RU_V2_CONTRACT = 5c84e0e...`；`B_01_08 = b8a2cf3...`；`B_01_08A_COMPOSITION = c59eaea...`；`B_01_08A = 11d6d088...` |
-| Current reviewed evidence | post-remediation REVIEW在PR #172合并，`P0/P1/P2/P3 = 0/0/0/0`；review/remediation descendant exact validation base `7097641424b88a814bd2f3510ebd563b3cfd40b4` / tree `ab393e73986feddc4ca3dd771312bfd142cfae36` |
-| Current exact full | `2004 passed, 1 deselected, 12 warnings in 131.04s` |
+| Current reviewed evidence | post-remediation REVIEW在PR #172合并；PR #173完成本Validation；PR #184同步`REGRESSION_GATE`；PR #185/#186完成mandatory Eval/Security re-review |
+| Current exact full | exact Security re-review barrier `22c4cfa672e7a4a91916100e9868585e6b2bcdf9`：`2007 passed, 1 deselected, 12 warnings in 147.45s` |
 | Current late-phase focused | 01-07S/U/X/T/W/V、01-08、01-08A相关21个focused test files：`1787 passed in 123.01s` |
 | Credential preflight | 缺失Qwen环境变量：`1 skipped`，reason `MISSING_REQUIRED_ENV`；无失败、无外部network |
 | Max feedback latency | focused task tests应在每个原子 commit前完成；full suite在每个 Packet handoff前完成 |
@@ -355,7 +356,7 @@ graphify update .
 - M Plan、shell correction与feature PR #99–#101形成`B_DEPENDENCY_M = 42fa2ec7ef1a61a2edfd78d69ca4e6a5d32aa1c3`；Q oracle remediation与Plan/category/feature PR #102–#106形成`B_Q = 2b9fde6f0e09308a53b86a4929ea3b639660f82e`。
 - Execution-owner r2 PR #107把Y/Z/AA纳入42 denominator；Y/Z PR #108–#111形成`B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05`，AA与quality-gate remediation PR #112–#120形成`B_J_READY = b8d32d50775a0d3f4a0d3e7e609c717f6c540b33`。
 - J Plan、exact-reader scope alignment与feature PR #121–#124通过exact-head/latest-overlay双review、merge-tree equality与post-merge focused 87、Application 707、neighbors 165、full `2033 passed, 1 deselected, 12 warnings`，形成historical scoped `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd` / tree `f70b20215e569acf3ad196cc050e9a23700d4bae`。
-- **CURRENT POST-REMEDIATION UPDATE：** 01-07S/U/X/T/W/V已完成v1 contract closure并形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08和01-08A又依次形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d088...`。Composition Root、offline vertical evidence和credential-aware runner已存在；readiness与lifecycle-valid Eval结果仍未完成。
+- **CURRENT POST-QUALITY UPDATE：** 01-07S/U/X/T/W/V已完成v1 contract closure并形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08和01-08A又依次形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d088...`。六个authenticated physical Case已为`REGRESSION_GATE`，全部16 variants生成lifecycle-valid Result并PASS；readiness、canonical产品启动与真实credentialed Qwen仍未完成。
 - 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## Manual-only Verification
@@ -365,25 +366,25 @@ graphify update .
 | GitHub branch / PR ownership | E2E01-01/04 | Git metadata不由pytest证明 | 比较exact base/head/tree、changed-file allowlist、PR base/head与reviewed SHA |
 | Latest-integration containment | E2E01-01/04 | pytest不证明reviewed SHA、merge ancestry或单writer allowlist | 核对`7097641424...` / tree `ab393e73...`为review/remediation descendant，且post-review只含派生文档变化 |
 | Real credentialed Qwen | E2E01-01/04 | 需要显式真实credential与受控external transport；缺凭据preflight只能证明fail-closed | 在approved exact integrated head配置凭据后单独运行`uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；在此之前保持`NOT_RUN / SKIPPED` |
-| Canonical lifecycle ruling | E2E01-01/04 | Case / artifact lifecycle只能由canonical Eval owner裁决 | 确认Case保持`CONTRACT_DEFINED`、Requirements保持0/8；不得把offline vertical或test-only executable bundle升级为lifecycle PASS |
-| Controlled UAT | E2E01-01/04 | 用户可观察体验与人工验收不是pytest替代项 | 使用不含lifecycle route的受控UAT adapter验证E2E01-01/04，并单独记录实际结果 |
-| Release decision | E2E01-01/04 | release/readiness需要跨owner证据与明确审批 | 审核安全、Eval lifecycle、UAT、app-start与回归报告后另行裁决；本Validation不作release结论 |
+| Canonical lifecycle ruling | E2E01-01/04 | Case / artifact lifecycle只能由canonical Eval owner裁决 | `CONFIRMED`：PR #178/#180推进`EXECUTABLE`，PR #183/#184推进`REGRESSION_GATE`；本Validation只消费结果 |
+| Controlled UAT | E2E01-01/04 | 用户可观察体验与人工验收不是pytest替代项 | `COMPLETE / scoped PASS`：`CODEX_INTEGRATOR`以`DIRECT_CONTROLLED_EXECUTION`运行16 variants；`end_user_uat = NOT_RUN` |
+| Release decision | E2E01-01/04 | release需要跨owner证据与明确审批 | `PENDING_USER_DECISIONS`：是否继续接受`RTA-D01`；是否合并integration → `main` PR |
 
-01-08的直接HTTP → Runtime → PostgreSQL测试已经是可复现offline vertical自动化证据，不再列为“未来才需自动化”。它仍不能替代canonical lifecycle ruling、真实credentialed Qwen、controlled UAT或release decision。
+01-08的直接HTTP → Runtime → PostgreSQL测试和后续16-variant lifecycle-valid Results均已形成；controlled UAT也已完成scoped Integrator验收。它们仍不能替代真实credentialed Qwen、canonical产品启动、end-user UAT或最终release decision。
 
 ## Validation Sign-off
 
-- [x] 当前磁盘49份Plan artifact、24份Summary均已分类；42/42 implementation target已有自动化行为或合同反馈，但这不改变canonical lifecycle / Requirements 0/8。
+- [x] 当前磁盘49份Plan artifact、24份Summary均已分类；42/42 implementation target已有自动化行为或合同反馈。
 - [x] 每个适用Plan task都有actual automated command、existing test file或contract-only机械反馈；没有真实测试缺口。
 - [x] 01-07S/U/X/T/W/V、01-08、01-08A八项旧索引缺口均已补入Per-Task map并标记green。
 - [x] denominator-neutral amendments / handoffs / oracle remediation已单独分类，不重复计入产品行为denominator。
 - [x] 无watch-mode flag。
 - [x] post-remediation REVIEW已在PR #172合并，`P0/P1/P2/P3 = 0/0/0/0`；exact validation base为`7097641424...` / tree `ab393e73...`。
-- [x] current exact full为`2004 passed, 1 deselected, 12 warnings in 131.04s`；late-phase 21-file focused为`1787 passed in 123.01s`。
+- [x] current exact full为`2007 passed, 1 deselected, 12 warnings in 147.45s`；late-phase Validation的21-file focused历史证据为`1787 passed in 123.01s`。
 - [x] 缺凭据Qwen baseline为`1 skipped / MISSING_REQUIRED_ENV`；runner/preflight已覆盖，但没有真实credentialed result。
-- [x] `nyquist_compliant: true`只表示Plan-task automated feedback coverage，不宣布Phase、Requirement、Case lifecycle或release完成。
-- [x] Case artifacts保持`CONTRACT_DEFINED`；没有lifecycle-valid Trajectory / E2E Eval Result或PASS。
-- [x] 当前没有canonical app-start、lifecycle-valid regression report、production readiness或P0完成证据。
+- [x] `nyquist_compliant: true`只表示Plan-task automated feedback coverage；后续Case lifecycle变化来自canonical owner，不由本Validation宣布。
+- [x] 六个authenticated physical Case已为`REGRESSION_GATE`；全部16 variants有lifecycle-valid Result并PASS。
+- [x] 当前没有canonical app-start、真实credentialed Qwen Result、production readiness或P0完成证据。
 - [x] 本次audit没有新增测试，也没有修改Case、artifact、manifest或loader lifecycle。
 
 ## Validation Audit 2026-07-30
@@ -397,4 +398,4 @@ graphify update .
 
 八个gap均为01-07S/U/X/T/W/V、01-08、01-08A已存在绿色自动化证据未进入旧Validation索引；没有发现真实测试缺口或实现缺陷。denominator-neutral handoff / remediation另行分类，不计入这八个产品行为映射gap。
 
-**Approval:** `NYQUIST_PLAN_TASK_FEEDBACK_COVERED_THROUGH_01_08A / VALIDATION_INDEX_REFRESHED / NO_TEST_GAP / NO_LIFECYCLE_TRANSITION`。当前结论只批准本派生Validation索引覆盖49份Plan artifact、42/42 implementation target及post-remediation exact evidence；canonical lifecycle与Requirements仍为0/8。Case保持`CONTRACT_DEFINED`，没有lifecycle-valid Trajectory / E2E Eval Result或PASS，没有真实credentialed Qwen结果，也没有canonical app-start、回归报告、production readiness或P0完成结论。
+**Approval:** `NYQUIST_PLAN_TASK_FEEDBACK_COVERED_THROUGH_01_08A / VALIDATION_INDEX_REFRESHED / NO_TEST_GAP / POST_QUALITY_STATUS_ALIGNED`。本派生Validation覆盖49份Plan artifact、42/42 implementation target及post-quality evidence；Case lifecycle当前为`REGRESSION_GATE`，全部16 variants为PASS。真实credentialed Qwen、canonical app-start、production readiness、`RTA-D01` release确认与main merge仍未完成。

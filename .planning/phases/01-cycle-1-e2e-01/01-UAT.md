@@ -331,7 +331,7 @@ skipped: 0
 
 `NONE_RECORDED`
 
-## Lifecycle Nonclaim
+## Lifecycle Nonclaim at exact UAT execution
 
 - `E2E01-01/04` 仍保持 canonical `CONTRACT_DEFINED`，本 UAT 不直接推进为
   `EXECUTABLE`。
@@ -340,3 +340,18 @@ skipped: 0
 - 没有运行真实 credentialed Qwen Baseline。
 - UAT artifact 经独立 exact-head review 与 PR 合并后，才进入 Coverage Matrix
   canonical lifecycle owner 的独立裁决。
+
+## Post-UAT status alignment
+
+上述nonclaim保留本UAT在exact `e4a6ce4...`执行时的边界，不倒灌后续结果。随后
+PR #178/#180完成`EXECUTABLE`裁决与activation，PR #181/#182形成全部16 variants
+的默认gate与聚合Result，PR #183/#184完成`REGRESSION_GATE`裁决与原子同步，
+PR #185/#186完成mandatory Eval / Security re-review。
+
+当前状态为：
+
+- controlled UAT仍是`CODEX_INTEGRATOR / DIRECT_CONTROLLED_EXECUTION / scoped PASS`；
+- `end_user_uat`仍是`NOT_RUN`；
+- 六个authenticated physical Case为`REGRESSION_GATE`；
+- 当前release只等待`RTA-D01`用户确认与integration → `main`合并决定；
+- 真实credentialed Qwen、canonical产品启动和production readiness仍未证明。

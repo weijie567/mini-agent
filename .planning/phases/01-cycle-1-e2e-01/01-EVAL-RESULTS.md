@@ -6,6 +6,7 @@ candidate_version: git:752b75f9648c85c4effc4bbaeaea47803d62045f
 runtime_version: git:752b75f9648c85c4effc4bbaeaea47803d62045f
 case_lifecycle: EXECUTABLE
 regression_gate: NOT_YET_OWNER_ACTIVATED
+current_effective_lifecycle: REGRESSION_GATE
 provider_lane: offline_gate
 network_access: FORBIDDEN
 result_count: 16
@@ -37,6 +38,13 @@ generated_at: 2026-07-31
 这是 lifecycle-valid offline Result 与聚合 regression evidence。它不把 Case
 自动提升为 `REGRESSION_GATE`；该状态仍等待 canonical Coverage Matrix owner
 裁决及后续 authenticated lifecycle 同步。
+
+上述两句记录本报告在exact `752b75f...`生成时的边界。随后PR #183完成canonical
+owner裁决，PR #184将六个physical Case、manifest与loader原子同步为
+`REGRESSION_GATE`；PR #185/#186完成mandatory Eval / Security re-review。
+当前effective lifecycle因此为`REGRESSION_GATE`，但本报告的candidate/runtime
+version、2005-test当时结果和Result rows仍保持原始exact evidence，不倒灌改写为
+后续SHA。当前canonical full evidence为`2007 passed, 1 deselected, 12 warnings`。
 
 ## Exact execution evidence
 
@@ -130,9 +138,10 @@ exact SHA-256、双向 Case/script reference closure、唯一性和 closed-schem
 
 ## Non-claims
 
-- `regression_gate: NOT_YET_OWNER_ACTIVATED`；本报告本身不改变 lifecycle。
+- `regression_gate: NOT_YET_OWNER_ACTIVATED`记录本报告生成时状态；本报告本身不改变
+  lifecycle，当前`REGRESSION_GATE`来自后续PR #183/#184。
 - `qwen_baseline: NOT_RUN`；没有凭据时的零网络 `NOT_RUN` 不计为 `PASS`。
 - 不证明 canonical 应用启动、线上监控、production readiness 或完整 P0。
 - controlled UAT 的 `end_user_uat` 仍为 `NOT_RUN`。
-- `RTA-D01` 仍是已接受但未消除的 bounded availability residual risk；进入
-  `REGRESSION_GATE` / release gate 前必须按 owner 规则复审。
+- `RTA-D01` 仍是已接受但未消除的 bounded availability residual risk；
+  `REGRESSION_GATE`前mandatory复审已完成，release gate是否继续接受仍待用户确认。

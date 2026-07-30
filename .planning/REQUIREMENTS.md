@@ -7,16 +7,17 @@
 
 - 复选框表示 GSD 执行追踪，不等于 Case 已变为 `EXECUTABLE`、`REGRESSION_GATE` 或已经通过。
 - 只有 post-execution quality gate 完成、canonical owner 已依据可复现证据更新生命周期后，Integrator 才能手工同步勾选对应条目。
+- Phase 1当前已满足上述证据前提，但completion checkbox仍由最终release transition持有：`RTA-D01`用户确认与integration → `main`合并决定完成前保持未勾选。
 - 禁止调用 `requirements.mark-complete` 或其他自动 lifecycle API；Roadmap / State progress 也只能由 Integrator 根据 Summary、PR 与硬证据手工同步。
 - Phase 2–6 只是 Coverage Matrix Cycle 的顺序映射；在 scoped implementation owner 出现前，不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
 ## Phase 1｜Cycle 1：第一最薄 E2E-01（W2 RUNTIME / INFRA / EVAL PLANNING）
 
-- [ ] **E2E01-01** — 按 Coverage Matrix 与 [Thin Slice Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md) 取得可复现的 Component、Trajectory 与 E2E 证据。
-- [ ] **E2E01-04** — 按同一 owners 取得安全等价、最小披露与禁止私有 Observation 的可复现证据。
+- [ ] **E2E01-01** — 可复现的 Component、Trajectory 与 E2E evidence已完成并进入`REGRESSION_GATE`；completion transition等待两项release用户决定。
+- [ ] **E2E01-04** — 安全等价、最小披露与禁止私有 Observation evidence已完成并进入`REGRESSION_GATE`；completion transition等待两项release用户决定。
 
-当前八个 numbered slot 中 `01-01`–`01-04`与`01-07`已有同名 evidence-indexed Summary，`01-05/06` slots由replacement `01-05R/06R` Summaries提供完成证据；磁盘共38份`*-PLAN.md` artifact与24份Summary。01-07K/L/M/Q/Y/Z/AA/J已通过PR #94–#124完成适用Plan、真实合同/测试反馈、独立exact-head与latest-integration review、串行merge及post-merge gate，依序形成`B_DEPENDENCY`、`B_DEPENDENCY_M`、`B_Q`、`B_YZ`、`B_J_READY`与scoped `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`、tree `f70b20215e569acf3ad196cc050e9a23700d4bae`。Canonical execution owner PR #107把Y/Z/AA纳入唯一map并把目标分母修正为42，因此当前reviewed feature完成证据为`32/42`；numbered Plan evidence仍为`7/8`，canonical lifecycle与本文件复选框仍为`0/8`。下一实现入口是从原exact `B_ACTIVE`分别签发01-07S/U；当前及后续evidence-only status PR不替换feature base，也不创建第二道implementation barrier。`B_ACTIVE`只覆盖J Plan明确的exact-one accepted E2E01与已定义candidate-invalid/protocol/source-version fault routes；zero/all-REJECT、multi-ACCEPT、atomic failure恢复、v1 contract closure、Composition Root、真实HTTP Trajectory/E2E、credentialed Qwen baseline、Case PASS与产品readiness仍未完成。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。若owner裁决要求激活默认inactive的01-07R或新增其他依赖，必须先修订唯一execution map与分母。
+当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## Phase 2｜Cycle 2：完成 E2E-01（PLANNED MAPPING ONLY）
 
@@ -57,8 +58,8 @@
 
 | Requirement | Phase | Canonical source | GSD 状态 |
 |---|---:|---|---|
-| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | Pending |
-| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | Pending |
+| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / RELEASE_TRANSITION_PENDING` |
+| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / RELEASE_TRANSITION_PENDING` |
 | `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 | Pending |

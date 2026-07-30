@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "1"
 current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "07J"
-status: "in_progress"
-last_updated: "2026-07-30T04:20:42+08:00"
-last_activity: "2026-07-30 — 01-07J reviewed serial merge formed scoped B_ACTIVE; derived status alignment continues without replacing the S/U feature base"
+current_plan: "release"
+status: "release_decision_pending"
+last_updated: "2026-07-31T07:49:46+08:00"
+last_activity: "2026-07-31 — 42/42 implementation targets、REGRESSION_GATE 与全部 post-execution quality gates complete；RTA-D01 / main merge decisions pending"
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 8
-  completed_plans: 0
-  percent: 0
+  completed_plans: 8
+  percent: 100
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -33,30 +33,30 @@ See: [PROJECT.md](PROJECT.md)
 
 Current Phase: 1
 Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: 07J
+Current Plan: release
 Total Phases: 6
 Total Plans in Phase: 8
-Status: 01-07J complete / scoped B_ACTIVE confirmed / 01-07S+01-07U next
-Last Activity: 2026-07-30
-Last Activity Description: 01-07J经独立exact-head/latest-overlay review与串行merge形成scoped `B_ACTIVE = 7f92b5e...` / tree `f70b202...`；派生状态对齐不替换S/U的exact feature base
-Progress: 0%
+Status: Phase 1 implementation and quality gates complete / release decisions pending
+Last Activity: 2026-07-31
+Last Activity Description: 六个authenticated Case已为`REGRESSION_GATE`，全部16 variants为PASS；Eval/Security re-review与controlled UAT已完成
+Progress: 100% implementation-plan evidence；Phase completion transition held
 
 ## Current Position
 
 Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 7 of 8（numbered Plan evidence为7/8；磁盘38份Plan artifact、24份Summary；reviewed feature完成证据为32/42）
-Status: `ACTIVE / 01-07J_COMPLETE / SCOPED_B_ACTIVE_CONFIRMED / 01-07S_01-07U_NEXT`
-Last activity: 2026-07-30 — J evidence-only planning-status alignment进行中；S/U唯一implementation input仍为原exact `B_ACTIVE`
-Progress: `░░░░░░░░░░` 0%
+Plan: 8 of 8；全部42个implementation targets完成
+Status: `ACTIVE / IMPLEMENTATION_42_OF_42 / QUALITY_GATES_COMPLETE / RELEASE_DECISIONS_PENDING`
+Last activity: 2026-07-31 — execution owner current status经PR #193对齐；本derived Packet同步最终pre-release状态
+Progress: `██████████` 100% implementation-plan evidence
 
-Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些派生计数不表示Case、Phase、真实纵向链或产品完成。
+Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。Requirements与Phase checkbox仍保持未勾选，只因为`RTA-D01` release确认和integration → `main`合并决定尚未完成；这不表示还有未实现的Phase 1 Task Packet。
 
 ## Next Safe Action
 
-1. 完成本dedicated planning-status Packet后，继续按single-writer边界依次对齐Project Direction、README与execution-owner current-status prose；这些evidence-only PR不创建第二道implementation barrier。
-2. 01-07S与01-07U只能分别从原exact `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`签发；planning/status merge不得替换feature base。两个互斥writer经独立review、latest overlay与串行merge后才形成`B_SU`。
-3. 后续严格服从execution owner中的唯一顺序：`{S,U} → X → T → W → V`。
-4. `B_RU_V2_CONTRACT`形成后才可签发01-08；01-08 reviewed merge后才可签发01-08A，缺凭据只能记录`NOT_RUN / SKIPPED`。
+1. 完成本dedicated planning-status Packet的独立review与串行merge。
+2. 从最新exact integration head创建显式`integration/e2e01-thin` → `main` release PR，保留`RTA-D01`用户确认为未决release gate，不提前merge。
+3. 请用户确认本次release是否继续接受`RTA-D01`的有界availability residual risk。
+4. 请用户决定是否把准备好的Phase 1 release PR合并到`main`；未取得两个明确决定前不推进Phase completion transition。
 5. 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## Current Decisions
@@ -73,7 +73,7 @@ Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些�
 - 01-07R默认`INACTIVE_OWNER_RULING_REQUIRED`；若要激活，必须先修改唯一execution map并把当前分母从42改为43。
 - source-version继续走H additive representation、K trusted producer、M Core closure；active routing只由Q/J阶段拥有，不能被additive阶段提前吸收。
 - Eval evidence仍必须来自真实HTTP结果与Application exact-Run closure，不能从Provider transient capture、script或expectations补造。
-- default offline Composition Root与credentialed Qwen runner仍属于后续01-08/01-08A，当前证据不能冒充真实纵向或Qwen baseline。
+- default offline Composition Root与credential-aware Qwen runner已完成；真实credentialed Qwen Baseline仍为`NOT_RUN / SKIPPED`，且离线证据不能冒充canonical产品启动或production readiness。
 
 ## Barriers and Blockers
 
@@ -92,9 +92,13 @@ Canonical Case / Requirement lifecycle与兼容层checkbox仍为`0/8`；这些�
 - `CONFIRMED / B_Q`: Q oracle remediation与Plan/category/feature PR #102–#106 reviewed merge为`2b9fde6f0e09308a53b86a4929ea3b639660f82e`；full为`1901 passed, 1 deselected, 12 warnings`。
 - `CONFIRMED / B_YZ_AND_B_J_READY`: execution-map r2与PR #108–#120依序形成`B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05`及`B_J_READY = b8d32d50775a0d3f4a0d3e7e609c717f6c540b33`；AA latest overlay/full为`1987 passed, 1 deselected, 12 warnings`。
 - `CONFIRMED / SCOPED_B_ACTIVE`: J Plan、scope alignment与feature PR #121–#124 reviewed串行merge为`7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`、tree `f70b20215e569acf3ad196cc050e9a23700d4bae`；post-merge focused 87、Application 707、neighbors 165、full `2033 passed, 1 deselected, 12 warnings`。
-- `READY / 01-07S_01-07U`: 只可从原exact `B_ACTIVE`分别签发；当前status alignment不替换该base，也不提前形成`B_SU`。
+- `CONFIRMED / B_RU_V2_CONTRACT`: 01-07S/U/X/T/W/V已reviewed串行完成并形成`5c84e0e...`。
+- `CONFIRMED / B_01_08A`: 01-08、Composition handoff与01-08A runner依序形成`b8a2cf3...`、`c59eaea...`与`11d6d08...`；这些产品barrier不被后续状态PR替换。
+- `CONFIRMED / POST_EXECUTION_QUALITY`: PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review；canonical full为`2007 passed, 1 deselected, 12 warnings`。
+- `CONFIRMED / REGRESSION_GATE`: 六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。
 - `CONFIRMED / PRIOR_CROSS_FILE_ALIGNMENT_COMPLETE`: planning-status PR #75 merge `b1deb0a...`、Project Direction PR #76 merge `879cb10...`、README PR #77 merge `0472f03...`与execution owner PR #78 merge `7cf4aef...`已依次完成F/E evidence-only对齐；它们未改变`B_FE_EXPAND`。
-- `OPEN / 01-08_01-08A_ISSUANCE`: 等待唯一execution map完整形成`B_RU_V2_CONTRACT`；当前reviewed feature完成证据为`32/42`。
+- `PENDING_USER_DECISION / RTA-D01`: mandatory Security re-review为`235 CLOSED + 1 ACCEPTED + 0 OPEN`；本次release是否继续接受该有界风险待用户确认。
+- `PENDING_USER_DECISION / MAIN_MERGE`: integration → `main` release PR由Integrator准备，但不在用户明确授权前merge。
 - `OPEN`: 后续第2–6阶段尚无scoped implementation owner；不得生成实现细节。
 
 ## Evidence Boundary
@@ -103,6 +107,6 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 
 ## Session
 
-Last Date: 2026-07-30
-Stopped At: 01-07J complete；scoped `B_ACTIVE`已形成；派生status alignment继续但不替换01-07S/U的exact feature base
+Last Date: 2026-07-31
+Stopped At: Phase 1 implementation与quality gates complete；派生状态同步进行中；release risk / main merge decisions pending
 Resume File: [../docs/implementation/e2e01-thin-slice-multi-agent-plan.md](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)
