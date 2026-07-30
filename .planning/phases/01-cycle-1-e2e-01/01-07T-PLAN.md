@@ -249,7 +249,7 @@ uv run pytest
 
 <rollback>
 
-未merge：关闭draft PR并保留证据。已merge但W未形成：普通revert T merge并复跑codec、Infrastructure/database/full，恢复到`B_T_PHYSICAL_HANDOFF`；不得reset/force。
+未merge：关闭draft PR并保留证据。已merge但W未形成：普通revert T merge并复跑codec、Infrastructure/database/full，恢复`B_T_PHYSICAL_HANDOFF`所定义的compatibility surface；revert会产生新的SHA/tree，不得把它误称为原exact barrier，也不得reset/force。
 
 若已有下游barrier，按`V → W → T`逆序普通revert并逐步复跑对应gate。T不迁移physical rows，rollback不得声称恢复或删除数据库内容。
 
