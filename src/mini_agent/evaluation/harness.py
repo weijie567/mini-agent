@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from asyncio import CancelledError
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -2005,6 +2006,7 @@ class OfflineEvalHarness:
             _restore_canonical_singleton_state()
             raise _fresh_command_error()
         outcome: EvalLaneRunOutcome | None = None
+        cancelled = False
         command_failed = False
         singleton_state_failed = False
         singleton_state_restored = False
@@ -2017,6 +2019,8 @@ class OfflineEvalHarness:
                     case_ids=case_ids,
                     transport_factory=transport_factory,
                 )
+            except CancelledError:
+                cancelled = True
             except Exception:
                 command_failed = True
             singleton_state_failed = (
@@ -2027,6 +2031,8 @@ class OfflineEvalHarness:
             singleton_state_restored = (
                 _restore_canonical_singleton_state()
             )
+        if cancelled:
+            raise CancelledError()
         if (
             command_failed
             or singleton_state_failed
