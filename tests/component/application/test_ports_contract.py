@@ -304,25 +304,6 @@ def _legacy_application_executable_hits(
         module.rsplit(".", maxsplit=1)[-1]
         for module in _TARGETED_APPLICATION_MODULES
     }
-    targeted_module_aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name in _TARGETED_APPLICATION_MODULES:
-                    targeted_module_aliases.add(
-                        alias.asname or alias.name.split(".", maxsplit=1)[0]
-                    )
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            for alias in node.names:
-                imported_module = f"{node.module}.{alias.name}"
-                if imported_module in _TARGETED_APPLICATION_MODULES:
-                    targeted_module_aliases.add(alias.asname or alias.name)
-                if (
-                    node.module == "mini_agent.application.ports"
-                    and alias.name == "RuntimeRecordPort"
-                ):
-                    targeted_module_aliases.add(alias.asname or alias.name)
-
     def dotted_name(node: ast.AST) -> str | None:
         parts: list[str] = []
         current = node
@@ -333,45 +314,6 @@ def _legacy_application_executable_hits(
             return None
         parts.append(current.id)
         return ".".join(reversed(parts))
-
-    for _ in range(len(tuple(ast.walk(tree))) + 1):
-        aliases_before = len(targeted_module_aliases)
-        for node in ast.walk(tree):
-            targets: tuple[ast.expr, ...] = ()
-            value: ast.AST | None = None
-            if isinstance(node, ast.Assign):
-                targets = tuple(node.targets)
-                value = node.value
-            elif isinstance(node, ast.AnnAssign):
-                targets = (node.target,)
-                value = node.value
-            if value is None:
-                continue
-            value_name = dotted_name(value)
-            if not (
-                value_name in _TARGETED_APPLICATION_MODULES
-                or (
-                    isinstance(value, ast.Name)
-                    and value.id in targeted_module_aliases
-                )
-            ):
-                continue
-            targeted_module_aliases.update(
-                target.id
-                for target in targets
-                if isinstance(target, ast.Name)
-            )
-        if len(targeted_module_aliases) == aliases_before:
-            break
-
-    def is_targeted_container(node: ast.AST) -> bool:
-        if isinstance(node, ast.Name):
-            return (
-                node.id in targeted_module_aliases
-                or node.id == "module"
-                or node.id.endswith("_module")
-            )
-        return dotted_name(node) in _TARGETED_APPLICATION_MODULES
 
     def lexical_scope(node: ast.AST) -> ast.AST:
         current = node
@@ -391,6 +333,176 @@ def _legacy_application_executable_hits(
             and descendant.id == name
             for descendant in ast.walk(target)
         )
+
+    def node_position(node: ast.AST) -> tuple[int, int]:
+        return (
+            getattr(node, "lineno", 0),
+            getattr(node, "col_offset", 0),
+        )
+
+    def import_binding(
+        node: ast.Import | ast.ImportFrom,
+        name: str,
+    ) -> bool | None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+                if bound_name == name:
+                    return alias.name in _TARGETED_APPLICATION_MODULES
+            return None
+        for alias in node.names:
+            bound_name = alias.asname or alias.name
+            if bound_name != name:
+                continue
+            imported_name = (
+                f"{node.module}.{alias.name}"
+                if node.module is not None
+                else alias.name
+            )
+            return (
+                imported_name in _TARGETED_APPLICATION_MODULES
+                or (
+                    node.module == "mini_agent.application.ports"
+                    and alias.name == "RuntimeRecordPort"
+                )
+            )
+        return None
+
+    def scope_parameter_names(scope: ast.AST) -> set[str]:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return set()
+        arguments = scope.args
+        return {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        } | {
+            argument.arg
+            for argument in (arguments.vararg, arguments.kwarg)
+            if argument is not None
+        }
+
+    def container_binding_in_scope(
+        name: str,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+        visited: frozenset[tuple[int, str]],
+    ) -> tuple[bool, bool]:
+        bindings: list[tuple[int, int, ast.AST, ast.AST | bool | None]] = []
+        has_local_binding = name in scope_parameter_names(scope)
+        for candidate in ast.walk(scope):
+            if candidate is scope or lexical_scope(candidate) is not scope:
+                continue
+            binding_value: ast.AST | bool | None = None
+            binds = False
+            if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+                imported_target = import_binding(candidate, name)
+                if imported_target is not None:
+                    binds = True
+                    binding_value = imported_target
+            elif isinstance(candidate, ast.Assign):
+                matching_targets = [
+                    target
+                    for target in candidate.targets
+                    if target_binds_name(target, name)
+                ]
+                if matching_targets:
+                    binds = True
+                    binding_value = (
+                        candidate.value
+                        if len(candidate.targets) == 1
+                        and isinstance(candidate.targets[0], ast.Name)
+                        else None
+                    )
+            elif isinstance(candidate, ast.AnnAssign) and target_binds_name(
+                candidate.target,
+                name,
+            ):
+                binds = True
+                binding_value = (
+                    candidate.value
+                    if isinstance(candidate.target, ast.Name)
+                    else None
+                )
+            elif isinstance(candidate, ast.NamedExpr) and target_binds_name(
+                candidate.target,
+                name,
+            ):
+                binds = True
+                binding_value = (
+                    candidate.value
+                    if isinstance(candidate.target, ast.Name)
+                    else None
+                )
+            elif isinstance(
+                candidate,
+                (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
+            ) and target_binds_name(candidate.target, name):
+                binds = True
+            if not binds:
+                continue
+            has_local_binding = True
+            if node_position(candidate) < node_position(before):
+                bindings.append(
+                    (*node_position(candidate), candidate, binding_value)
+                )
+        if not bindings:
+            return has_local_binding, False
+        _line, _column, binding, value = max(
+            bindings,
+            key=lambda item: item[:2],
+        )
+        if isinstance(value, bool):
+            return True, value
+        if value is None:
+            return True, False
+        return True, is_targeted_container(
+            value,
+            at=binding,
+            visited=visited,
+        )
+
+    def is_targeted_container(
+        node: ast.AST,
+        *,
+        at: ast.AST,
+        visited: frozenset[tuple[int, str]] = frozenset(),
+    ) -> bool:
+        qualified_name = dotted_name(node)
+        if qualified_name in _TARGETED_APPLICATION_MODULES:
+            return True
+        if not isinstance(node, ast.Name):
+            return False
+        scope = lexical_scope(at)
+        lookup_key = (id(scope), node.id)
+        if lookup_key in visited:
+            return False
+        next_visited = visited | {lookup_key}
+        has_binding, is_target = container_binding_in_scope(
+            node.id,
+            before=at,
+            scope=scope,
+            visited=next_visited,
+        )
+        if has_binding:
+            return is_target
+        if scope is not tree:
+            has_binding, is_target = container_binding_in_scope(
+                node.id,
+                before=at,
+                scope=tree,
+                visited=next_visited,
+            )
+            if has_binding:
+                return is_target
+        return node.id == "module" or node.id.endswith("_module")
 
     def direct_static_string_domain(node: ast.AST) -> frozenset[str] | None:
         value = _static_value(node)
@@ -515,6 +627,17 @@ def _legacy_application_executable_hits(
             or not isinstance(node.args[1], ast.Name)
         ):
             return False
+        negation = parents.get(id(node))
+        assertion = parents.get(id(negation)) if negation is not None else None
+        if not (
+            isinstance(negation, ast.UnaryOp)
+            and isinstance(negation.op, ast.Not)
+            and negation.operand is node
+            and isinstance(assertion, ast.Assert)
+            and assertion.test is negation
+            and assertion.msg is None
+        ):
+            return False
         function = lexical_scope(node)
         if (
             not isinstance(function, ast.FunctionDef)
@@ -599,7 +722,7 @@ def _legacy_application_executable_hits(
                 add_hit(node, f"dynamic-export:{node.attr}")
             if (
                 node.attr == "__dict__"
-                and is_targeted_container(node.value)
+                and is_targeted_container(node.value, at=node)
             ):
                 add_hit(node, "dynamic-module-__dict__")
         if isinstance(node, ast.Call):
@@ -620,7 +743,7 @@ def _legacy_application_executable_hits(
                     add_hit(node, f"reflective-target:{folded_name}")
                 if (
                     not is_exact_runtime_oracle_call(node)
-                    and is_targeted_container(node.args[0])
+                    and is_targeted_container(node.args[0], at=node)
                     and folded_name is None
                 ):
                     has_loop_domain, dynamic_domain = (
@@ -647,7 +770,7 @@ def _legacy_application_executable_hits(
             if (
                 call_name == "vars"
                 and node.args
-                and is_targeted_container(node.args[0])
+                and is_targeted_container(node.args[0], at=node)
             ):
                 add_hit(node, "dynamic-module-vars")
         if isinstance(node, ast.Subscript):
@@ -727,6 +850,22 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
             "    assert not hasattr(core_module, input())"
         ),
         (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        leaked = hasattr(application_records_module, legacy_name)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        assert hasattr(application_records_module, legacy_name)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        if hasattr(application_records_module, legacy_name):\n"
+            "            pass"
+        ),
+        (
             "import mini_agent.core.request_understanding as core_module\n"
             "ru = core_module\n"
             "getattr(ru, input())"
@@ -751,6 +890,33 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
             mutation,
             filename="mutation.py",
         ), mutation
+
+
+def test_application_ru_v1_absence_oracle_allows_rebound_instance_reflection() -> None:
+    safe_sources = (
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(record):\n"
+            "    ru = core_module\n"
+            "    ru = record\n"
+            "    return getattr(ru, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(core_module):\n"
+            "    return hasattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(ru):\n"
+            "    return vars(ru)"
+        ),
+    )
+    for safe_source in safe_sources:
+        assert not _legacy_application_executable_hits(
+            safe_source,
+            filename="safe_source.py",
+        ), safe_source
 
 
 def _assert_signature(
