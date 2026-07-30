@@ -827,22 +827,30 @@ class OfflineE2E01Composition:
                 owner_scope=owner_scope,
                 run_id=agent_result.run_id,
             )
-            closure_trace_ids = tuple(
-                event.trace_event_id for event in closure.trace_events
-            )
+            closure_trace_by_id = {
+                event.trace_event_id: event for event in closure.trace_events
+            }
             ordered_trace_ids = tuple(
                 event.trace_event_id for event in ordered_trace
             )
+            ordered_trace_by_id = {
+                event.trace_event_id: event for event in ordered_trace
+            }
             if (
-                len(closure_trace_ids) != len(ordered_trace_ids)
-                or set(closure_trace_ids) != set(ordered_trace_ids)
+                len(closure_trace_by_id) != len(closure.trace_events)
+                or len(ordered_trace_by_id) != len(ordered_trace)
+                or closure_trace_by_id != ordered_trace_by_id
             ):
                 raise ValueError("ordered Trace does not match exact closure")
+            canonical_ordered_trace = tuple(
+                closure_trace_by_id[event_id]
+                for event_id in ordered_trace_ids
+            )
             closure_fields = {
                 field_name: getattr(closure, field_name)
                 for field_name in ExactRunEvidenceClosure.model_fields
             }
-            closure_fields["trace_events"] = ordered_trace
+            closure_fields["trace_events"] = canonical_ordered_trace
             closure = ExactRunEvidenceClosure(**closure_fields)
         except Exception:
             projection_failed = True
