@@ -75,7 +75,7 @@
   uv run pytest
   ```
 
-- 上述命令只证明当前依赖、PostgreSQL / pgvector、migration chain、隔离测试 namespace，以及已合并的 Core / Application、Runtime、Infrastructure 与 Eval component / integration 证据可复现；不证明 Composition Root、canonical 应用启动、真实 HTTP → Runtime → PostgreSQL → Eval 纵向链、real `EvalCaseSut` / evidence reader、Trajectory / E2E Result、credentialed Qwen Baseline 或 P0 产品已经完成。
+- 上述命令证明当前依赖、PostgreSQL / pgvector、migration chain、隔离测试 namespace，以及已合并的 Core / Application、Runtime、Infrastructure 与 Eval component / integration 证据可复现；当前套件还覆盖显式 `OfflineE2E01Composition`、real `EvalCaseSut`、PostgreSQL exact owner-scoped evidence reader、直接 HTTP → Runtime → PostgreSQL 离线纵向 evidence、credential-aware Qwen runner 的零网络路径和真实 `CONTRACT_DEFINED` artifacts 的 Harness lifecycle fail-closed 边界。这些证据仍不证明 canonical 应用启动、lifecycle-valid Trajectory / E2E Eval Result、回归报告、真实 credentialed Qwen Baseline、production readiness 或 P0 产品已经完成。
 - 当前尚未建立 canonical 的应用启动、lint、type-check 和构建命令；相关配置和实现真实出现并通过验证前不得编造。可选并行测试只能作为附加证据，不能替代上述默认串行门禁。
 - 每个纵向切片在实现前先定义最小 Eval Contract；Component Eval 随实现增长，第一条完整纵向切片尽早运行 Trajectory / E2E Eval，实际失败必须进入回归集。不得在没有实现反馈时一次性冻结全部普通指标或阈值。
 - 修改完成后必须运行与风险相称的机械检查、测试或可复现验证，并准确报告已执行、未执行和失败的项目。
