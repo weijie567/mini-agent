@@ -3033,12 +3033,147 @@ def _legacy_core_source_hits(
             continue
         for target in targets:
             assignments_by_name.setdefault(target.id, []).append((node, value))
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], (ast.List, ast.Tuple))
+            and isinstance(node.value, (ast.List, ast.Tuple))
+        ):
+            def record_unpacked_bindings(
+                target: ast.AST,
+                assigned_value: ast.AST,
+            ) -> None:
+                if isinstance(target, ast.Name):
+                    assignments_by_name.setdefault(target.id, []).append(
+                        (node, assigned_value)
+                    )
+                    return
+                if (
+                    isinstance(target, (ast.List, ast.Tuple))
+                    and isinstance(assigned_value, (ast.List, ast.Tuple))
+                    and len(target.elts) == len(assigned_value.elts)
+                ):
+                    for child_target, child_value in zip(
+                        target.elts,
+                        assigned_value.elts,
+                        strict=True,
+                    ):
+                        record_unpacked_bindings(
+                            child_target,
+                            child_value,
+                        )
+
+            record_unpacked_bindings(node.targets[0], node.value)
+
+    calls_by_name: dict[str, list[ast.Call]] = {}
+    direct_lambda_calls: dict[ast.Lambda, list[ast.Call]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            calls_by_name.setdefault(node.func.id, []).append(node)
+        elif isinstance(node.func, ast.Lambda):
+            direct_lambda_calls.setdefault(node.func, []).append(node)
+
+    aliases_by_source_name: dict[
+        str,
+        list[tuple[str, ast.AST]],
+    ] = {}
+    lambda_bindings: dict[
+        ast.Lambda,
+        list[tuple[str, ast.AST]],
+    ] = {}
+    for target_name, bindings in assignments_by_name.items():
+        for binding_node, value in bindings:
+            if isinstance(value, ast.Name):
+                aliases_by_source_name.setdefault(value.id, []).append(
+                    (target_name, binding_node)
+                )
+            elif isinstance(value, ast.Lambda):
+                lambda_bindings.setdefault(value, []).append(
+                    (target_name, binding_node)
+                )
+
+    external_names_by_scope: dict[ast.AST, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            external_names_by_scope.setdefault(
+                lexical_scope(node),
+                set(),
+            ).update(node.names)
 
     def position(node: ast.AST) -> tuple[int, int]:
         return (
             getattr(node, "lineno", -1),
             getattr(node, "col_offset", -1),
         )
+
+    def binding_is_direct_in_scope(node: ast.AST, scope: ast.AST) -> bool:
+        return any(
+            statement is node
+            for statement in getattr(scope, "body", ())
+        )
+
+    deferred_calls_by_scope: dict[ast.AST, tuple[ast.Call, ...]] = {}
+
+    def deferred_scope_calls(use: ast.AST) -> tuple[ast.Call, ...]:
+        active_scope = lexical_scope(use)
+        if not isinstance(
+            active_scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ) or is_definition_time_expression(use):
+            return ()
+        cached_calls = deferred_calls_by_scope.get(active_scope)
+        if cached_calls is not None:
+            return cached_calls
+
+        aliases: dict[str, tuple[int, int]] = {}
+        if isinstance(active_scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            aliases[active_scope.name] = position(active_scope)
+        binding_scope = lexical_scope(active_scope)
+        if isinstance(active_scope, ast.Lambda):
+            for alias, binding_node in lambda_bindings.get(active_scope, ()):
+                if lexical_scope(binding_node) is binding_scope:
+                    aliases[alias] = position(binding_node)
+        pending_names = list(aliases)
+        while pending_names:
+            source_name = pending_names.pop()
+            for alias, binding_node in aliases_by_source_name.get(
+                source_name,
+                (),
+            ):
+                if (
+                    lexical_scope(binding_node) is binding_scope
+                    and aliases[source_name] < position(binding_node)
+                    and alias not in aliases
+                ):
+                    aliases[alias] = position(binding_node)
+                    pending_names.append(alias)
+
+        indexed_calls = [
+            *direct_lambda_calls.get(active_scope, ()),
+            *(
+                call
+                for alias in aliases
+                for call in calls_by_name.get(alias, ())
+            ),
+        ]
+        calls = tuple(
+            call
+            for call in indexed_calls
+            if (
+                not node_contains(active_scope, call)
+                and (
+                    call.func is active_scope
+                    or (
+                        isinstance(call.func, ast.Name)
+                        and aliases[call.func.id] < position(call)
+                    )
+                )
+            )
+        )
+        deferred_calls_by_scope[active_scope] = calls
+        return calls
 
     def resolution_scopes(node: ast.AST) -> list[ast.AST]:
         scopes: list[ast.AST] = []
@@ -3077,6 +3212,38 @@ def _legacy_core_source_hits(
             current = parents[current]
             if current is ancestor:
                 return True
+        return False
+
+    def binding_is_statically_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if (
+                isinstance(parent, ast.If)
+                and isinstance(parent.test, ast.Constant)
+                and isinstance(parent.test.value, bool)
+            ):
+                in_body = any(
+                    child is current or node_contains(child, current)
+                    for child in parent.body
+                )
+                in_orelse = any(
+                    child is current or node_contains(child, current)
+                    for child in parent.orelse
+                )
+                if (
+                    in_body
+                    and not parent.test.value
+                    or in_orelse
+                    and parent.test.value
+                ):
+                    return True
+            current = parent
         return False
 
     def is_definition_time_expression(node: ast.AST) -> bool:
@@ -3144,11 +3311,15 @@ def _legacy_core_source_hits(
         )
         return defaults_by_name.get(name)
 
-    def latest_assignment(
+    def possible_assignments(
         name: str,
         *,
         before: ast.AST,
-    ) -> tuple[ast.AST, ast.AST | str | bool] | bool | None:
+    ) -> (
+        tuple[tuple[ast.AST, ast.AST | str | bool], ...]
+        | bool
+        | None
+    ):
         scopes = resolution_scopes(before)
         deferred_lookup = isinstance(
             scopes[0],
@@ -3160,23 +3331,26 @@ def _legacy_core_source_hits(
             ] = [
                 item
                 for item in assignments_by_name.get(name, ())
-                if lexical_scope(item[0]) is scope
+                if (
+                    lexical_scope(item[0]) is scope
+                    and not binding_is_statically_unreachable(item[0], scope)
+                )
             ]
             scope_bindings.extend(
                 item
                 for item in callable_import_bindings_by_name.get(name, ())
-                if lexical_scope(item[0]) is scope
+                if (
+                    lexical_scope(item[0]) is scope
+                    and not binding_is_statically_unreachable(item[0], scope)
+                )
             )
             has_binding = bool(
                 scope_bindings or name in parameter_names(scope)
             )
             if not has_binding:
                 continue
-            declared_global_or_nonlocal = any(
-                isinstance(node, (ast.Global, ast.Nonlocal))
-                and name in node.names
-                for node in ast.walk(scope)
-                if node is scope or lexical_scope(node) is scope
+            declared_global_or_nonlocal = (
+                name in external_names_by_scope.get(scope, ())
             )
             candidates = (
                 scope_bindings
@@ -3188,17 +3362,48 @@ def _legacy_core_source_hits(
                 ]
             )
             if candidates:
-                return max(
-                    candidates,
+                direct_candidates = [
+                    item
+                    for item in candidates
+                    if binding_is_direct_in_scope(item[0], scope)
+                ]
+                if not direct_candidates:
+                    return tuple(candidates)
+                dominant = max(
+                    direct_candidates,
                     key=lambda item: position(item[0]),
+                )
+                return (
+                    dominant,
+                    *(
+                        item
+                        for item in candidates
+                        if (
+                            not binding_is_direct_in_scope(item[0], scope)
+                            and position(item[0]) > position(dominant[0])
+                        )
+                    ),
                 )
             default = parameter_default(scope, name)
             if default is not None:
-                return scope, default
+                return ((scope, default),)
             if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
                 continue
             return False
         return None
+
+    def latest_assignment(
+        name: str,
+        *,
+        before: ast.AST,
+    ) -> tuple[ast.AST, ast.AST | str | bool] | bool | None:
+        assignments = possible_assignments(name, before=before)
+        if assignments is None or assignments is False:
+            return assignments
+        return max(
+            assignments,
+            key=lambda item: position(item[0]),
+        )
 
     def name_refers_to_module(
         name: str,
@@ -3218,7 +3423,10 @@ def _legacy_core_source_hits(
             scope_assignments = [
                 (node, value)
                 for node, value in assignments_by_name.get(name, ())
-                if lexical_scope(node) is scope
+                if (
+                    lexical_scope(node) is scope
+                    and not binding_is_statically_unreachable(node, scope)
+                )
             ]
             scope_imports = [
                 (node, is_target)
@@ -3226,7 +3434,10 @@ def _legacy_core_source_hits(
                     name,
                     (),
                 )
-                if lexical_scope(node) is scope
+                if (
+                    lexical_scope(node) is scope
+                    and not binding_is_statically_unreachable(node, scope)
+                )
             ]
             has_binding = bool(
                 scope_assignments
@@ -3235,11 +3446,8 @@ def _legacy_core_source_hits(
             )
             if not has_binding:
                 continue
-            declared_global_or_nonlocal = any(
-                isinstance(node, (ast.Global, ast.Nonlocal))
-                and name in node.names
-                for node in ast.walk(scope)
-                if node is scope or lexical_scope(node) is scope
+            declared_global_or_nonlocal = (
+                name in external_names_by_scope.get(scope, ())
             )
             binding_candidates = [
                 (node, value)
@@ -3263,10 +3471,6 @@ def _legacy_core_source_hits(
                 if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
                     continue
                 return False
-            binding_node, value = max(
-                binding_candidates,
-                key=lambda item: position(item[0]),
-            )
             def binding_targets_module(
                 candidate_node: ast.AST,
                 candidate_value: ast.AST | bool,
@@ -3281,31 +3485,42 @@ def _legacy_core_source_hits(
                     )
                 return _dotted_ast_name(candidate_value) in relevant_modules
 
-            resolved_value = binding_targets_module(binding_node, value)
-            if resolved_value:
-                return True
-            active_function = scopes[0]
-            if isinstance(
-                active_function,
-                (ast.FunctionDef, ast.AsyncFunctionDef),
+            direct_candidates = [
+                item
+                for item in binding_candidates
+                if binding_is_direct_in_scope(item[0], scope)
+            ]
+            if direct_candidates:
+                dominant = max(
+                    direct_candidates,
+                    key=lambda item: position(item[0]),
+                )
+                possible_candidates = (
+                    dominant,
+                    *(
+                        item
+                        for item in binding_candidates
+                        if (
+                            not binding_is_direct_in_scope(item[0], scope)
+                            and position(item[0]) > position(dominant[0])
+                        )
+                    ),
+                )
+            else:
+                possible_candidates = tuple(binding_candidates)
+            if any(
+                binding_targets_module(candidate_node, candidate_value)
+                for candidate_node, candidate_value in possible_candidates
             ):
-                called_before_rebind = any(
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == active_function.name
-                    and position(node) < position(binding_node)
-                    for node in ast.walk(tree)
-                )
-                prior_target_binding = any(
-                    position(candidate_node) < position(binding_node)
-                    and binding_targets_module(
-                        candidate_node,
-                        candidate_value,
-                    )
-                    for candidate_node, candidate_value in binding_candidates
-                )
-                if called_before_rebind and prior_target_binding:
-                    return True
+                return True
+            if index > 0:
+                for call in deferred_scope_calls(before):
+                    if name_refers_to_module(
+                        name,
+                        before=call,
+                        seen=seen,
+                    ):
+                        return True
             return False
         return False
 
@@ -3317,46 +3532,58 @@ def _legacy_core_source_hits(
     ) -> str | None:
         if name in seen:
             return None
-        assignment = latest_assignment(name, before=before)
-        if assignment is False:
+        assignments = possible_assignments(name, before=before)
+        if assignments is False:
             return None
-        if assignment is not None:
-            assignment_node, value = assignment
-            if isinstance(value, str):
-                return (
-                    None
-                    if value == "__pytest_module__"
-                    else value
+        if assignments is not None:
+            resolved_names: list[str] = []
+            for assignment_node, value in assignments:
+                normalized_name: str | None = None
+                if isinstance(value, str):
+                    normalized_name = (
+                        None
+                        if value == "__pytest_module__"
+                        else value
+                    )
+                elif isinstance(value, ast.Name):
+                    normalized_name = normalized_callable_name(
+                        value.id,
+                        before=assignment_node,
+                        seen=seen | {name},
+                    )
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in builtins_aliases
+                    and value.attr in builtin_callable_names
+                ):
+                    normalized_name = value.attr
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in importlib_aliases
+                    and value.attr == "import_module"
+                ):
+                    normalized_name = "import_module"
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in pytest_aliases
+                    and value.attr in {"importorskip", "skip", "xfail"}
+                ):
+                    normalized_name = value.attr
+                if normalized_name is not None:
+                    resolved_names.append(normalized_name)
+            if resolved_names:
+                return resolved_names[0]
+            for call in deferred_scope_calls(before):
+                normalized_name = normalized_callable_name(
+                    name,
+                    before=call,
+                    seen=seen,
                 )
-            if isinstance(value, bool):
-                return None
-            if isinstance(value, ast.Name):
-                return normalized_callable_name(
-                    value.id,
-                    before=assignment_node,
-                    seen=seen | {name},
-                )
-            if (
-                isinstance(value, ast.Attribute)
-                and isinstance(value.value, ast.Name)
-                and value.value.id in builtins_aliases
-                and value.attr in builtin_callable_names
-            ):
-                return value.attr
-            if (
-                isinstance(value, ast.Attribute)
-                and isinstance(value.value, ast.Name)
-                and value.value.id in importlib_aliases
-                and value.attr == "import_module"
-            ):
-                return "import_module"
-            if (
-                isinstance(value, ast.Attribute)
-                and isinstance(value.value, ast.Name)
-                and value.value.id in pytest_aliases
-                and value.attr in {"importorskip", "skip", "xfail"}
-            ):
-                return value.attr
+                if normalized_name is not None:
+                    return normalized_name
             return None
         if name in imported_callable_aliases:
             return imported_callable_aliases[name]
@@ -3400,21 +3627,31 @@ def _legacy_core_source_hits(
     ) -> bool:
         if name in seen:
             return False
-        assignment = latest_assignment(name, before=before)
-        if assignment is None or assignment is False:
+        assignments = possible_assignments(name, before=before)
+        if assignments is None or assignments is False:
             return False
-        assignment_node, value = assignment
-        if isinstance(value, ast.Name):
-            return name_refers_to_namespace(
+        for assignment_node, value in assignments:
+            if isinstance(value, ast.Name) and name_refers_to_namespace(
                 value.id,
                 before=assignment_node,
                 seen=seen | {name},
+            ):
+                return True
+            if (
+                isinstance(value, ast.Call)
+                and normalized_call_name(value)
+                in {"globals", "locals", "vars"}
+                and not value.args
+                and not value.keywords
+            ):
+                return True
+        return any(
+            name_refers_to_namespace(
+                name,
+                before=call,
+                seen=seen,
             )
-        return (
-            isinstance(value, ast.Call)
-            and normalized_call_name(value) in {"globals", "locals", "vars"}
-            and not value.args
-            and not value.keywords
+            for call in deferred_scope_calls(before)
         )
 
     def is_relevant_module(node: ast.AST, *, at: ast.AST | None = None) -> bool:
@@ -4032,6 +4269,19 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "core_module = object()\n"
         ),
         (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "alias = consumer\n"
+            "alias()\n"
+            "core_module = object()\n"
+        ),
+        (
+            module_import
+            + "(lambda: getattr(core_module, input()))()\n"
+            "core_module = object()\n"
+        ),
+        (
             "def outer():\n"
             "    def inner():\n"
             "        return getattr(core_module, input())\n"
@@ -4045,6 +4295,45 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "        return getattr(core_module, input())\n"
             "    inner()\n"
             "    core_module = object()\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+            "consumer()\n"
+            "reflect = lambda value, name: None\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+            "consumer()\n"
+            "namespace = {}\n"
+        ),
+        (
+            module_import
+            + "if False:\n"
+            "    core_module = object()\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "if False:\n"
+            "    reflect = lambda value, name: None\n"
+            "reflect(core_module, input())\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "if False:\n"
+            "    namespace = {}\n"
+            "namespace[input()] = object()\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "(core_module,) = (target_module,)\n"
+            "getattr(core_module, input())\n"
         ),
         (
             module_import
@@ -4373,6 +4662,28 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    return getattr(core_module, input())\n"
             "core_module = object()\n"
             "consumer()"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+            "reflect = lambda value, name: None\n"
+            "consumer()"
+        ),
+        (
+            "namespace = globals()\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+            "namespace = {}\n"
+            "consumer()"
+        ),
+        (
+            module_import
+            + "core_module = object()\n"
+            "if False:\n"
+            "    core_module = request_processing_module\n"
+            "getattr(core_module, input())"
         ),
         (
             module_import
