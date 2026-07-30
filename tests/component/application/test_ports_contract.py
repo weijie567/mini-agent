@@ -265,6 +265,7 @@ def _legacy_application_executable_hits(
         for child in ast.iter_child_nodes(parent)
     }
     exempt_node_ids: set[int] = set()
+    invalid_legacy_set_declarations: list[ast.AST] = []
     accepted_delta_family = next(
         identifier
         for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
@@ -285,7 +286,32 @@ def _legacy_application_executable_hits(
             and target.id == "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
             for target in targets
         ):
-            exempt_node_ids.update(id(descendant) for descendant in ast.walk(node))
+            value_node = (
+                node.value
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                else None
+            )
+            if (
+                isinstance(value_node, ast.Call)
+                and isinstance(value_node.func, ast.Name)
+                and value_node.func.id == "frozenset"
+                and len(value_node.args) == 1
+                and not value_node.keywords
+            ):
+                declared_values = _static_value(value_node.args[0])
+            else:
+                declared_values = _static_value(value_node) if value_node else None
+            if (
+                isinstance(declared_values, (list, set, tuple, frozenset))
+                and all(isinstance(value, str) for value in declared_values)
+                and frozenset(declared_values)
+                == _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+            ):
+                exempt_node_ids.update(
+                    id(descendant) for descendant in ast.walk(node)
+                )
+            else:
+                invalid_legacy_set_declarations.append(node)
         if isinstance(node, ast.keyword):
             label = _folded_static_string(node.value)
             if node.arg in {"family_name", "field_name"} and label in (
@@ -299,6 +325,9 @@ def _legacy_application_executable_hits(
 
     def add_hit(node: ast.AST, detail: str) -> None:
         hits.add((filename, getattr(node, "lineno", 0), detail))
+
+    for declaration in invalid_legacy_set_declarations:
+        add_hit(declaration, "invalid-legacy-identifier-set")
 
     targeted_module_tails = {
         module.rsplit(".", maxsplit=1)[-1]
@@ -587,10 +616,16 @@ def _legacy_application_executable_hits(
             root = root.value
         if not isinstance(root, ast.Name):
             return False
-        for scope in (lexical_scope(at), tree):
-            if root.id in scope_parameter_names(scope):
-                return False
-            bindings: list[tuple[int, int, bool]] = []
+
+        def package_status_in_scope(
+            scope: ast.AST,
+            *,
+            initial_status: bool,
+        ) -> tuple[bool, bool]:
+            bindings: list[tuple[int, int, ast.AST, bool]] = []
+            has_binding = root.id in scope_parameter_names(scope)
+            if has_binding:
+                initial_status = False
             for candidate in ast.walk(scope):
                 if candidate is scope or lexical_scope(candidate) is not scope:
                     continue
@@ -604,7 +639,10 @@ def _legacy_application_executable_hits(
                         )
                         if bound_name == root.id:
                             binds = True
-                            is_package_import = alias.name == "mini_agent"
+                            is_package_import = (
+                                alias.name == "mini_agent"
+                                or alias.name.startswith("mini_agent.")
+                            )
                 elif isinstance(candidate, ast.ImportFrom):
                     binds = import_binding(candidate, root.id) is not None
                 elif isinstance(candidate, ast.Assign):
@@ -621,15 +659,63 @@ def _legacy_application_executable_hits(
                     (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
                 ):
                     binds = target_binds_name(candidate.target, root.id)
-                if binds and node_position(candidate) < node_position(at):
+                if not binds:
+                    continue
+                has_binding = True
+                if node_position(candidate) < node_position(at):
                     bindings.append(
-                        (*node_position(candidate), is_package_import)
+                        (
+                            *node_position(candidate),
+                            candidate,
+                            is_package_import,
+                        )
                     )
-            if bindings:
-                return max(bindings, key=lambda item: item[:2])[2]
-            if scope is tree:
-                break
-        return True
+            dominating = [
+                binding
+                for binding in bindings
+                if isinstance(
+                    binding[2],
+                    (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
+                )
+                and binding_dominates_use(
+                    binding[2],
+                    use=at,
+                    scope=scope,
+                )
+            ]
+            dominating_position = (-1, -1)
+            possible_package = initial_status
+            if dominating:
+                latest_dominating = max(
+                    dominating,
+                    key=lambda item: item[:2],
+                )
+                dominating_position = latest_dominating[:2]
+                possible_package = latest_dominating[3]
+            possible_package = possible_package or any(
+                binding[:2] > dominating_position
+                and not binding_dominates_use(
+                    binding[2],
+                    use=at,
+                    scope=scope,
+                )
+                and binding[3]
+                for binding in bindings
+            )
+            return has_binding, possible_package
+
+        function_scope = lexical_scope(at)
+        _module_bound, possible_package = package_status_in_scope(
+            tree,
+            initial_status=True,
+        )
+        if function_scope is tree:
+            return possible_package
+        _local_bound, possible_package = package_status_in_scope(
+            function_scope,
+            initial_status=possible_package,
+        )
+        return possible_package
 
     def is_targeted_container(
         node: ast.AST,
@@ -930,6 +1016,39 @@ def _legacy_application_executable_hits(
         }
         return node in expected_calls
 
+    def runtime_oracle_function_is_exact(function: ast.FunctionDef) -> bool:
+        expected_signature_calls = [
+            descendant
+            for descendant in ast.walk(function)
+            if isinstance(descendant, ast.Call)
+            and isinstance(descendant.func, ast.Name)
+            and descendant.func.id == "hasattr"
+            and len(descendant.args) == 2
+            and isinstance(descendant.args[0], ast.Name)
+            and isinstance(descendant.args[1], ast.Name)
+            and (
+                (
+                    descendant.args[0].id
+                    in {
+                        "application_records_module",
+                        "application_ports_module",
+                    }
+                    and descendant.args[1].id == "legacy_name"
+                )
+                or (
+                    descendant.args[0].id == "RuntimeRecordPort"
+                    and descendant.args[1].id == "legacy_port_member"
+                )
+            )
+        ]
+        return (
+            len(expected_signature_calls) == 3
+            and all(
+                is_exact_runtime_oracle_call(call)
+                for call in expected_signature_calls
+            )
+        )
+
     dynamic_export_names = {"__getattr__", "__getattribute__"}
     for node in ast.walk(tree):
         if id(node) not in exempt_node_ids:
@@ -955,6 +1074,13 @@ def _legacy_application_executable_hits(
                 add_hit(node, node.name)
             if node.name in dynamic_export_names:
                 add_hit(node, f"dynamic-export:{node.name}")
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name
+                == "test_application_ru_v1_records_and_ports_are_not_executable"
+                and not runtime_oracle_function_is_exact(node)
+            ):
+                add_hit(node, "invalid-runtime-absence-oracle-shape")
         if isinstance(node, ast.Name):
             if node.id in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
                 add_hit(node, node.id)
@@ -1146,6 +1272,28 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
             "getattr(RRP, input())"
         ),
         (
+            "import mini_agent.application.records\n"
+            "getattr(mini_agent.application.records, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding\n"
+            "vars(mini_agent.core.request_understanding)"
+        ),
+        (
+            "import mini_agent.application.records\n"
+            "def inspect(record, condition):\n"
+            "    if condition:\n"
+            "        mini_agent = record\n"
+            "    return getattr(mini_agent.application.records, input())"
+        ),
+        (
+            "import mini_agent.application.records\n"
+            "def inspect(records):\n"
+            "    for mini_agent in records:\n"
+            "        pass\n"
+            "    return getattr(mini_agent.application.records, input())"
+        ),
+        (
             "import mini_agent.core.request_understanding as core_module\n"
             "def inspect(record, condition):\n"
             "    ru = core_module\n"
@@ -1228,6 +1376,25 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
             "        assert not hasattr(application_ports_module, legacy_name)\n"
             "    for legacy_port_member in legacy_port_members:\n"
             "        assert not hasattr(RuntimeRecordPort, legacy_port_member)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    pass"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        pass\n"
+            "    for legacy_port_member in legacy_port_members:\n"
+            "        pass"
         ),
         "from mini_agent.application.records import *",
         "def __getattr__(name):\n    return None",
