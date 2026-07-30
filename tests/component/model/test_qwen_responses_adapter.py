@@ -103,15 +103,29 @@ def _reachable_traceback_state(
             visit(vars(value))
 
     frame_names: list[str] = []
-    traceback = error.__traceback__
-    while traceback is not None:
-        frame = traceback.tb_frame
-        if frame.f_globals.get("__name__") == (
-            "mini_agent.infrastructure.model.qwen_responses"
+    pending_errors = [error]
+    visited_errors: set[int] = set()
+    while pending_errors:
+        current_error = pending_errors.pop()
+        if id(current_error) in visited_errors:
+            continue
+        visited_errors.add(id(current_error))
+        visit(current_error.args)
+        traceback = current_error.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if frame.f_globals.get("__name__") == (
+                "mini_agent.infrastructure.model.qwen_responses"
+            ):
+                frame_names.append(frame.f_code.co_name)
+                visit(dict(frame.f_locals))
+            traceback = traceback.tb_next
+        for chained_error in (
+            current_error.__cause__,
+            current_error.__context__,
         ):
-            frame_names.append(frame.f_code.co_name)
-            visit(dict(frame.f_locals))
-        traceback = traceback.tb_next
+            if chained_error is not None:
+                pending_errors.append(chained_error)
     return tuple(frame_names), frozenset(strings), frozenset(value_types)
 
 
@@ -251,6 +265,111 @@ def _run_with_handler(
             return await operation(adapter)  # type: ignore[misc]
 
     return asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        " https://qwen.invalid/compatible-mode/v1 ",
+        "http://qwen.invalid/compatible-mode/v1",
+        "https:///compatible-mode/v1",
+        "relative/compatible-mode/v1",
+        "https://qwen.invalid:bad/compatible-mode/v1",
+    ],
+)
+def test_adapter_rejects_invalid_url_without_reachable_inputs_or_transport(
+    base_url: str,
+) -> None:
+    seen: list[httpx.Request] = []
+    errors: list[ValueError] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: seen.append(request) or httpx.Response(200)
+            )
+        ) as client:
+            for _ in range(2):
+                with pytest.raises(ValueError) as caught:
+                    QwenResponsesAdapterV2(
+                        base_url=base_url,
+                        api_key="synthetic-secret",
+                        client=client,
+                    )
+                errors.append(caught.value)
+
+    asyncio.run(run())
+    assert seen == []
+    for error in errors:
+        assert type(error) is ValueError
+        assert error.args in {
+            ("base_url must be a concrete injected value",),
+            ("base_url must be a valid HTTPS URL",),
+        }
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        frame_names, strings, value_types = _reachable_traceback_state(error)
+        assert frame_names == ("__init__",)
+        assert {base_url, "synthetic-secret"}.isdisjoint(strings)
+        assert QwenResponsesAdapterV2 not in value_types
+        assert httpx.AsyncClient not in value_types
+        assert httpx.URL not in value_types
+    assert errors[0] is not errors[1]
+
+
+@pytest.mark.parametrize("invalid_input", ["api_key", "client"])
+def test_adapter_rejects_invalid_injected_dependency_without_reachable_inputs(
+    invalid_input: str,
+) -> None:
+    seen: list[httpx.Request] = []
+    base_url = "https://qwen.invalid/compatible-mode/v1"
+    api_key = " synthetic-secret " if invalid_input == "api_key" else (
+        "synthetic-secret"
+    )
+    client: object = (
+        object()
+        if invalid_input == "client"
+        else httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: seen.append(request) or httpx.Response(200)
+            )
+        )
+    )
+    errors: list[ValueError | TypeError] = []
+    try:
+        for _ in range(2):
+            with pytest.raises((ValueError, TypeError)) as caught:
+                QwenResponsesAdapterV2(
+                    base_url=base_url,
+                    api_key=api_key,
+                    client=client,  # type: ignore[arg-type]
+                )
+            errors.append(caught.value)
+    finally:
+        if isinstance(client, httpx.AsyncClient):
+            asyncio.run(client.aclose())
+
+    assert seen == []
+    expected_type = ValueError if invalid_input == "api_key" else TypeError
+    for error in errors:
+        assert type(error) is expected_type
+        assert error.args == (
+            (
+                "api_key must be a concrete injected value"
+                if invalid_input == "api_key"
+                else "client must be an injected httpx.AsyncClient"
+            ),
+        )
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        frame_names, strings, value_types = _reachable_traceback_state(error)
+        assert frame_names == ("__init__",)
+        assert {base_url, api_key}.isdisjoint(strings)
+        assert QwenResponsesAdapterV2 not in value_types
+        assert type(client) not in value_types
+        assert httpx.AsyncClient not in value_types
+        assert httpx.URL not in value_types
+    assert errors[0] is not errors[1]
 
 
 def test_v2_request_understanding_uses_exact_closed_one_function_request() -> None:
