@@ -55,6 +55,10 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "alembic/versions/20260728_0003_request_understanding_v2_expand.py"
 )
+_MODELS_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "src/mini_agent/infrastructure/persistence/models.py"
+)
 _DOWNGRADE_BLOCKED_MESSAGE = (
     "cannot downgrade request understanding v2 physical schema while "
     "v2 records exist"
@@ -93,6 +97,15 @@ _EXPANDED_CODE_VERSION_PAIRS = (
         "request_understanding_record",
         "request_understanding_record.p0.v2",
     ),
+)
+_REQUEST_UNDERSTANDING_V1_PAIR = (
+    "request_understanding_record",
+    "request_understanding_record.p0.v1",
+)
+_ACTIVE_CODE_VERSION_PAIRS = tuple(
+    pair
+    for pair in _EXPANDED_CODE_VERSION_PAIRS
+    if pair != _REQUEST_UNDERSTANDING_V1_PAIR
 )
 
 
@@ -659,15 +672,150 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         engine.dispose()
 
 
-def test_sqlalchemy_metadata_and_catalog_have_exact_expanded_physical_pair_set(
+def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
 ) -> None:
+    models_source = _MODELS_PATH.read_text()
+    models_tree = ast.parse(models_source)
+    application_catalog_name = "P0_RECORD_SCHEMA_VERSION_CATALOG"
+
+    def folded_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = folded_string(node.left)
+            right = folded_string(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+
+    def import_roots(tree: ast.AST) -> set[str]:
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(
+                    alias.name.split(".", maxsplit=1)[0]
+                    for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                roots.add(node.module.split(".", maxsplit=1)[0])
+        return roots
+
+    application_imports = [
+        node
+        for node in ast.walk(models_tree)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("mini_agent.application")
+        )
+        or (
+            isinstance(node, ast.Import)
+            and any(
+                alias.name.startswith("mini_agent.application")
+                for alias in node.names
+            )
+        )
+    ]
+    assert len(application_imports) == 1
+    application_import = application_imports[0]
+    assert isinstance(application_import, ast.ImportFrom)
+    assert application_import.module == "mini_agent.application.persistence"
+    assert [
+        (alias.name, alias.asname)
+        for alias in application_import.names
+    ] == [("P0RecordCode", None)]
+
+    assert not any(
+        (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "mini_agent.application.persistence"
+            and any(
+                alias.name == application_catalog_name
+                for alias in node.names
+            )
+        )
+        or (
+            isinstance(node, ast.Name)
+            and node.id == application_catalog_name
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr == application_catalog_name
+        )
+        or (
+            folded_string(node) == application_catalog_name
+        )
+        for node in ast.walk(models_tree)
+    )
+    assert not {
+        node.id
+        for node in ast.walk(models_tree)
+        if isinstance(node, ast.Name)
+        and node.id in {
+            "__import__",
+            "eval",
+            "exec",
+            "getattr",
+            "globals",
+            "locals",
+            "vars",
+        }
+    }
+    assert not {
+        node.attr
+        for node in ast.walk(models_tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {
+            "__dict__",
+            "__globals__",
+            "__module__",
+            "__subclasses__",
+            "import_module",
+        }
+    }
+    unsafe_import_roots = {"builtins", "importlib", "sys"}
+    assert not import_roots(models_tree) & unsafe_import_roots
+    adversarial_imports = ast.parse(
+        "from importlib import import_module as load_module\n"
+        "from builtins import vars as namespace\n"
+    )
+    assert import_roots(adversarial_imports) & unsafe_import_roots == {
+        "builtins",
+        "importlib",
+    }
+
+    physical_literal = _literal_pair_tuple(
+        models_tree,
+        "_PHYSICAL_CODE_VERSION_PAIRS",
+    )
+    assert physical_literal == _EXPANDED_CODE_VERSION_PAIRS
+    assert len(physical_literal) == len(set(physical_literal)) == 18
+
+    code_version_assignments = [
+        node
+        for node in models_tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_CODE_VERSION_PAIRS"
+        )
+    ]
+    assert len(code_version_assignments) == 1
+    expected_derivation = ast.parse(
+        "tuple(sorted(_PHYSICAL_CODE_VERSION_PAIRS))",
+        mode="eval",
+    ).body
+    assert ast.dump(
+        code_version_assignments[0].value,
+        include_attributes=False,
+    ) == ast.dump(expected_derivation, include_attributes=False)
+
     assert len(persistence_models._RECORD_CODES) == 17
     assert set(persistence_models._RECORD_CODES) == {
         code for code, _ in _V1_CODE_VERSION_PAIRS
     }
-    assert persistence_models._CODE_VERSION_PAIRS == tuple(
-        sorted(_EXPANDED_CODE_VERSION_PAIRS)
-    )
+    physical_pairs = persistence_models._CODE_VERSION_PAIRS
+    assert physical_pairs == tuple(sorted(_EXPANDED_CODE_VERSION_PAIRS))
 
     catalog_pairs = tuple(
         sorted(
@@ -675,7 +823,20 @@ def test_sqlalchemy_metadata_and_catalog_have_exact_expanded_physical_pair_set(
             for code, schema_version in P0_RECORD_SCHEMA_VERSION_CATALOG
         )
     )
-    assert catalog_pairs == tuple(sorted(_EXPANDED_CODE_VERSION_PAIRS))
+    active_pairs = tuple(sorted(_ACTIVE_CODE_VERSION_PAIRS))
+    request_understanding_v1_pair = {
+        _REQUEST_UNDERSTANDING_V1_PAIR
+    }
+
+    assert catalog_pairs in {active_pairs, physical_pairs}
+    assert set(active_pairs) < set(physical_pairs)
+    assert set(physical_pairs) - set(active_pairs) == (
+        request_understanding_v1_pair
+    )
+    assert frozenset(set(physical_pairs) - set(catalog_pairs)) in {
+        frozenset(),
+        frozenset(request_understanding_v1_pair),
+    }
 
 
 def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
