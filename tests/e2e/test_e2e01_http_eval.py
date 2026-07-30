@@ -52,24 +52,18 @@ def _exact_source_version() -> str:
 
 EXACT_SOURCE_VERSION = _exact_source_version()
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
-TARGET_CASE_IDS = (
+SINGLE_SCRIPT_CASE_IDS = (
     "E2E01-01",
     "E2E01-04-A",
     "E2E01-04-B",
-    "E2E01-01+SEC-ARGUMENT-BINDING",
-    "E2E01-01+FAULT-PROVIDER-PROTOCOL",
-    "E2E01-01+FAULT-PRESENTATION-PROTOCOL",
 )
-SCRIPT_REF_BY_CASE = {
-    "E2E01-01+SEC-ARGUMENT-BINDING": (
-        "script:sec-argument-binding:foreign-order"
-    ),
-    "E2E01-01+FAULT-PROVIDER-PROTOCOL": (
-        "script:fault-provider:zero-target-functions"
-    ),
-    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
-        "script:fault-presentation:zero-target-functions"
-    ),
+EXPECTED_SCRIPT_COUNTS_BY_CASE = {
+    "E2E01-01": 1,
+    "E2E01-04-A": 1,
+    "E2E01-04-B": 1,
+    "E2E01-01+SEC-ARGUMENT-BINDING": 2,
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL": 7,
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": 4,
 }
 RAW_ALICE_SESSION = "p0-session-alice"
 
@@ -207,39 +201,104 @@ async def test_real_http_runtime_postgres_produces_lifecycle_valid_results(
         assert "customer-B" not in bounded_projection
         assert "p0-session-bob" not in bounded_projection
 
-        eval_run_id = uuid4()
-        outcome = await composition.build_harness(
-            nonce_factory=uuid4,
-        ).run_lane(
-            eval_run_id=eval_run_id,
-            case_ids=TARGET_CASE_IDS,
-            script_ref_by_case=SCRIPT_REF_BY_CASE,
+        actual_script_counts = {
+            case.case_id: len(tuple(case.input["model_script_refs"]))
+            for case in artifacts.cases
+        }
+        assert actual_script_counts == EXPECTED_SCRIPT_COUNTS_BY_CASE
+        assert sum(actual_script_counts.values()) == 16
+        multi_script_variants = tuple(
+            (case.case_id, script_ref)
+            for case in artifacts.cases
+            for script_ref in tuple(case.input["model_script_refs"])
+            if len(tuple(case.input["model_script_refs"])) > 1
         )
-
-        assert outcome.command_passed is True
-        assert outcome.execution_failures == ()
-        assert tuple(result.case_id for result in outcome.results) == (
-            TARGET_CASE_IDS
+        assert len(multi_script_variants) == 13
+        run_specs = (
+            (SINGLE_SCRIPT_CASE_IDS, {}),
+            *(
+                ((case_id,), {case_id: script_ref})
+                for case_id, script_ref in multi_script_variants
+            ),
         )
-        assert all(
-            result.status is EvalResultStatus.PASS
-            for result in outcome.results
-        )
-        persisted = await records.list_eval_results(eval_run_id=eval_run_id)
-        persisted_failures = (
-            await records.list_eval_execution_failures(
+        harness = composition.build_harness(nonce_factory=uuid4)
+        evaluated_variants: list[tuple[str, str]] = []
+        persisted_results = []
+        for case_ids, script_ref_by_case in run_specs:
+            eval_run_id = uuid4()
+            outcome = await harness.run_lane(
                 eval_run_id=eval_run_id,
+                case_ids=case_ids,
+                script_ref_by_case=script_ref_by_case,
             )
+
+            assert outcome.command_passed is True
+            assert outcome.execution_failures == ()
+            assert tuple(
+                result.case_id for result in outcome.results
+            ) == case_ids
+            assert all(
+                result.status is EvalResultStatus.PASS
+                for result in outcome.results
+            )
+            persisted = await records.list_eval_results(
+                eval_run_id=eval_run_id
+            )
+            persisted_failures = (
+                await records.list_eval_execution_failures(
+                    eval_run_id=eval_run_id,
+                )
+            )
+            assert persisted == outcome.results
+            assert persisted_failures == ()
+            assert all(
+                result.version_manifest.candidate_version
+                == EXACT_SOURCE_VERSION
+                and result.version_manifest.runtime_version
+                == EXACT_SOURCE_VERSION
+                for result in persisted
+            )
+            persisted_results.extend(persisted)
+            for result in persisted:
+                script_refs = tuple(
+                    artifacts.case_by_id(result.case_id).input[
+                        "model_script_refs"
+                    ]
+                )
+                selected_script_ref = script_ref_by_case.get(
+                    result.case_id,
+                    script_refs[0],
+                )
+                evaluated_variants.append(
+                    (result.case_id, selected_script_ref)
+                )
+                assert result.trace_ref is not None
+                result_trace = await composition.reload_trace(
+                    result.trace_ref
+                )
+                assert (
+                    sum(
+                        event.event_type
+                        is TraceEventType.EVAL_CASE_GRADED
+                        for event in result_trace
+                    )
+                    == 1
+                )
+
+        expected_variants = {
+            (case.case_id, script_ref)
+            for case in artifacts.cases
+            for script_ref in tuple(case.input["model_script_refs"])
+        }
+        assert len(persisted_results) == 16
+        assert len(evaluated_variants) == len(set(evaluated_variants)) == 16
+        assert set(evaluated_variants) == expected_variants
+        result_projection = "".join(
+            result.model_dump_json() for result in persisted_results
         )
-        assert persisted == outcome.results
-        assert persisted_failures == ()
-        assert all(
-            result.version_manifest.candidate_version
-            == EXACT_SOURCE_VERSION
-            and result.version_manifest.runtime_version
-            == EXACT_SOURCE_VERSION
-            for result in persisted
-        )
+        assert "customer-A" not in result_projection
+        assert "customer-B" not in result_projection
+        assert RAW_ALICE_SESSION not in result_projection
         for direct_result in (success, foreign, nonexistent):
             assert direct_result.evidence.trace_ref is not None
             trace = await composition.reload_trace(
