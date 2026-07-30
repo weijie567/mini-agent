@@ -16,7 +16,7 @@ from mini_agent.application.records import ConditionalWriteResult
 from mini_agent.core.presentation import PresentationPlan
 from mini_agent.core.request_understanding import (
     NextMove,
-    RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 import mini_agent.evaluation.graders as graders_module
 import mini_agent.evaluation.harness as harness_module
@@ -545,12 +545,27 @@ def test_frozen_dtos_reject_noncanonical_stale_and_fact_bearing_returns() -> Non
 
     with pytest.raises(
         ValidationError,
-        match="new-goal thin-slice candidate must use a null base Task version",
+        match="new-goal v2 candidate must use a null base Task version",
     ):
-        RequestUnderstandingOutput.model_validate(
+        RequestUnderstandingOutputV2.model_validate(
             {
-                "schema_version": "e2e01-thin-v1",
+                "schema_version": "e2e01-thin-v2",
                 "message_ref": message_ref,
+                "contextualization": {
+                    "text": "查询订单 O-1001",
+                    "resolved_reference_candidates": [
+                        {
+                            "name": "order_id",
+                            "candidate_value": "O-1001",
+                            "source_kind": "CURRENT_MESSAGE",
+                            "source_ref": message_ref,
+                            "source_quote": "O-1001",
+                            "confidence": 1.0,
+                        }
+                    ],
+                    "uncertainties": [],
+                    "source_message_refs": [message_ref],
+                },
                 "task_delta_candidates": [
                     {
                         "candidate_id": ("00000000-0000-4000-8000-000000000102"),
