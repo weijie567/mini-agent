@@ -57,7 +57,6 @@ from mini_agent.core.order import (
 from mini_agent.core.request_understanding import InputAuthority, TaskDeltaOperation
 from mini_agent.core.task_state import (
     CandidateValidationDecision,
-    CandidateValidationRecord,
     InputBinding,
     InputValidationStatus,
     RequestUnitRecord,
@@ -2080,10 +2079,19 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
     test_tree = ast.parse(Path(__file__).read_text())
     removed_v1_types = {
         "AcceptedTaskDelta",
+        "CandidateValidationRecord",
         "RequestUnderstandingRecord",
     }
 
     for tree in (source_tree, test_tree):
+        assert not any(
+            isinstance(node, ast.Import)
+            and any(
+                alias.name == "mini_agent.core.task_state"
+                for alias in node.names
+            )
+            for node in ast.walk(tree)
+        )
         imported_v1_types = {
             alias.name
             for node in ast.walk(tree)
@@ -2093,6 +2101,56 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
             if alias.name in removed_v1_types
         }
         assert not imported_v1_types
+        assert not {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id in removed_v1_types
+        }
+        assert not {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr in removed_v1_types
+        }
+        assert not {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id
+            in {
+                "__import__",
+                "globals",
+                "locals",
+                "vars",
+            }
+        }
+        assert not {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr
+            in {
+                "import_module",
+            }
+        }
+        assert not any(
+            (
+                isinstance(node, ast.Import)
+                and any(
+                    alias.name.split(".", maxsplit=1)[0]
+                    in {"builtins", "importlib", "sys"}
+                    for alias in node.names
+                )
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and node.module is not None
+                and node.module.split(".", maxsplit=1)[0]
+                in {"builtins", "importlib", "sys"}
+            )
+            for node in ast.walk(tree)
+        )
 
     assert not {
         node.id
