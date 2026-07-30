@@ -19,10 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PostgreSQLUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from mini_agent.application.persistence import (
-    P0_RECORD_SCHEMA_VERSION_CATALOG,
-    P0RecordCode,
-)
+from mini_agent.application.persistence import P0RecordCode
 
 
 def _sql_values(values: tuple[str, ...]) -> str:
@@ -30,12 +27,39 @@ def _sql_values(values: tuple[str, ...]) -> str:
 
 
 _RECORD_CODES = tuple(code.value for code in P0RecordCode)
-_CODE_VERSION_PAIRS = tuple(
-    sorted(
-        (code.value, schema_version)
-        for code, schema_version in P0_RECORD_SCHEMA_VERSION_CATALOG
-    )
+_PHYSICAL_CODE_VERSION_PAIRS = (
+    ("agent_run_record", "agent_run_record.p0.v1"),
+    ("context_manifest_record", "context_manifest_record.p0.v1"),
+    ("conversation_record", "conversation_record.p0.v1"),
+    ("conversation_task_link_record", "conversation_task_link_record.p0.v1"),
+    (
+        "eval_execution_failure_record",
+        "eval_execution_failure_record.p0.v1",
+    ),
+    ("eval_result_record", "eval_result_record.p0.v1"),
+    ("gate_decision_record", "gate_decision_record.p0.v1"),
+    ("input_binding_record", "input_binding_record.p0.v1"),
+    ("message_record", "message_record.p0.v1"),
+    (
+        "model_visible_toolset_artifact",
+        "model_visible_toolset_artifact.p0.v1",
+    ),
+    ("observation_record", "observation_record.p0.v1"),
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v1",
+    ),
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v2",
+    ),
+    ("request_unit_record", "request_unit_record.p0.v1"),
+    ("run_task_link_record", "run_task_link_record.p0.v1"),
+    ("task_record", "task_record.p0.v1"),
+    ("tool_call_record", "tool_call_record.p0.v1"),
+    ("trace_event_record", "trace_event_record.p0.v1"),
 )
+_CODE_VERSION_PAIRS = tuple(sorted(_PHYSICAL_CODE_VERSION_PAIRS))
 _CODE_VERSION_CHECK = " OR ".join(
     f"(record_code = '{code}' AND record_schema_version = '{version}')"
     for code, version in _CODE_VERSION_PAIRS
