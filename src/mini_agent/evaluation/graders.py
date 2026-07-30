@@ -793,7 +793,7 @@ class RequestUnderstandingGrader:
             or understanding.validated_task_state_version
             != expectations.expected_validated_task_state_version
             or understanding.next_move_candidate_ref is None
-            or binding_values != {expectations.expected_next_move_order_id}
+            or binding_values != {expectations.expected_binding_order_id}
             or (
                 expectations.expected_requested_tool_name is not None
                 and gate_names != {expectations.expected_requested_tool_name}

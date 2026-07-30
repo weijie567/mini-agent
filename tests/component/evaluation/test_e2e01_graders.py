@@ -1716,6 +1716,26 @@ def test_trace_precedence_canonical_passes_for_every_authenticated_script_ref(
     assert outcome.status is EvalResultStatus.PASS
 
 
+def test_request_understanding_keeps_accepted_binding_under_argument_drift() -> None:
+    variant = next(
+        item
+        for item in _TRACE_VARIANTS
+        if item.variant_id == "ARGUMENT_BINDING_REJECTED"
+    )
+    expectations = _variant_expectations(variant).model_copy(
+        update={"expected_next_move_order_id": "O-2001"}
+    )
+
+    outcome = grade_evidence(
+        ("RequestUnderstandingGrader",),
+        _variant_evidence(variant),
+        expectations,
+    )
+
+    assert outcome.status is EvalResultStatus.PASS
+    assert outcome.critical_failures == ()
+
+
 @pytest.mark.parametrize(
     ("variant", "before", "after"),
     _TRACE_VARIANT_EDGE_CASES,
