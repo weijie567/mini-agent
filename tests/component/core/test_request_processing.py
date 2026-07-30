@@ -1,7 +1,9 @@
+import ast
 import gc
 import pickle
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 import warnings
 from uuid import UUID, uuid4
 
@@ -9,6 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 import mini_agent.core.request_processing as request_processing_module
+import mini_agent.core.request_understanding as request_understanding_module
+import mini_agent.core.task_state as task_state_module
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
     InitialAcceptedTaskGraphV2,
@@ -2941,3 +2945,170 @@ def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() ->
             closure=forked_closure,
             task_graphs=(first_graph, forked_graph),
         )
+
+
+_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = frozenset(
+    {
+        "RequestUnderstandingOutput",
+        "AcceptedTaskDelta",
+        "CandidateValidationRecord",
+        "RequestUnderstandingRecord",
+        "InitialRequestDecision",
+        "validate_and_reduce_initial_request",
+        "revalidate_next_move",
+    }
+)
+
+
+def _folded_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _folded_static_string(node.left)
+        right = _folded_static_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if not isinstance(value, ast.Constant) or not isinstance(
+                value.value,
+                str,
+            ):
+                return None
+            parts.append(value.value)
+        return "".join(parts)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        separator = _folded_static_string(node.func.value)
+        values_node = node.args[0]
+        if separator is None or not isinstance(
+            values_node,
+            (ast.List, ast.Tuple),
+        ):
+            return None
+        values = [_folded_static_string(item) for item in values_node.elts]
+        if all(value is not None for value in values):
+            return separator.join(value for value in values if value is not None)
+    if isinstance(node, ast.Subscript):
+        value = _folded_static_string(node.value)
+        if value is None:
+            return None
+        if isinstance(node.slice, ast.Constant) and isinstance(
+            node.slice.value,
+            int,
+        ):
+            return value[node.slice.value]
+        if isinstance(node.slice, ast.Slice):
+            bounds: list[int | None] = []
+            for bound in (
+                node.slice.lower,
+                node.slice.upper,
+                node.slice.step,
+            ):
+                if bound is None:
+                    bounds.append(None)
+                elif isinstance(bound, ast.Constant) and isinstance(
+                    bound.value,
+                    int,
+                ):
+                    bounds.append(bound.value)
+                else:
+                    return None
+            return value[slice(*bounds)]
+    return None
+
+
+def _legacy_core_hits(path: Path) -> tuple[str, ...]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    ignored_literal_nodes: set[int] = set()
+    if path == Path(__file__):
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id
+                == "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS"
+            ):
+                ignored_literal_nodes.update(
+                    id(descendant) for descendant in ast.walk(node.value)
+                )
+
+    hits: list[str] = []
+    relevant_modules = {
+        "mini_agent.core.request_processing",
+        "mini_agent.core.request_understanding",
+        "mini_agent.core.task_state",
+    }
+    for node in ast.walk(tree):
+        folded = _folded_static_string(node)
+        if (
+            id(node) not in ignored_literal_nodes
+            and folded in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS
+        ):
+            hits.append(f"{node.lineno}:folded:{folded}")
+        if isinstance(node, ast.ImportFrom):
+            if node.module in relevant_modules and any(
+                alias.name == "*" for alias in node.names
+            ):
+                hits.append(f"{node.lineno}:star-import:{node.module}")
+            for alias in node.names:
+                if alias.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                    hits.append(f"{node.lineno}:import:{alias.name}")
+        elif isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            if node.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:definition:{node.name}")
+        elif isinstance(node, ast.Name):
+            if node.id in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:name:{node.id}")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:attribute:{node.attr}")
+    return tuple(sorted(set(hits)))
+
+
+def test_request_understanding_core_has_no_legacy_v1_executable_surface() -> None:
+    core_test_dir = Path(__file__).parent
+    owned_paths = (
+        Path(request_understanding_module.__file__),
+        Path(task_state_module.__file__),
+        Path(request_processing_module.__file__),
+        core_test_dir / "test_control_gateway.py",
+        core_test_dir / "test_identity_contract.py",
+        core_test_dir / "test_request_understanding_contract.py",
+        core_test_dir / "test_task_state_contract.py",
+        Path(__file__),
+    )
+    hits = {
+        str(path): path_hits
+        for path in owned_paths
+        if (path_hits := _legacy_core_hits(path))
+    }
+
+    assert not hits
+    for module in (
+        request_understanding_module,
+        task_state_module,
+        request_processing_module,
+    ):
+        for legacy_name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+            assert legacy_name not in vars(module)
+
+    assert "RequestUnderstandingInput" in vars(request_understanding_module)
+    assert "RequestUnderstandingOutputV2" in vars(request_understanding_module)
+    assert "AcceptedTaskDeltaV2" in vars(task_state_module)
+    assert "CandidateValidationRecordV2" in vars(task_state_module)
+    assert "RequestUnderstandingRecordV2" in vars(task_state_module)
+    assert "validate_and_reduce_initial_request_v2" in vars(
+        request_processing_module
+    )
+    assert "revalidate_next_move_v2" in vars(request_processing_module)
