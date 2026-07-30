@@ -1,10 +1,10 @@
 # 第一最薄 E2E-01｜Implementation Spec
 
-更新日期：2026-07-28
+更新日期：2026-07-30
 状态：`ACTIVE / CONTRACT_DEFINED`  
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
-> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划和 `AGENTS.md`。在可复现 Harness 建立前，相关 Case 仍为 `CONTRACT_DEFINED`。
+> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划和 `AGENTS.md`。仓库当前已有可复现的 offline Composition、real `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、Harness 与直接 HTTP → Runtime → PostgreSQL 纵向 evidence，但第 16 节 Definition of Done、post-execution quality gate 与 Coverage Matrix lifecycle 裁决尚未全部完成；authenticated artifacts、manifest 与 loader 继续保持 `CONTRACT_DEFINED`，通过 Harness 时在派发 SUT 前 fail closed。因此本文件状态仍为 `ACTIVE / CONTRACT_DEFINED`，不得把实现存在或 direct evidence 记为 Case `PASS`。
 
 ## 1. 权威边界
 
