@@ -1,8 +1,11 @@
+import ast
 import inspect
 from pathlib import Path
 from typing import get_type_hints
 from uuid import UUID
 
+import mini_agent.application.ports as application_ports_module
+import mini_agent.application.records as application_records_module
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
@@ -59,6 +62,138 @@ class CandidateOnlyProvider:
 
     async def plan_presentation(self, request: object) -> object:
         raise NotImplementedError
+
+
+def _folded_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _folded_static_string(node.left)
+        right = _folded_static_string(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.JoinedStr):
+        parts = tuple(_folded_static_string(value) for value in node.values)
+        return "".join(parts) if all(part is not None for part in parts) else None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        separator = _folded_static_string(node.func.value)
+        values = node.args[0]
+        if separator is not None and isinstance(values, (ast.List, ast.Tuple)):
+            parts = tuple(_folded_static_string(value) for value in values.elts)
+            return (
+                separator.join(parts)
+                if all(part is not None for part in parts)
+                else None
+            )
+    return None
+
+
+def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
+    legacy_identifiers = frozenset(
+        {
+            "AcceptedTaskDelta",
+            "CandidateValidationRecord",
+            "CreateInitialTaskGraphCommand",
+            "ModelProvider",
+            "RequestUnderstandingOutput",
+            "RequestUnderstandingRecord",
+            "SaveRequestUnderstandingCommand",
+            "create_initial_task_graph_if_current",
+            "load_accepted_task_delta_for_owner",
+            "load_request_understanding_for_owner",
+        }
+    )
+    targeted_modules = frozenset(
+        {
+            "mini_agent.application.ports",
+            "mini_agent.application.records",
+            "mini_agent.core.request_understanding",
+            "mini_agent.core.task_state",
+        }
+    )
+    repo_root = Path(__file__).parents[3]
+    owned_paths = (
+        repo_root / "src/mini_agent/application/records.py",
+        repo_root / "src/mini_agent/application/ports.py",
+        repo_root / "tests/component/application/test_record_contracts.py",
+        repo_root / "tests/component/application/test_ports_contract.py",
+    )
+    executable_hits: set[tuple[str, int, str]] = set()
+
+    for owned_path in owned_paths:
+        tree = ast.parse(owned_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module in targeted_modules and any(
+                    alias.name == "*" for alias in node.names
+                ):
+                    executable_hits.add(
+                        (owned_path.name, node.lineno, "target-module-star-import")
+                    )
+                for alias in node.names:
+                    if alias.name in legacy_identifiers:
+                        executable_hits.add(
+                            (owned_path.name, node.lineno, alias.name)
+                        )
+            if isinstance(
+                node,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ) and node.name in legacy_identifiers:
+                executable_hits.add((owned_path.name, node.lineno, node.name))
+            if isinstance(node, ast.Name) and node.id in legacy_identifiers:
+                executable_hits.add((owned_path.name, node.lineno, node.id))
+            if isinstance(node, ast.Attribute) and node.attr in legacy_identifiers:
+                executable_hits.add((owned_path.name, node.lineno, node.attr))
+            if isinstance(node, ast.Call):
+                call_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else (
+                        node.func.attr
+                        if isinstance(node.func, ast.Attribute)
+                        else None
+                    )
+                )
+                if call_name in {"getattr", "hasattr", "setattr"} and len(
+                    node.args
+                ) >= 2:
+                    folded_name = _folded_static_string(node.args[1])
+                    if folded_name in legacy_identifiers:
+                        executable_hits.add(
+                            (owned_path.name, node.lineno, folded_name)
+                        )
+                if call_name in {"__import__", "getmodule", "import_module"}:
+                    executable_hits.add(
+                        (owned_path.name, node.lineno, call_name)
+                    )
+            if isinstance(node, ast.Subscript):
+                folded_key = _folded_static_string(node.slice)
+                if folded_key in legacy_identifiers:
+                    executable_hits.add(
+                        (owned_path.name, node.lineno, folded_key)
+                    )
+
+    assert not executable_hits
+    assert not legacy_identifiers.intersection(vars(application_records_module))
+    assert not legacy_identifiers.intersection(vars(application_ports_module))
+    legacy_port_members = frozenset(
+        name for name in legacy_identifiers if name[:1].islower()
+    )
+    assert not legacy_port_members.intersection(vars(RuntimeRecordPort))
+    assert application_ports_module.ModelProviderV2 is ModelProviderV2
+    assert (
+        application_records_module.SaveRequestUnderstandingV2NoTaskCommand
+        is SaveRequestUnderstandingV2NoTaskCommand
+    )
+    assert (
+        application_records_module.CreateInitialTaskGraphV2Command
+        is CreateInitialTaskGraphV2Command
+    )
 
 
 def _assert_signature(
