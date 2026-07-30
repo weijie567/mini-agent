@@ -3043,38 +3043,110 @@ def _legacy_core_source_hits(
             return value
         if not isinstance(value, ast.Name) or value.id in seen:
             return None
-        candidates = [
-            (binding_node, binding_value)
-            for binding_node, binding_value in assignments_by_name.get(
-                value.id,
-                (),
-            )
-            if (
-                lexical_scope(binding_node) is lexical_scope(before)
-                and (
-                    getattr(binding_node, "lineno", -1),
-                    getattr(binding_node, "col_offset", -1),
+
+        scopes = [lexical_scope(before)]
+        current = scopes[0]
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                if not (
+                    isinstance(
+                        current,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    )
+                    and isinstance(parent, ast.ClassDef)
+                ):
+                    scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+
+        for scope in scopes:
+            candidates = [
+                (binding_node, binding_value)
+                for binding_node, binding_value in assignments_by_name.get(
+                    value.id,
+                    (),
                 )
-                < (
-                    getattr(before, "lineno", -1),
-                    getattr(before, "col_offset", -1),
+                if (
+                    lexical_scope(binding_node) is scope
+                    and (
+                        getattr(binding_node, "lineno", -1),
+                        getattr(binding_node, "col_offset", -1),
+                    )
+                    < (
+                        getattr(before, "lineno", -1),
+                        getattr(before, "col_offset", -1),
+                    )
                 )
-            )
-        ]
-        if not candidates:
-            return None
-        binding_node, binding_value = max(
-            candidates,
-            key=lambda item: (
-                getattr(item[0], "lineno", -1),
-                getattr(item[0], "col_offset", -1),
-            ),
-        )
-        return static_sequence_value(
-            binding_value,
-            before=binding_node,
-            seen=seen | {value.id},
-        )
+            ]
+            if candidates:
+                binding_node, binding_value = max(
+                    candidates,
+                    key=lambda item: (
+                        getattr(item[0], "lineno", -1),
+                        getattr(item[0], "col_offset", -1),
+                    ),
+                )
+                return static_sequence_value(
+                    binding_value,
+                    before=binding_node,
+                    seen=seen | {value.id},
+                )
+            if isinstance(
+                scope,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ) and value.id in parameter_names(scope):
+                positional = (*scope.args.posonlyargs, *scope.args.args)
+                defaults_by_name = (
+                    {
+                        argument.arg: default
+                        for argument, default in zip(
+                            positional[-len(scope.args.defaults) :],
+                            scope.args.defaults,
+                            strict=True,
+                        )
+                    }
+                    if scope.args.defaults
+                    else {}
+                )
+                defaults_by_name.update(
+                    {
+                        argument.arg: default
+                        for argument, default in zip(
+                            scope.args.kwonlyargs,
+                            scope.args.kw_defaults,
+                            strict=True,
+                        )
+                        if default is not None
+                    }
+                )
+                default = defaults_by_name.get(value.id)
+                if default is None:
+                    return None
+                return static_sequence_value(
+                    default,
+                    before=scope,
+                    seen=seen | {value.id},
+                )
+            if not isinstance(scope, ast.ClassDef):
+                local_bindings = assignments_by_name.get(value.id, ())
+                if any(
+                    lexical_scope(binding_node) is scope
+                    for binding_node, _binding_value in local_bindings
+                ):
+                    return None
+        return None
 
     def record_unpacked_bindings(
         target: ast.AST,
@@ -3226,6 +3298,16 @@ def _legacy_core_source_hits(
             return bool(node.elts)
         if isinstance(node, ast.Dict):
             return bool(node.keys)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            operand_truthiness = static_truthiness(
+                node.operand,
+                seen=seen,
+            )
+            return (
+                None
+                if operand_truthiness is None
+                else not operand_truthiness
+            )
         if isinstance(node, ast.Name) and node.id not in seen:
             scopes = [lexical_scope(node)]
             current = scopes[0]
@@ -4616,6 +4698,19 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "getattr(core_module, input())\n"
         ),
         (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer(values=(target_module,)):\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
             module_import
             + "flag = False\n"
             "class Consumer:\n"
@@ -5004,6 +5099,25 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    if flag:\n"
             "        reflect = lambda value, name: None\n"
             "    result = reflect(core_module, input())"
+        ),
+        (
+            module_import
+            + "flag = not False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            "values = (object(),)\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())"
+        ),
+        (
+            "def consumer(values=(object(),)):\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())"
         ),
         (
             "import mini_agent.core.request_processing as target_module\n"
