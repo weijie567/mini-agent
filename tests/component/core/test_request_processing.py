@@ -3058,7 +3058,7 @@ def _legacy_core_source_hits(
                 return True
         return False
 
-    def binding_is_literal_unreachable(
+    def binding_is_raw_literal_unreachable(
         node: ast.AST,
         scope: ast.AST,
     ) -> bool:
@@ -3069,6 +3069,102 @@ def _legacy_core_source_hits(
                 return False
             if isinstance(parent, ast.If):
                 truthiness = literal_truthiness(parent.test)
+                if truthiness is not None:
+                    in_body = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.body
+                    )
+                    in_orelse = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.orelse
+                    )
+                    if (
+                        in_body
+                        and not truthiness
+                        or in_orelse
+                        and truthiness
+                    ):
+                        return True
+            current = parent
+        return False
+
+    def early_static_truthiness(
+        node: ast.AST,
+        *,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool | None:
+        direct_truthiness = literal_truthiness(node)
+        if direct_truthiness is not None:
+            return direct_truthiness
+        if not isinstance(node, ast.Name) or node.id in seen:
+            return None
+        scopes = [lexical_scope(node)]
+        current = scopes[0]
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+        for scope in scopes:
+            candidates = [
+                (binding_node, value)
+                for binding_node, value in assignments_by_name.get(
+                    node.id,
+                    (),
+                )
+                if (
+                    lexical_scope(binding_node) is scope
+                    and not binding_is_raw_literal_unreachable(
+                        binding_node,
+                        scope,
+                    )
+                    and (
+                        getattr(binding_node, "lineno", -1),
+                        getattr(binding_node, "col_offset", -1),
+                    )
+                    < (
+                        getattr(node, "lineno", -1),
+                        getattr(node, "col_offset", -1),
+                    )
+                )
+            ]
+            if candidates:
+                _binding_node, value = max(
+                    candidates,
+                    key=lambda item: (
+                        getattr(item[0], "lineno", -1),
+                        getattr(item[0], "col_offset", -1),
+                    ),
+                )
+                return early_static_truthiness(
+                    value,
+                    seen=seen | {node.id},
+                )
+        return None
+
+    def binding_is_literal_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if isinstance(parent, ast.If):
+                truthiness = early_static_truthiness(parent.test)
                 if truthiness is not None:
                     in_body = any(
                         child is current or parent_contains(child, current)
@@ -3160,17 +3256,56 @@ def _legacy_core_source_hits(
                 )
             ]
             if candidates:
-                binding_node, binding_value = max(
+                final_binding = max(
                     candidates,
                     key=lambda item: (
                         getattr(item[0], "lineno", -1),
                         getattr(item[0], "col_offset", -1),
                     ),
                 )
-                return static_sequence_value(
-                    binding_value,
-                    before=binding_node,
-                    seen=seen | {value.id},
+                active_bindings: list[tuple[ast.AST, ast.AST]] = []
+                if deferred_lookup and index > 0:
+                    for call in deferred_scope_calls(before):
+                        call_candidates = [
+                            item
+                            for item in candidates
+                            if position(item[0]) < position(call)
+                        ]
+                        if call_candidates:
+                            active_bindings.append(
+                                max(
+                                    call_candidates,
+                                    key=lambda item: position(item[0]),
+                                )
+                            )
+                resolved_bindings: list[
+                    tuple[ast.List | ast.Tuple, ast.AST]
+                ] = []
+                for binding_node, binding_value in (
+                    *active_bindings,
+                    final_binding,
+                ):
+                    resolved = static_sequence_value(
+                        binding_value,
+                        before=binding_node,
+                        seen=seen | {value.id},
+                    )
+                    if resolved is not None:
+                        resolved_bindings.append((resolved, binding_node))
+                for resolved, binding_node in resolved_bindings:
+                    if any(
+                        isinstance(element, ast.Name)
+                        and name_refers_to_module(
+                            element.id,
+                            before=binding_node,
+                        )
+                        for element in ast.walk(resolved)
+                    ):
+                        return resolved
+                return (
+                    resolved_bindings[-1][0]
+                    if resolved_bindings
+                    else None
                 )
             if isinstance(
                 scope,
@@ -3295,23 +3430,6 @@ def _legacy_core_source_hits(
                 child_value,
                 binding_node=binding_node,
             )
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        resolved_value = static_sequence_value(
-            node.value,
-            before=node,
-        )
-        if resolved_value is None:
-            continue
-        for target in node.targets:
-            if isinstance(target, (ast.List, ast.Tuple)):
-                record_unpacked_bindings(
-                    target,
-                    resolved_value,
-                    binding_node=node,
-                )
 
     calls_by_name: dict[str, list[ast.Call]] = {}
     direct_lambda_calls: dict[ast.Lambda, list[ast.Call]] = {}
@@ -4361,6 +4479,23 @@ def _legacy_core_source_hits(
             and name_refers_to_namespace(node.id, before=node)
         )
 
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        resolved_value = static_sequence_value(
+            node.value,
+            before=node,
+        )
+        if resolved_value is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, (ast.List, ast.Tuple)):
+                record_unpacked_bindings(
+                    target,
+                    resolved_value,
+                    binding_node=node,
+                )
+
     hits: list[str] = []
     dynamic_export_names = {"__getattr__", "__getattribute__"}
     for node in ast.walk(tree):
@@ -4786,9 +4921,38 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "getattr(core_module, input())\n"
         ),
         (
+            "import mini_agent.core.request_processing as target_module\n"
+            "dead = False\n"
+            "values = (target_module,)\n"
+            "if dead:\n"
+            "    values = (object(),)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (target_module,)\n"
+            "consumer()\n"
+            "values = (object(),)\n"
+        ),
+        (
             module_import
             + "flag = False\n"
             "if False:\n"
+            "    flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "dead = False\n"
+            "flag = False\n"
+            "if dead:\n"
             "    flag = True\n"
             "class Consumer:\n"
             "    if flag:\n"
@@ -5219,9 +5383,38 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "getattr(core_module, input())"
         ),
         (
+            "import mini_agent.core.request_processing as target_module\n"
+            "dead = False\n"
+            "values = (object(),)\n"
+            "if dead:\n"
+            "    values = (target_module,)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (target_module,)\n"
+            "values = (object(),)\n"
+            "consumer()"
+        ),
+        (
             module_import
             + "flag = True\n"
             "if False:\n"
+            "    flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "dead = False\n"
+            "flag = True\n"
+            "if dead:\n"
             "    flag = False\n"
             "class Consumer:\n"
             "    if flag:\n"
