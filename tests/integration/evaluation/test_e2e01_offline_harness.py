@@ -2713,12 +2713,16 @@ def _run(
     )
 
 
-def test_contract_defined_cases_fail_before_any_execution_stage(
+def test_derived_contract_defined_cases_fail_before_any_execution_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selected_ids = ("E2E01-01", "E2E01-04-A", "E2E01-04-B")
+    blocked_artifacts = _test_only_derived_lifecycle_bundle(
+        ARTIFACTS,
+        default_status="CONTRACT_DEFINED",
+    )
     assert all(
-        ARTIFACTS.case_by_id(case_id).lifecycle_status
+        blocked_artifacts.case_by_id(case_id).lifecycle_status
         == "CONTRACT_DEFINED"
         for case_id in selected_ids
     )
@@ -2756,7 +2760,7 @@ def test_contract_defined_cases_fail_before_any_execution_stage(
         ForbiddenScriptedProvider,
     )
     harness, _sut, _traces, _port = _harness(
-        artifacts=ARTIFACTS,
+        artifacts=blocked_artifacts,
         sut=sut,
         traces=traces,
         port=port,
@@ -7462,9 +7466,13 @@ def test_qwen_runner_missing_env_persists_three_not_run_without_network() -> Non
         assert result.usage_summary is None
 
 
-def test_contract_defined_qwen_with_credentials_fails_before_provider_transport(
+def test_derived_contract_defined_qwen_fails_before_provider_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    blocked_artifacts = _test_only_derived_lifecycle_bundle(
+        ARTIFACTS,
+        default_status="CONTRACT_DEFINED",
+    )
     traces = InMemoryTraceCallbacks()
     port = InMemoryResultPort()
     qwen_sut_calls = 0
@@ -7513,7 +7521,7 @@ def test_contract_defined_qwen_with_credentials_fails_before_provider_transport(
         ForbiddenQwenAdapter,
     )
     harness, _sut, _traces, _port = _harness(
-        artifacts=ARTIFACTS,
+        artifacts=blocked_artifacts,
         qwen_sut=ForbiddenQwenSut(),
         traces=traces,
         port=port,

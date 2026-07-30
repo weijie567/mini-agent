@@ -20,7 +20,7 @@ from mini_agent.core.common import AuditOnlyModel
 
 MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-thin-slice.v1.json"
 EXPECTED_MANIFEST_SHA256 = (
-    "ffd9d3f130813e3acec347c4ab23fc4372a0969288c35120e72aa8650fa7b8bd"
+    "29eb501028b9971dc052c44f3bd7226d9f5200597cba327662150079fe5ec800"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -348,7 +348,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         or manifest.get("created_from_base_sha")
         != "6c6d041cf20db6ff268c8bca129cc19b521cb568"
         or manifest.get("hash_algorithm") != "SHA-256"
-        or manifest.get("case_lifecycle_status") != "CONTRACT_DEFINED"
+        or manifest.get("case_lifecycle_status") != "EXECUTABLE"
         or manifest.get("eval_result_artifacts_created") is not False
         or manifest.get("baseline_result_artifacts_created") is not False
     ):
@@ -489,8 +489,8 @@ def _validate_cases(
             _CASE_KEYS,
             optional=frozenset({"observable_equivalence"}),
         )
-        if case.get("lifecycle_status") != "CONTRACT_DEFINED":
-            raise ArtifactContractError("case lifecycle is not CONTRACT_DEFINED")
+        if case.get("lifecycle_status") != "EXECUTABLE":
+            raise ArtifactContractError("case lifecycle is not EXECUTABLE")
         input_projection = _expect_mapping(case.get("input"))
         grading = _expect_mapping(case.get("grading"))
         _expect_nonempty_strings(grading.get("graders"))

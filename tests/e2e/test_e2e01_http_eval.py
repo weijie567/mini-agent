@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -11,8 +12,7 @@ from sqlalchemy import func, select
 import mini_agent.bootstrap as bootstrap_module
 from mini_agent.application.persistence import P0RecordCode
 from mini_agent.application.records import (
-    EvalExecutionFailurePhase,
-    EvalExecutionSafeErrorCode,
+    EvalResultStatus,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
@@ -34,8 +34,43 @@ from mini_agent.bootstrap import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _exact_source_version() -> str:
+    completed = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    assert len(revision) == 40
+    assert all(character in "0123456789abcdef" for character in revision)
+    return f"git:{revision}"
+
+
+EXACT_SOURCE_VERSION = _exact_source_version()
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
-TARGET_CASE_IDS = ("E2E01-01", "E2E01-04-A", "E2E01-04-B")
+TARGET_CASE_IDS = (
+    "E2E01-01",
+    "E2E01-04-A",
+    "E2E01-04-B",
+    "E2E01-01+SEC-ARGUMENT-BINDING",
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL",
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL",
+)
+SCRIPT_REF_BY_CASE = {
+    "E2E01-01+SEC-ARGUMENT-BINDING": (
+        "script:sec-argument-binding:foreign-order"
+    ),
+    "E2E01-01+FAULT-PROVIDER-PROTOCOL": (
+        "script:fault-provider:zero-target-functions"
+    ),
+    "E2E01-01+FAULT-PRESENTATION-PROTOCOL": (
+        "script:fault-presentation:zero-target-functions"
+    ),
+}
 RAW_ALICE_SESSION = "p0-session-alice"
 
 pytestmark = pytest.mark.anyio
@@ -59,12 +94,8 @@ class _MonotonicClock:
 def _artifacts():
     return load_e2e01_artifacts(
         REPO_ROOT,
-        candidate_version=(
-            "git:5c84e0e170e42853af85526805d904bf12671eaa"
-        ),
-        runtime_version=(
-            "git:5c84e0e170e42853af85526805d904bf12671eaa"
-        ),
+        candidate_version=EXACT_SOURCE_VERSION,
+        runtime_version=EXACT_SOURCE_VERSION,
     )
 
 
@@ -111,7 +142,7 @@ def _assert_bounded_composition_error(error: OfflineCompositionError) -> None:
     assert error.__context__ is None
 
 
-async def test_real_http_runtime_postgres_and_contract_defined_eval_fail_closed(
+async def test_real_http_runtime_postgres_produces_lifecycle_valid_results(
     eval_postgres_namespace,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
@@ -182,20 +213,17 @@ async def test_real_http_runtime_postgres_and_contract_defined_eval_fail_closed(
         ).run_lane(
             eval_run_id=eval_run_id,
             case_ids=TARGET_CASE_IDS,
+            script_ref_by_case=SCRIPT_REF_BY_CASE,
         )
 
-        assert outcome.command_passed is False
-        assert outcome.results == ()
-        assert tuple(
-            failure.case_id for failure in outcome.execution_failures
-        ) == TARGET_CASE_IDS
+        assert outcome.command_passed is True
+        assert outcome.execution_failures == ()
+        assert tuple(result.case_id for result in outcome.results) == (
+            TARGET_CASE_IDS
+        )
         assert all(
-            failure.failure_phase
-            is EvalExecutionFailurePhase.CASE_SETUP
-            and failure.safe_error_code
-            is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
-            and failure.trace_ref is None
-            for failure in outcome.execution_failures
+            result.status is EvalResultStatus.PASS
+            for result in outcome.results
         )
         persisted = await records.list_eval_results(eval_run_id=eval_run_id)
         persisted_failures = (
@@ -203,12 +231,14 @@ async def test_real_http_runtime_postgres_and_contract_defined_eval_fail_closed(
                 eval_run_id=eval_run_id,
             )
         )
-        assert persisted == ()
-        assert persisted_failures == outcome.execution_failures
+        assert persisted == outcome.results
+        assert persisted_failures == ()
         assert all(
-            failure.version_manifest.candidate_version
-            == "git:5c84e0e170e42853af85526805d904bf12671eaa"
-            for failure in persisted_failures
+            result.version_manifest.candidate_version
+            == EXACT_SOURCE_VERSION
+            and result.version_manifest.runtime_version
+            == EXACT_SOURCE_VERSION
+            for result in persisted
         )
         for direct_result in (success, foreign, nonexistent):
             assert direct_result.evidence.trace_ref is not None

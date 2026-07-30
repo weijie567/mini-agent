@@ -26,10 +26,10 @@ REFERENCED = (
 )
 EXPECTED_HASHES = {
     REFERENCED[0]: "3940f5755ab001339d254077b36b3ae2965e590adee43ea0fb4e1d7cd2648c33",
-    REFERENCED[1]: "58622417bf2221ded9951a8f41c29bdfd2d5fbe71109ade64c1b52f27ede4440",
+    REFERENCED[1]: "7cfe4942299382e54c2ff96848a68a6d8dfe1097c98d098cf84426a2162b91cc",
     REFERENCED[2]: "2b42415c1c705b30b34f7a80d810726d59f7891da52daa390208d62fa1aa7176",
     REFERENCED[3]: "61e43e8a560c3b31d1444759360941bb038d41a94ee1326be7c8cce52808158d",
-    MANIFEST: "ffd9d3f130813e3acec347c4ab23fc4372a0969288c35120e72aa8650fa7b8bd",
+    MANIFEST: "29eb501028b9971dc052c44f3bd7226d9f5200597cba327662150079fe5ec800",
 }
 
 
@@ -71,7 +71,7 @@ def test_loads_exact_five_artifacts_and_binds_caller_versions() -> None:
 
     assert bundle.candidate_version == "candidate:c35687d"
     assert bundle.runtime_version == "runtime:01-08"
-    assert bundle.manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
+    assert bundle.manifest["case_lifecycle_status"] == "EXECUTABLE"
     assert bundle.manifest["eval_result_artifacts_created"] is False
     assert bundle.manifest["baseline_result_artifacts_created"] is False
     assert {case.case_id for case in bundle.cases} == {
