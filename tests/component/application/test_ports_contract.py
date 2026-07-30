@@ -89,11 +89,18 @@ _STATIC_VALUE_MISSING = object()
 def _static_value(node: ast.AST) -> object:
     if isinstance(node, ast.Constant):
         return node.value
-    if isinstance(node, (ast.List, ast.Tuple)):
+    if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
         values = tuple(_static_value(value) for value in node.elts)
         if any(value is _STATIC_VALUE_MISSING for value in values):
             return _STATIC_VALUE_MISSING
-        return list(values) if isinstance(node, ast.List) else values
+        if isinstance(node, ast.List):
+            return list(values)
+        if isinstance(node, ast.Set):
+            try:
+                return set(values)
+            except TypeError:
+                return _STATIC_VALUE_MISSING
+        return values
     if isinstance(node, ast.Dict):
         keys = tuple(_static_value(key) for key in node.keys if key is not None)
         values = tuple(_static_value(value) for value in node.values)
@@ -106,6 +113,19 @@ def _static_value(node: ast.AST) -> object:
             return dict(zip(keys, values, strict=True))
         except (TypeError, ValueError):
             return _STATIC_VALUE_MISSING
+    if (
+        isinstance(node, ast.GeneratorExp)
+        and len(node.generators) == 1
+        and not node.generators[0].ifs
+        and not node.generators[0].is_async
+        and isinstance(node.generators[0].target, ast.Name)
+        and isinstance(node.elt, ast.Name)
+        and node.generators[0].target.id == node.elt.id
+    ):
+        iterable = _static_value(node.generators[0].iter)
+        if isinstance(iterable, (list, tuple)):
+            return tuple(iterable)
+        return _STATIC_VALUE_MISSING
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         operand = _static_value(node.operand)
         if not isinstance(operand, (int, float, complex)):
@@ -209,6 +229,14 @@ def _static_value(node: ast.AST) -> object:
             ):
                 return receiver.replace(*args)  # type: ignore[arg-type]
             if (
+                node.func.attr in {"removeprefix", "removesuffix"}
+                and isinstance(receiver, str)
+                and len(args) == 1
+                and isinstance(args[0], str)
+                and not keywords
+            ):
+                return getattr(receiver, node.func.attr)(args[0])
+            if (
                 node.func.attr == "get"
                 and isinstance(receiver, dict)
                 and len(args) in {1, 2}
@@ -232,6 +260,16 @@ def _legacy_application_executable_hits(
 ) -> set[tuple[str, int, str]]:
     tree = ast.parse(source)
     exempt_node_ids: set[int] = set()
+    runtime_oracle_call_ids: set[int] = set()
+    accepted_delta_family = next(
+        identifier
+        for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+        if identifier.startswith("Accepted") and identifier.endswith("Delta")
+    )
+    safe_family_labels = {
+        accepted_delta_family,
+        f"{accepted_delta_family}.input_binding_refs",
+    }
     for node in ast.walk(tree):
         targets: tuple[ast.expr, ...] = ()
         if isinstance(node, ast.Assign):
@@ -246,20 +284,24 @@ def _legacy_application_executable_hits(
             exempt_node_ids.update(id(descendant) for descendant in ast.walk(node))
         if isinstance(node, ast.keyword):
             label = _folded_static_string(node.value)
-            if (
-                node.arg == "family_name"
-                and label in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
-            ) or (
-                node.arg == "field_name"
-                and label is not None
-                and any(
-                    label.startswith(f"{identifier}.")
-                    for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
-                )
+            if node.arg in {"family_name", "field_name"} and label in (
+                safe_family_labels
             ):
                 exempt_node_ids.update(
                     id(descendant) for descendant in ast.walk(node)
                 )
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name
+            == "test_application_ru_v1_records_and_ports_are_not_executable"
+        ):
+            runtime_oracle_call_ids.update(
+                id(descendant)
+                for descendant in ast.walk(node)
+                if isinstance(descendant, ast.Call)
+                and isinstance(descendant.func, ast.Name)
+                and descendant.func.id == "hasattr"
+            )
 
     hits: set[tuple[str, int, str]] = set()
 
@@ -270,6 +312,74 @@ def _legacy_application_executable_hits(
         module.rsplit(".", maxsplit=1)[-1]
         for module in _TARGETED_APPLICATION_MODULES
     }
+    targeted_module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _TARGETED_APPLICATION_MODULES:
+                    targeted_module_aliases.add(
+                        alias.asname or alias.name.split(".", maxsplit=1)[0]
+                    )
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            for alias in node.names:
+                imported_module = f"{node.module}.{alias.name}"
+                if imported_module in _TARGETED_APPLICATION_MODULES:
+                    targeted_module_aliases.add(alias.asname or alias.name)
+
+    def dotted_name(node: ast.AST) -> str | None:
+        parts: list[str] = []
+        current = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if not isinstance(current, ast.Name):
+            return None
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    def is_targeted_container(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return (
+                node.id in targeted_module_aliases
+                or node.id == "module"
+                or node.id.endswith("_module")
+                or node.id == "RuntimeRecordPort"
+            )
+        return dotted_name(node) in _TARGETED_APPLICATION_MODULES
+
+    static_name_domains: dict[str, frozenset[str]] = {}
+
+    def static_string_domain(node: ast.AST) -> frozenset[str] | None:
+        value = _static_value(node)
+        if isinstance(value, (list, set, tuple)) and all(
+            isinstance(item, str) for item in value
+        ):
+            return frozenset(value)
+        if isinstance(node, ast.Name):
+            return static_name_domains.get(node.id)
+        return None
+
+    for _ in range(3):
+        for node in ast.walk(tree):
+            targets: tuple[ast.expr, ...] = ()
+            value_node: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets = tuple(node.targets)
+                value_node = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+                value_node = node.value
+            if value_node is not None:
+                domain = static_string_domain(value_node)
+                if domain is not None:
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            static_name_domains[target.id] = domain
+            if isinstance(node, (ast.For, ast.comprehension)):
+                domain = static_string_domain(node.iter)
+                if domain is not None and isinstance(node.target, ast.Name):
+                    static_name_domains[node.target.id] = domain
+
     dynamic_export_names = {"__getattr__", "__getattribute__"}
     for node in ast.walk(tree):
         if id(node) not in exempt_node_ids:
@@ -307,11 +417,7 @@ def _legacy_application_executable_hits(
                 add_hit(node, f"dynamic-export:{node.attr}")
             if (
                 node.attr == "__dict__"
-                and isinstance(node.value, ast.Name)
-                and (
-                    node.value.id == "module"
-                    or node.value.id.endswith("_module")
-                )
+                and is_targeted_container(node.value)
             ):
                 add_hit(node, "dynamic-module-__dict__")
         if isinstance(node, ast.Call):
@@ -330,6 +436,20 @@ def _legacy_application_executable_hits(
                 folded_name = _folded_static_string(node.args[1])
                 if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
                     add_hit(node, f"reflective-target:{folded_name}")
+                if (
+                    id(node) not in runtime_oracle_call_ids
+                    and is_targeted_container(node.args[0])
+                    and folded_name is None
+                ):
+                    dynamic_domain = (
+                        static_name_domains.get(node.args[1].id)
+                        if isinstance(node.args[1], ast.Name)
+                        else None
+                    )
+                    if dynamic_domain is None or dynamic_domain.intersection(
+                        _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+                    ):
+                        add_hit(node, f"dynamic-module-reflection:{call_name}")
             if call_name == "get" and node.args:
                 folded_name = _folded_static_string(node.args[0])
                 if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
@@ -345,11 +465,7 @@ def _legacy_application_executable_hits(
             if (
                 call_name == "vars"
                 and node.args
-                and isinstance(node.args[0], ast.Name)
-                and (
-                    node.args[0].id == "module"
-                    or node.args[0].id.endswith("_module")
-                )
+                and is_targeted_container(node.args[0])
             ):
                 add_hit(node, "dynamic-module-vars")
         if isinstance(node, ast.Subscript):
@@ -409,6 +525,21 @@ def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -
         'vars(module).get("RequestUnderstandingOutput")',
         'module.__dict__.get("RequestUnderstandingOutput")',
         'globals()["RequestUnderstandingOutput"]',
+        'getattr(module, "xRequestUnderstandingOutput".removeprefix("x"))',
+        "getattr(module, ''.join(part for part in ('Model', 'Provider')))",
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "legacy_name = next(\n"
+            "    name\n"
+            "    for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "    if hasattr(core_module, name)\n"
+            ")\n"
+            "getattr(core_module, legacy_name)"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "getattr(core_module, input())"
+        ),
         "from mini_agent.application.records import *",
         "def __getattr__(name):\n    return None",
     )
