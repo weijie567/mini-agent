@@ -1220,7 +1220,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
               "credential-complete-path-runs-only-under-explicit-qwen_baseline-marker",
               "qwen-results-remain-informational-and-do-not-define-an-ordinary-pass-rate-release-gate",
               "no-failure-taxonomy-artifact-grader-threshold-lifecycle-or-composition-change",
-              "feature-starts-from-exact-B_01_08A_COMPOSITION-not-the-plan-merge"
+              "feature-starts-from-exact-B_01_08A_COMPOSITION-not-the-execution-owner-or-plan-merge"
             ]
           }
         ]
