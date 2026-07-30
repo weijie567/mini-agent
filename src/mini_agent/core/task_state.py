@@ -47,55 +47,9 @@ class InputBinding(AuditOnlyModel):
         return self
 
 
-class AcceptedTaskDelta(AuditOnlyModel):
-    accepted_delta_id: UUID
-    candidate_ref: UUID
-    message_ref: UUID
-    operation: Literal[TaskDeltaOperation.ADD_GOAL]
-    goal_text: NonEmptyString
-    input_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
-    accepted_at: datetime
-
-    @field_validator("accepted_at")
-    @classmethod
-    def accepted_at_is_utc(cls, value: datetime) -> datetime:
-        return require_utc(value, field_name="accepted_at")
-
-
 class CandidateValidationDecision(StrEnum):
     ACCEPT = "ACCEPT"
     REJECT = "REJECT"
-
-
-class CandidateValidationRecord(AuditOnlyModel):
-    candidate_ref: UUID
-    decision: CandidateValidationDecision
-    reason_code: NonEmptyString | None = None
-
-    @model_validator(mode="after")
-    def rejected_candidate_has_reason(self) -> Self:
-        if (
-            self.decision is CandidateValidationDecision.REJECT
-            and self.reason_code is None
-        ):
-            raise ValueError("rejected candidate requires a stable reason")
-        if (
-            self.decision is CandidateValidationDecision.ACCEPT
-            and self.reason_code is not None
-        ):
-            raise ValueError("accepted candidate cannot have a rejection reason")
-        return self
-
-
-class RequestUnderstandingRecord(AuditOnlyModel):
-    run_id: UUID
-    message_ref: UUID
-    schema_version: NonEmptyString
-    candidate_validation: tuple[CandidateValidationRecord, ...]
-    accepted_delta_refs: tuple[UUID, ...]
-    proposed_base_task_state_version: PositiveStateVersion | None = None
-    validated_task_state_version: PositiveStateVersion | None = None
-    next_move_candidate_ref: UUID | None = None
 
 
 class TaskStatus(StrEnum):

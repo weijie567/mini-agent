@@ -12,7 +12,6 @@ from mini_agent.core.request_understanding import (
     QueryContextualizationCandidateV2,
     ReferenceSourceKindV2,
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
@@ -39,49 +38,6 @@ def _candidate(*, message_ref: UUID, order_id: str = "O-4242") -> InputCandidate
     )
 
 
-def _output(
-    *,
-    bound_order_id: str = "O-4242",
-    proposed_order_id: str = "O-4242",
-) -> RequestUnderstandingOutput:
-    message_ref = uuid4()
-    return RequestUnderstandingOutput(
-        message_ref=message_ref,
-        task_delta_candidates=(
-            TaskDeltaCandidate(
-                candidate_id=uuid4(),
-                operation=TaskDeltaOperation.ADD_GOAL,
-                goal_patch="查询当前消息中订单的状态",
-                input_candidates=(
-                    _candidate(
-                        message_ref=message_ref,
-                        order_id=bound_order_id,
-                    ),
-                ),
-                confidence=0.98,
-            ),
-        ),
-        next_move_candidate=NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name="get_order",
-            arguments={"order_id": proposed_order_id},
-            base_task_state_version=None,
-        ),
-    )
-
-
-def test_new_goal_output_keeps_candidate_and_state_write_separate() -> None:
-    output = _output()
-
-    assert output.next_move_candidate.base_task_state_version is None
-    assert "status" not in TaskDeltaCandidate.model_fields
-    assert "state_version" not in TaskDeltaCandidate.model_fields
-    assert "tool_call_id" not in NextMove.model_fields
-
-    with pytest.raises(ValidationError, match="frozen"):
-        output.next_move_candidate.kind = NextMoveKind.FINISH
-
-
 def test_request_input_binds_model_to_the_exact_toolset_projection() -> None:
     tool_spec = get_order_tool_spec()
     expected_hash = compute_model_visible_toolset_hash((tool_spec,))
@@ -102,18 +58,6 @@ def test_request_input_binds_model_to_the_exact_toolset_projection() -> None:
             provider_visible_tool_specs=(tool_spec,),
             model_visible_toolset_hash=f"sha256:{'0' * 64}",
         )
-
-
-def test_model_parameter_mismatch_remains_a_candidate_for_gateway_rejection() -> None:
-    output = _output(
-        bound_order_id="O-4242",
-        proposed_order_id="O-4343",
-    )
-
-    assert (
-        output.task_delta_candidates[0].input_candidates[0].candidate_value
-        != output.next_move_candidate.arguments["order_id"]
-    )
 
 
 @pytest.mark.parametrize(
@@ -156,29 +100,7 @@ def test_task_delta_rejects_identity_and_direct_state_fields() -> None:
         TaskDeltaCandidate.model_validate({**base_payload, "status": "COMPLETED"})
 
 
-def test_output_rejects_non_current_source_and_fake_zero_version() -> None:
-    current_message_ref = uuid4()
-    other_message_ref = uuid4()
-
-    with pytest.raises(ValidationError, match="current message"):
-        RequestUnderstandingOutput(
-            message_ref=current_message_ref,
-            task_delta_candidates=(
-                TaskDeltaCandidate(
-                    candidate_id=uuid4(),
-                    operation="ADD_GOAL",
-                    goal_patch="查询订单状态",
-                    input_candidates=(_candidate(message_ref=other_message_ref),),
-                    confidence=0.9,
-                ),
-            ),
-            next_move_candidate=NextMove(
-                kind="CALL_TOOL",
-                requested_tool_name="get_order",
-                arguments={"order_id": "O-4242"},
-            ),
-        )
-
+def test_next_move_rejects_fake_zero_version() -> None:
     with pytest.raises(ValidationError, match="greater than or equal to 1"):
         NextMove(
             kind="CALL_TOOL",
@@ -292,6 +214,10 @@ def test_v2_model_facing_types_have_exact_direct_binding_fields() -> None:
     output = _output_v2()
     assert output.schema_version == "e2e01-thin-v2"
     assert output.task_delta_candidates
+    assert output.next_move_candidate.base_task_state_version is None
+    assert "status" not in TaskDeltaCandidate.model_fields
+    assert "state_version" not in TaskDeltaCandidate.model_fields
+    assert "tool_call_id" not in NextMove.model_fields
 
     payload = output.model_dump()
     payload.pop("schema_version")
@@ -310,6 +236,37 @@ def test_v2_model_facing_types_have_exact_direct_binding_fields() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         output.schema_version = "e2e01-thin-v2"
+    with pytest.raises(ValidationError, match="frozen"):
+        output.next_move_candidate.kind = NextMoveKind.FINISH
+
+
+def test_v2_model_parameter_mismatch_remains_for_gateway_rejection() -> None:
+    message_ref = uuid4()
+    output = _output_v2(
+        message_ref=message_ref,
+        candidates=(
+            TaskDeltaCandidate(
+                candidate_id=uuid4(),
+                operation=TaskDeltaOperation.ADD_GOAL,
+                goal_patch="查询当前消息中订单的状态",
+                input_candidates=(
+                    _candidate(message_ref=message_ref, order_id="O-4242"),
+                ),
+                confidence=0.98,
+            ),
+        ),
+        next_move=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-4343"},
+            base_task_state_version=None,
+        ),
+    )
+
+    assert (
+        output.task_delta_candidates[0].input_candidates[0].candidate_value
+        != output.next_move_candidate.arguments["order_id"]
+    )
 
 
 @pytest.mark.parametrize("source_quote", ["", "界" * 129, b"order O-4242"])

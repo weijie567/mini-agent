@@ -173,41 +173,6 @@ class NextMove(ModelVisibleModel):
         return self
 
 
-class RequestUnderstandingOutput(ModelVisibleModel):
-    schema_version: Literal["e2e01-thin-v1"] = THIN_SLICE_REQUEST_SCHEMA_VERSION
-    message_ref: UUID
-    task_delta_candidates: Annotated[
-        tuple[TaskDeltaCandidate, ...],
-        Field(min_length=1),
-    ]
-    next_move_candidate: NextMove
-
-    @model_validator(mode="after")
-    def candidates_bind_to_current_message(self) -> Self:
-        candidate_ids = [
-            candidate.candidate_id for candidate in self.task_delta_candidates
-        ]
-        if len(candidate_ids) != len(set(candidate_ids)):
-            raise ValueError("TaskDeltaCandidate IDs must be unique")
-
-        for delta in self.task_delta_candidates:
-            for input_candidate in delta.input_candidates:
-                if input_candidate.source_ref != self.message_ref:
-                    raise ValueError(
-                        "thin-slice InputCandidate must reference current message"
-                    )
-                if input_candidate.authority is not InputAuthority.USER_CLAIM:
-                    raise ValueError(
-                        "thin-slice InputCandidate must remain a USER_CLAIM"
-                    )
-
-        if self.next_move_candidate.base_task_state_version is not None:
-            raise ValueError(
-                "new-goal thin-slice candidate must use a null base Task version"
-            )
-        return self
-
-
 from pydantic import StrictStr
 
 
