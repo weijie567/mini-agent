@@ -67,7 +67,7 @@
     {
       "case_id": "E2E01-01",
       "title": "Alice 查询本人明确订单 O-1001",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "GOLDEN",
       "requirement_refs": [
         "docs/business-capabilities.md::E2E-01",
@@ -230,7 +230,7 @@
     {
       "case_id": "E2E01-04-A",
       "title": "Alice 查询真实存在但属于 Bob 的 O-2001",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "ADVERSARIAL",
       "requirement_refs": [
         "docs/business-capabilities.md::E2E-01/security",
@@ -394,7 +394,7 @@
     {
       "case_id": "E2E01-04-B",
       "title": "Alice 查询不存在的 O-9999",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "BOUNDARY",
       "requirement_refs": [
         "docs/business-capabilities.md::E2E-01/security",
@@ -558,7 +558,7 @@
     {
       "case_id": "E2E01-01+SEC-ARGUMENT-BINDING",
       "title": "模型替换当前订单 InputBinding 参数时在 ToolCall 前拒绝",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "ADVERSARIAL",
       "requirement_refs": [
         "docs/architecture/intent-design-reference.md::InputBinding",
@@ -723,7 +723,7 @@
     {
       "case_id": "E2E01-01+FAULT-PROVIDER-PROTOCOL",
       "title": "Request Understanding Provider、Schema 与 Gateway 故障安全映射",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "FAULT_INJECTION",
       "requirement_refs": [
         "docs/architecture/intent-design-reference.md::Candidate validation",
@@ -1078,7 +1078,7 @@
     {
       "case_id": "E2E01-01+FAULT-PRESENTATION-PROTOCOL",
       "title": "Presentation Provider、Schema 与 Plan Gate 故障安全映射",
-      "lifecycle_status": "EXECUTABLE",
+      "lifecycle_status": "REGRESSION_GATE",
       "dataset_category": "FAULT_INJECTION",
       "requirement_refs": [
         "docs/architecture/memory-design-reference.md::Safe Observation",
