@@ -3398,6 +3398,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         "tests/component/application/test_ports_contract.py",
     }
     exact_reader_dependency_files = {
+        "src/mini_agent/bootstrap.py",
         "src/mini_agent/infrastructure/persistence/postgres.py",
         "tests/integration/test_postgres_record_adapters.py",
         "src/mini_agent/evaluation/harness.py",
