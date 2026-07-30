@@ -1,15 +1,17 @@
+import ast
 import inspect
 from pathlib import Path
 from typing import get_type_hints
 from uuid import UUID
 
+import mini_agent.application.ports as application_ports_module
+import mini_agent.application.records as application_records_module
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
     ExactRunEvidencePort,
     EvalResultPort,
     GetOrderPort,
-    ModelProvider,
     ModelProviderV2,
     RestartRecoveryPort,
     RuntimeRecordPort,
@@ -21,7 +23,6 @@ from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    CreateInitialTaskGraphCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -48,7 +49,6 @@ from mini_agent.application.records import (
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
 )
 
@@ -59,6 +59,1390 @@ class CandidateOnlyProvider:
 
     async def plan_presentation(self, request: object) -> object:
         raise NotImplementedError
+
+
+_LEGACY_APPLICATION_RU_V1_IDENTIFIERS = frozenset(
+    {
+        "AcceptedTaskDelta",
+        "CandidateValidationRecord",
+        "CreateInitialTaskGraphCommand",
+        "ModelProvider",
+        "RequestUnderstandingOutput",
+        "RequestUnderstandingRecord",
+        "SaveRequestUnderstandingCommand",
+        "create_initial_task_graph_if_current",
+        "load_accepted_task_delta_for_owner",
+        "load_request_understanding_for_owner",
+    }
+)
+_TARGETED_APPLICATION_MODULES = frozenset(
+    {
+        "mini_agent.application.ports",
+        "mini_agent.application.records",
+        "mini_agent.core.request_understanding",
+        "mini_agent.core.task_state",
+    }
+)
+_STATIC_VALUE_MISSING = object()
+
+
+def _static_value(node: ast.AST) -> object:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
+        values = tuple(_static_value(value) for value in node.elts)
+        if any(value is _STATIC_VALUE_MISSING for value in values):
+            return _STATIC_VALUE_MISSING
+        if isinstance(node, ast.List):
+            return list(values)
+        if isinstance(node, ast.Set):
+            try:
+                return set(values)
+            except TypeError:
+                return _STATIC_VALUE_MISSING
+        return values
+    if isinstance(node, ast.Dict):
+        keys = tuple(_static_value(key) for key in node.keys if key is not None)
+        values = tuple(_static_value(value) for value in node.values)
+        if (
+            len(keys) != len(node.keys)
+            or any(value is _STATIC_VALUE_MISSING for value in (*keys, *values))
+        ):
+            return _STATIC_VALUE_MISSING
+        try:
+            return dict(zip(keys, values, strict=True))
+        except (TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
+    if (
+        isinstance(node, ast.GeneratorExp)
+        and len(node.generators) == 1
+        and not node.generators[0].ifs
+        and not node.generators[0].is_async
+        and isinstance(node.generators[0].target, ast.Name)
+        and isinstance(node.elt, ast.Name)
+        and node.generators[0].target.id == node.elt.id
+    ):
+        iterable = _static_value(node.generators[0].iter)
+        if isinstance(iterable, (list, tuple)):
+            return tuple(iterable)
+        return _STATIC_VALUE_MISSING
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = _static_value(node.operand)
+        if not isinstance(operand, (int, float, complex)):
+            return _STATIC_VALUE_MISSING
+        return +operand if isinstance(node.op, ast.UAdd) else -operand
+    if isinstance(node, ast.BinOp):
+        left = _static_value(node.left)
+        right = _static_value(node.right)
+        if left is _STATIC_VALUE_MISSING or right is _STATIC_VALUE_MISSING:
+            return _STATIC_VALUE_MISSING
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right  # type: ignore[operator]
+            if isinstance(node.op, ast.Mult):
+                return left * right  # type: ignore[operator]
+            if isinstance(node.op, ast.Mod) and isinstance(left, str):
+                return left % right
+        except (KeyError, TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
+    if isinstance(node, ast.JoinedStr):
+        rendered: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                rendered.append(value.value)
+                continue
+            if not isinstance(value, ast.FormattedValue):
+                return _STATIC_VALUE_MISSING
+            static_value = _static_value(value.value)
+            if static_value is _STATIC_VALUE_MISSING:
+                return _STATIC_VALUE_MISSING
+            if value.conversion == ord("r"):
+                static_value = repr(static_value)
+            elif value.conversion == ord("s"):
+                static_value = str(static_value)
+            elif value.conversion == ord("a"):
+                static_value = ascii(static_value)
+            format_spec = (
+                _static_value(value.format_spec)
+                if value.format_spec is not None
+                else ""
+            )
+            if not isinstance(format_spec, str):
+                return _STATIC_VALUE_MISSING
+            try:
+                rendered.append(format(static_value, format_spec))
+            except (TypeError, ValueError):
+                return _STATIC_VALUE_MISSING
+        return "".join(rendered)
+    if isinstance(node, ast.Slice):
+        lower = _static_value(node.lower) if node.lower is not None else None
+        upper = _static_value(node.upper) if node.upper is not None else None
+        step = _static_value(node.step) if node.step is not None else None
+        if any(
+            value is _STATIC_VALUE_MISSING for value in (lower, upper, step)
+        ):
+            return _STATIC_VALUE_MISSING
+        if not all(value is None or isinstance(value, int) for value in (lower, upper, step)):
+            return _STATIC_VALUE_MISSING
+        return slice(lower, upper, step)
+    if isinstance(node, ast.Subscript):
+        container = _static_value(node.value)
+        key = _static_value(node.slice)
+        if container is _STATIC_VALUE_MISSING or key is _STATIC_VALUE_MISSING:
+            return _STATIC_VALUE_MISSING
+        try:
+            return container[key]  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            return _STATIC_VALUE_MISSING
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    ):
+        receiver = _static_value(node.func.value)
+        args = tuple(_static_value(value) for value in node.args)
+        keywords = {
+            keyword.arg: _static_value(keyword.value)
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        if (
+            any(value is _STATIC_VALUE_MISSING for value in args)
+            or len(keywords) != len(node.keywords)
+            or any(value is _STATIC_VALUE_MISSING for value in keywords.values())
+        ):
+            return _STATIC_VALUE_MISSING
+        try:
+            if (
+                node.func.attr == "join"
+                and isinstance(receiver, str)
+                and len(args) == 1
+                and not keywords
+            ):
+                return receiver.join(args[0])  # type: ignore[arg-type]
+            if node.func.attr == "format" and isinstance(receiver, str):
+                return receiver.format(*args, **keywords)
+            if (
+                node.func.attr == "replace"
+                and isinstance(receiver, str)
+                and len(args) in {2, 3}
+                and not keywords
+            ):
+                return receiver.replace(*args)  # type: ignore[arg-type]
+            if (
+                node.func.attr in {"removeprefix", "removesuffix"}
+                and isinstance(receiver, str)
+                and len(args) == 1
+                and isinstance(args[0], str)
+                and not keywords
+            ):
+                return getattr(receiver, node.func.attr)(args[0])
+            if (
+                node.func.attr == "get"
+                and isinstance(receiver, dict)
+                and len(args) in {1, 2}
+                and not keywords
+            ):
+                return receiver.get(*args)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return _STATIC_VALUE_MISSING
+    return _STATIC_VALUE_MISSING
+
+
+def _folded_static_string(node: ast.AST) -> str | None:
+    value = _static_value(node)
+    return value if isinstance(value, str) else None
+
+
+def _legacy_application_executable_hits(
+    source: str,
+    *,
+    filename: str,
+) -> set[tuple[str, int, str]]:
+    tree = ast.parse(source)
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    exempt_node_ids: set[int] = set()
+    invalid_legacy_set_declarations: list[ast.AST] = []
+    accepted_delta_family = next(
+        identifier
+        for identifier in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+        if identifier.startswith("Accepted") and identifier.endswith("Delta")
+    )
+    safe_family_labels = {
+        accepted_delta_family,
+        f"{accepted_delta_family}.input_binding_refs",
+    }
+    for node in ast.walk(tree):
+        targets: tuple[ast.expr, ...] = ()
+        if isinstance(node, ast.Assign):
+            targets = tuple(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+        if any(
+            isinstance(target, ast.Name)
+            and target.id == "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
+            for target in targets
+        ):
+            value_node = (
+                node.value
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                else None
+            )
+            if (
+                isinstance(value_node, ast.Call)
+                and isinstance(value_node.func, ast.Name)
+                and value_node.func.id == "frozenset"
+                and len(value_node.args) == 1
+                and not value_node.keywords
+            ):
+                declared_values = _static_value(value_node.args[0])
+            else:
+                declared_values = _static_value(value_node) if value_node else None
+            if (
+                isinstance(declared_values, (list, set, tuple, frozenset))
+                and all(isinstance(value, str) for value in declared_values)
+                and frozenset(declared_values)
+                == _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+            ):
+                exempt_node_ids.update(
+                    id(descendant) for descendant in ast.walk(node)
+                )
+            else:
+                invalid_legacy_set_declarations.append(node)
+        if isinstance(node, ast.keyword):
+            label = _folded_static_string(node.value)
+            if node.arg in {"family_name", "field_name"} and label in (
+                safe_family_labels
+            ):
+                exempt_node_ids.update(
+                    id(descendant) for descendant in ast.walk(node)
+                )
+
+    hits: set[tuple[str, int, str]] = set()
+
+    def add_hit(node: ast.AST, detail: str) -> None:
+        hits.add((filename, getattr(node, "lineno", 0), detail))
+
+    for declaration in invalid_legacy_set_declarations:
+        add_hit(declaration, "invalid-legacy-identifier-set")
+
+    targeted_module_tails = {
+        module.rsplit(".", maxsplit=1)[-1]
+        for module in _TARGETED_APPLICATION_MODULES
+    }
+    def dotted_name(node: ast.AST) -> str | None:
+        parts: list[str] = []
+        current = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if not isinstance(current, ast.Name):
+            return None
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    def lexical_scope(node: ast.AST) -> ast.AST:
+        current = node
+        while id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(
+                current,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ):
+                return current
+        return tree
+
+    def target_binds_name(target: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(descendant, ast.Name)
+            and isinstance(descendant.ctx, ast.Store)
+            and descendant.id == name
+            for descendant in ast.walk(target)
+        )
+
+    def node_position(node: ast.AST) -> tuple[int, int]:
+        return (
+            getattr(node, "lineno", 0),
+            getattr(node, "col_offset", 0),
+        )
+
+    def import_binding(
+        node: ast.Import | ast.ImportFrom,
+        name: str,
+    ) -> bool | None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+                if bound_name == name:
+                    return alias.name in _TARGETED_APPLICATION_MODULES
+            return None
+        for alias in node.names:
+            bound_name = alias.asname or alias.name
+            if bound_name != name:
+                continue
+            imported_name = (
+                f"{node.module}.{alias.name}"
+                if node.module is not None
+                else alias.name
+            )
+            return (
+                imported_name in _TARGETED_APPLICATION_MODULES
+                or (
+                    node.level > 0
+                    and alias.name in targeted_module_tails
+                )
+                or (
+                    node.module == "mini_agent.application.ports"
+                    and alias.name == "RuntimeRecordPort"
+                )
+            )
+        return None
+
+    def scope_parameter_names(scope: ast.AST) -> set[str]:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return set()
+        arguments = scope.args
+        return {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        } | {
+            argument.arg
+            for argument in (arguments.vararg, arguments.kwarg)
+            if argument is not None
+        }
+
+    def node_contains(ancestor: ast.AST, descendant: ast.AST) -> bool:
+        current = descendant
+        while id(current) in parents:
+            current = parents[id(current)]
+            if current is ancestor:
+                return True
+        return False
+
+    def binding_dominates_use(
+        binding: ast.AST,
+        *,
+        use: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        for owner in ast.walk(scope):
+            if owner is not scope and lexical_scope(owner) is not scope:
+                continue
+            for _field_name, value in ast.iter_fields(owner):
+                if not isinstance(value, list):
+                    continue
+                for index, item in enumerate(value):
+                    if item is not binding:
+                        continue
+                    return any(
+                        isinstance(later, ast.AST)
+                        and (
+                            later is use
+                            or node_contains(later, use)
+                        )
+                        for later in value[index + 1 :]
+                    )
+        return False
+
+    def parameter_default(
+        scope: ast.AST,
+        name: str,
+    ) -> ast.AST | None:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return None
+        positional = (*scope.args.posonlyargs, *scope.args.args)
+        defaults_by_name = {
+            argument.arg: default
+            for argument, default in zip(
+                positional[-len(scope.args.defaults) :],
+                scope.args.defaults,
+                strict=True,
+            )
+        } if scope.args.defaults else {}
+        defaults_by_name.update(
+            {
+                argument.arg: default
+                for argument, default in zip(
+                    scope.args.kwonlyargs,
+                    scope.args.kw_defaults,
+                    strict=True,
+                )
+                if default is not None
+            }
+        )
+        return defaults_by_name.get(name)
+
+    def container_binding_in_scope(
+        name: str,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+        visited: frozenset[tuple[int, str]],
+    ) -> tuple[bool, bool]:
+        bindings: list[tuple[int, int, ast.AST, ast.AST | bool | None]] = []
+        is_parameter = name in scope_parameter_names(scope)
+        has_local_binding = is_parameter
+        for candidate in ast.walk(scope):
+            if candidate is scope or lexical_scope(candidate) is not scope:
+                continue
+            binding_value: ast.AST | bool | None = None
+            binds = False
+            if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+                imported_target = import_binding(candidate, name)
+                if imported_target is not None:
+                    binds = True
+                    binding_value = imported_target
+            elif isinstance(candidate, ast.Assign):
+                matching_targets = [
+                    target
+                    for target in candidate.targets
+                    if target_binds_name(target, name)
+                ]
+                if matching_targets:
+                    binds = True
+                    binding_value = (
+                        candidate.value
+                        if len(candidate.targets) == 1
+                        and isinstance(candidate.targets[0], ast.Name)
+                        else None
+                    )
+            elif isinstance(candidate, ast.AnnAssign) and target_binds_name(
+                candidate.target,
+                name,
+            ):
+                binds = True
+                binding_value = (
+                    candidate.value
+                    if isinstance(candidate.target, ast.Name)
+                    else None
+                )
+            elif isinstance(candidate, ast.NamedExpr) and target_binds_name(
+                candidate.target,
+                name,
+            ):
+                binds = True
+                binding_value = (
+                    candidate.value
+                    if isinstance(candidate.target, ast.Name)
+                    else None
+                )
+            elif isinstance(
+                candidate,
+                (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
+            ) and target_binds_name(candidate.target, name):
+                binds = True
+            if not binds:
+                continue
+            has_local_binding = True
+            if node_position(candidate) < node_position(before):
+                bindings.append(
+                    (*node_position(candidate), candidate, binding_value)
+                )
+
+        def binding_targets_container(
+            binding: ast.AST,
+            value: ast.AST | bool | None,
+        ) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return False
+            return is_targeted_container(
+                value,
+                at=binding,
+                visited=visited,
+            )
+
+        parameter_value = parameter_default(scope, name)
+        possible_target = (
+            parameter_value is not None
+            and is_targeted_container(
+                parameter_value,
+                at=scope,
+                visited=visited,
+            )
+        )
+        dominating = [
+            binding
+            for binding in bindings
+            if isinstance(
+                binding[2],
+                (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
+            )
+            and binding_dominates_use(binding[2], use=before, scope=scope)
+        ]
+        dominating_position = (-1, -1)
+        if dominating:
+            latest_dominating = max(dominating, key=lambda item: item[:2])
+            dominating_position = latest_dominating[:2]
+            possible_target = binding_targets_container(
+                latest_dominating[2],
+                latest_dominating[3],
+            )
+        possible_target = possible_target or any(
+            binding[:2] > dominating_position
+            and not binding_dominates_use(
+                binding[2],
+                use=before,
+                scope=scope,
+            )
+            and binding_targets_container(binding[2], binding[3])
+            for binding in bindings
+        )
+        if not bindings:
+            return has_local_binding, possible_target
+        return True, possible_target
+
+    def qualified_root_is_unshadowed(
+        node: ast.AST,
+        *,
+        at: ast.AST,
+    ) -> bool:
+        root = node
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if not isinstance(root, ast.Name):
+            return False
+
+        def package_status_in_scope(
+            scope: ast.AST,
+            *,
+            initial_status: bool,
+        ) -> tuple[bool, bool]:
+            bindings: list[tuple[int, int, ast.AST, bool]] = []
+            has_binding = root.id in scope_parameter_names(scope)
+            if has_binding:
+                initial_status = False
+            for candidate in ast.walk(scope):
+                if candidate is scope or lexical_scope(candidate) is not scope:
+                    continue
+                is_package_import = False
+                binds = False
+                if isinstance(candidate, ast.Import):
+                    for alias in candidate.names:
+                        bound_name = (
+                            alias.asname
+                            or alias.name.split(".", maxsplit=1)[0]
+                        )
+                        if bound_name == root.id:
+                            binds = True
+                            is_package_import = (
+                                alias.name == "mini_agent"
+                                or alias.name.startswith("mini_agent.")
+                            )
+                elif isinstance(candidate, ast.ImportFrom):
+                    binds = import_binding(candidate, root.id) is not None
+                elif isinstance(candidate, ast.Assign):
+                    binds = any(
+                        target_binds_name(target, root.id)
+                        for target in candidate.targets
+                    )
+                elif isinstance(candidate, ast.AnnAssign):
+                    binds = target_binds_name(candidate.target, root.id)
+                elif isinstance(candidate, ast.NamedExpr):
+                    binds = target_binds_name(candidate.target, root.id)
+                elif isinstance(
+                    candidate,
+                    (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
+                ):
+                    binds = target_binds_name(candidate.target, root.id)
+                if not binds:
+                    continue
+                has_binding = True
+                if node_position(candidate) < node_position(at):
+                    bindings.append(
+                        (
+                            *node_position(candidate),
+                            candidate,
+                            is_package_import,
+                        )
+                    )
+            dominating = [
+                binding
+                for binding in bindings
+                if isinstance(
+                    binding[2],
+                    (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
+                )
+                and binding_dominates_use(
+                    binding[2],
+                    use=at,
+                    scope=scope,
+                )
+            ]
+            dominating_position = (-1, -1)
+            possible_package = initial_status
+            if dominating:
+                latest_dominating = max(
+                    dominating,
+                    key=lambda item: item[:2],
+                )
+                dominating_position = latest_dominating[:2]
+                possible_package = latest_dominating[3]
+            possible_package = possible_package or any(
+                binding[:2] > dominating_position
+                and not binding_dominates_use(
+                    binding[2],
+                    use=at,
+                    scope=scope,
+                )
+                and binding[3]
+                for binding in bindings
+            )
+            return has_binding, possible_package
+
+        function_scope = lexical_scope(at)
+        _module_bound, possible_package = package_status_in_scope(
+            tree,
+            initial_status=True,
+        )
+        if function_scope is tree:
+            return possible_package
+        _local_bound, possible_package = package_status_in_scope(
+            function_scope,
+            initial_status=possible_package,
+        )
+        return possible_package
+
+    def is_targeted_container(
+        node: ast.AST,
+        *,
+        at: ast.AST,
+        visited: frozenset[tuple[int, str]] = frozenset(),
+    ) -> bool:
+        qualified_name = dotted_name(node)
+        if qualified_name in _TARGETED_APPLICATION_MODULES:
+            return qualified_root_is_unshadowed(node, at=at)
+        if not isinstance(node, ast.Name):
+            return False
+        scope = lexical_scope(at)
+        lookup_key = (id(scope), node.id)
+        if lookup_key in visited:
+            return False
+        next_visited = visited | {lookup_key}
+        has_binding, is_target = container_binding_in_scope(
+            node.id,
+            before=at,
+            scope=scope,
+            visited=next_visited,
+        )
+        if has_binding:
+            return is_target
+        if scope is not tree:
+            has_binding, is_target = container_binding_in_scope(
+                node.id,
+                before=at,
+                scope=tree,
+                visited=next_visited,
+            )
+            if has_binding:
+                return is_target
+        return node.id == "module" or node.id.endswith("_module")
+
+    def direct_static_string_domain(node: ast.AST) -> frozenset[str] | None:
+        value = _static_value(node)
+        if isinstance(value, (list, set, tuple)) and all(
+            isinstance(item, str) for item in value
+        ):
+            return frozenset(value)
+        return None
+
+    def assigned_value_in_scope(
+        name: str,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+    ) -> ast.AST | None:
+        assignments: list[tuple[int, int, ast.AST]] = []
+        ambiguous_binding = False
+        for candidate in ast.walk(scope):
+            if candidate is scope or lexical_scope(candidate) is not scope:
+                continue
+            if getattr(candidate, "lineno", 0) >= getattr(before, "lineno", 0):
+                continue
+            targets: tuple[ast.AST, ...] = ()
+            value: ast.AST | None = None
+            if isinstance(candidate, ast.Assign):
+                targets = tuple(candidate.targets)
+                value = candidate.value
+            elif isinstance(candidate, ast.AnnAssign):
+                targets = (candidate.target,)
+                value = candidate.value
+            elif isinstance(candidate, ast.NamedExpr):
+                targets = (candidate.target,)
+                value = candidate.value
+            elif isinstance(
+                candidate,
+                (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension),
+            ):
+                targets = (candidate.target,)
+            if not any(target_binds_name(target, name) for target in targets):
+                continue
+            if (
+                value is None
+                or len(targets) != 1
+                or not isinstance(targets[0], ast.Name)
+            ):
+                ambiguous_binding = True
+                continue
+            assignments.append(
+                (
+                    getattr(candidate, "lineno", 0),
+                    getattr(candidate, "col_offset", 0),
+                    value,
+                )
+            )
+        if ambiguous_binding or len(assignments) != 1:
+            return None
+        return max(assignments, key=lambda item: item[:2])[2]
+
+    def static_string_domain(
+        node: ast.AST,
+        *,
+        before: ast.AST,
+        scope: ast.AST,
+        visited: frozenset[str] = frozenset(),
+    ) -> frozenset[str] | None:
+        direct = direct_static_string_domain(node)
+        if direct is not None:
+            return direct
+        if not isinstance(node, ast.Name) or node.id in visited:
+            return None
+        assigned = assigned_value_in_scope(node.id, before=before, scope=scope)
+        if assigned is None:
+            return None
+        return static_string_domain(
+            assigned,
+            before=before,
+            scope=scope,
+            visited=visited | {node.id},
+        )
+
+    def nearest_loop_domain(
+        name_node: ast.Name,
+        *,
+        call: ast.Call,
+    ) -> tuple[bool, frozenset[str] | None]:
+        name = name_node.id
+        scope = lexical_scope(call)
+        current: ast.AST = call
+        while id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(current, (ast.For, ast.AsyncFor)) and target_binds_name(
+                current.target,
+                name,
+            ):
+                return True, static_string_domain(
+                    current.iter,
+                    before=call,
+                    scope=scope,
+                )
+            if isinstance(
+                current,
+                (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp),
+            ):
+                for generator in reversed(current.generators):
+                    if target_binds_name(generator.target, name):
+                        return True, static_string_domain(
+                            generator.iter,
+                            before=call,
+                            scope=scope,
+                        )
+            if current is scope:
+                break
+        return False, None
+
+    def is_exact_runtime_oracle_call(node: ast.Call) -> bool:
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id != "hasattr"
+            or len(node.args) != 2
+            or node.keywords
+            or not isinstance(node.args[0], ast.Name)
+            or not isinstance(node.args[1], ast.Name)
+        ):
+            return False
+        negation = parents.get(id(node))
+        assertion = parents.get(id(negation)) if negation is not None else None
+        if not (
+            isinstance(negation, ast.UnaryOp)
+            and isinstance(negation.op, ast.Not)
+            and negation.operand is node
+            and isinstance(assertion, ast.Assert)
+            and assertion.test is negation
+            and assertion.msg is None
+        ):
+            return False
+        function = lexical_scope(node)
+        if (
+            not isinstance(function, ast.FunctionDef)
+            or function.name
+            != "test_application_ru_v1_records_and_ports_are_not_executable"
+            or function not in tree.body
+            or function.decorator_list
+            or function.args.args
+            or function.args.posonlyargs
+            or function.args.kwonlyargs
+            or function.args.vararg is not None
+            or function.args.kwarg is not None
+        ):
+            return False
+        if any(
+            isinstance(descendant, (ast.Return, ast.Raise, ast.Break, ast.Continue))
+            for descendant in ast.walk(function)
+        ):
+            return False
+
+        def direct_negative_hasattr(
+            statement: ast.stmt,
+        ) -> tuple[str, str, ast.Call] | None:
+            if (
+                not isinstance(statement, ast.Assert)
+                or statement.msg is not None
+                or not isinstance(statement.test, ast.UnaryOp)
+                or not isinstance(statement.test.op, ast.Not)
+                or not isinstance(statement.test.operand, ast.Call)
+            ):
+                return None
+            call = statement.test.operand
+            if (
+                not isinstance(call.func, ast.Name)
+                or call.func.id != "hasattr"
+                or len(call.args) != 2
+                or call.keywords
+                or not isinstance(call.args[0], ast.Name)
+                or not isinstance(call.args[1], ast.Name)
+            ):
+                return None
+            return call.args[0].id, call.args[1].id, call
+
+        module_loops = [
+            statement
+            for statement in function.body
+            if isinstance(statement, ast.For)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "legacy_name"
+            and isinstance(statement.iter, ast.Name)
+            and statement.iter.id == "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
+            and not statement.orelse
+        ]
+        port_loops = [
+            statement
+            for statement in function.body
+            if isinstance(statement, ast.For)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "legacy_port_member"
+            and isinstance(statement.iter, ast.Name)
+            and statement.iter.id == "legacy_port_members"
+            and not statement.orelse
+        ]
+        if len(module_loops) != 1 or len(port_loops) != 1:
+            return False
+        module_assertions = [
+            direct_negative_hasattr(statement)
+            for statement in module_loops[0].body
+        ]
+        port_assertions = [
+            direct_negative_hasattr(statement)
+            for statement in port_loops[0].body
+        ]
+        if (
+            [
+                assertion[:2] if assertion is not None else None
+                for assertion in module_assertions
+            ]
+            != [
+                ("application_records_module", "legacy_name"),
+                ("application_ports_module", "legacy_name"),
+            ]
+            or [
+                assertion[:2] if assertion is not None else None
+                for assertion in port_assertions
+            ]
+            != [("RuntimeRecordPort", "legacy_port_member")]
+        ):
+            return False
+
+        legacy_set_stores = [
+            descendant
+            for descendant in ast.walk(function)
+            if isinstance(descendant, ast.Name)
+            and isinstance(descendant.ctx, ast.Store)
+            and descendant.id == "_LEGACY_APPLICATION_RU_V1_IDENTIFIERS"
+        ]
+        if legacy_set_stores:
+            return False
+        port_member_assignments = [
+            statement
+            for statement in function.body
+            if isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == "legacy_port_members"
+        ]
+        expected_port_members = ast.parse(
+            "frozenset("
+            "name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS "
+            "if name[:1].islower()"
+            ")",
+            mode="eval",
+        ).body
+        if (
+            len(port_member_assignments) != 1
+            or ast.dump(
+                port_member_assignments[0].value,
+                include_attributes=False,
+            )
+            != ast.dump(expected_port_members, include_attributes=False)
+        ):
+            return False
+        expected_calls = {
+            assertion[2]
+            for assertion in (*module_assertions, *port_assertions)
+            if assertion is not None
+        }
+        return node in expected_calls
+
+    def runtime_oracle_function_is_exact(function: ast.FunctionDef) -> bool:
+        expected_signature_calls = [
+            descendant
+            for descendant in ast.walk(function)
+            if isinstance(descendant, ast.Call)
+            and isinstance(descendant.func, ast.Name)
+            and descendant.func.id == "hasattr"
+            and len(descendant.args) == 2
+            and isinstance(descendant.args[0], ast.Name)
+            and isinstance(descendant.args[1], ast.Name)
+            and (
+                (
+                    descendant.args[0].id
+                    in {
+                        "application_records_module",
+                        "application_ports_module",
+                    }
+                    and descendant.args[1].id == "legacy_name"
+                )
+                or (
+                    descendant.args[0].id == "RuntimeRecordPort"
+                    and descendant.args[1].id == "legacy_port_member"
+                )
+            )
+        ]
+        return (
+            len(expected_signature_calls) == 3
+            and all(
+                is_exact_runtime_oracle_call(call)
+                for call in expected_signature_calls
+            )
+        )
+
+    dynamic_export_names = {"__getattr__", "__getattribute__"}
+    for node in ast.walk(tree):
+        if id(node) not in exempt_node_ids:
+            folded_value = _folded_static_string(node)
+            if folded_value in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, f"folded-target:{folded_value}")
+        if isinstance(node, ast.ImportFrom):
+            module_name = node.module or ""
+            if any(alias.name == "*" for alias in node.names) and (
+                module_name in _TARGETED_APPLICATION_MODULES
+                or module_name.rsplit(".", maxsplit=1)[-1]
+                in targeted_module_tails
+            ):
+                add_hit(node, "target-module-star-import")
+            for alias in node.names:
+                if alias.name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, alias.name)
+        if isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            if node.name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.name)
+            if node.name in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.name}")
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name
+                == "test_application_ru_v1_records_and_ports_are_not_executable"
+                and not runtime_oracle_function_is_exact(node)
+            ):
+                add_hit(node, "invalid-runtime-absence-oracle-shape")
+        if isinstance(node, ast.Name):
+            if node.id in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.id)
+            if node.id in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.id}")
+        if isinstance(node, ast.Attribute):
+            if node.attr in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, node.attr)
+            if node.attr in dynamic_export_names:
+                add_hit(node, f"dynamic-export:{node.attr}")
+            if (
+                node.attr == "__dict__"
+                and is_targeted_container(node.value, at=node)
+            ):
+                add_hit(node, "dynamic-module-__dict__")
+        if isinstance(node, ast.Call):
+            call_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else None
+                )
+            )
+            if call_name in {"getattr", "hasattr", "setattr", "delattr"} and len(
+                node.args
+            ) >= 2:
+                folded_name = _folded_static_string(node.args[1])
+                if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, f"reflective-target:{folded_name}")
+                exact_runtime_oracle = is_exact_runtime_oracle_call(node)
+                runtime_function = lexical_scope(node)
+                has_runtime_oracle_signature = (
+                    call_name == "hasattr"
+                    and isinstance(runtime_function, ast.FunctionDef)
+                    and runtime_function.name
+                    == "test_application_ru_v1_records_and_ports_are_not_executable"
+                    and isinstance(node.args[0], ast.Name)
+                    and isinstance(node.args[1], ast.Name)
+                    and (
+                        (
+                            node.args[0].id
+                            in {
+                                "application_records_module",
+                                "application_ports_module",
+                            }
+                            and node.args[1].id == "legacy_name"
+                        )
+                        or (
+                            node.args[0].id == "RuntimeRecordPort"
+                            and node.args[1].id == "legacy_port_member"
+                        )
+                    )
+                )
+                if has_runtime_oracle_signature and not exact_runtime_oracle:
+                    add_hit(node, "invalid-runtime-absence-oracle")
+                if (
+                    not exact_runtime_oracle
+                    and is_targeted_container(node.args[0], at=node)
+                    and folded_name is None
+                ):
+                    has_loop_domain, dynamic_domain = (
+                        nearest_loop_domain(node.args[1], call=node)
+                        if isinstance(node.args[1], ast.Name)
+                        else (False, None)
+                    )
+                    if dynamic_domain is None or dynamic_domain.intersection(
+                        _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+                    ) or not has_loop_domain:
+                        add_hit(node, f"dynamic-module-reflection:{call_name}")
+            if call_name == "get" and node.args:
+                folded_name = _folded_static_string(node.args[0])
+                if folded_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                    add_hit(node, f"mapping-get-target:{folded_name}")
+            if call_name in {
+                "__import__",
+                "getmodule",
+                "globals",
+                "import_module",
+                "locals",
+            }:
+                add_hit(node, f"dynamic-access:{call_name}")
+            if (
+                call_name == "vars"
+                and node.args
+                and is_targeted_container(node.args[0], at=node)
+            ):
+                add_hit(node, "dynamic-module-vars")
+        if isinstance(node, ast.Subscript):
+            folded_key = _folded_static_string(node.slice)
+            if folded_key in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+                add_hit(node, f"subscript-target:{folded_key}")
+    return hits
+
+
+def test_application_ru_v1_records_and_ports_are_not_executable() -> None:
+    repo_root = Path(__file__).parents[3]
+    owned_paths = (
+        repo_root / "src/mini_agent/application/records.py",
+        repo_root / "src/mini_agent/application/ports.py",
+        repo_root / "tests/component/application/test_record_contracts.py",
+        repo_root / "tests/component/application/test_ports_contract.py",
+    )
+    executable_hits: set[tuple[str, int, str]] = set()
+
+    for owned_path in owned_paths:
+        executable_hits.update(
+            _legacy_application_executable_hits(
+                owned_path.read_text(encoding="utf-8"),
+                filename=owned_path.name,
+            )
+        )
+
+    assert not executable_hits
+    legacy_port_members = frozenset(
+        name
+        for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS
+        if name[:1].islower()
+    )
+    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:
+        assert not hasattr(application_records_module, legacy_name)
+        assert not hasattr(application_ports_module, legacy_name)
+    for legacy_port_member in legacy_port_members:
+        assert not hasattr(RuntimeRecordPort, legacy_port_member)
+    assert application_ports_module.ModelProviderV2 is ModelProviderV2
+    assert (
+        application_records_module.SaveRequestUnderstandingV2NoTaskCommand
+        is SaveRequestUnderstandingV2NoTaskCommand
+    )
+    assert (
+        application_records_module.CreateInitialTaskGraphV2Command
+        is CreateInitialTaskGraphV2Command
+    )
+
+
+def test_application_ru_v1_absence_oracle_rejects_static_and_dynamic_aliases() -> None:
+    mutations = (
+        'getattr(module, "Request{}Output".format("Understanding"))',
+        'getattr(module, "xRequestUnderstandingOutput"[1:])',
+        'getattr(module, "%s%s" % ("RequestUnderstanding", "Output"))',
+        'legacy_name = "RequestUnderstandingOutput"\ngetattr(module, legacy_name)',
+        'vars(module).get("RequestUnderstandingOutput")',
+        'module.__dict__.get("RequestUnderstandingOutput")',
+        'globals()["RequestUnderstandingOutput"]',
+        'getattr(module, "xRequestUnderstandingOutput".removeprefix("x"))',
+        "getattr(module, ''.join(part for part in ('Model', 'Provider')))",
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "legacy_name = next(\n"
+            "    name\n"
+            "    for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "    if hasattr(core_module, name)\n"
+            ")\n"
+            "getattr(core_module, legacy_name)"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    assert not hasattr(core_module, input())"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        leaked = hasattr(application_records_module, legacy_name)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        assert hasattr(application_records_module, legacy_name)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        if hasattr(application_records_module, legacy_name):\n"
+            "            pass"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "ru = core_module\n"
+            "getattr(ru, input())"
+        ),
+        (
+            "from mini_agent.application.ports import RuntimeRecordPort as RRP\n"
+            "getattr(RRP, input())"
+        ),
+        (
+            "import mini_agent.application.records\n"
+            "getattr(mini_agent.application.records, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding\n"
+            "vars(mini_agent.core.request_understanding)"
+        ),
+        (
+            "import mini_agent.application.records\n"
+            "def inspect(record, condition):\n"
+            "    if condition:\n"
+            "        mini_agent = record\n"
+            "    return getattr(mini_agent.application.records, input())"
+        ),
+        (
+            "import mini_agent.application.records\n"
+            "def inspect(records):\n"
+            "    for mini_agent in records:\n"
+            "        pass\n"
+            "    return getattr(mini_agent.application.records, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(record, condition):\n"
+            "    ru = core_module\n"
+            "    if condition:\n"
+            "        ru = record\n"
+            "    return getattr(ru, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(record, condition):\n"
+            "    if condition:\n"
+            "        ru = core_module\n"
+            "    else:\n"
+            "        ru = record\n"
+            "    return getattr(ru, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(records):\n"
+            "    ru = core_module\n"
+            "    for ru in records:\n"
+            "        pass\n"
+            "    return getattr(ru, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(ru=core_module):\n"
+            "    return getattr(ru, input())"
+        ),
+        "from . import records as ru\ngetattr(ru, input())",
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def check():\n"
+            "    for name in ('safe_name',):\n"
+            "        assert not hasattr(core_module, name)\n"
+            "    for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        getattr(core_module, name)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        if False:\n"
+            "            assert not hasattr(\n"
+            "                application_records_module, legacy_name\n"
+            "            )\n"
+            "        assert not hasattr(application_ports_module, legacy_name)\n"
+            "    for legacy_port_member in legacy_port_members:\n"
+            "        assert not hasattr(RuntimeRecordPort, legacy_port_member)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        continue\n"
+            "        assert not hasattr(\n"
+            "            application_records_module, legacy_name\n"
+            "        )\n"
+            "        assert not hasattr(application_ports_module, legacy_name)\n"
+            "    for legacy_port_member in legacy_port_members:\n"
+            "        assert not hasattr(RuntimeRecordPort, legacy_port_member)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    _LEGACY_APPLICATION_RU_V1_IDENTIFIERS = ()\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        assert not hasattr(\n"
+            "            application_records_module, legacy_name\n"
+            "        )\n"
+            "        assert not hasattr(application_ports_module, legacy_name)\n"
+            "    for legacy_port_member in legacy_port_members:\n"
+            "        assert not hasattr(RuntimeRecordPort, legacy_port_member)"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    pass"
+        ),
+        (
+            "def test_application_ru_v1_records_and_ports_are_not_executable():\n"
+            "    legacy_port_members = frozenset(\n"
+            "        name for name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS\n"
+            "        if name[:1].islower()\n"
+            "    )\n"
+            "    for legacy_name in _LEGACY_APPLICATION_RU_V1_IDENTIFIERS:\n"
+            "        pass\n"
+            "    for legacy_port_member in legacy_port_members:\n"
+            "        pass"
+        ),
+        "from mini_agent.application.records import *",
+        "def __getattr__(name):\n    return None",
+    )
+    for mutation in mutations:
+        assert _legacy_application_executable_hits(
+            mutation,
+            filename="mutation.py",
+        ), mutation
+
+
+def test_application_ru_v1_absence_oracle_allows_rebound_instance_reflection() -> None:
+    safe_sources = (
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(record):\n"
+            "    ru = core_module\n"
+            "    ru = record\n"
+            "    return getattr(ru, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(core_module):\n"
+            "    return hasattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_understanding as core_module\n"
+            "def inspect(ru):\n"
+            "    return vars(ru)"
+        ),
+        (
+            "def inspect(mini_agent):\n"
+            "    return getattr(\n"
+            "        mini_agent.core.request_understanding, input()\n"
+            "    )"
+        ),
+        (
+            "import mini_agent\n"
+            "def inspect(record):\n"
+            "    mini_agent = record\n"
+            "    return vars(mini_agent.core.request_understanding)"
+        ),
+    )
+    for safe_source in safe_sources:
+        assert not _legacy_application_executable_hits(
+            safe_source,
+            filename="safe_source.py",
+        ), safe_source
 
 
 def _assert_signature(
@@ -75,7 +1459,7 @@ def _assert_signature(
 def test_model_provider_surface_only_proposes_validated_candidates() -> None:
     provider = CandidateOnlyProvider()
 
-    assert isinstance(provider, ModelProvider)
+    assert isinstance(provider, ModelProviderV2)
     assert not hasattr(provider, "execute_tool")
     assert not hasattr(provider, "save_task")
 
@@ -90,7 +1474,7 @@ def test_application_inbound_handler_and_provider_failure_surface_are_exact() ->
         },
     )
     assert "trusted" in (AgentRunHandler.__doc__ or "").casefold()
-    provider_doc = ModelProvider.__doc__ or ""
+    provider_doc = ModelProviderV2.__doc__ or ""
     assert "ProviderProtocolError" in provider_doc
     assert "from None" in provider_doc
     assert "__cause__" in provider_doc
@@ -100,7 +1484,7 @@ def test_application_inbound_handler_and_provider_failure_surface_are_exact() ->
 
 
 def test_ports_are_protocols_owned_by_application() -> None:
-    assert ModelProvider._is_protocol
+    assert ModelProviderV2._is_protocol
     assert AgentRunHandler._is_protocol
     assert SessionAuthPort._is_protocol
     assert GetOrderPort._is_protocol
@@ -207,13 +1591,8 @@ def test_run_start_and_atomic_finalization_are_separate_exact_projection_cas() -
     }
 
 
-def test_initial_graph_task_transition_and_observation_use_aggregate_commands() -> None:
+def test_task_transition_and_observation_use_aggregate_commands() -> None:
     contracts = (
-        (
-            RuntimeRecordPort.create_initial_task_graph_if_current,
-            CreateInitialTaskGraphCommand,
-            ConditionalWriteResult,
-        ),
         (
             RuntimeRecordPort.apply_task_transition_if_current,
             ApplyTaskTransitionCommand,
@@ -288,8 +1667,6 @@ def test_owner_scoped_reads_require_minimal_trusted_owner_scope() -> None:
         RuntimeRecordPort.load_run_for_owner,
         RuntimeRecordPort.load_task_for_owner,
         RuntimeRecordPort.load_request_unit_for_owner,
-        RuntimeRecordPort.load_request_understanding_for_owner,
-        RuntimeRecordPort.load_accepted_task_delta_for_owner,
         RuntimeRecordPort.load_input_binding_for_owner,
         RuntimeRecordPort.load_context_manifest_for_owner,
         RuntimeRecordPort.load_gate_decision_for_owner,
@@ -313,8 +1690,6 @@ def test_owner_scoped_read_shapes_hide_absent_vs_foreign_resources() -> None:
         RuntimeRecordPort.load_run_for_owner,
         RuntimeRecordPort.load_task_for_owner,
         RuntimeRecordPort.load_request_unit_for_owner,
-        RuntimeRecordPort.load_request_understanding_for_owner,
-        RuntimeRecordPort.load_accepted_task_delta_for_owner,
         RuntimeRecordPort.load_input_binding_for_owner,
         RuntimeRecordPort.load_context_manifest_for_owner,
         RuntimeRecordPort.load_gate_decision_for_owner,
@@ -561,7 +1936,7 @@ def test_core_and_application_source_have_no_framework_or_adapter_imports() -> N
         assert forbidden_import not in source
 
 
-def test_model_provider_v2_is_additive_and_has_exact_failure_partition() -> None:
+def test_model_provider_v2_is_current_and_has_exact_failure_partition() -> None:
     provider = CandidateOnlyProvider()
 
     assert isinstance(provider, ModelProviderV2)
@@ -581,11 +1956,6 @@ def test_model_provider_v2_is_additive_and_has_exact_failure_partition() -> None
             "return": PresentationPlan,
         },
     )
-    assert (
-        get_type_hints(ModelProvider.propose_next_move, include_extras=True)["return"]
-        is RequestUnderstandingOutput
-    )
-
     normalized_doc = " ".join((ModelProviderV2.__doc__ or "").split())
     for required_term in (
         "correctly framed Request Understanding target function",

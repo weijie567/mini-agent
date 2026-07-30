@@ -13,7 +13,6 @@ from mini_agent.application.records import (
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    CreateInitialTaskGraphCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -46,13 +45,10 @@ from mini_agent.core.presentation import (
 )
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
 )
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     InputBinding,
-    RequestUnderstandingRecord,
     RequestUnitRecord,
     TaskRecord,
 )
@@ -76,25 +72,6 @@ class AgentRunHandler(Protocol):
     """Application use case accepting only trusted identity plus bounded message."""
 
     async def handle(self, command: AgentRunCommand) -> AgentRunResult: ...
-
-
-@runtime_checkable
-class ModelProvider(Protocol):
-    """Return candidates only; implementations cannot mutate state or run Tools.
-
-    An Adapter maps an untrusted response violation to a fresh parameterless
-    ``ProviderProtocolError`` only after discarding the raw exception. The raised
-    bounded signal must have ``__cause__`` and ``__context__`` set to ``None``;
-    suppressing display with ``raise ... from None`` alone does not erase context.
-    """
-
-    async def propose_next_move(
-        self, request: RequestUnderstandingInput
-    ) -> RequestUnderstandingOutput: ...
-
-    async def plan_presentation(
-        self, request: PresentationInput
-    ) -> PresentationPlan: ...
 
 
 @runtime_checkable
@@ -190,13 +167,6 @@ class RuntimeRecordPort(Protocol):
         projection. Post-commit Message or terminal Trace writes cannot satisfy
         this contract.
         """
-        ...
-
-    async def create_initial_task_graph_if_current(
-        self,
-        command: CreateInitialTaskGraphCommand,
-    ) -> ConditionalWriteResult:
-        """Conditionally insert the complete owner-bound initial graph atomically."""
         ...
 
     async def save_request_understanding_v2_no_task_if_current(
@@ -311,24 +281,6 @@ class RuntimeRecordPort(Protocol):
         request_unit_id: UUID,
     ) -> RequestUnitRecord | None:
         """Return ``None`` for both absent and unauthorized RequestUnits."""
-        ...
-
-    async def load_request_understanding_for_owner(
-        self,
-        *,
-        owner_scope: TrustedOwnerScope,
-        run_id: UUID,
-    ) -> RequestUnderstandingRecord | None:
-        """Return ``None`` for both absent and unauthorized records."""
-        ...
-
-    async def load_accepted_task_delta_for_owner(
-        self,
-        *,
-        owner_scope: TrustedOwnerScope,
-        accepted_delta_id: UUID,
-    ) -> AcceptedTaskDelta | None:
-        """Return ``None`` for both absent and unauthorized records."""
         ...
 
     async def load_input_binding_for_owner(
@@ -501,8 +453,9 @@ class ModelProviderV2(Protocol):
     Presentation transport, framing, target-call, and ``PresentationPlan``
     validation failures also remain a fresh ``ProviderProtocolError``.
 
-    Both bounded errors may be exposed only after discarding the raw diagnostic,
-    with ``__cause__`` and ``__context__`` cleared.
+    Both bounded errors may be exposed only after discarding the raw exception
+    and its raw diagnostic, with ``__cause__`` and ``__context__`` cleared.
+    Suppressing display with ``raise ... from None`` alone does not erase context.
     """
 
     async def propose_next_move(
