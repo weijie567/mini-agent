@@ -10,12 +10,13 @@ from enum import Enum, StrEnum
 from inspect import signature
 from pathlib import Path
 from typing import cast
-from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid5
+from uuid import NAMESPACE_URL, SafeUUID, UUID, uuid4, uuid5
 
 import httpx
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from mini_agent.bootstrap import OfflineE2E01Composition
 from mini_agent.application.ports import EvalResultPort, ModelProviderV2
 from mini_agent.application.records import (
     AgentRunResult,
@@ -158,6 +159,12 @@ from mini_agent.evaluation.scripted_provider import (
 )
 from mini_agent.infrastructure.model.qwen_responses import (
     QwenResponsesAdapterV2,
+)
+from mini_agent.infrastructure.persistence.database import (
+    build_session_factory,
+)
+from mini_agent.infrastructure.persistence.postgres import (
+    PostgresRecordAdapter,
 )
 
 
@@ -7288,6 +7295,206 @@ def test_qwen_runner_missing_env_persists_three_not_run_without_network() -> Non
         assert result.usage_summary is None
 
 
+def test_qwen_runner_missing_sut_replays_not_run_without_network() -> None:
+    transport_calls = 0
+
+    def forbidden_transport() -> httpx.AsyncBaseTransport:
+        nonlocal transport_calls
+        transport_calls += 1
+        raise AssertionError("missing SUT cannot create transport")
+
+    harness, _sut, _traces, port = _harness()
+    environment = {
+        "DASHSCOPE_API_KEY": "synthetic-secret",
+        "DASHSCOPE_BASE_URL": "https://qwen.invalid/v1",
+    }
+
+    first = _run_qwen(
+        harness,
+        environment=environment,
+        transport_factory=forbidden_transport,
+    )
+    second = _run_qwen(
+        harness,
+        environment=environment,
+        transport_factory=forbidden_transport,
+    )
+
+    assert first == second
+    assert first.command_passed is False
+    assert first.execution_failures == ()
+    assert len(first.results) == 3
+    assert {result.status for result in first.results} == {
+        EvalResultStatus.NOT_RUN
+    }
+    assert len(port.results) == 3
+    assert transport_calls == 0
+
+
+@pytest.mark.parametrize(
+    "case_ids",
+    (
+        ("E2E01-UNKNOWN",),
+        ("E2E01-01", "E2E01-01"),
+        ("E2E01-04-A",),
+    ),
+)
+def test_qwen_runner_rejects_selection_before_network_without_secret_traceback(
+    case_ids: tuple[str, ...],
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    qwen_sut = QwenSyntheticSut(traces)
+    transport_calls = 0
+
+    def forbidden_transport() -> httpx.AsyncBaseTransport:
+        nonlocal transport_calls
+        transport_calls += 1
+        raise AssertionError("invalid selection cannot create transport")
+
+    harness, _sut, _traces, port = _harness(
+        qwen_sut=qwen_sut,
+        traces=traces,
+    )
+    secret = "synthetic-secret-selection"
+    endpoint = "https://selection-qwen.invalid/v1"
+
+    with pytest.raises(EvalHarnessCommandError) as caught:
+        _run_qwen(
+            harness,
+            environment={
+                "DASHSCOPE_API_KEY": secret,
+                "DASHSCOPE_BASE_URL": endpoint,
+            },
+            case_ids=case_ids,
+            transport_factory=forbidden_transport,
+        )
+
+    assert caught.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    frame_names, strings, _value_types = _mapper_traceback_state(
+        caught.value
+    )
+    assert frame_names == ("run_qwen_baseline",)
+    assert {secret, endpoint}.isdisjoint(strings)
+    assert transport_calls == 0
+    assert qwen_sut.qwen_calls == []
+    assert port.results == {}
+    assert port.failures == []
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ("transport-raises", "wrong-transport", "sut-raises"),
+)
+def test_qwen_runner_maps_execution_failures_without_secret_payload(
+    failure_kind: str,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+
+    class FailingQwenSut:
+        async def execute_qwen_case(self, **_kwargs: object) -> None:
+            raise RuntimeError(
+                "raw-qwen-sut-secret https://failure-qwen.invalid"
+            )
+
+    qwen_sut: object = (
+        FailingQwenSut()
+        if failure_kind == "sut-raises"
+        else QwenSyntheticSut(traces)
+    )
+
+    def transport_factory() -> httpx.AsyncBaseTransport:
+        if failure_kind == "transport-raises":
+            raise RuntimeError(
+                "raw-transport-secret https://failure-qwen.invalid"
+            )
+        if failure_kind == "wrong-transport":
+            return cast(httpx.AsyncBaseTransport, object())
+        return httpx.MockTransport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("failing SUT cannot use provider HTTP")
+            )
+        )
+
+    harness, _sut, _traces, port = _harness(
+        qwen_sut=qwen_sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+        ),
+    )
+    outcome = _run_qwen(
+        harness,
+        environment={
+            "DASHSCOPE_API_KEY": "synthetic-secret-failure",
+            "DASHSCOPE_BASE_URL": "https://failure-qwen.invalid/v1",
+        },
+        case_ids=("E2E01-01",),
+        transport_factory=transport_factory,
+    )
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert len(outcome.execution_failures) == 1
+    assert outcome.execution_failures[0].failure_phase is (
+        EvalExecutionFailurePhase.SYSTEM_UNDER_TEST
+    )
+    projection = (
+        outcome.execution_failures[0].model_dump_json()
+        + "".join(result.model_dump_json() for result in port.results.values())
+    )
+    for forbidden in (
+        "synthetic-secret-failure",
+        "raw-qwen-sut-secret",
+        "raw-transport-secret",
+        "failure-qwen.invalid",
+    ):
+        assert forbidden not in projection
+
+
+def test_qwen_runner_not_run_conflict_and_partial_write_are_bounded() -> None:
+    harness, _sut, _traces, port = _harness()
+    first = _run_qwen(harness, environment={})
+    first_key = next(iter(port.results))
+    port.results[first_key] = first.results[0].model_copy(
+        update={"completed_at": NOW + timedelta(days=1)}
+    )
+
+    with pytest.raises(EvalHarnessCommandError) as conflict:
+        _run_qwen(harness, environment={})
+
+    assert conflict.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert conflict.value.__cause__ is None
+    assert conflict.value.__context__ is None
+    assert len(port.results) == 3
+
+    class FailSecondAppendPort(InMemoryResultPort):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_calls = 0
+
+        async def append_eval_result(
+            self,
+            record: EvalResultRecord,
+        ) -> InsertOnlyWriteResult:
+            self.append_calls += 1
+            if self.append_calls == 2:
+                raise RuntimeError("raw-partial-write-secret")
+            return await super().append_eval_result(record)
+
+    partial_port = FailSecondAppendPort()
+    partial_harness, *_ = _harness(port=partial_port)
+    with pytest.raises(EvalHarnessCommandError) as partial:
+        _run_qwen(partial_harness, environment={})
+
+    assert partial.value.args == ("EVAL_HARNESS_COMMAND_FAILED",)
+    assert partial.value.__cause__ is None
+    assert partial.value.__context__ is None
+    assert len(partial_port.results) == 1
+    assert partial_port.append_calls == 2
+
+
 def test_qwen_runner_uses_distinct_adapters_without_script_oracle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7353,6 +7560,7 @@ def test_qwen_runner_uses_distinct_adapters_without_script_oracle(
     assert all(type(provider) is QwenResponsesAdapterV2 for provider in providers)
     assert len({id(provider) for provider in providers}) == 3
     assert len({id(provider._client) for provider in providers}) == 3
+    assert all(provider._client.is_closed for provider in providers)
     assert transport_factory.seen_by_transport == [
         ["submit_next_move", "submit_presentation_plan"],
         ["submit_next_move"],
@@ -7367,3 +7575,138 @@ def test_qwen_runner_uses_distinct_adapters_without_script_oracle(
     )
     assert "synthetic-secret" not in projection
     assert "qwen.invalid" not in projection
+
+
+def test_qwen_runner_mock_transport_runs_real_postgres_composition(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    artifacts = load_e2e01_artifacts(
+        REPO_ROOT,
+        candidate_version=(
+            "git:c59eaea8bac2b25cc936eb2f47af15b6da1d2595"
+        ),
+        runtime_version=(
+            "git:c59eaea8bac2b25cc936eb2f47af15b6da1d2595"
+        ),
+    )
+    transport_factory = QwenTransportFactorySpy()
+    external_network_calls = 0
+
+    async def forbidden_external_http(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        nonlocal external_network_calls
+        external_network_calls += 1
+        raise AssertionError("external Qwen HTTP is forbidden")
+
+    monkeypatch.setattr(
+        httpx.AsyncHTTPTransport,
+        "handle_async_request",
+        forbidden_external_http,
+    )
+
+    class MonotonicClock:
+        def __init__(self) -> None:
+            self.next = datetime(2030, 1, 1, tzinfo=UTC)
+
+        def __call__(self) -> datetime:
+            value = self.next
+            self.next += timedelta(microseconds=1)
+            return value
+
+    async def execute():
+        composition = await OfflineE2E01Composition.start(
+            artifacts=artifacts,
+            session_factory=session_factory,
+            clock=MonotonicClock(),
+            uuid_factory=uuid4,
+        )
+
+        class CapturingCompositionSut:
+            def __init__(self) -> None:
+                self.results: list[EvalCaseSutResult] = []
+
+            async def execute_qwen_case(
+                self,
+                *,
+                execution_input: EvalCaseExecutionInput,
+                qwen_provider: QwenResponsesAdapterV2,
+            ) -> EvalCaseSutResult | None:
+                result = await composition.execute_qwen_case(
+                    execution_input=execution_input,
+                    qwen_provider=qwen_provider,
+                )
+                if result is not None:
+                    self.results.append(result)
+                return result
+
+        qwen_sut = CapturingCompositionSut()
+        records = PostgresRecordAdapter(session_factory)
+        harness = OfflineEvalHarness(
+            artifacts=artifacts,
+            sut=composition,
+            qwen_sut=qwen_sut,
+            trace_callbacks=composition,
+            result_port=records,
+            clock=MonotonicClock(),
+            nonce_factory=uuid4,
+        )
+        outcome = await harness.run_qwen_baseline(
+            eval_run_id=UUID(
+                "00000000-0000-4000-8000-000000000902"
+            ),
+            environment={
+                "DASHSCOPE_API_KEY": "synthetic-composition-secret",
+                "DASHSCOPE_BASE_URL": (
+                    "https://composition-qwen.invalid/v1"
+                ),
+            },
+            transport_factory=transport_factory,
+        )
+        persisted = await records.list_eval_results(
+            eval_run_id=UUID(
+                "00000000-0000-4000-8000-000000000902"
+            )
+        )
+        return outcome, tuple(qwen_sut.results), persisted
+
+    try:
+        outcome, sut_results, persisted = asyncio.run(execute())
+    finally:
+        engine.dispose()
+
+    assert external_network_calls == 0
+    assert outcome.command_passed is True
+    assert outcome.execution_failures == ()
+    assert persisted == outcome.results
+    assert len(sut_results) == 3
+    assert all(
+        result.evidence.run_record.provider_lane == "qwen_baseline"
+        for result in sut_results
+    )
+    assert all(
+        len(result.evidence.request_understanding_records_v2) == 1
+        for result in sut_results
+    )
+    assert tuple(
+        len(result.evidence.observations) for result in sut_results
+    ) == (1, 0, 0)
+    assert all(
+        task.owner_customer_id == "customer-A"
+        for result in sut_results
+        for task in result.evidence.task_records
+    )
+    assert transport_factory.seen_by_transport == [
+        ["submit_next_move", "submit_presentation_plan"],
+        ["submit_next_move"],
+        ["submit_next_move"],
+    ]
+    projection = "".join(
+        result.model_dump_json() for result in outcome.results
+    )
+    assert "synthetic-composition-secret" not in projection
+    assert "composition-qwen.invalid" not in projection

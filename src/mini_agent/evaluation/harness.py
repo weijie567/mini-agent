@@ -1998,29 +1998,38 @@ class OfflineEvalHarness:
             Callable[[], httpx.AsyncBaseTransport] | None
         ) = None,
     ) -> EvalLaneRunOutcome:
+        private_environment: Mapping[str, str] = environment
+        environment = MappingProxyType({})
         if not _canonical_singleton_state_is_closed():
+            private_environment = MappingProxyType({})
             _restore_canonical_singleton_state()
             raise _fresh_command_error()
         outcome: EvalLaneRunOutcome | None = None
+        command_failed = False
         singleton_state_failed = False
         singleton_state_restored = False
         try:
-            outcome = await self._run_qwen_baseline_impl(
-                eval_run_id=eval_run_id,
-                environment=environment,
-                attempt=attempt,
-                case_ids=case_ids,
-                transport_factory=transport_factory,
-            )
+            try:
+                outcome = await self._run_qwen_baseline_impl(
+                    eval_run_id=eval_run_id,
+                    environment=private_environment,
+                    attempt=attempt,
+                    case_ids=case_ids,
+                    transport_factory=transport_factory,
+                )
+            except Exception:
+                command_failed = True
             singleton_state_failed = (
                 not _canonical_singleton_state_is_closed()
             )
         finally:
+            private_environment = MappingProxyType({})
             singleton_state_restored = (
                 _restore_canonical_singleton_state()
             )
         if (
-            singleton_state_failed
+            command_failed
+            or singleton_state_failed
             or not singleton_state_restored
             or outcome is None
         ):
