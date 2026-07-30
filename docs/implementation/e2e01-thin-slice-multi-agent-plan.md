@@ -1430,7 +1430,7 @@ Real Eval接入前的首轮只读planning/checker核查发现三个Runtime-owned
 
 W4 是 01-01 至 01-08A 执行并集成后的 quality gate，不计入 Phase 1 的八个 numbered Plan；插入式 01-04D–01-04H、上方execution map明确列出的01-07系列Packet与01-08A只作为阻断依赖记录，不推进 lifecycle。先由 canonical Coverage Matrix owner更新 lifecycle，再由 Integrator手工同步 derived Requirements / Roadmap / State；不得调用自动 progress / completion API。
 
-截至 2026-07-31，W4 的 code review / fix、Validation、controlled UAT、Case activation、exhaustive Result、`REGRESSION_GATE` synchronization、Eval re-audit 与 mandatory Security re-review 均已完成。实现分母保持 `42/42`；当前只剩 execution-plan / `.planning` 派生状态收口、`RTA-D01` release gate 用户确认，以及显式 integration → `main` PR 的最终合并决定。该状态不把后两项待决事项解释为实现缺口，也不自动推进 GSD Phase completion。
+截至 2026-07-31，W4 的 code review / fix、Validation、controlled UAT、Case activation、exhaustive Result、`REGRESSION_GATE` synchronization、Eval re-audit、mandatory Security re-review、execution-plan与`.planning`派生状态同步均已完成。实现分母保持 `42/42`；当前release gate只剩`RTA-D01`用户确认，以及显式integration → `main` PR的最终合并决定。两项待决事项不是实现缺口，且完成前不推进GSD Phase completion transition。
 
 ## 8. 集成门禁
 
@@ -1589,8 +1589,8 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | W2 dispatch | `RU_V2_CONTRACT_AND_01_08A_REVIEWED_MERGED / IMPLEMENTATION_42_OF_42 / QUALITY_GATES_COMPLETE` | PR #149形成`B_RU_V2_CONTRACT = 5c84e0e...`；PR #153形成`B_01_08 = b8a2cf3...`；PR #156形成`B_01_08A_COMPOSITION = c59eaea...`；PR #158形成`B_01_08A = 11d6d08...`；后续quality evidence不替换产品实现barrier |
 | `E2E01-01/04` 生命周期 | `REGRESSION_GATE / LIFECYCLE_VALID_RESULTS_PRESENT` | Coverage Matrix owner经PR #178/#180激活为`EXECUTABLE`，PR #181/#182形成全部16 variants的默认gate与聚合Result，PR #183/#184完成`REGRESSION_GATE`裁决及artifact同步；controlled UAT为scoped `PASS`，但`end_user_uat = NOT_RUN` |
 
-W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08/01-08A均已有reviewed feature和post-merge证据；全部42个implementation targets已完成。Canonical Case lifecycle已由对应owner推进为`REGRESSION_GATE`，但 Requirements / Phase completion仍须由Integrator在完成派生状态同步后、依据最终release决策显式推进；本execution owner不维护第二份Case lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。
+W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08/01-08A均已有reviewed feature和post-merge证据；全部42个implementation targets已完成。Canonical Case lifecycle已由对应owner推进为`REGRESSION_GATE`，派生状态也已同步；Requirements / Phase completion transition仅因最终release决策保持锁定。本execution owner不维护第二份Case lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。
 
-PR #187–#192已按single-writer顺序对齐Business、Project Direction、Thin Slice Spec、`AGENTS.md`、Eval owners与`README.md`。本Packet关闭第8节与本节的execution-owner旧状态，不修改marker-bounded execution map、分母或任何Case语义；派生`.planning`状态由后续dedicated planning-status Packet手工同步，且不得反向覆盖active owner。
+PR #187–#195已按single-writer顺序对齐Business、Project Direction、Thin Slice Spec、`AGENTS.md`、Eval owners、execution plan、`.planning`派生状态与`README.md`。本次最终execution-owner收口不修改marker-bounded execution map、分母或任何Case语义；派生状态不得反向覆盖active owner。
 
 产品实现 barrier仍是exact `B_01_08A = 11d6d0886d34a64b37ca34b0cfbc1aa1434b3044`；post-execution evidence和状态PR不替换该barrier。Current release closure只保留`RTA-D01`的最终用户风险确认与integration → `main`合并决定；mandatory Security re-review为`235 CLOSED + 1 ACCEPTED + 0 OPEN`，release用户确认尚未完成。当前缺少`DASHSCOPE_API_KEY`与`DASHSCOPE_BASE_URL`，因此实际credentialed baseline仍为`NOT_RUN / SKIPPED`，且不得把runner实现解释为credentialed Qwen结果、canonical产品启动、完整P0或readiness。
