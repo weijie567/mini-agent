@@ -7383,6 +7383,58 @@ def test_qwen_runner_rejects_selection_before_network_without_secret_traceback(
     assert port.failures == []
 
 
+def test_qwen_runner_post_success_error_scrubs_retained_provider() -> None:
+    traces = InMemoryTraceCallbacks()
+    qwen_sut = QwenSyntheticSut(traces)
+    transport_factory = QwenTransportFactorySpy()
+    harness, _sut, _traces, port = _harness(
+        qwen_sut=qwen_sut,
+        traces=traces,
+        nonce_factory=NonceFactorySpy(
+            (
+                EXECUTION_REF_1,
+                SCRIPT_EXECUTION_REF_1,
+                EXECUTION_REF_2,
+                SCRIPT_EXECUTION_REF_2,
+                EXECUTION_REF_3,
+                SCRIPT_EXECUTION_REF_3,
+            )
+        ),
+    )
+    secret = "synthetic-retained-provider-secret"
+    endpoint = "https://retained-provider.invalid/v1"
+    warmup = _run_qwen(
+        harness,
+        environment={
+            "DASHSCOPE_API_KEY": secret,
+            "DASHSCOPE_BASE_URL": endpoint,
+        },
+        transport_factory=transport_factory,
+    )
+    assert warmup.command_passed is True
+    assert len(qwen_sut.qwen_calls) == 3
+
+    with pytest.raises(EvalHarnessCommandError) as caught:
+        _run_qwen(
+            harness,
+            environment={
+                "DASHSCOPE_API_KEY": secret,
+                "DASHSCOPE_BASE_URL": endpoint,
+            },
+            case_ids=("E2E01-UNKNOWN",),
+            transport_factory=transport_factory,
+        )
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    frame_names, strings, _value_types = _mapper_traceback_state(
+        caught.value
+    )
+    assert frame_names == ("run_qwen_baseline",)
+    assert {secret, endpoint}.isdisjoint(strings)
+    assert len(port.results) == 3
+
+
 @pytest.mark.parametrize(
     "failure_kind",
     ("transport-raises", "wrong-transport", "sut-raises"),
@@ -7456,11 +7508,24 @@ def test_qwen_runner_maps_execution_failures_without_secret_payload(
 def test_qwen_runner_cancellation_preserves_signal_without_secret_traceback(
 ) -> None:
     class CancellingQwenSut:
-        async def execute_qwen_case(self, **_kwargs: object) -> None:
-            raise asyncio.CancelledError("raw-cancelled-qwen-secret")
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.qwen_provider: QwenResponsesAdapterV2 | None = None
 
+        async def execute_qwen_case(
+            self,
+            *,
+            execution_input: EvalCaseExecutionInput,
+            qwen_provider: QwenResponsesAdapterV2,
+        ) -> None:
+            assert type(execution_input) is EvalCaseExecutionInput
+            self.qwen_provider = qwen_provider
+            self.started.set()
+            await asyncio.Future()
+
+    qwen_sut = CancellingQwenSut()
     harness, _sut, _traces, port = _harness(
-        qwen_sut=CancellingQwenSut(),
+        qwen_sut=qwen_sut,
         nonce_factory=NonceFactorySpy(
             (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
         ),
@@ -7468,26 +7533,37 @@ def test_qwen_runner_cancellation_preserves_signal_without_secret_traceback(
     secret = "synthetic-secret-cancelled"
     endpoint = "https://cancelled-qwen.invalid/v1"
 
-    with pytest.raises(asyncio.CancelledError) as caught:
-        _run_qwen(
-            harness,
-            environment={
-                "DASHSCOPE_API_KEY": secret,
-                "DASHSCOPE_BASE_URL": endpoint,
-            },
-            case_ids=("E2E01-01",),
-            transport_factory=lambda: httpx.MockTransport(
-                lambda _request: (_ for _ in ()).throw(
-                    AssertionError("cancelled SUT cannot use provider HTTP")
-                )
-            ),
+    async def execute_and_cancel() -> asyncio.CancelledError:
+        task = asyncio.create_task(
+            harness.run_qwen_baseline(
+                eval_run_id=EVAL_RUN_ID,
+                environment={
+                    "DASHSCOPE_API_KEY": secret,
+                    "DASHSCOPE_BASE_URL": endpoint,
+                },
+                case_ids=("E2E01-01",),
+                transport_factory=lambda: httpx.MockTransport(
+                    lambda _request: (_ for _ in ()).throw(
+                        AssertionError(
+                            "cancelled SUT cannot use provider HTTP"
+                        )
+                    )
+                ),
+            )
         )
+        await qwen_sut.started.wait()
+        task.cancel("raw-cancelled-qwen-secret")
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        return caught.value
 
-    assert caught.value.args == ()
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
+    error = asyncio.run(execute_and_cancel())
+
+    assert error.args == ()
+    assert error.__cause__ is None
+    assert error.__context__ is None
     frame_names, strings, _value_types = _mapper_traceback_state(
-        caught.value
+        error
     )
     assert frame_names == ("run_qwen_baseline",)
     assert {
@@ -7495,6 +7571,9 @@ def test_qwen_runner_cancellation_preserves_signal_without_secret_traceback(
         endpoint,
         "raw-cancelled-qwen-secret",
     }.isdisjoint(strings)
+    assert qwen_sut.qwen_provider is not None
+    assert qwen_sut.qwen_provider._client.is_closed
+    assert harness._pending_case_by_execution_ref == {}
     assert port.results == {}
     assert port.failures == []
 

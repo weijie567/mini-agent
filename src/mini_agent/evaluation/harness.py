@@ -2004,6 +2004,9 @@ class OfflineEvalHarness:
         if not _canonical_singleton_state_is_closed():
             private_environment = MappingProxyType({})
             _restore_canonical_singleton_state()
+            self = None
+            case_ids = None
+            transport_factory = None
             raise _fresh_command_error()
         outcome: EvalLaneRunOutcome | None = None
         cancelled = False
@@ -2032,6 +2035,9 @@ class OfflineEvalHarness:
                 _restore_canonical_singleton_state()
             )
         if cancelled:
+            self = None
+            case_ids = None
+            transport_factory = None
             raise CancelledError()
         if (
             command_failed
@@ -2039,6 +2045,9 @@ class OfflineEvalHarness:
             or not singleton_state_restored
             or outcome is None
         ):
+            self = None
+            case_ids = None
+            transport_factory = None
             raise _fresh_command_error()
         return outcome
 
