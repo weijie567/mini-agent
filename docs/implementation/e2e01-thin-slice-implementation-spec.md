@@ -1,6 +1,6 @@
 # 第一最薄 E2E-01｜Implementation Spec
 
-更新日期：2026-07-30
+更新日期：2026-07-31
 状态：`ACTIVE / CONTRACT_DEFINED`  
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
@@ -1589,6 +1589,24 @@ EvalCaseGraded
 ```
 
 上述“最低事件”按实际到达的受控阶段适用，不表示每条轨迹无条件包含全部事件。`RunStopped` 对正常 `COMPLETED` Run 和第 10.4 节 `INCOMPLETE / PROCESS_RESTART_DETECTED` 恢复 closure 是必需事件；第 10.3 节未捕获异常形成的 `FAILED` Run 是第一切片唯一例外，因为该路径没有 canonical `stop_reason` 或用户结果，必须保留 `AgentRunRecord(FAILED)` 而不能伪造 reason / outcome。`TaskStateChanged`、ToolCall 生命周期事件、Observation 与 Presentation 事件同样只在对应状态迁移或阶段实际发生时出现。
+
+### 11.1 关键 Trace 写入失败与 `RTA-D01` 风险接受
+
+Memory owner 允许可选 Trace 扩展字段按可观测策略降级，但这不适用于本节按实际阶段要求的最低事件、关键关联和终态 closure。第一切片继续采用 fail-closed 规则：适用的关键 Trace 在 terminal aggregate 提交前写入失败时，Runtime 不得返回成功结果；若 Run 已创建，则尽力按第 10.3 节关闭为 `FAILED`，随后保留原始内部失败语义。terminal aggregate 只有在 Run、Task / RequestUnit、Message 与 terminal Trace 全部原子提交后才能返回结果。
+
+本 scoped owner 对 `RTA-D01` 作出以下显式裁决：
+
+| 项目 | 裁决 |
+|---|---|
+| 风险 | Trace Store 或关键 Trace append 失败会拒绝当前请求，造成有界 availability loss |
+| disposition | `ACCEPT / BOUNDED` |
+| 接受理由 | 第一切片宁可拒绝一次 read-only 请求，也不返回缺少关键 Trace、状态或停止证据的不可审计成功；这与 `FAULT-TRACE-DEGRADED` 对关键 Gate、状态和停止原因仍可追踪的要求一致 |
+| 已有控制 | 无自动重试或循环；异常不产生用户结果、不伪造 `RunStopped`，也不留下部分 terminal projection；错误内容保持 bounded |
+| 明确不接受 | “Trace 写失败但仍返回成功”、伪造补写、丢失已提交状态、泄露原始 payload / Token / PII，或用该裁决放宽任何 Action / Ledger 原子性 |
+| 适用范围 | 仅 `E2E01-01/04` 第一切片的 read-only `get_order` Runtime；不覆盖真实生产 SLO、其他 Tool、RAG / Evidence、确认、ActionPolicy、`create_refund`、幂等或 `RESULT_UNKNOWN` |
+| 强制复审触发 | 引入任何 Action / 副作用、canonical 产品启动或生产可用性目标、Trace outbox / async delivery、关键事件分类变化，或目标 Case 从 `EXECUTABLE` 推进到 `REGRESSION_GATE` / 任何 release gate 之前 |
+
+这是一项明确记录的 scoped residual risk，不是已消除的 mitigation。后续 Security artifact 必须把它计入 `accepted_risks`，不得改写为 `NONE` 或用自动化测试宣称 Trace dependency 的 availability risk 已消失。
 
 跨组件安全投影：
 
