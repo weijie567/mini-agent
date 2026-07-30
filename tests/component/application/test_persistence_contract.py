@@ -2083,6 +2083,15 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
         "RequestUnderstandingRecord",
     }
 
+    def folded_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = folded_string(node.left)
+            right = folded_string(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+
     for tree in (source_tree, test_tree):
         assert not any(
             (
@@ -2108,6 +2117,12 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
             if alias.name in removed_v1_types
         }
         assert not imported_v1_types
+        assert not any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "mini_agent.core.task_state"
+            and any(alias.name == "*" for alias in node.names)
+            for node in ast.walk(tree)
+        )
         assert not {
             node.id
             for node in ast.walk(tree)
@@ -2118,8 +2133,25 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
             node.attr
             for node in ast.walk(tree)
             if isinstance(node, ast.Attribute)
-            and node.attr in {*removed_v1_types, "task_state"}
+            and node.attr in {
+                *removed_v1_types,
+                "getmodule",
+                "task_state",
+            }
         }
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and folded_string(node.args[1]) in removed_v1_types
+            for node in ast.walk(tree)
+        )
+        assert not any(
+            isinstance(node, ast.Subscript)
+            and folded_string(node.slice) in removed_v1_types
+            for node in ast.walk(tree)
+        )
         assert not {
             node.id
             for node in ast.walk(tree)
