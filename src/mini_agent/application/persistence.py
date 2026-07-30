@@ -1357,31 +1357,7 @@ def _child_payloads(
         _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
 
     child_records = tuple(child for _, child in validated_children)
-    if parent_spec.record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
-        parent = parent_record
-        accepted_refs = tuple(parent.accepted_delta_refs)
-        child_ids = tuple(child.accepted_delta_id for child in child_records)
-        if (
-            len(accepted_refs) != len(set(accepted_refs))
-            or len(child_ids) != len(set(child_ids))
-            or set(accepted_refs) != set(child_ids)
-        ):
-            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-        for child in child_records:
-            if child.message_ref != parent.message_ref:
-                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-            matches = tuple(
-                candidate
-                for candidate in parent.candidate_validation
-                if candidate.candidate_ref == child.candidate_ref
-            )
-            if (
-                len(matches) != 1
-                or matches[0].decision is not CandidateValidationDecision.ACCEPT
-            ):
-                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-        validated_children.sort(key=lambda item: str(item[1].accepted_delta_id))
-    elif parent_spec.record_code is P0RecordCode.TASK_RECORD:
+    if parent_spec.record_code is P0RecordCode.TASK_RECORD:
         parent = parent_record
         identities = tuple(
             (

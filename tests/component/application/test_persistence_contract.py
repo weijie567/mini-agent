@@ -2103,6 +2103,9 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
             "_P0_V1_PERSISTENCE_REGISTRY",
         }
     }
+    assert "REQUEST_UNDERSTANDING_RECORD" not in inspect.getsource(
+        persistence_module._child_payloads
+    )
 
     catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
