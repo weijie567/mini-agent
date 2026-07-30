@@ -16,7 +16,6 @@ from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    CreateInitialTaskGraphCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateRequestUnitCommand,
@@ -51,7 +50,6 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     SaveInputBindingCommand,
     SaveObservationCommand,
-    SaveRequestUnderstandingCommand,
     SaveRequestUnderstandingV2AcceptedCommand,
     SaveRequestUnderstandingV2NoTaskCommand,
     TaskRecoveryAggregate,
@@ -80,18 +78,15 @@ from mini_agent.core.request_understanding import (
     TaskDeltaOperation,
 )
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationDecision,
-    CandidateValidationRecord,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -299,40 +294,6 @@ def _input_binding(**updates: object) -> InputBinding:
     }
     values.update(updates)
     return InputBinding(**values)
-
-
-def _request_understanding(**updates: object) -> RequestUnderstandingRecord:
-    candidate_ref = uuid4()
-    accepted_delta_ref = uuid4()
-    values: dict[str, object] = {
-        "run_id": uuid4(),
-        "message_ref": uuid4(),
-        "schema_version": "request_understanding_record.p0.v1",
-        "candidate_validation": (
-            CandidateValidationRecord(
-                candidate_ref=candidate_ref,
-                decision=CandidateValidationDecision.ACCEPT,
-            ),
-        ),
-        "accepted_delta_refs": (accepted_delta_ref,),
-        "next_move_candidate_ref": uuid4(),
-    }
-    values.update(updates)
-    return RequestUnderstandingRecord(**values)
-
-
-def _accepted_delta(**updates: object) -> AcceptedTaskDelta:
-    values: dict[str, object] = {
-        "accepted_delta_id": uuid4(),
-        "candidate_ref": uuid4(),
-        "message_ref": uuid4(),
-        "operation": TaskDeltaOperation.ADD_GOAL,
-        "goal_text": "查询订单 O-1001",
-        "input_binding_refs": (uuid4(),),
-        "accepted_at": UTC_NOW,
-    }
-    values.update(updates)
-    return AcceptedTaskDelta(**values)
 
 
 def _task_transition(**updates: object) -> TaskStateTransition:
@@ -829,94 +790,6 @@ def _updated_recovery_trace_events(
     )
     events[event_index] = events[event_index].model_copy(update=updates)
     return tuple(events)
-
-
-def _initial_graph() -> CreateInitialTaskGraphCommand:
-    conversation_id = uuid4()
-    message_id = uuid4()
-    run_id = uuid4()
-    task_id = uuid4()
-    request_unit_id = uuid4()
-    binding_id = uuid4()
-    accepted_delta_id = uuid4()
-    candidate_ref = uuid4()
-    conversation = _conversation(
-        schema_version="conversation_record.p0.v1",
-        conversation_id=conversation_id,
-    )
-    message = _message(
-        schema_version="message_record.p0.v1",
-        message_id=message_id,
-        conversation_id=conversation_id,
-    )
-    run = _run(
-        run_id=run_id,
-        conversation_id=conversation_id,
-        status=AgentRunStatus.RUNNING,
-    )
-    binding = _input_binding(
-        binding_id=binding_id,
-        source_refs=(message_id,),
-    )
-    accepted_delta = _accepted_delta(
-        accepted_delta_id=accepted_delta_id,
-        candidate_ref=candidate_ref,
-        message_ref=message_id,
-        input_binding_refs=(binding_id,),
-    )
-    understanding = _request_understanding(
-        run_id=run_id,
-        message_ref=message_id,
-        candidate_validation=(
-            CandidateValidationRecord(
-                candidate_ref=candidate_ref,
-                decision=CandidateValidationDecision.ACCEPT,
-            ),
-        ),
-        accepted_delta_refs=(accepted_delta_id,),
-    )
-    task = _task(task_id=task_id)
-    request_unit = _request_unit(
-        request_unit_id=request_unit_id,
-        task_id=task_id,
-        goal_text=accepted_delta.goal_text,
-        goal_source_refs=(message_id,),
-        input_binding_refs=(binding_id,),
-    )
-    return CreateInitialTaskGraphCommand(
-        owner_scope=_owner_scope(),
-        expected_conversation_record=conversation,
-        expected_message_record=message,
-        expected_active_run_record=run,
-        request_understanding=SaveRequestUnderstandingCommand(
-            record=understanding,
-            accepted_deltas=(accepted_delta,),
-        ),
-        initial_task=CreateTaskCommand(initial_record=task),
-        initial_request_unit=CreateRequestUnitCommand(initial_record=request_unit),
-        input_bindings=(
-            SaveInputBindingCommand(
-                record=binding,
-                request_unit_id=request_unit_id,
-            ),
-        ),
-        conversation_task_link=ConversationTaskLinkRecord(
-            schema_version="conversation_task_link_record.p0.v1",
-            conversation_id=conversation_id,
-            task_id=task_id,
-            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
-            linked_at=UTC_NOW,
-        ),
-        run_task_link=CreateRunTaskLinkCommand(
-            active_record=RunTaskLinkRecord(
-                schema_version="run_task_link_record.p0.v1",
-                run_id=run_id,
-                task_id=task_id,
-                base_task_state_version=None,
-                result_task_state_version=None,
-            )
-        ),
-    )
 
 
 def _initial_v2_graph() -> CreateInitialTaskGraphV2Command:
@@ -2105,176 +1978,6 @@ def test_restart_tool_command_preserves_identity_attempt_and_action_effect() -> 
                 finished_at=UTC_NOW + timedelta(milliseconds=1),
                 interruption_reason="PROCESS_RESTART_DETECTED",
             ),
-        )
-
-
-def test_request_understanding_command_closes_the_exact_accepted_child_set() -> None:
-    graph = _initial_graph()
-    command = graph.request_understanding
-    child = command.accepted_deltas[0]
-
-    assert set(command.record.accepted_delta_refs) == {child.accepted_delta_id}
-    with pytest.raises(ValidationError):
-        SaveRequestUnderstandingCommand(
-            record=command.record,
-            accepted_deltas=(),
-        )
-    with pytest.raises(ValidationError):
-        SaveRequestUnderstandingCommand(
-            record=_rebuild(
-                command.record,
-                accepted_delta_refs=(
-                    child.accepted_delta_id,
-                    child.accepted_delta_id,
-                ),
-            ),
-            accepted_deltas=(child, child),
-        )
-    with pytest.raises(ValidationError, match="message_ref"):
-        SaveRequestUnderstandingCommand(
-            record=command.record,
-            accepted_deltas=(_rebuild(child, message_ref=uuid4()),),
-        )
-    with pytest.raises(ValidationError, match="accepted candidate"):
-        SaveRequestUnderstandingCommand(
-            record=command.record,
-            accepted_deltas=(_rebuild(child, candidate_ref=uuid4()),),
-        )
-
-
-def test_initial_task_graph_binds_trusted_roots_children_and_relations() -> None:
-    graph = _initial_graph()
-    task = graph.initial_task.initial_record
-    request_unit = graph.initial_request_unit.initial_record
-    binding = graph.input_bindings[0]
-
-    assert graph.owner_scope.customer_id == task.owner_customer_id
-    assert graph.expected_message_record.direction is MessageDirection.USER
-    assert graph.expected_active_run_record.status is AgentRunStatus.RUNNING
-    assert graph.request_understanding.record.run_id == (
-        graph.expected_active_run_record.run_id
-    )
-    assert binding.request_unit_id == request_unit.request_unit_id
-    assert set(request_unit.input_binding_refs) == {binding.record.binding_id}
-    assert graph.conversation_task_link.task_id == task.task_id
-    assert graph.run_task_link.active_record.task_id == task.task_id
-    assert graph.run_task_link.active_record.base_task_state_version is None
-
-    with pytest.raises(ValidationError, match="trusted owner scope"):
-        _rebuild(graph, owner_scope=_owner_scope("customer-B"))
-    with pytest.raises(ValidationError, match="USER message"):
-        _rebuild(
-            graph,
-            expected_message_record=_rebuild(
-                graph.expected_message_record,
-                direction=MessageDirection.ASSISTANT,
-            ),
-        )
-    with pytest.raises(ValidationError, match="Conversation"):
-        _rebuild(
-            graph,
-            expected_message_record=_rebuild(
-                graph.expected_message_record,
-                conversation_id=uuid4(),
-            ),
-        )
-    with pytest.raises(ValidationError, match="RUNNING"):
-        _rebuild(
-            graph,
-            expected_active_run_record=_project_run(
-                graph.expected_active_run_record,
-                status=AgentRunStatus.CREATED,
-            ),
-        )
-    with pytest.raises(ValidationError, match="clean active Run"):
-        _rebuild(
-            graph,
-            expected_active_run_record=_project_run(
-                graph.expected_active_run_record,
-                incomplete_reason="PROCESS_RESTART_DETECTED",
-            ),
-        )
-    with pytest.raises(ValidationError, match="Run"):
-        _rebuild(
-            graph,
-            expected_active_run_record=_project_run(
-                graph.expected_active_run_record,
-                conversation_id=uuid4(),
-            ),
-        )
-    with pytest.raises(ValidationError, match="RequestUnderstanding"):
-        _rebuild(
-            graph,
-            request_understanding=_rebuild(
-                graph.request_understanding,
-                record=_rebuild(
-                    graph.request_understanding.record,
-                    run_id=uuid4(),
-                ),
-            ),
-        )
-    with pytest.raises(ValidationError, match="InputBinding source"):
-        _rebuild(
-            graph,
-            input_bindings=(
-                _rebuild(
-                    binding,
-                    record=_rebuild(binding.record, source_refs=(uuid4(),)),
-                ),
-            ),
-        )
-    with pytest.raises(ValidationError):
-        _rebuild(graph, input_bindings=(binding, binding))
-    with pytest.raises(ValidationError, match="RequestUnit"):
-        _rebuild(
-            graph,
-            initial_request_unit=CreateRequestUnitCommand(
-                initial_record=_rebuild(request_unit, task_id=uuid4())
-            ),
-        )
-    with pytest.raises(ValidationError, match="ConversationTaskLink"):
-        _rebuild(
-            graph,
-            conversation_task_link=_rebuild(
-                graph.conversation_task_link,
-                task_id=uuid4(),
-            ),
-        )
-    with pytest.raises(ValidationError, match="RunTaskLink"):
-        _rebuild(
-            graph,
-            run_task_link=CreateRunTaskLinkCommand(
-                active_record=_rebuild(
-                    graph.run_task_link.active_record,
-                    run_id=uuid4(),
-                )
-            ),
-        )
-
-    first_delta = graph.request_understanding.accepted_deltas[0]
-    second_candidate_ref = uuid4()
-    second_delta = _rebuild(
-        first_delta,
-        accepted_delta_id=uuid4(),
-        candidate_ref=second_candidate_ref,
-    )
-    with pytest.raises(ValidationError):
-        SaveRequestUnderstandingCommand(
-            record=_rebuild(
-                graph.request_understanding.record,
-                candidate_validation=(
-                    *graph.request_understanding.record.candidate_validation,
-                    CandidateValidationRecord(
-                        candidate_ref=second_candidate_ref,
-                        decision=CandidateValidationDecision.ACCEPT,
-                    ),
-                ),
-                accepted_delta_refs=(
-                    first_delta.accepted_delta_id,
-                    second_delta.accepted_delta_id,
-                ),
-            ),
-            accepted_deltas=(first_delta, second_delta),
         )
 
 
@@ -3960,7 +3663,6 @@ def test_application_inbound_models_are_strict_and_visibility_bounded() -> None:
 
 def test_application_port_declaration_models_freeze_the_exact_field_surface() -> None:
     expected_fields = {
-        SaveRequestUnderstandingCommand: {"record", "accepted_deltas"},
         SaveRequestUnderstandingV2AcceptedCommand: {
             "record",
             "accepted_delta",
@@ -3973,18 +3675,6 @@ def test_application_port_declaration_models_freeze_the_exact_field_surface() ->
             "request_understanding_record",
         },
         SaveInputBindingCommand: {"record", "request_unit_id"},
-        CreateInitialTaskGraphCommand: {
-            "owner_scope",
-            "expected_conversation_record",
-            "expected_message_record",
-            "expected_active_run_record",
-            "request_understanding",
-            "initial_task",
-            "initial_request_unit",
-            "input_bindings",
-            "conversation_task_link",
-            "run_task_link",
-        },
         CreateInitialTaskGraphV2Command: {
             "owner_scope",
             "expected_conversation_record",
@@ -4063,10 +3753,6 @@ def test_application_port_declaration_models_freeze_the_exact_field_surface() ->
 
 
 def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> None:
-    exact_one_fields = (
-        (SaveRequestUnderstandingCommand, "accepted_deltas"),
-        (CreateInitialTaskGraphCommand, "input_bindings"),
-    )
     optional_one_fields = (
         (FinalizeRunCommand, "expected_active_links"),
         (FinalizeRunCommand, "terminal_links"),
@@ -4092,10 +3778,6 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         (SaveRequestUnderstandingV2NoTaskCommand, "expected_message_records"),
         (CreateInitialTaskGraphV2Command, "expected_message_records"),
     )
-    for model_type, field_name in exact_one_fields:
-        field_schema = model_type.model_json_schema()["properties"][field_name]
-        assert field_schema["minItems"] == 1
-        assert field_schema["maxItems"] == 1
     for model_type, field_name in optional_one_fields:
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema.get("minItems", 0) == 0
@@ -4112,23 +3794,6 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         field_schema = model_type.model_json_schema()["properties"][field_name]
         assert field_schema["minItems"] == 1
         assert field_schema["maxItems"] == 8
-
-    graph = _initial_graph()
-    child = graph.request_understanding.accepted_deltas[0]
-    binding = graph.input_bindings[0]
-    assert len(graph.request_understanding.accepted_deltas) == 1
-    assert len(graph.input_bindings) == 1
-    with pytest.raises(ValidationError):
-        _rebuild(graph.request_understanding, accepted_deltas=())
-    with pytest.raises(ValidationError):
-        _rebuild(
-            graph.request_understanding,
-            accepted_deltas=(child, child),
-        )
-    with pytest.raises(ValidationError):
-        _rebuild(graph, input_bindings=())
-    with pytest.raises(ValidationError):
-        _rebuild(graph, input_bindings=(binding, binding))
 
     finalization = _completed_finalization()
     empty_finalization = _failed_finalization(with_task=False)
@@ -4202,8 +3867,6 @@ def test_first_slice_application_tuple_cardinality_is_explicitly_bounded() -> No
         )
 
     for model_type, field_name in (
-        (RequestUnderstandingRecord, "accepted_delta_refs"),
-        (AcceptedTaskDelta, "input_binding_refs"),
         (InputBinding, "source_refs"),
         (RequestUnitRecord, "input_binding_refs"),
     ):

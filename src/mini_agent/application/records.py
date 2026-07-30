@@ -30,7 +30,6 @@ from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.request_processing import _normalize_order_id
 from mini_agent.core.request_understanding import UncertaintyV2
 from mini_agent.core.task_state import (
-    AcceptedTaskDelta,
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
@@ -40,7 +39,6 @@ from mini_agent.core.task_state import (
     DurableTaskDeltaCandidateV2,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -226,54 +224,6 @@ class RunTaskLinkRecord(_StrictAuditOnlyRecord):
             and self.result_task_state_version < self.base_task_state_version
         ):
             raise ValueError("RunTaskLink result version cannot precede base version")
-        return self
-
-
-class SaveRequestUnderstandingCommand(_StrictRuntimePrivateRecord):
-    """Persist one RequestUnderstanding with its exact accepted logical children."""
-
-    record: RequestUnderstandingRecord
-    accepted_deltas: Annotated[
-        tuple[AcceptedTaskDelta, ...],
-        Field(min_length=1, max_length=1),
-    ]
-
-    @model_validator(mode="after")
-    def accepted_children_are_exact_and_parent_bound(self) -> Self:
-        accepted_refs = self.record.accepted_delta_refs
-        child_ids = tuple(child.accepted_delta_id for child in self.accepted_deltas)
-        if len(accepted_refs) != len(set(accepted_refs)) or len(child_ids) != len(
-            set(child_ids)
-        ):
-            raise ValueError(
-                "RequestUnderstanding requires unique accepted child identities"
-            )
-        if set(accepted_refs) != set(child_ids):
-            raise ValueError(
-                "RequestUnderstanding requires the exact accepted child set"
-            )
-        for child in self.accepted_deltas:
-            if child.message_ref != self.record.message_ref:
-                raise ValueError(
-                    "accepted child message_ref must match RequestUnderstanding"
-                )
-            matching_candidates = tuple(
-                candidate
-                for candidate in self.record.candidate_validation
-                if candidate.candidate_ref == child.candidate_ref
-            )
-            if (
-                len(matching_candidates) != 1
-                or matching_candidates[0].decision
-                is not CandidateValidationDecision.ACCEPT
-            ):
-                raise ValueError(
-                    "accepted child must bind exactly one accepted candidate"
-                )
-            if len(child.input_binding_refs) != len(set(child.input_binding_refs)):
-                raise ValueError(
-                    "accepted child requires unique InputBinding references"
-                )
         return self
 
 
@@ -1773,123 +1723,6 @@ def _strict_rebuild_create_run_task_link_command(
         rebuilt,
         error_message=error_message,
     )
-
-
-class CreateInitialTaskGraphCommand(_StrictRuntimePrivateRecord):
-    """One conditional write for the accepted initial goal and all projections."""
-
-    owner_scope: TrustedOwnerScope
-    expected_conversation_record: ConversationRecord
-    expected_message_record: MessageRecord
-    expected_active_run_record: AgentRunRecord
-    request_understanding: SaveRequestUnderstandingCommand
-    initial_task: CreateTaskCommand
-    initial_request_unit: CreateRequestUnitCommand
-    input_bindings: Annotated[
-        tuple[SaveInputBindingCommand, ...],
-        Field(min_length=1, max_length=1),
-    ]
-    conversation_task_link: ConversationTaskLinkRecord
-    run_task_link: CreateRunTaskLinkCommand
-
-    @model_validator(mode="after")
-    def graph_is_owner_consistent_and_bijective(self) -> Self:
-        conversation = self.expected_conversation_record
-        message = self.expected_message_record
-        run = self.expected_active_run_record
-        understanding = self.request_understanding
-        task = self.initial_task.initial_record
-        request_unit = self.initial_request_unit.initial_record
-        conversation_link = self.conversation_task_link
-        run_link = self.run_task_link.active_record
-
-        if conversation.owner_customer_id != self.owner_scope.customer_id:
-            raise ValueError("Conversation must match the trusted owner scope")
-        if task.owner_customer_id != self.owner_scope.customer_id:
-            raise ValueError("initial Task must match the trusted owner scope")
-        if (
-            message.direction is not MessageDirection.USER
-            or message.conversation_id != conversation.conversation_id
-        ):
-            raise ValueError(
-                "initial graph requires the exact USER message in Conversation"
-            )
-        if run.status is not AgentRunStatus.RUNNING:
-            raise ValueError("initial graph requires a RUNNING Run")
-        if run.incomplete_reason is not None:
-            raise ValueError("initial graph requires a clean active Run")
-        if run.conversation_id != conversation.conversation_id:
-            raise ValueError("active Run must belong to the Conversation")
-        if (
-            understanding.record.run_id != run.run_id
-            or understanding.record.message_ref != message.message_id
-        ):
-            raise ValueError("RequestUnderstanding must bind the exact Run and Message")
-        if request_unit.task_id != task.task_id:
-            raise ValueError("initial RequestUnit must belong to initial Task")
-        if (
-            request_unit.state_version != task.state_version
-            or request_unit.status is not task.status
-        ):
-            raise ValueError(
-                "initial Task and RequestUnit must share version and status"
-            )
-        if (
-            len(request_unit.goal_source_refs) != 1
-            or request_unit.goal_source_refs[0] != message.message_id
-        ):
-            raise ValueError(
-                "initial RequestUnit goal source must be the exact USER message"
-            )
-
-        binding_by_id: dict[UUID, SaveInputBindingCommand] = {}
-        for binding in self.input_bindings:
-            binding_id = binding.record.binding_id
-            if binding_id in binding_by_id:
-                raise ValueError("InputBinding identities must be unique")
-            if binding.request_unit_id != request_unit.request_unit_id:
-                raise ValueError("InputBinding must bind the initial RequestUnit")
-            if binding.record.source_refs != (message.message_id,):
-                raise ValueError("InputBinding source must be the exact USER message")
-            binding_by_id[binding_id] = binding
-        request_unit_binding_ids = tuple(request_unit.input_binding_refs)
-        if len(request_unit_binding_ids) != len(set(request_unit_binding_ids)) or set(
-            request_unit_binding_ids
-        ) != set(binding_by_id):
-            raise ValueError("initial graph requires exact InputBinding identities")
-
-        accepted_binding_ids = {
-            binding_id
-            for delta in understanding.accepted_deltas
-            for binding_id in delta.input_binding_refs
-        }
-        if accepted_binding_ids != set(binding_by_id):
-            raise ValueError(
-                "accepted deltas and RequestUnit require the same InputBindings"
-            )
-        if (
-            len(understanding.accepted_deltas) != 1
-            or understanding.accepted_deltas[0].goal_text != request_unit.goal_text
-        ):
-            raise ValueError(
-                "initial RequestUnit must map bijectively to one accepted goal"
-            )
-
-        if (
-            conversation_link.conversation_id != conversation.conversation_id
-            or conversation_link.task_id != task.task_id
-            or conversation_link.ended_at is not None
-        ):
-            raise ValueError(
-                "ConversationTaskLink must be the active initial Task link"
-            )
-        if (
-            run_link.run_id != run.run_id
-            or run_link.task_id != task.task_id
-            or run_link.base_task_state_version is not None
-        ):
-            raise ValueError("RunTaskLink must bind the Run to its newly created Task")
-        return self
 
 
 class CreateInitialTaskGraphV2Command(_StrictRuntimePrivateRecord):

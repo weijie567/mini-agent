@@ -12,7 +12,6 @@ from mini_agent.application.ports import (
     ExactRunEvidencePort,
     EvalResultPort,
     GetOrderPort,
-    ModelProvider,
     ModelProviderV2,
     RestartRecoveryPort,
     RuntimeRecordPort,
@@ -24,7 +23,6 @@ from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    CreateInitialTaskGraphCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -51,7 +49,6 @@ from mini_agent.application.records import (
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
 )
 
@@ -210,7 +207,7 @@ def _assert_signature(
 def test_model_provider_surface_only_proposes_validated_candidates() -> None:
     provider = CandidateOnlyProvider()
 
-    assert isinstance(provider, ModelProvider)
+    assert isinstance(provider, ModelProviderV2)
     assert not hasattr(provider, "execute_tool")
     assert not hasattr(provider, "save_task")
 
@@ -225,7 +222,7 @@ def test_application_inbound_handler_and_provider_failure_surface_are_exact() ->
         },
     )
     assert "trusted" in (AgentRunHandler.__doc__ or "").casefold()
-    provider_doc = ModelProvider.__doc__ or ""
+    provider_doc = ModelProviderV2.__doc__ or ""
     assert "ProviderProtocolError" in provider_doc
     assert "from None" in provider_doc
     assert "__cause__" in provider_doc
@@ -235,7 +232,7 @@ def test_application_inbound_handler_and_provider_failure_surface_are_exact() ->
 
 
 def test_ports_are_protocols_owned_by_application() -> None:
-    assert ModelProvider._is_protocol
+    assert ModelProviderV2._is_protocol
     assert AgentRunHandler._is_protocol
     assert SessionAuthPort._is_protocol
     assert GetOrderPort._is_protocol
@@ -342,13 +339,8 @@ def test_run_start_and_atomic_finalization_are_separate_exact_projection_cas() -
     }
 
 
-def test_initial_graph_task_transition_and_observation_use_aggregate_commands() -> None:
+def test_task_transition_and_observation_use_aggregate_commands() -> None:
     contracts = (
-        (
-            RuntimeRecordPort.create_initial_task_graph_if_current,
-            CreateInitialTaskGraphCommand,
-            ConditionalWriteResult,
-        ),
         (
             RuntimeRecordPort.apply_task_transition_if_current,
             ApplyTaskTransitionCommand,
@@ -423,8 +415,6 @@ def test_owner_scoped_reads_require_minimal_trusted_owner_scope() -> None:
         RuntimeRecordPort.load_run_for_owner,
         RuntimeRecordPort.load_task_for_owner,
         RuntimeRecordPort.load_request_unit_for_owner,
-        RuntimeRecordPort.load_request_understanding_for_owner,
-        RuntimeRecordPort.load_accepted_task_delta_for_owner,
         RuntimeRecordPort.load_input_binding_for_owner,
         RuntimeRecordPort.load_context_manifest_for_owner,
         RuntimeRecordPort.load_gate_decision_for_owner,
@@ -448,8 +438,6 @@ def test_owner_scoped_read_shapes_hide_absent_vs_foreign_resources() -> None:
         RuntimeRecordPort.load_run_for_owner,
         RuntimeRecordPort.load_task_for_owner,
         RuntimeRecordPort.load_request_unit_for_owner,
-        RuntimeRecordPort.load_request_understanding_for_owner,
-        RuntimeRecordPort.load_accepted_task_delta_for_owner,
         RuntimeRecordPort.load_input_binding_for_owner,
         RuntimeRecordPort.load_context_manifest_for_owner,
         RuntimeRecordPort.load_gate_decision_for_owner,
@@ -696,7 +684,7 @@ def test_core_and_application_source_have_no_framework_or_adapter_imports() -> N
         assert forbidden_import not in source
 
 
-def test_model_provider_v2_is_additive_and_has_exact_failure_partition() -> None:
+def test_model_provider_v2_is_current_and_has_exact_failure_partition() -> None:
     provider = CandidateOnlyProvider()
 
     assert isinstance(provider, ModelProviderV2)
@@ -716,11 +704,6 @@ def test_model_provider_v2_is_additive_and_has_exact_failure_partition() -> None
             "return": PresentationPlan,
         },
     )
-    assert (
-        get_type_hints(ModelProvider.propose_next_move, include_extras=True)["return"]
-        is RequestUnderstandingOutput
-    )
-
     normalized_doc = " ".join((ModelProviderV2.__doc__ or "").split())
     for required_term in (
         "correctly framed Request Understanding target function",
