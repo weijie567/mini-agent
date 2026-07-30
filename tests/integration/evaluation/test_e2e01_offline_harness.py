@@ -173,6 +173,37 @@ ARTIFACTS = load_e2e01_artifacts(
     REPO_ROOT,
     candidate_version="candidate:c35687d",
 )
+
+
+def _test_only_derived_lifecycle_bundle(
+    source: LoadedE2E01Artifacts,
+    *,
+    default_status: str = "EXECUTABLE",
+    status_by_case: Mapping[str, str] | None = None,
+) -> LoadedE2E01Artifacts:
+    """Derive synthetic lifecycle state without changing authenticated artifacts."""
+
+    overrides = dict(status_by_case or {})
+    return source.model_copy(
+        update={
+            "cases": tuple(
+                case.model_copy(
+                    update={
+                        "lifecycle_status": overrides.get(
+                            case.case_id,
+                            default_status,
+                        )
+                    }
+                )
+                for case in source.cases
+            )
+        }
+    )
+
+
+TEST_ONLY_EXECUTABLE_ARTIFACTS = _test_only_derived_lifecycle_bundle(
+    ARTIFACTS
+)
 EVAL_RUN_ID = UUID("00000000-0000-4000-8000-000000000801")
 RUN_ID = UUID("00000000-0000-4000-8000-000000000802")
 TRACE_REF = UUID("00000000-0000-4000-8000-000000000803")
@@ -2646,7 +2677,7 @@ def _harness(
     port.timeline = timeline
     sut = sut or SyntheticSut(traces)
     harness_arguments: dict[str, object] = {
-        "artifacts": artifacts or ARTIFACTS,
+        "artifacts": artifacts or TEST_ONLY_EXECUTABLE_ARTIFACTS,
         "sut": sut,
         "trace_callbacks": traces,
         "result_port": cast(EvalResultPort, port),
@@ -2682,8 +2713,142 @@ def _run(
     )
 
 
+def test_contract_defined_cases_fail_before_any_execution_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_ids = ("E2E01-01", "E2E01-04-A", "E2E01-04-B")
+    assert all(
+        ARTIFACTS.case_by_id(case_id).lifecycle_status
+        == "CONTRACT_DEFINED"
+        for case_id in selected_ids
+    )
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    sut = BoundaryProbeSut()
+    provider_calls = 0
+    nonce_calls = 0
+    grader_calls = 0
+
+    class ForbiddenScriptedProvider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError(
+                "CONTRACT_DEFINED Case cannot construct a Provider"
+            )
+
+    def forbidden_nonce() -> UUID:
+        nonlocal nonce_calls
+        nonce_calls += 1
+        return uuid4()
+
+    def forbidden_grader(
+        *_args: object,
+        **_kwargs: object,
+    ) -> GradingOutcome:
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("CONTRACT_DEFINED Case cannot reach a Grader")
+
+    monkeypatch.setattr(
+        harness_module,
+        "ScriptedModelProviderV2",
+        ForbiddenScriptedProvider,
+    )
+    harness, _sut, _traces, _port = _harness(
+        artifacts=ARTIFACTS,
+        sut=sut,
+        traces=traces,
+        port=port,
+        grader_runner=forbidden_grader,
+        nonce_factory=forbidden_nonce,
+    )
+
+    outcome = _run(harness, case_ids=selected_ids)
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert tuple(
+        failure.case_id for failure in outcome.execution_failures
+    ) == selected_ids
+    assert all(
+        failure.failure_phase is EvalExecutionFailurePhase.CASE_SETUP
+        and failure.safe_error_code
+        is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+        and failure.trace_ref is None
+        for failure in outcome.execution_failures
+    )
+    assert tuple(port.failures) == outcome.execution_failures
+    assert port.results == {}
+    assert port.events == ["failure_append"] * len(selected_ids)
+    assert sut.received_calls == []
+    assert provider_calls == 0
+    assert nonce_calls == 0
+    assert grader_calls == 0
+    assert traces.events == []
+
+
+@pytest.mark.parametrize(
+    "blocked_status",
+    ("CONTRACT_DEFINED", "RETIRED", "UNKNOWN"),
+)
+def test_mixed_lifecycle_selection_fails_closed_as_one_batch(
+    blocked_status: str,
+) -> None:
+    blocked_case_id = "E2E01-01+SEC-ARGUMENT-BINDING"
+    artifacts = _test_only_derived_lifecycle_bundle(
+        ARTIFACTS,
+        status_by_case={blocked_case_id: blocked_status},
+    )
+    sut = BoundaryProbeSut()
+    nonce_calls = 0
+
+    def forbidden_nonce() -> UUID:
+        nonlocal nonce_calls
+        nonce_calls += 1
+        return uuid4()
+
+    harness, _sut, traces, port = _harness(
+        artifacts=artifacts,
+        sut=sut,
+        nonce_factory=forbidden_nonce,
+    )
+
+    outcome = _run(
+        harness,
+        case_ids=("E2E01-01", blocked_case_id),
+    )
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert tuple(
+        failure.case_id for failure in outcome.execution_failures
+    ) == (blocked_case_id,)
+    assert tuple(port.failures) == outcome.execution_failures
+    assert port.results == {}
+    assert sut.received_calls == []
+    assert nonce_calls == 0
+    assert traces.events == []
+
+
+def test_test_only_regression_gate_case_remains_executable() -> None:
+    artifacts = _test_only_derived_lifecycle_bundle(
+        ARTIFACTS,
+        default_status="REGRESSION_GATE",
+    )
+    harness, _sut, _traces, port = _harness(artifacts=artifacts)
+
+    outcome = _run(harness)
+
+    assert outcome.command_passed is True
+    assert outcome.execution_failures == ()
+    assert len(outcome.results) == 1
+    assert outcome.results[0].status is EvalResultStatus.PASS
+    assert tuple(port.results.values()) == outcome.results
+
+
 def test_execution_only_sut_input_excludes_case_oracle_and_nested_setup() -> None:
-    source_case = ARTIFACTS.case_by_id("E2E01-01")
+    source_case = TEST_ONLY_EXECUTABLE_ARTIFACTS.case_by_id("E2E01-01")
     case_values = source_case.model_dump(mode="json")
     source_message = dict(case_values["input"]["messages"][0])
     source_message["setup_answer"] = {
@@ -2697,11 +2862,11 @@ def test_execution_only_sut_input_excludes_case_oracle_and_nested_setup() -> Non
     }
     case_values["input"] = case_input
     case = EvalCaseArtifact.model_validate(case_values)
-    artifacts = ARTIFACTS.model_copy(
+    artifacts = TEST_ONLY_EXECUTABLE_ARTIFACTS.model_copy(
         update={
             "cases": tuple(
                 case if item.case_id == case.case_id else item
-                for item in ARTIFACTS.cases
+                for item in TEST_ONLY_EXECUTABLE_ARTIFACTS.cases
             )
         }
     )
@@ -6664,10 +6829,12 @@ def test_caller_eval_run_uuid_cannot_alias_private_replay_key() -> None:
     assert len(port.results) == 1
 
 
-def test_authenticated_artifacts_are_snapshotted_at_construction() -> None:
-    caller_artifacts = load_e2e01_artifacts(
-        REPO_ROOT,
-        candidate_version="candidate:c35687d",
+def test_test_only_executable_bundle_is_snapshotted_at_construction() -> None:
+    caller_artifacts = _test_only_derived_lifecycle_bundle(
+        load_e2e01_artifacts(
+            REPO_ROOT,
+            candidate_version="candidate:c35687d",
+        )
     )
     caller_case = caller_artifacts.case_by_id("E2E01-01")
     expected_dataset_version = caller_case.version_manifest[
@@ -7295,6 +7462,101 @@ def test_qwen_runner_missing_env_persists_three_not_run_without_network() -> Non
         assert result.usage_summary is None
 
 
+def test_contract_defined_qwen_with_credentials_fails_before_provider_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    qwen_sut_calls = 0
+    transport_factory_calls = 0
+    adapter_calls = 0
+    grader_calls = 0
+
+    class ForbiddenQwenSut:
+        async def execute_qwen_case(self, **_kwargs: object) -> None:
+            nonlocal qwen_sut_calls
+            qwen_sut_calls += 1
+            raise AssertionError(
+                "CONTRACT_DEFINED Case cannot execute the Qwen SUT"
+            )
+
+    class ForbiddenQwenAdapter:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal adapter_calls
+            adapter_calls += 1
+            raise AssertionError(
+                "CONTRACT_DEFINED Case cannot construct a Qwen adapter"
+            )
+
+    def forbidden_transport_factory() -> httpx.AsyncBaseTransport:
+        nonlocal transport_factory_calls
+        transport_factory_calls += 1
+        return httpx.MockTransport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError(
+                    "CONTRACT_DEFINED Case cannot access Qwen transport"
+                )
+            )
+        )
+
+    def forbidden_grader(
+        *_args: object,
+        **_kwargs: object,
+    ) -> GradingOutcome:
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("CONTRACT_DEFINED Case cannot reach a Grader")
+
+    monkeypatch.setattr(
+        harness_module,
+        "QwenResponsesAdapterV2",
+        ForbiddenQwenAdapter,
+    )
+    harness, _sut, _traces, _port = _harness(
+        artifacts=ARTIFACTS,
+        qwen_sut=ForbiddenQwenSut(),
+        traces=traces,
+        port=port,
+        grader_runner=forbidden_grader,
+    )
+
+    outcome = _run_qwen(
+        harness,
+        environment={
+            "DASHSCOPE_API_KEY": "synthetic-lifecycle-secret",
+            "DASHSCOPE_BASE_URL": "https://lifecycle-qwen.invalid/v1",
+        },
+        transport_factory=forbidden_transport_factory,
+    )
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert tuple(
+        failure.case_id for failure in outcome.execution_failures
+    ) == ("E2E01-01", "E2E01-04-A", "E2E01-04-B")
+    assert all(
+        failure.failure_phase is EvalExecutionFailurePhase.CASE_SETUP
+        and failure.safe_error_code
+        is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+        and failure.trace_ref is None
+        for failure in outcome.execution_failures
+    )
+    assert tuple(port.failures) == outcome.execution_failures
+    assert port.results == {}
+    assert port.events == ["failure_append"] * 3
+    assert qwen_sut_calls == 0
+    assert transport_factory_calls == 0
+    assert adapter_calls == 0
+    assert grader_calls == 0
+    assert traces.events == []
+    projection = "".join(
+        failure.model_dump_json()
+        for failure in outcome.execution_failures
+    )
+    assert "synthetic-lifecycle-secret" not in projection
+    assert "lifecycle-qwen.invalid" not in projection
+
+
 def test_qwen_runner_missing_sut_replays_not_run_without_network() -> None:
     transport_calls = 0
 
@@ -7717,6 +7979,9 @@ def test_qwen_runner_mock_transport_runs_real_postgres_composition(
             "git:c59eaea8bac2b25cc936eb2f47af15b6da1d2595"
         ),
     )
+    test_only_executable_artifacts = _test_only_derived_lifecycle_bundle(
+        artifacts
+    )
     transport_factory = QwenTransportFactorySpy()
     external_network_calls = 0
 
@@ -7772,7 +8037,7 @@ def test_qwen_runner_mock_transport_runs_real_postgres_composition(
         qwen_sut = CapturingCompositionSut()
         records = PostgresRecordAdapter(session_factory)
         harness = OfflineEvalHarness(
-            artifacts=artifacts,
+            artifacts=test_only_executable_artifacts,
             sut=composition,
             qwen_sut=qwen_sut,
             trace_callbacks=composition,

@@ -11,7 +11,8 @@ from sqlalchemy import func, select
 import mini_agent.bootstrap as bootstrap_module
 from mini_agent.application.persistence import P0RecordCode
 from mini_agent.application.records import (
-    EvalResultStatus,
+    EvalExecutionFailurePhase,
+    EvalExecutionSafeErrorCode,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
@@ -110,7 +111,7 @@ def _assert_bounded_composition_error(error: OfflineCompositionError) -> None:
     assert error.__context__ is None
 
 
-async def test_real_http_runtime_postgres_and_eval_gate_pass(
+async def test_real_http_runtime_postgres_and_contract_defined_eval_fail_closed(
     eval_postgres_namespace,
 ) -> None:
     engine = eval_postgres_namespace.build_engine()
@@ -183,30 +184,44 @@ async def test_real_http_runtime_postgres_and_eval_gate_pass(
             case_ids=TARGET_CASE_IDS,
         )
 
-        assert outcome.command_passed is True
-        assert outcome.execution_failures == ()
-        assert tuple(result.case_id for result in outcome.results) == (
-            TARGET_CASE_IDS
-        )
+        assert outcome.command_passed is False
+        assert outcome.results == ()
+        assert tuple(
+            failure.case_id for failure in outcome.execution_failures
+        ) == TARGET_CASE_IDS
         assert all(
-            result.status is EvalResultStatus.PASS
-            for result in outcome.results
+            failure.failure_phase
+            is EvalExecutionFailurePhase.CASE_SETUP
+            and failure.safe_error_code
+            is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+            and failure.trace_ref is None
+            for failure in outcome.execution_failures
         )
         persisted = await records.list_eval_results(eval_run_id=eval_run_id)
-        assert persisted == outcome.results
-        assert all(
-            result.version_manifest.candidate_version
-            == "git:5c84e0e170e42853af85526805d904bf12671eaa"
-            for result in persisted
+        persisted_failures = (
+            await records.list_eval_execution_failures(
+                eval_run_id=eval_run_id,
+            )
         )
-        assert all(result.trace_ref is not None for result in persisted)
-        for result in persisted:
-            assert result.trace_ref is not None
-            trace = await composition.reload_trace(result.trace_ref)
-            assert trace[-1].event_type is TraceEventType.EVAL_CASE_GRADED
-            assert trace[-1].case_id == result.case_id
+        assert persisted == ()
+        assert persisted_failures == outcome.execution_failures
+        assert all(
+            failure.version_manifest.candidate_version
+            == "git:5c84e0e170e42853af85526805d904bf12671eaa"
+            for failure in persisted_failures
+        )
+        for direct_result in (success, foreign, nonexistent):
+            assert direct_result.evidence.trace_ref is not None
+            trace = await composition.reload_trace(
+                direct_result.evidence.trace_ref
+            )
             assert all(
-                event.run_id == result.trace_ref for event in trace
+                event.event_type is not TraceEventType.EVAL_CASE_GRADED
+                for event in trace
+            )
+            assert all(
+                event.run_id == direct_result.evidence.trace_ref
+                for event in trace
             )
     finally:
         engine.dispose()
