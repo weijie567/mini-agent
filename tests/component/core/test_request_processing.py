@@ -2796,6 +2796,42 @@ def _legacy_core_source_hits(
                 id(descendant) for descendant in ast.walk(node.value)
             )
 
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def lexical_scope(node: ast.AST) -> ast.AST:
+        current = node
+        while current in parents:
+            current = parents[current]
+            if isinstance(
+                current,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ):
+                return current
+        return tree
+
+    def parameter_names(scope: ast.AST) -> set[str]:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return set()
+        return {
+            argument.arg
+            for argument in (
+                *scope.args.posonlyargs,
+                *scope.args.args,
+                *scope.args.kwonlyargs,
+            )
+        } | {
+            argument.arg
+            for argument in (scope.args.vararg, scope.args.kwarg)
+            if argument is not None
+        }
+
     relevant_modules = {
         "mini_agent.core.request_processing",
         "mini_agent.core.request_understanding",
@@ -2808,6 +2844,7 @@ def _legacy_core_source_hits(
     imported_module_aliases: set[str] = set()
     importlib_aliases: set[str] = set()
     builtins_aliases: set[str] = set()
+    pytest_aliases: set[str] = set()
     builtin_callable_names = {
         "__import__",
         "delattr",
@@ -2822,7 +2859,10 @@ def _legacy_core_source_hits(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in relevant_modules:
+                if (
+                    alias.name in relevant_modules
+                    and lexical_scope(node) is tree
+                ):
                     imported_module_aliases.add(
                         alias.asname or alias.name.split(".")[0]
                     )
@@ -2830,8 +2870,13 @@ def _legacy_core_source_hits(
                     importlib_aliases.add(alias.asname or alias.name)
                 if alias.name == "builtins":
                     builtins_aliases.add(alias.asname or alias.name)
+                if alias.name == "pytest":
+                    pytest_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
-            if node.module == "mini_agent.core":
+            if (
+                node.module == "mini_agent.core"
+                and lexical_scope(node) is tree
+            ):
                 for alias in node.names:
                     if alias.name in relevant_module_tails:
                         imported_module_aliases.add(alias.asname or alias.name)
@@ -2847,6 +2892,12 @@ def _legacy_core_source_hits(
                         imported_callable_aliases[
                             alias.asname or alias.name
                         ] = "import_module"
+            if node.module == "pytest":
+                for alias in node.names:
+                    if alias.name in {"importorskip", "skip", "xfail"}:
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = alias.name
 
     def assignment_target_values(
         node: ast.AST,
@@ -2890,13 +2941,37 @@ def _legacy_core_source_hits(
         name: str,
         *,
         before: ast.AST,
-    ) -> tuple[ast.AST, ast.AST] | None:
-        candidates = [
+    ) -> tuple[ast.AST, ast.AST] | bool | None:
+        use_scope = lexical_scope(before)
+        local_bindings = [
             item
             for item in assignments_by_name.get(name, ())
-            if position(item[0]) < position(before)
+            if lexical_scope(item[0]) is use_scope
         ]
-        return max(candidates, key=lambda item: position(item[0]), default=None)
+        if use_scope is not tree and (
+            local_bindings or name in parameter_names(use_scope)
+        ):
+            dominating = [
+                item
+                for item in local_bindings
+                if position(item[0]) < position(before)
+            ]
+            return max(
+                dominating,
+                key=lambda item: position(item[0]),
+                default=False,
+            )
+        module_candidates = [
+            item
+            for item in assignments_by_name.get(name, ())
+            if lexical_scope(item[0]) is tree
+            and position(item[0]) < position(before)
+        ]
+        return max(
+            module_candidates,
+            key=lambda item: position(item[0]),
+            default=None,
+        )
 
     def name_refers_to_module(
         name: str,
@@ -2907,6 +2982,8 @@ def _legacy_core_source_hits(
         if name in seen:
             return False
         assignment = latest_assignment(name, before=before)
+        if assignment is False:
+            return False
         if assignment is not None:
             assignment_node, value = assignment
             if isinstance(value, ast.Name):
@@ -2927,6 +3004,8 @@ def _legacy_core_source_hits(
         if name in seen:
             return None
         assignment = latest_assignment(name, before=before)
+        if assignment is False:
+            return None
         if assignment is not None:
             assignment_node, value = assignment
             if isinstance(value, ast.Name):
@@ -2968,6 +3047,13 @@ def _legacy_core_source_hits(
             return node.func.attr
         if (
             isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in pytest_aliases
+            and node.func.attr in {"importorskip", "skip", "xfail"}
+        ):
+            return node.func.attr
+        if (
+            isinstance(node.func, ast.Attribute)
             and node.func.attr == "import_module"
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in importlib_aliases
@@ -2986,7 +3072,7 @@ def _legacy_core_source_hits(
         if name in seen:
             return False
         assignment = latest_assignment(name, before=before)
-        if assignment is None:
+        if assignment is None or assignment is False:
             return False
         assignment_node, value = assignment
         if isinstance(value, ast.Name):
@@ -3001,12 +3087,6 @@ def _legacy_core_source_hits(
             and not value.args
             and not value.keywords
         )
-
-    parents = {
-        child: parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
-    }
 
     def is_relevant_module(node: ast.AST, *, at: ast.AST | None = None) -> bool:
         dotted_name = _dotted_ast_name(node)
@@ -3108,23 +3188,52 @@ def _legacy_core_source_hits(
         has_skip_call = any(
             isinstance(node, ast.Call)
             and (
-                normalized_call_name(node) in {"skip", "xfail"}
+                normalized_call_name(node)
+                in {"importorskip", "skip", "xfail"}
                 or (
                     isinstance(node.func, ast.Attribute)
-                    and node.func.attr in {"skip", "xfail"}
+                    and node.func.attr in {"importorskip", "skip", "xfail"}
                 )
             )
             for node in ast.walk(function)
         )
+        critical_runtime_bindings = required_runtime_modules | {
+            "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS",
+            "hasattr",
+        }
+        local_critical_stores = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and node.id in critical_runtime_bindings
+        ]
+        module_critical_rebindings = [
+            node
+            for name in required_runtime_modules | {"hasattr"}
+            for node, _value in assignments_by_name.get(name, ())
+            if lexical_scope(node) is tree
+        ]
+        has_parameters = bool(
+            function.args.posonlyargs
+            or function.args.args
+            or function.args.kwonlyargs
+            or function.args.vararg
+            or function.args.kwarg
+        )
         return (
             catalog_is_exact
             and not function.decorator_list
+            and not has_parameters
             and len(runtime_loops) == 1
             and runtime_absence_loop_is_exact(runtime_loops[0])
             and legacy_name_stores == [runtime_loops[0].target]
             and prefix_is_straight_line
             and not has_early_termination
             and not has_skip_call
+            and not local_critical_stores
+            and not module_critical_rebindings
+            and required_runtime_modules.issubset(imported_module_aliases)
         )
 
     def is_exact_runtime_absence_call(node: ast.Call) -> bool:
@@ -3407,6 +3516,28 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "    for legacy_name in ():\n"
             "        assert not hasattr(core_module, legacy_name)\n"
         ),
+        (
+            module_import
+            + "def unrelated():\n"
+            "    core_module = object()\n"
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def unrelated():\n"
+            "    reflect = lambda value, name: None\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "def unrelated():\n"
+            "    namespace = {}\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+        ),
         module_import + f'getattr(core_module, "{legacy_target}")',
     )
     for mutation in mutations:
@@ -3455,6 +3586,50 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
             + runtime_loop
         ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = ()\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    request_processing_module = object()\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "request_processing_module = object()\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface("
+            "request_processing_module=object()):\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "from pytest import skip\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = skip("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = pytest.importorskip("missing")\n'
+            + runtime_loop
+        ),
     )
     for runtime_downgrade in runtime_downgrades:
         assert _legacy_core_source_hits(
@@ -3483,6 +3658,11 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             "namespace = globals()\n"
             "namespace = {}\n"
             "namespace[input()] = object()"
+        ),
+        (
+            module_import
+            + "def consumer(core_module):\n"
+            "    return getattr(core_module, input())"
         ),
     )
     for safe_source in safe_sources:
