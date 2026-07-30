@@ -1,7 +1,9 @@
+import ast
 import gc
 import pickle
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 import warnings
 from uuid import UUID, uuid4
 
@@ -9,10 +11,11 @@ import pytest
 from pydantic import ValidationError
 
 import mini_agent.core.request_processing as request_processing_module
+import mini_agent.core.request_understanding as request_understanding_module
+import mini_agent.core.task_state as task_state_module
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
     InitialAcceptedTaskGraphV2,
-    InitialRequestDecision,
     InitialRequestNoTaskDecisionV2,
     InitialRequestRoutableTaskGraphDecisionV2,
     InitialRequestUnroutedTaskGraphsDecisionV2,
@@ -22,9 +25,7 @@ from mini_agent.core.request_processing import (
     RequestUnderstandingV2Error,
     RevalidatedNextMove,
     build_request_understanding_closure_v2,
-    revalidate_next_move,
     revalidate_next_move_v2,
-    validate_and_reduce_initial_request,
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
@@ -36,7 +37,6 @@ from mini_agent.core.request_understanding import (
     QueryContextualizationCandidateV2,
     ReferenceSourceKindV2,
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
     RequestUnderstandingOutputV2,
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
@@ -72,241 +72,6 @@ def _customer_context(customer_id: str = "customer-A") -> CustomerContext:
     )
 
 
-def _output(
-    *,
-    message_ref: UUID,
-    candidate_order_id: str = "o-1001",
-    proposed_order_id: object = " O-1001 ",
-    source_ref: UUID | None = None,
-    source_quote: str | None = None,
-    requested_tool_name: str = "get_order",
-) -> RequestUnderstandingOutput:
-    return RequestUnderstandingOutput(
-        message_ref=message_ref,
-        task_delta_candidates=(
-            TaskDeltaCandidate(
-                candidate_id=uuid4(),
-                operation=TaskDeltaOperation.ADD_GOAL,
-                goal_patch="查询当前消息中的订单状态",
-                input_candidates=(
-                    InputCandidate(
-                        name="order_id",
-                        candidate_value=candidate_order_id,
-                        semantic_role="TARGET_RESOURCE_IDENTIFIER",
-                        authority=InputAuthority.USER_CLAIM,
-                        source_kind=InputSourceKind.CURRENT_MESSAGE,
-                        source_ref=source_ref or message_ref,
-                        source_quote=source_quote or f"订单 {candidate_order_id}",
-                        confidence=0.99,
-                    ),
-                ),
-                confidence=0.98,
-            ),
-        ),
-        next_move_candidate=NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name=requested_tool_name,
-            arguments={"order_id": proposed_order_id},
-            base_task_state_version=None,
-        ),
-    )
-
-
-def _decision(
-    *,
-    output: RequestUnderstandingOutput | None = None,
-    message_ref: UUID | None = None,
-    message: str = "请查询订单 o-1001 的状态",
-) -> InitialRequestDecision:
-    actual_message_ref = message_ref or uuid4()
-    return validate_and_reduce_initial_request(
-        output=output or _output(message_ref=actual_message_ref),
-        current_message_ref=actual_message_ref,
-        current_message=message,
-        customer_context=_customer_context(),
-        run_id=uuid4(),
-        accepted_delta_id=uuid4(),
-        task_id=uuid4(),
-        request_unit_id=uuid4(),
-        binding_id=uuid4(),
-        next_move_candidate_ref=uuid4(),
-        now=NOW,
-    )
-
-
-def test_valid_current_message_add_goal_builds_one_active_v1_graph() -> None:
-    decision = _decision()
-
-    assert decision.input_binding.normalized_value == "O-1001"
-    assert decision.input_binding.authority is InputAuthority.USER_CLAIM
-    assert (
-        decision.input_binding.validation_status
-        is InputValidationStatus.ACCEPTED
-    )
-    assert decision.input_binding.confirmed_by_user is True
-    assert decision.task.owner_customer_id == "customer-A"
-    assert decision.task.status is TaskStatus.ACTIVE
-    assert decision.task.state_version == 1
-    assert decision.request_unit.status is TaskStatus.ACTIVE
-    assert decision.request_unit.state_version == 1
-    assert decision.request_unit.input_binding_refs == (
-        decision.input_binding.binding_id,
-    )
-    assert decision.request_understanding.validated_task_state_version == 1
-
-
-def test_revalidation_keeps_provider_candidate_distinct_from_binding() -> None:
-    message_ref = uuid4()
-    decision = _decision(
-        output=_output(
-            message_ref=message_ref,
-            candidate_order_id="O-1001",
-            proposed_order_id="O-2001",
-        ),
-        message_ref=message_ref,
-        message="查询订单 O-1001",
-    )
-
-    move = revalidate_next_move(
-        decision=decision,
-        current_task=decision.task,
-        current_request_unit=decision.request_unit,
-        current_input_binding=decision.input_binding,
-    )
-
-    assert move.normalized_candidate_order_id == "O-2001"
-    assert move.binding_normalized_value == "O-1001"
-    assert move.candidate_arguments["order_id"] == "O-2001"
-    assert move.argument_binding_refs == (decision.input_binding.binding_id,)
-    assert move.validated_task_state_version == 1
-    assert "order_number" not in RevalidatedNextMove.model_fields
-    assert "order_number" not in InitialRequestDecision.model_fields
-
-
-@pytest.mark.parametrize(
-    ("mutator", "message"),
-    [
-        (
-            lambda output, current_ref: output.model_copy(
-                update={"message_ref": uuid4()}
-            ),
-            "current message",
-        ),
-        (
-            lambda output, current_ref: output.model_copy(
-                update={
-                    "task_delta_candidates": (
-                        output.task_delta_candidates[0].model_copy(
-                            update={
-                                "input_candidates": (
-                                    output.task_delta_candidates[
-                                        0
-                                    ].input_candidates[0].model_copy(
-                                        update={
-                                            "source_kind": "RECENT_MESSAGE",
-                                        }
-                                    ),
-                                )
-                            }
-                        ),
-                    )
-                }
-            ),
-            "source",
-        ),
-        (
-            lambda output, current_ref: output.model_copy(
-                update={
-                    "task_delta_candidates": (
-                        output.task_delta_candidates[0].model_copy(
-                            update={
-                                "input_candidates": (
-                                    output.task_delta_candidates[
-                                        0
-                                    ].input_candidates[0].model_copy(
-                                        update={
-                                            "authority": "MODEL_INFERENCE",
-                                        }
-                                    ),
-                                )
-                            }
-                        ),
-                    )
-                }
-            ),
-            "authority",
-        ),
-        (
-            lambda output, current_ref: output.model_copy(
-                update={
-                    "next_move_candidate": output.next_move_candidate.model_copy(
-                        update={"base_task_state_version": 1}
-                    )
-                }
-            ),
-            "base Task version",
-        ),
-        (
-            lambda output, current_ref: output.model_copy(
-                update={
-                    "next_move_candidate": output.next_move_candidate.model_copy(
-                        update={
-                            "arguments": {
-                                "order_id": "O-1001",
-                                "customer_id": "attacker-selected",
-                            }
-                        }
-                    )
-                }
-            ),
-            "trusted field",
-        ),
-    ],
-)
-def test_fail_closed_validation_rejects_bypassed_invalid_candidates(
-    mutator: object,
-    message: str,
-) -> None:
-    message_ref = uuid4()
-    canonical = _output(message_ref=message_ref)
-    bypassed = mutator(canonical, message_ref)  # type: ignore[operator]
-
-    with pytest.raises(RequestProcessingError, match=message):
-        _decision(output=bypassed, message_ref=message_ref)
-
-
-def test_source_quote_must_be_an_exact_current_message_provenance() -> None:
-    message_ref = uuid4()
-    output = _output(
-        message_ref=message_ref,
-        source_quote="订单 O-1001",
-        candidate_order_id="O-1001",
-    )
-
-    with pytest.raises(RequestProcessingError, match="source quote"):
-        _decision(
-            output=output,
-            message_ref=message_ref,
-            message="请查询我的订单状态",
-        )
-
-
-def test_source_quote_cannot_match_order_id_as_a_longer_id_prefix() -> None:
-    message_ref = uuid4()
-    output = _output(
-        message_ref=message_ref,
-        source_quote="订单 O-10010",
-        candidate_order_id="O-1001",
-    )
-
-    with pytest.raises(RequestProcessingError, match="source quote"):
-        _decision(
-            output=output,
-            message_ref=message_ref,
-            message="请查询订单 O-10010 的状态",
-        )
-
-
 def test_input_contract_rejects_trusted_fields_without_runtime_bypass() -> None:
     with pytest.raises(ValidationError, match="trusted field"):
         NextMove(
@@ -316,52 +81,6 @@ def test_input_contract_rejects_trusted_fields_without_runtime_bypass() -> None:
                 "order_id": "O-1001",
                 "customer_id": "attacker-selected",
             },
-        )
-
-
-def test_request_processing_accepts_only_exact_frozen_contract_instances() -> None:
-    message_ref = uuid4()
-    output = _output(message_ref=message_ref)
-
-    with pytest.raises(RequestProcessingError, match="canonical output"):
-        validate_and_reduce_initial_request(
-            output=output.model_dump(),  # type: ignore[arg-type]
-            current_message_ref=message_ref,
-            current_message="请查询订单 o-1001 的状态",
-            customer_context=_customer_context(),
-            run_id=uuid4(),
-            accepted_delta_id=uuid4(),
-            task_id=uuid4(),
-            request_unit_id=uuid4(),
-            binding_id=uuid4(),
-            next_move_candidate_ref=uuid4(),
-            now=NOW,
-        )
-
-
-def test_revalidation_rejects_owner_or_graph_substitution() -> None:
-    decision = _decision()
-    foreign_task = decision.task.model_copy(
-        update={"owner_customer_id": "customer-B"}
-    )
-    unrelated_unit = decision.request_unit.model_copy(
-        update={"task_id": uuid4()}
-    )
-
-    with pytest.raises(RequestProcessingError, match="owner"):
-        revalidate_next_move(
-            decision=decision,
-            current_task=foreign_task,
-            current_request_unit=decision.request_unit,
-            current_input_binding=decision.input_binding,
-        )
-
-    with pytest.raises(RequestProcessingError, match="graph"):
-        revalidate_next_move(
-            decision=decision,
-            current_task=decision.task,
-            current_request_unit=unrelated_unit,
-            current_input_binding=decision.input_binding,
         )
 
 
@@ -2941,3 +2660,2801 @@ def test_v2_unrouted_decision_rejects_cross_graph_identity_and_version_fork() ->
             closure=forked_closure,
             task_graphs=(first_graph, forked_graph),
         )
+
+
+_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = frozenset(
+    {
+        "RequestUnderstandingOutput",
+        "AcceptedTaskDelta",
+        "CandidateValidationRecord",
+        "RequestUnderstandingRecord",
+        "InitialRequestDecision",
+        "validate_and_reduce_initial_request",
+        "revalidate_next_move",
+    }
+)
+
+
+def _folded_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _folded_static_string(node.left)
+        right = _folded_static_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if not isinstance(value, ast.Constant) or not isinstance(
+                value.value,
+                str,
+            ):
+                return None
+            parts.append(value.value)
+        return "".join(parts)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        separator = _folded_static_string(node.func.value)
+        values_node = node.args[0]
+        if separator is None or not isinstance(
+            values_node,
+            (ast.List, ast.Tuple),
+        ):
+            return None
+        values = [_folded_static_string(item) for item in values_node.elts]
+        if all(value is not None for value in values):
+            return separator.join(value for value in values if value is not None)
+    if isinstance(node, ast.Subscript):
+        value = _folded_static_string(node.value)
+        if value is None:
+            return None
+        if isinstance(node.slice, ast.Constant) and isinstance(
+            node.slice.value,
+            int,
+        ):
+            return value[node.slice.value]
+        if isinstance(node.slice, ast.Slice):
+            bounds: list[int | None] = []
+            for bound in (
+                node.slice.lower,
+                node.slice.upper,
+                node.slice.step,
+            ):
+                if bound is None:
+                    bounds.append(None)
+                elif isinstance(bound, ast.Constant) and isinstance(
+                    bound.value,
+                    int,
+                ):
+                    bounds.append(bound.value)
+                else:
+                    return None
+            return value[slice(*bounds)]
+    return None
+
+
+def _dotted_ast_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_ast_name(node.value)
+        if prefix is not None:
+            return f"{prefix}.{node.attr}"
+    return None
+
+
+def _legacy_core_source_hits(
+    source: str,
+    *,
+    filename: str,
+    ignore_target_catalog: bool = False,
+) -> tuple[str, ...]:
+    tree = ast.parse(source, filename=filename)
+    ignored_literal_nodes: set[int] = set()
+    catalog_assignments = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id
+            == "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS"
+        )
+    ]
+
+    def static_string_set(node: ast.AST) -> frozenset[str] | None:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "frozenset"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            node = node.args[0]
+        if not isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+            return None
+        values = [_folded_static_string(item) for item in node.elts]
+        if any(value is None for value in values):
+            return None
+        return frozenset(value for value in values if value is not None)
+
+    catalog_is_exact = (
+        len(catalog_assignments) == 1
+        and static_string_set(catalog_assignments[0].value)
+        == _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS
+    )
+    if ignore_target_catalog and catalog_is_exact:
+        for node in catalog_assignments:
+            ignored_literal_nodes.update(
+                id(descendant) for descendant in ast.walk(node.value)
+            )
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def lexical_scope(node: ast.AST) -> ast.AST:
+        current = node
+        while current in parents:
+            current = parents[current]
+            if isinstance(
+                current,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                return current
+        return tree
+
+    def parameter_names(scope: ast.AST) -> set[str]:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return set()
+        return {
+            argument.arg
+            for argument in (
+                *scope.args.posonlyargs,
+                *scope.args.args,
+                *scope.args.kwonlyargs,
+            )
+        } | {
+            argument.arg
+            for argument in (scope.args.vararg, scope.args.kwarg)
+            if argument is not None
+        }
+
+    relevant_modules = {
+        "mini_agent.core.request_processing",
+        "mini_agent.core.request_understanding",
+        "mini_agent.core.task_state",
+    }
+    relevant_module_tails = {
+        module_name.rsplit(".", maxsplit=1)[-1]
+        for module_name in relevant_modules
+    }
+    imported_module_aliases: set[str] = set()
+    importlib_aliases: set[str] = set()
+    builtins_aliases: set[str] = set()
+    pytest_aliases: set[str] = set()
+    builtin_callable_names = {
+        "__import__",
+        "delattr",
+        "getattr",
+        "globals",
+        "hasattr",
+        "locals",
+        "setattr",
+        "vars",
+    }
+    imported_callable_aliases: dict[str, str] = {}
+    module_import_bindings_by_name: dict[
+        str,
+        list[tuple[ast.AST, bool]],
+    ] = {}
+    callable_import_bindings_by_name: dict[
+        str,
+        list[tuple[ast.AST, str | bool]],
+    ] = {}
+
+    def record_module_import_binding(
+        *,
+        name: str,
+        node: ast.Import | ast.ImportFrom,
+        is_target: bool,
+    ) -> None:
+        bindings = module_import_bindings_by_name.setdefault(name, [])
+        bindings[:] = [
+            binding
+            for binding in bindings
+            if binding[0] is not node
+        ]
+        bindings.append((node, is_target))
+
+    def record_callable_import_binding(
+        *,
+        name: str,
+        node: ast.Import | ast.ImportFrom,
+        normalized_name: str | bool,
+    ) -> None:
+        bindings = callable_import_bindings_by_name.setdefault(name, [])
+        bindings[:] = [
+            binding
+            for binding in bindings
+            if binding[0] is not node
+        ]
+        bindings.append((node, normalized_name))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+                record_module_import_binding(
+                    name=bound_name,
+                    node=node,
+                    is_target=(
+                        alias.asname is not None
+                        and alias.name in relevant_modules
+                    ),
+                )
+                record_callable_import_binding(
+                    name=bound_name,
+                    node=node,
+                    normalized_name=(
+                        "__pytest_module__"
+                        if alias.name == "pytest"
+                        else False
+                    ),
+                )
+                if (
+                    alias.name in relevant_modules
+                    and lexical_scope(node) is tree
+                ):
+                    imported_module_aliases.add(
+                        alias.asname or alias.name.split(".")[0]
+                    )
+                if alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or alias.name)
+                if alias.name == "builtins":
+                    builtins_aliases.add(alias.asname or alias.name)
+                if alias.name == "pytest":
+                    pytest_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name
+                imported_name = (
+                    f"{node.module}.{alias.name}"
+                    if node.module is not None
+                    else alias.name
+                )
+                record_module_import_binding(
+                    name=bound_name,
+                    node=node,
+                    is_target=(
+                        imported_name in relevant_modules
+                        or (
+                            node.module == "mini_agent.core"
+                            and alias.name in relevant_module_tails
+                        )
+                        or (
+                            node.level > 0
+                            and alias.name in relevant_module_tails
+                        )
+                    ),
+                )
+                normalized_callable_import: str | bool = False
+                if (
+                    node.module == "builtins"
+                    and alias.name in builtin_callable_names
+                ):
+                    normalized_callable_import = alias.name
+                elif (
+                    node.module == "importlib"
+                    and alias.name == "import_module"
+                ):
+                    normalized_callable_import = "import_module"
+                elif (
+                    node.module == "pytest"
+                    and alias.name in {"importorskip", "skip", "xfail"}
+                ):
+                    normalized_callable_import = alias.name
+                record_callable_import_binding(
+                    name=bound_name,
+                    node=node,
+                    normalized_name=normalized_callable_import,
+                )
+            if (
+                node.module == "mini_agent.core"
+                and lexical_scope(node) is tree
+            ):
+                for alias in node.names:
+                    if alias.name in relevant_module_tails:
+                        imported_module_aliases.add(alias.asname or alias.name)
+            if node.module == "builtins":
+                for alias in node.names:
+                    if alias.name in builtin_callable_names:
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = alias.name
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "import_module":
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = "import_module"
+            if node.module == "pytest":
+                for alias in node.names:
+                    if alias.name in {"importorskip", "skip", "xfail"}:
+                        imported_callable_aliases[
+                            alias.asname or alias.name
+                        ] = alias.name
+
+    def assignment_target_values(
+        node: ast.AST,
+    ) -> tuple[tuple[ast.Name, ...], ast.AST | None]:
+        if isinstance(node, ast.Assign):
+            return (
+                tuple(
+                    target
+                    for target in node.targets
+                    if isinstance(target, ast.Name)
+                ),
+                node.value,
+            )
+        if isinstance(node, ast.AnnAssign):
+            return (
+                (node.target,) if isinstance(node.target, ast.Name) else (),
+                node.value,
+            )
+        if isinstance(node, ast.NamedExpr):
+            return (
+                (node.target,) if isinstance(node.target, ast.Name) else (),
+                node.value,
+            )
+        return (), None
+
+    assignments_by_name: dict[str, list[tuple[ast.AST, ast.AST]]] = {}
+    for node in ast.walk(tree):
+        targets, value = assignment_target_values(node)
+        if value is None:
+            continue
+        for target in targets:
+            assignments_by_name.setdefault(target.id, []).append((node, value))
+
+    def literal_truthiness(node: ast.AST) -> bool | None:
+        if isinstance(node, ast.Constant):
+            return bool(node.value)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return bool(node.elts)
+        if isinstance(node, ast.Dict):
+            return bool(node.keys)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            operand_truthiness = literal_truthiness(node.operand)
+            return (
+                None
+                if operand_truthiness is None
+                else not operand_truthiness
+            )
+        return None
+
+    def parent_contains(ancestor: ast.AST, descendant: ast.AST) -> bool:
+        current = descendant
+        while current in parents:
+            current = parents[current]
+            if current is ancestor:
+                return True
+        return False
+
+    def binding_is_raw_literal_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if isinstance(parent, ast.If):
+                truthiness = literal_truthiness(parent.test)
+                if truthiness is not None:
+                    in_body = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.body
+                    )
+                    in_orelse = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.orelse
+                    )
+                    if (
+                        in_body
+                        and not truthiness
+                        or in_orelse
+                        and truthiness
+                    ):
+                        return True
+            current = parent
+        return False
+
+    def early_static_truthiness(
+        node: ast.AST,
+        *,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool | None:
+        direct_truthiness = literal_truthiness(node)
+        if direct_truthiness is not None:
+            return direct_truthiness
+        if not isinstance(node, ast.Name) or node.id in seen:
+            return None
+        scopes = [lexical_scope(node)]
+        current = scopes[0]
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+        for scope in scopes:
+            candidates = [
+                (binding_node, value)
+                for binding_node, value in assignments_by_name.get(
+                    node.id,
+                    (),
+                )
+                if (
+                    lexical_scope(binding_node) is scope
+                    and not binding_is_raw_literal_unreachable(
+                        binding_node,
+                        scope,
+                    )
+                    and (
+                        getattr(binding_node, "lineno", -1),
+                        getattr(binding_node, "col_offset", -1),
+                    )
+                    < (
+                        getattr(node, "lineno", -1),
+                        getattr(node, "col_offset", -1),
+                    )
+                )
+            ]
+            if candidates:
+                _binding_node, value = max(
+                    candidates,
+                    key=lambda item: (
+                        getattr(item[0], "lineno", -1),
+                        getattr(item[0], "col_offset", -1),
+                    ),
+                )
+                return early_static_truthiness(
+                    value,
+                    seen=seen | {node.id},
+                )
+        return None
+
+    def binding_is_literal_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if isinstance(parent, ast.If):
+                truthiness = early_static_truthiness(parent.test)
+                if truthiness is not None:
+                    in_body = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.body
+                    )
+                    in_orelse = any(
+                        child is current or parent_contains(child, current)
+                        for child in parent.orelse
+                    )
+                    if (
+                        in_body
+                        and not truthiness
+                        or in_orelse
+                        and truthiness
+                    ):
+                        return True
+            current = parent
+        return False
+
+    def static_sequence_value(
+        value: ast.AST,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> ast.List | ast.Tuple | None:
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return value
+        if not isinstance(value, ast.Name) or value.id in seen:
+            return None
+
+        scopes = [lexical_scope(before)]
+        current = scopes[0]
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                if not (
+                    isinstance(
+                        current,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    )
+                    and isinstance(parent, ast.ClassDef)
+                ):
+                    scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        )
+        for index, scope in enumerate(scopes):
+            candidates = [
+                (binding_node, binding_value)
+                for binding_node, binding_value in assignments_by_name.get(
+                    value.id,
+                    (),
+                )
+                if (
+                    lexical_scope(binding_node) is scope
+                    and not binding_is_literal_unreachable(
+                        binding_node,
+                        scope,
+                    )
+                    and (
+                        deferred_lookup
+                        and index > 0
+                        or (
+                            (
+                                getattr(binding_node, "lineno", -1),
+                                getattr(binding_node, "col_offset", -1),
+                            )
+                            < (
+                                getattr(before, "lineno", -1),
+                                getattr(before, "col_offset", -1),
+                            )
+                        )
+                    )
+                )
+            ]
+            if candidates:
+                final_binding = max(
+                    candidates,
+                    key=lambda item: (
+                        getattr(item[0], "lineno", -1),
+                        getattr(item[0], "col_offset", -1),
+                    ),
+                )
+                active_bindings: list[tuple[ast.AST, ast.AST]] = []
+                if deferred_lookup and index > 0:
+                    for call in deferred_scope_calls(before):
+                        call_candidates = [
+                            item
+                            for item in candidates
+                            if position(item[0]) < position(call)
+                        ]
+                        if call_candidates:
+                            active_bindings.append(
+                                max(
+                                    call_candidates,
+                                    key=lambda item: position(item[0]),
+                                )
+                            )
+                resolved_bindings: list[
+                    tuple[ast.List | ast.Tuple, ast.AST]
+                ] = []
+                for binding_node, binding_value in (
+                    *active_bindings,
+                    final_binding,
+                ):
+                    resolved = static_sequence_value(
+                        binding_value,
+                        before=binding_node,
+                        seen=seen | {value.id},
+                    )
+                    if resolved is not None:
+                        resolved_bindings.append((resolved, binding_node))
+                for resolved, binding_node in resolved_bindings:
+                    if any(
+                        isinstance(element, ast.Name)
+                        and name_refers_to_module(
+                            element.id,
+                            before=binding_node,
+                        )
+                        for element in ast.walk(resolved)
+                    ):
+                        return resolved
+                return (
+                    resolved_bindings[-1][0]
+                    if resolved_bindings
+                    else None
+                )
+            if isinstance(
+                scope,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+            ) and value.id in parameter_names(scope):
+                positional = (*scope.args.posonlyargs, *scope.args.args)
+                defaults_by_name = (
+                    {
+                        argument.arg: default
+                        for argument, default in zip(
+                            positional[-len(scope.args.defaults) :],
+                            scope.args.defaults,
+                            strict=True,
+                        )
+                    }
+                    if scope.args.defaults
+                    else {}
+                )
+                defaults_by_name.update(
+                    {
+                        argument.arg: default
+                        for argument, default in zip(
+                            scope.args.kwonlyargs,
+                            scope.args.kw_defaults,
+                            strict=True,
+                        )
+                        if default is not None
+                    }
+                )
+                default = defaults_by_name.get(value.id)
+                if default is None:
+                    return None
+                return static_sequence_value(
+                    default,
+                    before=scope,
+                    seen=seen | {value.id},
+                )
+            if not isinstance(scope, ast.ClassDef):
+                local_bindings = assignments_by_name.get(value.id, ())
+                if any(
+                    lexical_scope(binding_node) is scope
+                    for binding_node, _binding_value in local_bindings
+                ):
+                    return None
+        return None
+
+    def record_unpacked_bindings(
+        target: ast.AST,
+        assigned_value: ast.AST,
+        *,
+        binding_node: ast.AST,
+    ) -> None:
+        if isinstance(target, ast.Name):
+            assignments_by_name.setdefault(target.id, []).append(
+                (binding_node, assigned_value)
+            )
+            return
+        if isinstance(target, ast.Starred):
+            record_unpacked_bindings(
+                target.value,
+                assigned_value,
+                binding_node=binding_node,
+            )
+            return
+        if not (
+            isinstance(target, (ast.List, ast.Tuple))
+            and isinstance(assigned_value, (ast.List, ast.Tuple))
+        ):
+            return
+        starred_indices = [
+            index
+            for index, element in enumerate(target.elts)
+            if isinstance(element, ast.Starred)
+        ]
+        if not starred_indices:
+            if len(target.elts) != len(assigned_value.elts):
+                return
+            pairs = zip(
+                target.elts,
+                assigned_value.elts,
+                strict=True,
+            )
+        elif len(starred_indices) == 1:
+            starred_index = starred_indices[0]
+            trailing_count = len(target.elts) - starred_index - 1
+            if len(assigned_value.elts) < len(target.elts) - 1:
+                return
+            leading_pairs = zip(
+                target.elts[:starred_index],
+                assigned_value.elts[:starred_index],
+                strict=True,
+            )
+            trailing_pairs = zip(
+                target.elts[starred_index + 1 :],
+                (
+                    assigned_value.elts[-trailing_count:]
+                    if trailing_count
+                    else ()
+                ),
+                strict=True,
+            )
+            starred_value = ast.List(
+                elts=list(
+                    assigned_value.elts[
+                        starred_index : (
+                            -trailing_count if trailing_count else None
+                        )
+                    ]
+                ),
+                ctx=ast.Load(),
+            )
+            pairs = (
+                *leading_pairs,
+                (target.elts[starred_index], starred_value),
+                *trailing_pairs,
+            )
+        else:
+            return
+        for child_target, child_value in pairs:
+            record_unpacked_bindings(
+                child_target,
+                child_value,
+                binding_node=binding_node,
+            )
+
+    calls_by_name: dict[str, list[ast.Call]] = {}
+    direct_lambda_calls: dict[ast.Lambda, list[ast.Call]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            calls_by_name.setdefault(node.func.id, []).append(node)
+        elif isinstance(node.func, ast.Lambda):
+            direct_lambda_calls.setdefault(node.func, []).append(node)
+
+    aliases_by_source_name: dict[
+        str,
+        list[tuple[str, ast.AST]],
+    ] = {}
+    lambda_bindings: dict[
+        ast.Lambda,
+        list[tuple[str, ast.AST]],
+    ] = {}
+    for target_name, bindings in assignments_by_name.items():
+        for binding_node, value in bindings:
+            if isinstance(value, ast.Name):
+                aliases_by_source_name.setdefault(value.id, []).append(
+                    (target_name, binding_node)
+                )
+            elif isinstance(value, ast.Lambda):
+                lambda_bindings.setdefault(value, []).append(
+                    (target_name, binding_node)
+                )
+
+    external_names_by_scope: dict[ast.AST, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            external_names_by_scope.setdefault(
+                lexical_scope(node),
+                set(),
+            ).update(node.names)
+
+    def position(node: ast.AST) -> tuple[int, int]:
+        return (
+            getattr(node, "lineno", -1),
+            getattr(node, "col_offset", -1),
+        )
+
+    def static_truthiness(
+        node: ast.AST,
+        *,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool | None:
+        direct_truthiness = literal_truthiness(node)
+        if direct_truthiness is not None:
+            return direct_truthiness
+        if isinstance(node, ast.Name) and node.id not in seen:
+            scopes = [lexical_scope(node)]
+            current = scopes[0]
+            while current in parents:
+                parent = parents[current]
+                if isinstance(
+                    parent,
+                    (
+                        ast.ClassDef,
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                        ast.Lambda,
+                    ),
+                ):
+                    scopes.append(parent)
+                    current = parent
+                    continue
+                current = parent
+            if tree not in scopes:
+                scopes.append(tree)
+            for scope in scopes:
+                candidates = [
+                    (binding_node, value)
+                    for binding_node, value in assignments_by_name.get(
+                        node.id,
+                        (),
+                    )
+                    if (
+                        lexical_scope(binding_node) is scope
+                        and not binding_is_literal_unreachable(
+                            binding_node,
+                            scope,
+                        )
+                        and position(binding_node) < position(node)
+                    )
+                ]
+                if not candidates:
+                    continue
+                _binding_node, value = max(
+                    candidates,
+                    key=lambda item: position(item[0]),
+                )
+                return static_truthiness(
+                    value,
+                    seen=seen | {node.id},
+                )
+        return None
+
+    def binding_is_direct_in_scope(node: ast.AST, scope: ast.AST) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return any(
+                    statement is current
+                    for statement in getattr(scope, "body", ())
+                )
+            if isinstance(parent, ast.If):
+                truthiness = static_truthiness(parent.test)
+                if truthiness is None:
+                    return False
+                executed_branch = parent.body if truthiness else parent.orelse
+                if not any(
+                    child is current or node_contains(child, current)
+                    for child in executed_branch
+                ):
+                    return False
+                current = parent
+                continue
+            return False
+        return False
+
+    deferred_calls_by_scope: dict[ast.AST, tuple[ast.Call, ...]] = {}
+
+    def deferred_scope_calls(use: ast.AST) -> tuple[ast.Call, ...]:
+        active_scope = lexical_scope(use)
+        if not isinstance(
+            active_scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ) or is_definition_time_expression(use):
+            return ()
+        cached_calls = deferred_calls_by_scope.get(active_scope)
+        if cached_calls is not None:
+            return cached_calls
+
+        aliases: dict[str, tuple[int, int]] = {}
+        if isinstance(active_scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            aliases[active_scope.name] = position(active_scope)
+        binding_scope = lexical_scope(active_scope)
+        if isinstance(active_scope, ast.Lambda):
+            for alias, binding_node in lambda_bindings.get(active_scope, ()):
+                if lexical_scope(binding_node) is binding_scope:
+                    aliases[alias] = position(binding_node)
+        pending_names = list(aliases)
+        while pending_names:
+            source_name = pending_names.pop()
+            for alias, binding_node in aliases_by_source_name.get(
+                source_name,
+                (),
+            ):
+                if (
+                    lexical_scope(binding_node) is binding_scope
+                    and aliases[source_name] < position(binding_node)
+                    and alias not in aliases
+                ):
+                    aliases[alias] = position(binding_node)
+                    pending_names.append(alias)
+
+        indexed_calls = [
+            *direct_lambda_calls.get(active_scope, ()),
+            *(
+                call
+                for alias in aliases
+                for call in calls_by_name.get(alias, ())
+            ),
+        ]
+
+        def name_refers_to_active_scope(
+            name: str,
+            *,
+            before: ast.AST,
+            seen: frozenset[str] = frozenset(),
+        ) -> bool:
+            if name in seen:
+                return False
+            candidates = [
+                (binding_node, value)
+                for binding_node, value in assignments_by_name.get(name, ())
+                if (
+                    lexical_scope(binding_node) is binding_scope
+                    and position(binding_node) < position(before)
+                    and not binding_is_statically_unreachable(
+                        binding_node,
+                        binding_scope,
+                    )
+                )
+            ]
+            if candidates:
+                direct_candidates = [
+                    item
+                    for item in candidates
+                    if binding_is_direct_in_scope(
+                        item[0],
+                        binding_scope,
+                    )
+                ]
+                if direct_candidates:
+                    dominant = max(
+                        direct_candidates,
+                        key=lambda item: position(item[0]),
+                    )
+                    candidates = [
+                        dominant,
+                        *(
+                            item
+                            for item in candidates
+                            if (
+                                not binding_is_direct_in_scope(
+                                    item[0],
+                                    binding_scope,
+                                )
+                                and position(item[0])
+                                > position(dominant[0])
+                            )
+                        ),
+                    ]
+                return any(
+                    value is active_scope
+                    or (
+                        isinstance(value, ast.Name)
+                        and name_refers_to_active_scope(
+                            value.id,
+                            before=binding_node,
+                            seen=seen | {name},
+                        )
+                    )
+                    for binding_node, value in candidates
+                )
+            return (
+                isinstance(
+                    active_scope,
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                )
+                and name == active_scope.name
+                and position(active_scope) < position(before)
+            )
+
+        calls = tuple(
+            call
+            for call in indexed_calls
+            if (
+                not node_contains(active_scope, call)
+                and (
+                    call.func is active_scope
+                    or (
+                        isinstance(call.func, ast.Name)
+                        and aliases[call.func.id] < position(call)
+                        and name_refers_to_active_scope(
+                            call.func.id,
+                            before=call,
+                        )
+                    )
+                )
+            )
+        )
+        deferred_calls_by_scope[active_scope] = calls
+        return calls
+
+    def resolution_scopes(node: ast.AST) -> list[ast.AST]:
+        scopes: list[ast.AST] = []
+        current_scope = lexical_scope(node)
+        scopes.append(current_scope)
+        current = current_scope
+        while current in parents:
+            parent = parents[current]
+            if isinstance(
+                parent,
+                (
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.Lambda,
+                ),
+            ):
+                if not (
+                    isinstance(
+                        current,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    )
+                    and isinstance(parent, ast.ClassDef)
+                ):
+                    scopes.append(parent)
+                current = parent
+                continue
+            current = parent
+        if tree not in scopes:
+            scopes.append(tree)
+        return scopes
+
+    def node_contains(ancestor: ast.AST, descendant: ast.AST) -> bool:
+        current = descendant
+        while current in parents:
+            current = parents[current]
+            if current is ancestor:
+                return True
+        return False
+
+    def binding_is_statically_unreachable(
+        node: ast.AST,
+        scope: ast.AST,
+    ) -> bool:
+        current = node
+        while current in parents:
+            parent = parents[current]
+            if parent is scope:
+                return False
+            if isinstance(parent, ast.If):
+                truthiness = static_truthiness(parent.test)
+                if truthiness is None:
+                    current = parent
+                    continue
+                in_body = any(
+                    child is current or node_contains(child, current)
+                    for child in parent.body
+                )
+                in_orelse = any(
+                    child is current or node_contains(child, current)
+                    for child in parent.orelse
+                )
+                if (
+                    in_body
+                    and not truthiness
+                    or in_orelse
+                    and truthiness
+                ):
+                    return True
+            current = parent
+        return False
+
+    def is_definition_time_expression(node: ast.AST) -> bool:
+        scope = lexical_scope(node)
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return False
+        roots: list[ast.AST] = [
+            *scope.args.defaults,
+            *(
+                default
+                for default in scope.args.kw_defaults
+                if default is not None
+            ),
+        ]
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            roots.extend(scope.decorator_list)
+            if scope.returns is not None:
+                roots.append(scope.returns)
+        roots.extend(
+            annotation
+            for argument in (
+                *scope.args.posonlyargs,
+                *scope.args.args,
+                *scope.args.kwonlyargs,
+            )
+            if (annotation := argument.annotation) is not None
+        )
+        return any(
+            root is node or node_contains(root, node)
+            for root in roots
+        )
+
+    def parameter_default(scope: ast.AST, name: str) -> ast.AST | None:
+        if not isinstance(
+            scope,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ):
+            return None
+        positional = (*scope.args.posonlyargs, *scope.args.args)
+        defaults_by_name = (
+            {
+                argument.arg: default
+                for argument, default in zip(
+                    positional[-len(scope.args.defaults) :],
+                    scope.args.defaults,
+                    strict=True,
+                )
+            }
+            if scope.args.defaults
+            else {}
+        )
+        defaults_by_name.update(
+            {
+                argument.arg: default
+                for argument, default in zip(
+                    scope.args.kwonlyargs,
+                    scope.args.kw_defaults,
+                    strict=True,
+                )
+                if default is not None
+            }
+        )
+        return defaults_by_name.get(name)
+
+    def possible_assignments(
+        name: str,
+        *,
+        before: ast.AST,
+    ) -> (
+        tuple[tuple[ast.AST, ast.AST | str | bool], ...]
+        | bool
+        | None
+    ):
+        scopes = resolution_scopes(before)
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ) and not is_definition_time_expression(before)
+        class_fallbacks: list[
+            tuple[ast.AST, ast.AST | str | bool]
+        ] = []
+        for index, scope in enumerate(scopes):
+            scope_bindings: list[
+                tuple[ast.AST, ast.AST | str | bool]
+            ] = [
+                item
+                for item in assignments_by_name.get(name, ())
+                if (
+                    lexical_scope(item[0]) is scope
+                    and not binding_is_statically_unreachable(item[0], scope)
+                )
+            ]
+            scope_bindings.extend(
+                item
+                for item in callable_import_bindings_by_name.get(name, ())
+                if (
+                    lexical_scope(item[0]) is scope
+                    and not binding_is_statically_unreachable(item[0], scope)
+                )
+            )
+            has_binding = bool(
+                scope_bindings or name in parameter_names(scope)
+            )
+            if not has_binding:
+                continue
+            declared_global_or_nonlocal = (
+                name in external_names_by_scope.get(scope, ())
+            )
+            candidates = (
+                scope_bindings
+                if deferred_lookup and index > 0
+                else [
+                    item
+                    for item in scope_bindings
+                    if position(item[0]) < position(before)
+                ]
+            )
+            if candidates:
+                direct_candidates = [
+                    item
+                    for item in candidates
+                    if binding_is_direct_in_scope(item[0], scope)
+                ]
+                if not direct_candidates:
+                    if isinstance(scope, ast.ClassDef):
+                        class_fallbacks.extend(candidates)
+                        continue
+                    return (*class_fallbacks, *candidates)
+                dominant = max(
+                    direct_candidates,
+                    key=lambda item: position(item[0]),
+                )
+                return (
+                    *class_fallbacks,
+                    dominant,
+                    *(
+                        item
+                        for item in candidates
+                        if (
+                            not binding_is_direct_in_scope(item[0], scope)
+                            and position(item[0]) > position(dominant[0])
+                        )
+                    ),
+                )
+            default = parameter_default(scope, name)
+            if default is not None:
+                return (*class_fallbacks, (scope, default))
+            if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
+                continue
+            return tuple(class_fallbacks) if class_fallbacks else False
+        return tuple(class_fallbacks) if class_fallbacks else None
+
+    def latest_assignment(
+        name: str,
+        *,
+        before: ast.AST,
+    ) -> tuple[ast.AST, ast.AST | str | bool] | bool | None:
+        assignments = possible_assignments(name, before=before)
+        if assignments is None or assignments is False:
+            return assignments
+        return max(
+            assignments,
+            key=lambda item: position(item[0]),
+        )
+
+    def name_refers_to_module(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        scopes = resolution_scopes(before)
+        deferred_lookup = isinstance(
+            scopes[0],
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        ) and not is_definition_time_expression(before)
+
+        for index, scope in enumerate(scopes):
+            scope_assignments = [
+                (node, value)
+                for node, value in assignments_by_name.get(name, ())
+                if (
+                    lexical_scope(node) is scope
+                    and not binding_is_statically_unreachable(node, scope)
+                )
+            ]
+            scope_imports = [
+                (node, is_target)
+                for node, is_target in module_import_bindings_by_name.get(
+                    name,
+                    (),
+                )
+                if (
+                    lexical_scope(node) is scope
+                    and not binding_is_statically_unreachable(node, scope)
+                )
+            ]
+            has_binding = bool(
+                scope_assignments
+                or scope_imports
+                or name in parameter_names(scope)
+            )
+            if not has_binding:
+                continue
+            declared_global_or_nonlocal = (
+                name in external_names_by_scope.get(scope, ())
+            )
+            binding_candidates = [
+                (node, value)
+                for node, value in (*scope_assignments, *scope_imports)
+                if (
+                    deferred_lookup
+                    and index > 0
+                )
+                or position(node) < position(before)
+            ]
+            if not binding_candidates:
+                default = parameter_default(scope, name)
+                if default is not None:
+                    if isinstance(default, ast.Name):
+                        return name_refers_to_module(
+                            default.id,
+                            before=scope,
+                            seen=seen,
+                        )
+                    return _dotted_ast_name(default) in relevant_modules
+                if isinstance(scope, ast.ClassDef) or declared_global_or_nonlocal:
+                    continue
+                return False
+            def binding_targets_module(
+                candidate_node: ast.AST,
+                candidate_value: ast.AST | bool,
+            ) -> bool:
+                if isinstance(candidate_value, bool):
+                    return candidate_value
+                if isinstance(candidate_value, ast.Name):
+                    return name_refers_to_module(
+                        candidate_value.id,
+                        before=candidate_node,
+                        seen=seen | {name},
+                    )
+                return _dotted_ast_name(candidate_value) in relevant_modules
+
+            direct_candidates = [
+                item
+                for item in binding_candidates
+                if binding_is_direct_in_scope(item[0], scope)
+            ]
+            if direct_candidates:
+                dominant = max(
+                    direct_candidates,
+                    key=lambda item: position(item[0]),
+                )
+                possible_candidates = (
+                    dominant,
+                    *(
+                        item
+                        for item in binding_candidates
+                        if (
+                            not binding_is_direct_in_scope(item[0], scope)
+                            and position(item[0]) > position(dominant[0])
+                        )
+                    ),
+                )
+            else:
+                possible_candidates = tuple(binding_candidates)
+            if any(
+                binding_targets_module(candidate_node, candidate_value)
+                for candidate_node, candidate_value in possible_candidates
+            ):
+                return True
+            if isinstance(scope, ast.ClassDef) and not direct_candidates:
+                continue
+            if index > 0:
+                for call in deferred_scope_calls(before):
+                    if name_refers_to_module(
+                        name,
+                        before=call,
+                        seen=seen,
+                    ):
+                        return True
+            return False
+        return False
+
+    def normalized_callable_name(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> str | None:
+        if name in seen:
+            return None
+        assignments = possible_assignments(name, before=before)
+        if assignments is False:
+            return None
+        if assignments is not None:
+            resolved_names: list[str] = []
+            for assignment_node, value in assignments:
+                normalized_name: str | None = None
+                if isinstance(value, str):
+                    normalized_name = (
+                        None
+                        if value == "__pytest_module__"
+                        else value
+                    )
+                elif isinstance(value, ast.Name):
+                    normalized_name = normalized_callable_name(
+                        value.id,
+                        before=assignment_node,
+                        seen=seen | {name},
+                    )
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in builtins_aliases
+                    and value.attr in builtin_callable_names
+                ):
+                    normalized_name = value.attr
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in importlib_aliases
+                    and value.attr == "import_module"
+                ):
+                    normalized_name = "import_module"
+                elif (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in pytest_aliases
+                    and value.attr in {"importorskip", "skip", "xfail"}
+                ):
+                    normalized_name = value.attr
+                if normalized_name is not None:
+                    resolved_names.append(normalized_name)
+            if resolved_names:
+                return resolved_names[0]
+            for call in deferred_scope_calls(before):
+                normalized_name = normalized_callable_name(
+                    name,
+                    before=call,
+                    seen=seen,
+                )
+                if normalized_name is not None:
+                    return normalized_name
+            return None
+        if name in imported_callable_aliases:
+            return imported_callable_aliases[name]
+        if name in builtin_callable_names:
+            return name
+        return None
+
+    def normalized_call_name(node: ast.Call) -> str | None:
+        if isinstance(node.func, ast.Name):
+            return normalized_callable_name(node.func.id, before=node)
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in builtins_aliases
+            and node.func.attr in builtin_callable_names
+        ):
+            return node.func.attr
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in pytest_aliases
+            and node.func.attr in {"importorskip", "skip", "xfail"}
+        ):
+            return node.func.attr
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "import_module"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in importlib_aliases
+        ):
+            return "import_module"
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    def name_refers_to_namespace(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        assignments = possible_assignments(name, before=before)
+        if assignments is None or assignments is False:
+            return False
+        for assignment_node, value in assignments:
+            if isinstance(value, ast.Name) and name_refers_to_namespace(
+                value.id,
+                before=assignment_node,
+                seen=seen | {name},
+            ):
+                return True
+            if (
+                isinstance(value, ast.Call)
+                and normalized_call_name(value)
+                in {"globals", "locals", "vars"}
+                and not value.args
+                and not value.keywords
+            ):
+                return True
+        return any(
+            name_refers_to_namespace(
+                name,
+                before=call,
+                seen=seen,
+            )
+            for call in deferred_scope_calls(before)
+        )
+
+    def is_relevant_module(node: ast.AST, *, at: ast.AST | None = None) -> bool:
+        dotted_name = _dotted_ast_name(node)
+        return (
+            isinstance(node, ast.Name)
+            and name_refers_to_module(node.id, before=at or node)
+        ) or dotted_name in relevant_modules
+
+    def enclosing_function(node: ast.AST) -> ast.FunctionDef | None:
+        current = parents.get(node)
+        while current is not None:
+            if isinstance(current, ast.FunctionDef):
+                return current
+            current = parents.get(current)
+        return None
+
+    required_runtime_modules = {
+        "request_processing_module",
+        "request_understanding_module",
+        "task_state_module",
+    }
+
+    def runtime_absence_loop_is_exact(node: ast.For) -> bool:
+        if (
+            not isinstance(node.target, ast.Name)
+            or node.target.id != "legacy_name"
+            or not isinstance(node.iter, ast.Name)
+            or node.iter.id != "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS"
+            or node.orelse
+            or len(node.body) != 3
+        ):
+            return False
+        checked_modules: set[str] = set()
+        for statement in node.body:
+            if (
+                not isinstance(statement, ast.Assert)
+                or not isinstance(statement.test, ast.UnaryOp)
+                or not isinstance(statement.test.op, ast.Not)
+                or not isinstance(statement.test.operand, ast.Call)
+            ):
+                return False
+            call = statement.test.operand
+            if (
+                normalized_call_name(call) != "hasattr"
+                or len(call.args) != 2
+                or not isinstance(call.args[0], ast.Name)
+                or call.args[0].id not in required_runtime_modules
+                or not isinstance(call.args[1], ast.Name)
+                or call.args[1].id != "legacy_name"
+            ):
+                return False
+            checked_modules.add(call.args[0].id)
+        return checked_modules == required_runtime_modules
+
+    def enclosing_runtime_loop(node: ast.AST) -> ast.For | None:
+        current = parents.get(node)
+        while current is not None:
+            if isinstance(current, ast.For):
+                return current
+            if isinstance(current, ast.FunctionDef):
+                return None
+            current = parents.get(current)
+        return None
+
+    def name_refers_to_pytest(
+        name: str,
+        *,
+        before: ast.AST,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        if name in seen:
+            return False
+        assignment = latest_assignment(name, before=before)
+        if assignment is False:
+            return False
+        if assignment is None:
+            return name in pytest_aliases
+        assignment_node, value = assignment
+        if isinstance(value, str):
+            return value == "__pytest_module__"
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, ast.Name) and name_refers_to_pytest(
+            value.id,
+            before=assignment_node,
+            seen=seen | {name},
+        )
+
+    def runtime_absence_function_is_exact(function: ast.FunctionDef) -> bool:
+        runtime_loops = [
+            node
+            for node in function.body
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "legacy_name"
+        ]
+        legacy_name_stores = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name)
+            and node.id == "legacy_name"
+            and isinstance(node.ctx, ast.Store)
+        ]
+        runtime_loop_index = (
+            function.body.index(runtime_loops[0])
+            if len(runtime_loops) == 1
+            else -1
+        )
+        prefix_is_straight_line = (
+            runtime_loop_index >= 0
+            and all(
+                isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Assert))
+                for statement in function.body[:runtime_loop_index]
+            )
+        )
+        has_early_termination = any(
+            isinstance(
+                node,
+                (ast.Raise, ast.Return, ast.Yield, ast.YieldFrom),
+            )
+            for node in ast.walk(function)
+        )
+        has_skip_call = any(
+            isinstance(node, ast.Call)
+            and (
+                normalized_call_name(node)
+                in {"importorskip", "skip", "xfail"}
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"importorskip", "skip", "xfail"}
+                )
+            )
+            for node in ast.walk(function)
+        )
+        has_skip_reference = any(
+            (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"importorskip", "skip", "xfail"}
+            )
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "__dict__"
+                and isinstance(node.value, ast.Name)
+                and name_refers_to_pytest(
+                    node.value.id,
+                    before=node,
+                )
+            )
+            or (
+                isinstance(node, ast.Call)
+                and normalized_call_name(node) == "vars"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and name_refers_to_pytest(
+                    node.args[0].id,
+                    before=node,
+                )
+            )
+            or (
+                isinstance(node, ast.Call)
+                and normalized_call_name(node) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and name_refers_to_pytest(
+                    node.args[0].id,
+                    before=node,
+                )
+                and _folded_static_string(node.args[1])
+                in {"__dict__", "importorskip", "skip", "xfail"}
+            )
+            for node in ast.walk(function)
+        )
+        critical_runtime_bindings = required_runtime_modules | {
+            "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS",
+            "hasattr",
+        }
+        local_critical_stores = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and node.id in critical_runtime_bindings
+        ]
+        canonical_catalog_target_ids = {
+            id(target)
+            for assignment in catalog_assignments
+            for target in assignment.targets
+        }
+        module_critical_rebindings: list[ast.AST] = [
+            node
+            for node in ast.walk(tree)
+            if (
+                (
+                    isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Store)
+                    and node.id in critical_runtime_bindings
+                    and id(node) not in canonical_catalog_target_ids
+                )
+                or (
+                    isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                    and node.name in critical_runtime_bindings
+                )
+                or (
+                    isinstance(node, ast.ExceptHandler)
+                    and node.name in critical_runtime_bindings
+                )
+            )
+            and lexical_scope(node) is tree
+        ]
+        module_critical_rebindings.extend(
+            node
+            for critical_name in {
+                "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS",
+                "hasattr",
+            }
+            for node, _is_target in module_import_bindings_by_name.get(
+                critical_name,
+                (),
+            )
+            if lexical_scope(node) is tree
+        )
+        local_critical_definitions = [
+            node
+            for node in ast.walk(function)
+            if (
+                isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                and node is not function
+                and node.name in critical_runtime_bindings
+            )
+            or (
+                isinstance(node, ast.ExceptHandler)
+                and node.name in critical_runtime_bindings
+            )
+        ]
+        runtime_module_imports_are_exact = all(
+            [
+                is_target
+                for node, is_target in module_import_bindings_by_name.get(
+                    name,
+                    (),
+                )
+                if lexical_scope(node) is tree
+            ]
+            == [True]
+            for name in required_runtime_modules
+        )
+        has_parameters = bool(
+            function.args.posonlyargs
+            or function.args.args
+            or function.args.kwonlyargs
+            or function.args.vararg
+            or function.args.kwarg
+        )
+        return (
+            catalog_is_exact
+            and function in tree.body
+            and not function.decorator_list
+            and not has_parameters
+            and len(runtime_loops) == 1
+            and runtime_absence_loop_is_exact(runtime_loops[0])
+            and legacy_name_stores == [runtime_loops[0].target]
+            and prefix_is_straight_line
+            and not has_early_termination
+            and not has_skip_call
+            and not has_skip_reference
+            and not local_critical_stores
+            and not local_critical_definitions
+            and not module_critical_rebindings
+            and runtime_module_imports_are_exact
+        )
+
+    def is_exact_runtime_absence_call(node: ast.Call) -> bool:
+        if (
+            normalized_call_name(node) != "hasattr"
+            or len(node.args) != 2
+            or not is_relevant_module(node.args[0])
+            or not isinstance(node.args[1], ast.Name)
+            or node.args[1].id != "legacy_name"
+        ):
+            return False
+        function = enclosing_function(node)
+        loop = enclosing_runtime_loop(node)
+        return (
+            function is not None
+            and function.name
+            == "test_request_understanding_core_has_no_legacy_v1_executable_surface"
+            and runtime_absence_function_is_exact(function)
+            and loop is not None
+            and runtime_absence_loop_is_exact(loop)
+        )
+
+    def is_namespace_mapping(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and normalized_call_name(node) in {"globals", "locals", "vars"}
+            and not node.args
+            and not node.keywords
+        ) or (
+            isinstance(node, ast.Name)
+            and name_refers_to_namespace(node.id, before=node)
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        resolved_value = static_sequence_value(
+            node.value,
+            before=node,
+        )
+        if resolved_value is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, (ast.List, ast.Tuple)):
+                record_unpacked_bindings(
+                    target,
+                    resolved_value,
+                    binding_node=node,
+                )
+
+    hits: list[str] = []
+    dynamic_export_names = {"__getattr__", "__getattribute__"}
+    for node in ast.walk(tree):
+        folded = _folded_static_string(node)
+        if (
+            id(node) not in ignored_literal_nodes
+            and folded in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS
+        ):
+            hits.append(f"{node.lineno}:folded:{folded}")
+        if isinstance(node, ast.ImportFrom):
+            if node.module in relevant_modules and any(
+                alias.name == "*" for alias in node.names
+            ):
+                hits.append(f"{node.lineno}:star-import:{node.module}")
+            for alias in node.names:
+                if alias.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                    hits.append(f"{node.lineno}:import:{alias.name}")
+                if (
+                    alias.name == "__dict__"
+                    and (
+                        node.module in relevant_modules
+                        or (
+                            node.level > 0
+                            and (node.module or "").rsplit(
+                                ".",
+                                maxsplit=1,
+                            )[-1]
+                            in relevant_module_tails
+                        )
+                    )
+                ):
+                    hits.append(f"{node.lineno}:module-dict-import")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets, _ = assignment_target_values(node)
+            if any(target.id == "pytestmark" for target in targets):
+                hits.append(f"{node.lineno}:runtime-oracle-skip-marker")
+        elif (
+            isinstance(node, ast.AugAssign)
+            and is_namespace_mapping(node.target)
+        ):
+            hits.append(f"{node.lineno}:dynamic-namespace-augassign")
+        elif isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            if node.name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:definition:{node.name}")
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name
+                == "test_request_understanding_core_has_no_legacy_v1_executable_surface"
+                and not runtime_absence_function_is_exact(node)
+            ):
+                hits.append(
+                    f"{node.lineno}:invalid-runtime-absence-oracle-shape"
+                )
+            if (
+                node.name in dynamic_export_names
+                and isinstance(parents.get(node), ast.Module)
+            ):
+                hits.append(f"{node.lineno}:dynamic-export:{node.name}")
+        elif isinstance(node, ast.Name):
+            if node.id in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:name:{node.id}")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+                hits.append(f"{node.lineno}:attribute:{node.attr}")
+            if node.attr in dynamic_export_names and is_relevant_module(
+                node.value
+            ):
+                hits.append(
+                    f"{node.lineno}:dynamic-export-attribute:{node.attr}"
+                )
+            if node.attr == "__dict__" and is_relevant_module(node.value):
+                hits.append(f"{node.lineno}:dynamic-module-dict")
+        elif isinstance(node, ast.Call):
+            call_name = normalized_call_name(node)
+            if (
+                call_name in {"getattr", "hasattr", "setattr", "delattr"}
+                and len(node.args) >= 2
+                and is_relevant_module(node.args[0])
+            ):
+                reflected_name = _folded_static_string(node.args[1])
+                if reflected_name == "__dict__":
+                    hits.append(f"{node.lineno}:dynamic-module-dict")
+                if (
+                    reflected_name is None
+                    and not is_exact_runtime_absence_call(node)
+                ):
+                    hits.append(
+                        f"{node.lineno}:dynamic-module-reflection:{call_name}"
+                    )
+            if (
+                call_name == "vars"
+                and node.args
+                and is_relevant_module(node.args[0])
+            ):
+                hits.append(f"{node.lineno}:dynamic-module-vars")
+            if call_name in {"__import__", "import_module"}:
+                hits.append(f"{node.lineno}:dynamic-import:{call_name}")
+            if (
+                call_name in {"get", "setdefault"}
+                and isinstance(node.func, ast.Attribute)
+                and is_namespace_mapping(node.func.value)
+                and node.args
+                and (
+                    call_name == "setdefault"
+                    or _folded_static_string(node.args[0]) is None
+                )
+            ):
+                hits.append(
+                    f"{node.lineno}:dynamic-namespace:{call_name}"
+                )
+            if (
+                call_name
+                in {
+                    "__setitem__",
+                    "clear",
+                    "pop",
+                    "popitem",
+                    "update",
+                }
+                and isinstance(node.func, ast.Attribute)
+                and is_namespace_mapping(node.func.value)
+            ):
+                hits.append(
+                    f"{node.lineno}:dynamic-namespace-mutation:{call_name}"
+                )
+            if (
+                call_name
+                in {
+                    "__setitem__",
+                    "clear",
+                    "pop",
+                    "popitem",
+                    "setdefault",
+                    "update",
+                }
+                and isinstance(node.func, ast.Attribute)
+                and _dotted_ast_name(node.func.value)
+                in {"dict", "builtins.dict"}
+                and node.args
+                and is_namespace_mapping(node.args[0])
+            ):
+                hits.append(
+                    f"{node.lineno}:unbound-namespace-mutation:{call_name}"
+                )
+        elif (
+            isinstance(node, ast.Subscript)
+            and is_namespace_mapping(node.value)
+            and (
+                _folded_static_string(node.slice) is None
+                or isinstance(node.ctx, (ast.Store, ast.Del))
+            )
+        ):
+            hits.append(f"{node.lineno}:dynamic-namespace-subscript")
+    return tuple(sorted(set(hits)))
+
+
+def _legacy_core_hits(path: Path) -> tuple[str, ...]:
+    return _legacy_core_source_hits(
+        path.read_text(),
+        filename=str(path),
+        ignore_target_catalog=path == Path(__file__),
+    )
+
+
+def test_request_understanding_core_has_no_legacy_v1_executable_surface() -> None:
+    core_test_dir = Path(__file__).parent
+    owned_paths = (
+        Path(request_understanding_module.__file__),
+        Path(task_state_module.__file__),
+        Path(request_processing_module.__file__),
+        core_test_dir / "test_control_gateway.py",
+        core_test_dir / "test_identity_contract.py",
+        core_test_dir / "test_request_understanding_contract.py",
+        core_test_dir / "test_task_state_contract.py",
+        Path(__file__),
+    )
+    hits = {
+        str(path): path_hits
+        for path in owned_paths
+        if (path_hits := _legacy_core_hits(path))
+    }
+
+    assert not hits
+    for legacy_name in _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:
+        assert not hasattr(request_understanding_module, legacy_name)
+        assert not hasattr(task_state_module, legacy_name)
+        assert not hasattr(request_processing_module, legacy_name)
+
+    assert hasattr(request_understanding_module, "RequestUnderstandingInput")
+    assert hasattr(request_understanding_module, "RequestUnderstandingOutputV2")
+    assert hasattr(task_state_module, "AcceptedTaskDeltaV2")
+    assert hasattr(task_state_module, "CandidateValidationRecordV2")
+    assert hasattr(task_state_module, "RequestUnderstandingRecordV2")
+    assert hasattr(
+        request_processing_module,
+        "validate_and_reduce_initial_request_v2",
+    )
+    assert hasattr(request_processing_module, "revalidate_next_move_v2")
+
+
+def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() -> None:
+    module_import = (
+        "import mini_agent.core.request_processing as core_module\n"
+    )
+    legacy_target = min(_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS)
+    mutations = (
+        module_import + "getattr(core_module, input())",
+        module_import + "hasattr(core_module, input())",
+        module_import + "setattr(core_module, input(), None)",
+        module_import + "vars(core_module).get(input())",
+        module_import + "core_module.__dict__.get(input())",
+        module_import + "alias = core_module\ngetattr(alias, input())",
+        module_import
+        + "alias: object = core_module\ngetattr(alias, input())",
+        module_import
+        + "reflect = getattr\nreflect(core_module, input())",
+        module_import
+        + "reflect: object = getattr\nreflect(core_module, input())",
+        (
+            "from builtins import getattr as reflect\n"
+            + module_import
+            + "reflect(core_module, input())"
+        ),
+        (
+            "import builtins\n"
+            + module_import
+            + "reflect = builtins.getattr\nreflect(core_module, input())"
+        ),
+        "import importlib\nimportlib.import_module(input())",
+        (
+            "import importlib\n"
+            "loader = importlib.import_module\n"
+            "loader(input())"
+        ),
+        "from importlib import import_module\nimport_module(input())",
+        "__import__(input())",
+        "vars()[input()] = object()",
+        "globals().get(input())",
+        "globals().setdefault(input(), object())",
+        "globals().update({input(): object()})",
+        "namespace = locals()\nnamespace[input()] = object()",
+        "namespace: dict = globals()\nnamespace[input()] = object()",
+        "namespace = globals()\nnamespace |= {input(): object()}",
+        (
+            "namespace = globals()\n"
+            "dict.update(namespace, {input(): object()})"
+        ),
+        (
+            "def __getattr__(name):\n"
+            "    return globals().get(name + 'V2')\n"
+        ),
+        (
+            module_import
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    legacy_name = input()\n"
+            "    assert not hasattr(core_module, legacy_name)\n"
+        ),
+        (
+            module_import
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    for legacy_name in ():\n"
+            "        assert not hasattr(core_module, legacy_name)\n"
+        ),
+        (
+            module_import
+            + "def unrelated():\n"
+            "    core_module = object()\n"
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "def consumer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "def consumer():\n"
+            "    from mini_agent.core import request_processing as core_module\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "def consumer():\n"
+            "    from . import request_processing as core_module\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "class Unrelated:\n"
+            "    core_module = object()\n"
+            "    def consumer(self):\n"
+            "        return getattr(core_module, input())\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+        ),
+        (
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            + module_import
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "consumer()\n"
+            "core_module = object()\n"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "alias = consumer\n"
+            "alias()\n"
+            "core_module = object()\n"
+        ),
+        (
+            module_import
+            + "(lambda: getattr(core_module, input()))()\n"
+            "core_module = object()\n"
+        ),
+        (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    return inner\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    def inner():\n"
+            "        return getattr(core_module, input())\n"
+            "    inner()\n"
+            "    core_module = object()\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+            "consumer()\n"
+            "reflect = lambda value, name: None\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+            "consumer()\n"
+            "namespace = {}\n"
+        ),
+        (
+            module_import
+            + "if False:\n"
+            "    core_module = object()\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "if False:\n"
+            "    reflect = lambda value, name: None\n"
+            "reflect(core_module, input())\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "if False:\n"
+            "    namespace = {}\n"
+            "namespace[input()] = object()\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "(core_module,) = (target_module,)\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "core_module, *rest = [target_module]\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "(core_module,) = values = (target_module,)\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer(values=(target_module,)):\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (target_module,)\n"
+            "if False:\n"
+            "    values = (object(),)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "dead = False\n"
+            "values = (target_module,)\n"
+            "if dead:\n"
+            "    values = (object(),)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (target_module,)\n"
+            "consumer()\n"
+            "values = (object(),)\n"
+        ),
+        (
+            module_import
+            + "flag = False\n"
+            "if False:\n"
+            "    flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "dead = False\n"
+            "flag = False\n"
+            "if dead:\n"
+            "    flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        reflect = lambda value, name: None\n"
+            "    result = reflect(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "def consumer(core_module=core_module):\n"
+            "    return getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "def consumer("
+            "value=getattr(core_module, input())"
+            "):\n"
+            "    return value\n"
+            "core_module = object()\n"
+        ),
+        (
+            module_import
+            + "def consumer(reflect=getattr):\n"
+            "    return reflect(core_module, input())\n"
+        ),
+        (
+            "def consumer(namespace=globals()):\n"
+            "    namespace[input()] = object()\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    global reflect\n"
+            "    result = reflect(core_module, input())\n"
+            "    reflect = lambda value, name: None\n"
+        ),
+        (
+            "reflect = lambda value, name: None\n"
+            "from builtins import getattr as reflect\n"
+            + module_import
+            + "reflect(core_module, input())\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    reflect = getattr\n"
+            "    def inner():\n"
+            "        return reflect(core_module, input())\n"
+        ),
+        (
+            "def outer():\n"
+            "    namespace = globals()\n"
+            "    def inner():\n"
+            "        namespace[input()] = object()\n"
+        ),
+        (
+            module_import
+            + "class Consumer:\n"
+            "    result = getattr(core_module, input())\n"
+            "    core_module = object()\n"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    global core_module\n"
+            "    result = getattr(core_module, input())\n"
+            "    core_module = object()\n"
+        ),
+        (
+            "from mini_agent.core.request_processing "
+            "import __dict__ as namespace\n"
+            "namespace.get(input())\n"
+        ),
+        (
+            module_import
+            + 'namespace = getattr(core_module, "__dict__")\n'
+            "namespace.get(input())\n"
+        ),
+        (
+            "import types as core_module, "
+            "mini_agent.core.request_processing as core_module\n"
+            "getattr(core_module, input())\n"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def unrelated():\n"
+            "    reflect = lambda value, name: None\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+        ),
+        (
+            "namespace = globals()\n"
+            "def unrelated():\n"
+            "    namespace = {}\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+        ),
+        module_import + f'getattr(core_module, "{legacy_target}")',
+    )
+    for mutation in mutations:
+        assert _legacy_core_source_hits(
+            mutation,
+            filename="mutation.py",
+        ), mutation
+
+    catalog_source = (
+        "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = frozenset("
+        f"{tuple(sorted(_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS))!r}"
+        ")\n"
+    )
+    runtime_imports = (
+        "import mini_agent.core.request_processing as request_processing_module\n"
+        "import mini_agent.core.request_understanding as "
+        "request_understanding_module\n"
+        "import mini_agent.core.task_state as task_state_module\n"
+    )
+    runtime_loop = (
+        "    for legacy_name in "
+        "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS:\n"
+        "        assert not hasattr(request_understanding_module, legacy_name)\n"
+        "        assert not hasattr(task_state_module, legacy_name)\n"
+        "        assert not hasattr(request_processing_module, legacy_name)\n"
+    )
+    runtime_downgrades = (
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    return\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    pytest.skip("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "@pytest.mark.skip\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    _LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS = ()\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    request_processing_module = object()\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "request_processing_module = object()\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "def test_request_understanding_core_has_no_legacy_v1_executable_surface("
+            "request_processing_module=object()):\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "from pytest import skip\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = skip("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = pytest.importorskip("missing")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import types as request_processing_module\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    skipper = pytest.skip\n"
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "skipper = lambda reason: None\n"
+            "from pytest import skip as skipper\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipper = pytest.__dict__["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    skipper = vars(pytest)["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "from sys import warnoptions as "
+            "_LEGACY_REQUEST_UNDERSTANDING_CORE_TARGETS\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            "    pytest_alias = pytest\n"
+            '    skipper = pytest_alias.__dict__["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+        (
+            catalog_source
+            + runtime_imports
+            + "import pytest\n"
+            "def test_request_understanding_core_has_no_legacy_v1_executable_surface():\n"
+            '    namespace = getattr(pytest, "__dict__")\n'
+            '    skipper = namespace["skip"]\n'
+            '    skipped = skipper("disabled")\n'
+            + runtime_loop
+        ),
+    )
+    for runtime_downgrade in runtime_downgrades:
+        assert _legacy_core_source_hits(
+            runtime_downgrade,
+            filename="runtime_downgrade.py",
+            ignore_target_catalog=True,
+        ), runtime_downgrade
+
+    safe_sources = (
+        module_import
+        + f'getattr(core_module, "{legacy_target}V2", None)',
+        'label = "historical request-understanding v1 absence"',
+        (
+            module_import
+            + "alias = core_module\n"
+            "alias = object()\n"
+            "getattr(alias, input())"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "reflect = lambda value, name: None\n"
+            "reflect(core_module, input())"
+        ),
+        (
+            "namespace = globals()\n"
+            "namespace = {}\n"
+            "namespace[input()] = object()"
+        ),
+        (
+            module_import
+            + "def consumer(core_module):\n"
+            "    return getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as core_module, "
+            "types as core_module\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "class Consumer:\n"
+            "    core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            + module_import
+            + "core_module = object()\n"
+        ),
+        (
+            "def outer():\n"
+            "    import mini_agent.core.request_processing as core_module\n"
+            "    reflect = getattr\n"
+            "    reflect = lambda value, name: None\n"
+            "    def inner():\n"
+            "        return reflect(core_module, input())"
+        ),
+        (
+            "def outer():\n"
+            "    namespace = globals()\n"
+            "    namespace = {}\n"
+            "    def inner():\n"
+            "        namespace[input()] = object()"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "core_module = object()\n"
+            "consumer()"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "def consumer():\n"
+            "    return reflect(core_module, input())\n"
+            "reflect = lambda value, name: None\n"
+            "consumer()"
+        ),
+        (
+            "namespace = globals()\n"
+            "def consumer():\n"
+            "    namespace[input()] = object()\n"
+            "namespace = {}\n"
+            "consumer()"
+        ),
+        (
+            module_import
+            + "core_module = object()\n"
+            "if False:\n"
+            "    core_module = request_processing_module\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "if True:\n"
+            "    core_module = object()\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "reflect = getattr\n"
+            "flag = True\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        reflect = lambda value, name: None\n"
+            "    result = reflect(core_module, input())"
+        ),
+        (
+            module_import
+            + "flag = not False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            "values = (object(),)\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())"
+        ),
+        (
+            "def consumer(values=(object(),)):\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())"
+        ),
+        (
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (object(),)"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "values = (object(),)\n"
+            "if False:\n"
+            "    values = (target_module,)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "dead = False\n"
+            "values = (object(),)\n"
+            "if dead:\n"
+            "    values = (target_module,)\n"
+            "(core_module,) = values\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "def consumer():\n"
+            "    (core_module,) = values\n"
+            "    return getattr(core_module, input())\n"
+            "values = (target_module,)\n"
+            "values = (object(),)\n"
+            "consumer()"
+        ),
+        (
+            module_import
+            + "flag = True\n"
+            "if False:\n"
+            "    flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "dead = False\n"
+            "flag = True\n"
+            "if dead:\n"
+            "    flag = False\n"
+            "class Consumer:\n"
+            "    if flag:\n"
+            "        core_module = object()\n"
+            "    result = getattr(core_module, input())"
+        ),
+        (
+            "import mini_agent.core.request_processing as target_module\n"
+            "core_module = object()\n"
+            "if 0:\n"
+            "    core_module = target_module\n"
+            "getattr(core_module, input())"
+        ),
+        (
+            module_import
+            + "def consumer():\n"
+            "    return getattr(core_module, input())\n"
+            "alias = consumer\n"
+            "alias = lambda: None\n"
+            "alias()\n"
+            "core_module = object()"
+        ),
+        (
+            module_import
+            + "def consumer(reflect=lambda value, name: None):\n"
+            "    return reflect(core_module, input())"
+        ),
+        (
+            "def consumer(namespace={}):\n"
+            "    namespace[input()] = object()"
+        ),
+        (
+            "from builtins import getattr as reflect\n"
+            "reflect = lambda value, name: None\n"
+            + module_import
+            + "reflect(core_module, input())"
+        ),
+    )
+    for safe_source in safe_sources:
+        assert not _legacy_core_source_hits(
+            safe_source,
+            filename="safe_source.py",
+        ), safe_source

@@ -7,9 +7,10 @@ from mini_agent.core.control_gateway import evaluate_control_gateway
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, TokenCounts
 from mini_agent.core.request_processing import (
-    InitialRequestDecision,
-    revalidate_next_move,
-    validate_and_reduce_initial_request,
+    InitialRequestRoutableTaskGraphDecisionV2,
+    InitialTaskIdentityAllocationV2,
+    revalidate_next_move_v2,
+    validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
     InputAuthority,
@@ -17,7 +18,11 @@ from mini_agent.core.request_understanding import (
     InputSourceKind,
     NextMove,
     NextMoveKind,
-    RequestUnderstandingOutput,
+    QueryContextualizationCandidateV2,
+    ReferenceSourceKindV2,
+    RequestUnderstandingInput,
+    RequestUnderstandingOutputV2,
+    ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
 )
@@ -113,13 +118,43 @@ def _decision(
     bound_order_id: str = "O-1001",
     proposed_order_id: object = "O-1001",
     requested_tool_name: str = "get_order",
-) -> InitialRequestDecision:
+) -> InitialRequestRoutableTaskGraphDecisionV2:
     message_ref = uuid4()
-    output = RequestUnderstandingOutput(
+    run_id = uuid4()
+    candidate_id = uuid4()
+    message = f"请查询订单 {bound_order_id}"
+    tool_spec = get_order_tool_spec()
+    request_input = RequestUnderstandingInput(
+        schema_version="e2e01-thin-v1",
+        run_id=run_id,
         message_ref=message_ref,
+        original_query=message,
+        provider_visible_tool_specs=(tool_spec,),
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            (tool_spec,)
+        ),
+    )
+    output = RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text=message,
+            resolved_reference_candidates=(
+                ResolvedReferenceCandidateV2(
+                    name="order_id",
+                    candidate_value=bound_order_id,
+                    source_kind=ReferenceSourceKindV2.CURRENT_MESSAGE,
+                    source_ref=message_ref,
+                    source_quote=bound_order_id,
+                    confidence=0.99,
+                ),
+            ),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
         task_delta_candidates=(
             TaskDeltaCandidate(
-                candidate_id=uuid4(),
+                candidate_id=candidate_id,
                 operation=TaskDeltaOperation.ADD_GOAL,
                 goal_patch="查询当前消息中的订单状态",
                 input_candidates=(
@@ -144,19 +179,26 @@ def _decision(
             base_task_state_version=None,
         ),
     )
-    return validate_and_reduce_initial_request(
+    decision = validate_and_reduce_initial_request_v2(
+        request_input=request_input,
         output=output,
-        current_message_ref=message_ref,
-        current_message=f"请查询订单 {bound_order_id}",
+        authoritative_messages={message_ref: message},
         customer_context=_context(),
-        run_id=uuid4(),
-        accepted_delta_id=uuid4(),
-        task_id=uuid4(),
-        request_unit_id=uuid4(),
-        binding_id=uuid4(),
+        request_understanding_record_id=uuid4(),
+        candidate_identity_allocations=(
+            InitialTaskIdentityAllocationV2(
+                candidate_ref=candidate_id,
+                accepted_delta_id=uuid4(),
+                task_id=uuid4(),
+                request_unit_id=uuid4(),
+                binding_id=uuid4(),
+            ),
+        ),
         next_move_candidate_ref=uuid4(),
         now=NOW,
     )
+    assert type(decision) is InitialRequestRoutableTaskGraphDecisionV2
+    return decision
 
 
 def _manifest(
@@ -180,7 +222,7 @@ def _manifest(
 
 
 def _evaluate(
-    decision: InitialRequestDecision,
+    decision: InitialRequestRoutableTaskGraphDecisionV2,
     *,
     snapshot: RegistrySnapshot | None = None,
     customer_context: CustomerContext | None = None,
@@ -190,26 +232,27 @@ def _evaluate(
     progress_valid: bool = True,
 ):
     actual_snapshot = snapshot or _snapshot()
+    task_graph = decision.task_graph
     model_call_id = uuid4()
     context_manifest_id = uuid4()
     manifest = _manifest(
         snapshot=actual_snapshot,
-        run_id=decision.request_understanding.run_id,
+        run_id=decision.closure.record.run_id,
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
     )
-    move = revalidate_next_move(
+    move = revalidate_next_move_v2(
         decision=decision,
-        current_task=decision.task,
-        current_request_unit=decision.request_unit,
-        current_input_binding=decision.input_binding,
+        current_task=task_graph.task,
+        current_request_unit=task_graph.request_unit,
+        current_input_binding=task_graph.input_binding,
     )
     gate = evaluate_control_gateway(
         revalidated_move=move,
         customer_context=customer_context or _context(),
-        current_task=current_task or decision.task,
-        current_request_unit=current_request_unit or decision.request_unit,
-        current_input_binding=decision.input_binding,
+        current_task=current_task or task_graph.task,
+        current_request_unit=current_request_unit or task_graph.request_unit,
+        current_input_binding=task_graph.input_binding,
         registry_snapshot=actual_snapshot,
         context_manifest=manifest,
         gate_decision_id=uuid4(),
@@ -231,7 +274,9 @@ def test_exact_bound_get_order_candidate_is_approved() -> None:
     assert gate.decision is GateDecisionValue.ACCEPT
     assert gate.reason_code is None
     assert gate.resolved_canonical_tool_name == "get_order"
-    assert gate.argument_binding_refs == (decision.input_binding.binding_id,)
+    assert gate.argument_binding_refs == (
+        decision.task_graph.input_binding.binding_id,
+    )
     assert gate.validated_task_state_version == 1
     assert "tool_call_id" not in type(gate).model_fields
     assert "order_number" not in type(gate).model_fields
@@ -264,7 +309,9 @@ def test_provider_argument_replacement_is_rejected_before_toolcall(
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
     assert gate.argument_binding_valid is False
-    assert gate.argument_binding_refs == (decision.input_binding.binding_id,)
+    assert gate.argument_binding_refs == (
+        decision.task_graph.input_binding.binding_id,
+    )
     assert "tool_call_id" not in type(gate).model_fields
 
 
@@ -298,23 +345,24 @@ def test_gateway_revalidates_every_fail_closed_boundary(
     expected_reason: GateReasonCode,
 ) -> None:
     decision = _decision()
+    task_graph = decision.task_graph
     snapshot = _snapshot()
     model_call_id = uuid4()
     context_manifest_id = uuid4()
     manifest = _manifest(
         snapshot=snapshot,
-        run_id=decision.request_understanding.run_id,
+        run_id=decision.closure.record.run_id,
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
     )
-    move = revalidate_next_move(
+    move = revalidate_next_move_v2(
         decision=decision,
-        current_task=decision.task,
-        current_request_unit=decision.request_unit,
-        current_input_binding=decision.input_binding,
+        current_task=task_graph.task,
+        current_request_unit=task_graph.request_unit,
+        current_input_binding=task_graph.input_binding,
     )
-    task = decision.task
-    request_unit = decision.request_unit
+    task = task_graph.task
+    request_unit = task_graph.request_unit
     tool_calls_used = 0
     progress_valid = True
 
@@ -335,7 +383,7 @@ def test_gateway_revalidates_every_fail_closed_boundary(
         snapshot = _snapshot(effect=ToolEffect.ACTION)
         manifest = _manifest(
             snapshot=snapshot,
-            run_id=decision.request_understanding.run_id,
+            run_id=decision.closure.record.run_id,
             model_call_id=model_call_id,
             context_manifest_id=context_manifest_id,
         )
@@ -358,7 +406,7 @@ def test_gateway_revalidates_every_fail_closed_boundary(
         customer_context=_context(),
         current_task=task,
         current_request_unit=request_unit,
-        current_input_binding=decision.input_binding,
+        current_input_binding=task_graph.input_binding,
         registry_snapshot=snapshot,
         context_manifest=manifest,
         gate_decision_id=uuid4(),
@@ -375,12 +423,12 @@ def test_gateway_revalidates_every_fail_closed_boundary(
     assert "tool_call_id" not in type(gate).model_fields
 
 
-def test_stale_revalidated_v1_against_current_v2_is_rejected() -> None:
+def test_stale_state_version_one_against_current_v2_is_rejected() -> None:
     decision = _decision()
-    current_task = decision.task.model_copy(
+    current_task = decision.task_graph.task.model_copy(
         update={"state_version": 2, "status": TaskStatus.WAITING_USER}
     )
-    current_request_unit = decision.request_unit.model_copy(
+    current_request_unit = decision.task_graph.request_unit.model_copy(
         update={"state_version": 2, "status": TaskStatus.WAITING_USER}
     )
 
@@ -398,20 +446,21 @@ def test_stale_revalidated_v1_against_current_v2_is_rejected() -> None:
 
 def test_bypassed_raw_and_normalized_candidate_drift_fails_closed() -> None:
     decision = _decision()
+    task_graph = decision.task_graph
     snapshot = _snapshot()
     model_call_id = uuid4()
     context_manifest_id = uuid4()
     manifest = _manifest(
         snapshot=snapshot,
-        run_id=decision.request_understanding.run_id,
+        run_id=decision.closure.record.run_id,
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
     )
-    move = revalidate_next_move(
+    move = revalidate_next_move_v2(
         decision=decision,
-        current_task=decision.task,
-        current_request_unit=decision.request_unit,
-        current_input_binding=decision.input_binding,
+        current_task=task_graph.task,
+        current_request_unit=task_graph.request_unit,
+        current_input_binding=task_graph.input_binding,
     ).model_copy(
         update={"candidate_arguments": {"order_id": "O-2001"}}
     )
@@ -419,9 +468,9 @@ def test_bypassed_raw_and_normalized_candidate_drift_fails_closed() -> None:
     gate = evaluate_control_gateway(
         revalidated_move=move,
         customer_context=_context(),
-        current_task=decision.task,
-        current_request_unit=decision.request_unit,
-        current_input_binding=decision.input_binding,
+        current_task=task_graph.task,
+        current_request_unit=task_graph.request_unit,
+        current_input_binding=task_graph.input_binding,
         registry_snapshot=snapshot,
         context_manifest=manifest,
         gate_decision_id=uuid4(),

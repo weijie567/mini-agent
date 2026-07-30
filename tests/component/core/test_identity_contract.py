@@ -9,7 +9,7 @@ from mini_agent.core.identity import CustomerContext, RuntimePrivateContext
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
-    RequestUnderstandingOutput,
+    RequestUnderstandingOutputV2,
 )
 from mini_agent.core.tool_system import ToolSpec
 
@@ -62,7 +62,7 @@ def test_model_visible_contract_schemas_do_not_expose_identity_fields() -> None:
     }
     model_visible_contracts = (
         RequestUnderstandingInput,
-        RequestUnderstandingOutput,
+        RequestUnderstandingOutputV2,
         ToolSpec,
         PresentationInput,
         PresentationPlan,
