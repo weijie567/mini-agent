@@ -204,10 +204,10 @@ CANCELLED 保留给未来显式 cancellation 语义；INCOMPLETE 继续只允许
 PROCESS_RESTART_DETECTED。unknown / contradictory reason fail closed。
 ```
 
-## 8. 已准备、尚未关闭的 owner impact
+## 8. 已关闭的 owner impact 与未实现边界
 
-用户批准 exact ruling 后，当前工作树已准备以下 owner-alignment draft；在独立
-exact-file review 与合并前均不视为 `CLOSED`：
+用户批准 exact ruling 后，下列 owner impact 已通过 R6 exact-file review，并由
+PR #201 合并为 `CLOSED`：
 
 - `PROJECT_DIRECTION.md`：Run lifecycle、no-result finalization 与共享 Trace
   projection。
@@ -218,9 +218,9 @@ exact-file review 与合并前均不视为 `CLOSED`：
 - `docs/evaluation/agent-evaluation-strategy.md` 与 Coverage Matrix：no-result
   trajectory evidence，不伪造普通 HTTP Result。
 - Cycle 2 scoped Spec：`RM-I01/I04/I05` exact status、stop reason、assertion 与
-  physical mapping。
+  physical mapping；现为 scoped active owner。
 - scoped Spec 已把后续 Core、Application、Persistence、Eval、migration 和 tests
-  的目标义务写成合同；本轮没有创建这些实现。
+  的目标义务写成合同；当前仍没有创建这些实现。
 
 Persistence / Memory impact analysis 的结论是：`record_schema_version` 同时表示
 结构与语义，OA-10 改变了 Run、link 与 `RunStopped` 的 closed matrix，因此目标

@@ -83,9 +83,9 @@ owner 与 Cycle 2 scoped owner；manifest 不包含本 Packet、`AGENTS.md` 或 
 | `2831ea71c1c2a73d4d992f81e0fb170204b0da1f6a5986106e5fc2d2422df128` | `docs/architecture/memory-design-reference.md` |
 | `58b90ba8376c247c5309eb3c40ac8445562f9f22daf53c977931c61750754833` | `docs/architecture/tool-calling-design-reference.md` |
 | `ad41b28b3dca28072572398546a5f6ed47344edb16a8e2ab249b341b2eb8ad95` | `docs/evaluation/agent-evaluation-strategy.md` |
-| `1d2f229bd90793ff4294578bf1af66f591833d6939854f16c306b7c9d4bc5fb5` | `docs/evaluation/p0-eval-coverage-matrix.md` |
+| `fb7e5fdc1a3720842b296c2d1bc2019479453f52ed3a09bd8ccdb5e2378bc686` | `docs/evaluation/p0-eval-coverage-matrix.md` |
 | `65b90e7db0aaa0c96895d1d9e9f41ae4cb22c5e73cb065284d6dab3cfca13cce` | `docs/implementation/e2e01-thin-slice-implementation-spec.md` |
-| `bf4434d1d41f21d299ddb5cce210afa6a346680df55d91914394ab080b50a30f` | `docs/implementation/e2e01-cycle2-implementation-spec.md` |
+| `db9427a7992554b54b9e626d140240a608f2c1e7a832bcd2ec34f72b79d35ce7` | `docs/implementation/e2e01-cycle2-implementation-spec.md` |
 
 Activation PR 的 final commit SHA、review verdict 与 merge SHA 由 GitHub PR
 metadata / review comment 持有；不得把 Packet 自己的 SHA 或尚未发生的 merge

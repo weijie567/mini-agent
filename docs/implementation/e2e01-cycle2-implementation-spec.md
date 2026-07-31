@@ -254,7 +254,7 @@ Phase 2 必须新增：
    - Acceptance：每个 physical Case 可从本文唯一编码通用 EvalCase 必填字段、grading 和 version manifest；predicate arity / symbol 解析可机械验证；默认离线 Harness 对全部 Phase 1 + 2 variants 产生完整 Result；任何 Critical failure、execution failure、缺失 Case 或 digest mismatch 使 Gate 失败。
 
 18. **Phase 2 总门禁与三轴 lifecycle 纪律**：实现完成不自动推进 Contract、Planning、Case 或 Phase。
-    - Current：Phase 2 尚无 activation、Plan 或实现。
+    - Current：Phase 2 contract 已激活为 `READY_FOR_PLANNING`，但尚无 Plan 或实现。
    - Target：Document / Contract、Planning 和 EvalCase lifecycle 分轴推进；依次完成 contract activation、Plan / Task Packet、实现、review / fix、Validation、Eval / Security、Controlled UAT、Coverage Matrix owner lifecycle 裁决和显式 release。
    - Acceptance：任一文档、Plan、artifact、Fixture、测试或实现的出现都不自动推进另一轴；只有 canonical owner 基于 exact artifact 与可复现结果更新 Case lifecycle 后，Integrator 才手工同步 `.planning/`；无真实凭据时 Qwen 保持诚实 `NOT_RUN`。
 
@@ -1506,9 +1506,8 @@ GOAL_COMPLETED
 ```
 
 `STATE_OR_BINDING_INVALIDATED` 已由 Core Runtime owner 裁决为 obsolete Run 的
-exact stop reason。上方 imported Phase 1 vocabulary 已经生效；Phase 2 新增项仍是
-等待 owner-alignment review / merge 与 Activation 的 target contract，不表示当前
-源码已经实现。
+exact stop reason。上方 imported Phase 1 vocabulary 已经生效；Phase 2 新增项现由
+scoped active contract 拥有，但不表示当前源码已经实现。
 
 下表只拥有 Phase 2 delta，不重新拥有 imported Phase 1 mappings：
 

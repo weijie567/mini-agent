@@ -443,7 +443,7 @@ grading:
     - T
 ```
 
-完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码。其六个 authenticated physical artifacts 当前为 `REGRESSION_GATE`，全部 16 variants 已形成 lifecycle-valid offline Result 与聚合报告；`E2E01-05` 等待 Cycle 2 的 scoped contract。
+完整 P0 的通用字段编码、Fixture 格式和执行命令仍等待各切片裁决；`E2E01-01/04` 已由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 定义具体编码。其六个 authenticated physical artifacts 当前为 `REGRESSION_GATE`，全部 16 variants 已形成 lifecycle-valid offline Result 与聚合报告；`E2E01-05` 的 exact encoding 已由 active Cycle 2 scoped contract 定义，但 authenticated artifact、loader、Harness Result 和 lifecycle owner 裁决仍未出现。
 
 ## 9. 当前验证状态
 
