@@ -759,6 +759,87 @@ Context Manifest 记录“模型实际看到了哪些输入”，用于：
 - 确认必须引用对应的 `task_state_version` 和 `proposal_hash`。
 - 对同一个幂等动作，只允许一个有效执行身份。
 
+### 14.4 E2E-01 Cycle 2 candidate、freshness 与 derivation alignment
+
+Memory owner 对 `E2E01-02/03/05/06` 增加以下通用规则：
+
+1. **候选能力的 authority 与 durability。** CandidateSet 是绑定当前 owner、
+   Task、RequestUnit、来源 Observation 和 state version 的 Runtime-private
+   selection capability；它不是业务事实。任一 current-set uniqueness、record
+   graph、owner scope、来源引用、版本、过期或 supersession 校验失败，都不得生成
+   selection、verified target 或后续业务 ToolCall。恢复只能从同一
+   owner-scoped exact closure 唯一解析，不能从模型摘要、展示文本或其他 Task 猜测
+   target。
+2. **birth-stale fail closed。** 业务读取即使 Schema 合法，只要在 Runtime
+   acceptance 时已经 stale，就不形成新的 standard Observation。刷新失败也不得
+   把旧 Observation 作为“截至之前”的替代事实投影给模型、Renderer 或新的派生
+   结果。具体 5 分钟 TTL、时间字段编码与 reason code 属于 Cycle 2 scoped Spec。
+3. **确定性派生绑定。** Shipment Assessment 必须引用 exact owner scope、Task /
+   RequestUnit / state version、verified target、Shipment Observation 及其
+   source version、适用 Claim binding、规则版本和一次可信 UTC `assessed_at`。
+   新 Observation、target / Task version、Claim correction 或 rule version 变化
+   时，旧派生结果不再 current；新记录通过 supersession 引用旧记录，禁止原地
+   改写。replay 使用记录中的 exact 输入与可信时间，不能以当前默认值重算历史。
+4. **authority metadata 只被传播，不被重建。** Memory 保存和校验业务 source
+   authority 的安全 ref / version，不因此成为来源 owner；不得从用户可见字段、
+   数据库 `recorded_at`、当前代码默认值或 downstream projection 反推 source
+   version。业务 source authority 的语义服从
+   [P0 业务能力说明](../business-capabilities.md)，具体 producer implementation、
+   canonical bytes、record shape 与 restricted propagation 由 scoped Spec
+   拥有。
+
+120 小时停滞阈值、primary-result precedence 和四类 Shipment Assessment 的业务
+含义由 Business owner 拥有。Memory 只拥有上述 derivation binding、currentness、
+supersession 与 replay 通则；具体编码、reason code serialization、
+`rule_version` 与测试向量只在
+[E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
+正式 Activation 后由其 scoped 拥有。该 delegation 不推进 Case lifecycle，也不
+表示对应记录、Port 或持久化已经实现。
+
+### 14.5 `SUPERSEDED` Run 的 no-result closure
+
+Memory owner 消费
+[Project Direction §9.2](../../PROJECT_DIRECTION.md#92-e2e-01-cycle-2-shared-runtime-owner-alignment)
+对 obsolete Run 的 Core lifecycle 裁决，并固定以下 record-closure 规则：
+
+1. 只有同一 transactionally consistent snapshot 或等价 fence 中的 owner-scoped
+   exact current Run、Task、RequestUnit 与 `RunTaskLink` closure，能够唯一证明旧
+   Run 已被更新状态或绑定取代时，才允许 conditional finalizer 使用
+   `SUPERSEDED + STATE_OR_BINDING_INVALIDATED`。模型、旧缓存、展示文本、网络连接
+   状态或单条未经闭合验证的记录都不能作出该裁决。
+2. finalization 不更新 Task / RequestUnit，不创建新 state version，也不追加旧 Run
+   发起的 `TaskStateChanged`。已有
+   `RunTaskLink.result_task_state_version` 保持 `null`；它不声称旧 Run 产生了
+   Task result，也不能复制新 Run 已推进的 Task version。该 link 由 parent
+   Run=`SUPERSEDED` 逻辑关闭，不再被 active-run / restart-recovery reader 认作可
+   恢复 link。
+3. Run terminal CAS、link no-result closure 与
+   `RunStopped(stop_reason=STATE_OR_BINDING_INVALIDATED,
+   user_outcome=BLOCKED)` 必须形成一个失败原子的持久化操作或可证明等价的原子
+   边界。`BLOCKED` 只是 audit disposition；不得形成 `AgentRunResult`、ASSISTANT
+   Message、`ResponseRendered`、Observation、Evidence 或用户回复。已经发生的
+   Run、ToolCall、attempt 与安全 Trace evidence append-only 保留。
+4. `INCOMPLETE` 继续只表示 `PROCESS_RESTART_DETECTED`，并继续使用既有
+   restart-recovery closure；`CANCELLED` 不作为 obsolete Run 的别名。reason
+   unknown、重复、非唯一、互相矛盾，或 current closure 无法唯一证明 obsolete
+   时，必须服从
+   [Core Runtime / Project Direction owner 的 canonical fence](../../PROJECT_DIRECTION.md#92-e2e-01-cycle-2-shared-runtime-owner-alignment)：
+   不得猜测 `SUPERSEDED`，不得写入 / 推进 Task、RequestUnit 或产生用户结果，
+   也不得据此改变 Run terminal、RunTaskLink、Task、RequestUnit、ToolCall 或
+   attempt。现有执行继续被 fence，只能进入受限的 integrity failure /
+   operator-resolution 路径，直到 exact closure 得到唯一修复。
+
+该语义把 `AgentRunRecord`、`RunTaskLinkRecord` 与 `TraceEventRecord` 的目标逻辑
+版本分别从 `agent_run_record.p0.v1`、`run_task_link_record.p0.v1`、
+`trace_event_record.p0.v1` 提升为 `agent_run_record.p0.v2`、
+`run_task_link_record.p0.v2`、`trace_event_record.p0.v2`；Trace v2 不新增 shared
+字段，只扩展已批准的 terminal / stop-reason closed matrix。P0
+`exact-version-only` 仍然成立：Cycle 2 Activation 前必须有显式 v1→v2 data /
+physical migration、完整 record-graph validation、原子 cutover、审计证据、失败
+原子性与 rollback fence；不得让 v1 / v2 同时成为 active version，不得在 request
+或 recovery read 中 fallback、upgrade、downgrade 或重写。这里定义的是目标语义，
+不主张 migration、codec、reader、conditional finalizer 或 Eval closure 已实现。
+
 ## 15. 存储与检索策略
 
 ### 15.1 P0 存储

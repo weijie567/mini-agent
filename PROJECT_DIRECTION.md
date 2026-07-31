@@ -480,6 +480,76 @@ L2 不复制权威事实、政策正文、确认或副作用结果。当前业�
 
 本节只固定后续 Plan 必须服从的 ownership、版本和批准关系，不表示 `PersistenceEnvelope`、Record Schema registry、strict decoder、业务表、兼容层或对应 migration 已经实现。
 
+### 9.2 E2E-01 Cycle 2 shared Runtime owner alignment
+
+以下规则是 `E2E01-02/03/05/06` scoped contract 的上游 ownership 边界。这些规则
+不会激活该 contract，不创建新的物理记录，也不改变四个 Case 的
+`CONTRACT_DEFINED` lifecycle：
+
+- 候选集与序号选择属于 Runtime-private Task working state 的受控 selection
+  capability，不是订单业务事实。共享 Task-state record 的生命周期、CAS、
+  supersession 和 owner-scoped current-state revalidation 由 Core Runtime /
+  Project Direction owner 管理；候选字段、content hash、15 分钟 TTL、record
+  shape 与序列化由 [E2E-01 Cycle 2 Implementation Spec](docs/implementation/e2e01-cycle2-implementation-spec.md)
+  在正式 Activation 后 scoped 拥有。
+- CandidateSet 不能复制 owner-scoped target mapping；模型、Renderer、HTTP 和普通
+  Trace 只能消费批准的安全 projection。Application / Presentation 不能通过读取
+  Runtime-private DTO 后临时删字段来建立第二套披露规则。
+- Tool attempt、retry decision 与 recovery 的专项语义由 Tool owner 演进。当前
+  OA-07 alignment **不改变 shared `TraceEvent` record structure 或 logical
+  version**；专项记录和 event payload 继续服从 Tool owner。下文 OA-10 因 Core
+  terminal closed-matrix 语义变化单独批准 `trace_event_record.p0.v2`，但仍不改变
+  shared 字段。`ToolAttemptRecord` 是 `ToolCallRecord` 的 logical child；OA-07
+  增加 `timeout_phase` / `retry_decision` 结构与语义，因此按第 9.1 节版本规则由
+  Tool owner 把父记录目标版本提升为 `tool_call_record.p0.v2`，不创建独立
+  top-level attempt record。若实现证明还必须修改共享 Trace 字段或公共结构，必须
+  另行提交 cross-file impact analysis 并取得 Core Runtime / Project Direction
+  owner 裁决，不能从本节推定授权。
+- 业务 source authority 与具体 producer implementation 分开：业务 owner 决定
+  哪一次 owner-scoped 业务读取及其版本是权威来源；scoped Spec 可以指定具体
+  Adapter implementation、restricted propagation 与 canonical bytes；Infrastructure
+  类、数据库列或 Port 声明位置都不会因此成为业务 canonical owner。
+- Application `RunResultMapper` 只消费 owner 已批准的互斥映射，不拥有业务结果或
+  Run lifecycle 语义。对已被更新状态或绑定取代的 obsolete Run，Core Runtime
+  使用 `AgentRunStatus.SUPERSEDED +
+  StopReason.STATE_OR_BINDING_INVALIDATED`。该 Run 是不可恢复、无用户结果的终态：
+  `completed_at` 必填，`incomplete_reason = null`；不得生成 `AgentRunResult`、
+  ASSISTANT Message 或 `ResponseRendered`，不得更新 Task / RequestUnit，也不得
+  追加由旧 Run 发起的 `TaskStateChanged`。
+- `SUPERSEDED` 只能由独立 conditional finalization 写入：以 expected active Run
+  和 owner-scoped exact current Task / RequestUnit / `RunTaskLink` closure 为条件，
+  唯一证明旧 Run 已 obsolete 后通过 CAS 原子终止 Run，并逻辑关闭其 link。该
+  `RunTaskLink.result_task_state_version` 保持 `null`，表示旧 Run 没有产生或确认
+  Task result；link 的 no-result closure 由 parent Run=`SUPERSEDED` 证明，不能填入
+  新 Run 推进后的 Task version。
+- 同一原子 closure append-only 保存
+  `RunStopped(stop_reason=STATE_OR_BINDING_INVALIDATED,
+  user_outcome=BLOCKED)`；这里 `BLOCKED` 只是不出站的 audit disposition，不是
+  `AgentRunResult`，也不证明已向用户发送结果。shared `TraceEvent` 字段结构保持
+  不变。已经发生的安全 Run、ToolCall、attempt 与 Trace evidence 均不得删除或
+  改写。
+- `CANCELLED` 保留给未来显式 cancellation 语义，本次不加入 Run 状态机；
+  `INCOMPLETE` 继续且只能表示
+  `PROCESS_RESTART_DETECTED`。unknown、重复、非唯一或互相矛盾的 interruption /
+  invalidation reason 必须 fail closed：不得猜测 `SUPERSEDED`，不得回退为
+  `COMPLETED`、safe not-found 或模型自由措辞，也不得产生用户结果或写入 /
+  推进 Task、RequestUnit。该 reason 不得进入 `RunResultMapper`；不得据此改变
+  Run terminal、RunTaskLink、Task、RequestUnit、ToolCall 或 attempt。现有执行
+  继续被 fence，只允许受限 integrity evidence 与 operator resolution，直到
+  exact closure 可被唯一证明。
+- 上述 OA-07 / OA-10 语义演进把当前 `tool_call_record.p0.v1`、
+  `agent_run_record.p0.v1`、`run_task_link_record.p0.v1` 与
+  `trace_event_record.p0.v1` 的目标逻辑版本分别提升为
+  `tool_call_record.p0.v2`、`agent_run_record.p0.v2`、
+  `run_task_link_record.p0.v2` 与 `trace_event_record.p0.v2`。Trace v2 只扩展
+  owner 已批准的 terminal /
+  stop-reason closed matrix，不新增 shared 字段。P0 的 exact-version-only 规则
+  继续适用；Activation 前必须由 scoped contract 明确 v1→v2 的显式 migration、
+  原子切换、审计、失败原子性与 rollback fence，禁止 mixed active versions、
+  read-time fallback 或静默 downgrade。本节只批准 logical contract evolution，
+  不表示 physical / data migration、decoder、finalizer、持久化 reader 或 Eval
+  support 已经实现。
+
 ## 10. Tool、RAG 与退款动作
 
 Read / Retrieval 工具：

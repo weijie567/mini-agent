@@ -428,6 +428,69 @@ Mock 系统必须提供可控测试分支，至少包括：
 15. P0 不把模拟退款 `COMPLETED` 表述为真实支付渠道到账。
 16. 回复、模型上下文、Memory 和 Trace 均遵循最小披露原则。
 
+### 6.1 E2E-01 Cycle 2 业务 owner 裁决与 scoped delegation
+
+本节拥有 `E2E01-02/03/05/06` 所需的业务语义；具体字段编码只在
+[E2E-01 Cycle 2 Implementation Spec](implementation/e2e01-cycle2-implementation-spec.md)
+正式 Activation 后，才按下列边界委托给该 scoped Spec。该委托不改变四个 Case
+当前的 `CONTRACT_DEFINED` lifecycle，也不表示 Phase 2 已经 Activation、规划或
+实现。
+
+1. **本人近期订单搜索。** 自然语言描述仍只是搜索 Claim / Candidate Input；
+   搜索必须先在服务端可信 `customer_id` 范围内执行，业务查询结果验证后才能形成
+   verified order target。Cycle 2 的精确时间窗口、normalization、matching、
+   category / alias 配置、排序、候选上限、截断和 refinement 编码由 scoped Spec
+   拥有，不升级为整个 P0 的通用搜索语义。
+2. **候选最小披露。** 多候选只允许展示完成当前澄清所需的本人订单安全摘要；
+   Presentation、HTTP、Renderer、模型上下文和普通 Trace 只能消费已批准的安全
+   projection，不能读取 Runtime-private result 后自行删字段。各可见域的精确字段、
+   UTC 日期编码、matching item 上限和禁止字段由 scoped Spec 拥有。
+3. **Order → active Package 基数。** P0 每个已验证 Order 在一次 owner-scoped
+   物流读取中只能解析为 `0..1` 个 active Package。`0` 表示没有可用的 active
+   Package；`1` 才允许继续形成 Shipment 事实；`>1` 是 source integrity failure，
+   不得挑选任一 Package、不得形成 Shipment Observation、不得自动重试，也不得向
+   用户、模型或普通 Trace 披露 Package 数量。
+4. **Shipment 事实有效性。** 合法但不足以形成配送判断的事实与互相矛盾、违反
+   source invariant 的事实必须分流：前者进入明确的“事实不足”业务分支，后者
+   必须 fail closed 为 integrity failure。
+   Shipment 的精确字段、状态与时间组合、5 分钟新鲜度编码和 failure code 由
+   scoped Spec 拥有；业务上仍要求配送判断只使用最新可信 Observation，刷新失败
+   不得回退旧事实。
+5. **确定性 Shipment Assessment。** 只有 fresh、完整且绑定当前 verified order
+   target 的 Shipment Observation 才能形成下列业务结果：
+
+   - `DELIVERED_NOT_RECEIVED`：物流事实显示 `DELIVERED`，且存在绑定同一当前目标的
+     有效用户“未收到”Claim；结果必须同时保留“物流显示已签收”和“用户反馈未收到”
+     两种来源，不能把 Claim 升级为已验证遗失、盗窃或承运商责任。
+   - `STALLED`：Shipment 尚未 `DELIVERED`，且可信判断时刻距最新物流事件达到或
+     超过 **120 小时**。
+   - `DELAYED`：Shipment 尚未 `DELIVERED`，存在承诺送达时间，且可信判断时刻已经
+     晚于该时间。
+   - `NORMAL`：形成判断所需事实完整，且以上三种例外均不成立。
+
+   多个条件同时成立时，primary result 的固定业务优先级为
+   `DELIVERED_NOT_RECEIVED > STALLED > DELAYED > NORMAL`。120 小时阈值、
+   primary-result precedence 和上述业务含义由本文拥有；scoped Spec 只拥有具体
+   编码、record shape、reason code serialization、`rule_version` 与测试向量。
+6. **source authority。** Order search snapshot、候选订单事实和 Shipment
+   snapshot/version 的业务权威来自受控业务系统在可信 owner scope 下完成的一次
+   读取，不来自展示字段、数据库写入时间、模型、Renderer 或消费者重算。具体
+   producer implementation、restricted propagation 和 canonical bytes 由 scoped
+   Spec 拥有；任何具体 Infrastructure Adapter 类都不是业务 canonical owner。
+7. **可见 / 私有 Tool contract。** 本文确认现有最小披露与可信身份规则继续适用；
+   `search_orders`、`get_shipment` 的 Agent-visible Schema、Runtime-private
+   Query / Result 和 restricted raw reference 的精确编码由 scoped Spec 拥有，
+   不建立第二套业务 DTO。
+8. **obsolete Run 的用户结果边界。** 已被更新状态或绑定取代的旧 Run 不得向用户
+   发送结果。unknown、重复或互相矛盾的 interruption / invalidation reason 必须
+   fail closed，不得回退为 `COMPLETED`、安全未找到或模型自由措辞。Task
+   no-overwrite、append-only audit 与 exact Run lifecycle 服从
+   [Project Direction §9.2](../PROJECT_DIRECTION.md#92-e2e-01-cycle-2-shared-runtime-owner-alignment)；
+   Core Runtime owner 已为该情形裁决
+   `SUPERSEDED + STATE_OR_BINDING_INVALIDATED`。本文只拥有“不向用户发送旧 Run
+   结果”的业务边界，不复制该 terminal、link、Trace 或 persistence lifecycle
+   正文。
+
 ## 7. 用户结果与 P0 验收
 
 ### 7.1 用户可见结果

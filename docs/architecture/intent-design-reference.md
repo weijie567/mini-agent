@@ -686,6 +686,32 @@ P0 只支持当前两条 E2E 所需的有限输入词汇：
 
 例如，用户说“帮我找最近买的鞋”，不应先要求订单号；Controlled ReAct 可以在当前 `customer_id` 范围内调用 `search_orders`。如果返回多个本人订单候选，再用最小摘要 `ASK_USER`。
 
+### 10.7 E2E-01 Cycle 2 序号引用与候选能力
+
+对“第二个”“前一个”等序号 / 相对引用，Intent owner 增加以下通用规则：
+
+1. 序号只是一项 Candidate Input，不能直接成为 `order_id`、verified target 或
+   Business Observation。
+2. 只有在可信 owner scope、当前 Task、当前 RequestUnit 和当前
+   `task_state_version` 下，存在且只存在一个未过期、未 supersede 的候选能力时，
+   Runtime 才能尝试解析序号。
+3. 解析必须先对 current CandidateSet、其来源 Observation、候选序列和 expected
+   version 做闭合校验，再以 CAS 形成新的 selection record 与
+   `verified_target_ref`；任何 missing、duplicate、expired、superseded、
+   wrong-owner、wrong-Task、ordinal out-of-range 或 CAS mismatch 都必须 fail
+   closed 并重新澄清，不能调用后续业务 Tool。
+4. CandidateSet 只表达 ordinal selection capability，不拥有或复制订单业务事实；
+   `candidate_ref → owner-scoped target` 的 Runtime-private mapping 对模型、
+   Renderer、HTTP 和普通 Trace 不可见。
+5. 自然语言搜索 description 继续是 Claim / Candidate；只有 owner-scoped 业务
+   读取验证后的候选才能进入上述能力闭包。
+
+`E2E01-02/03/05/06` 的候选字段、canonical hash bytes、15 分钟 TTL、ordinal
+编码、selection record shape 和 exact failure code，只在
+[E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
+正式 Activation 后由其 scoped 拥有；本节不把这些具体值升级为通用 Intent
+contract，也不改变四个 Case 的 `CONTRACT_DEFINED` lifecycle。
+
 ## 11. 与 Controlled ReAct 的边界
 
 ### 11.1 触发时机
