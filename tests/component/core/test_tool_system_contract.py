@@ -1168,6 +1168,44 @@ def test_cycle2_validator_is_scoped_without_tightening_generic_registry_build() 
         validate_cycle2_registry_snapshot(unexpected)
 
 
+@pytest.mark.parametrize(
+    ("policy_field", "malformed_value"),
+    [
+        ("max_attempts", True),
+        ("max_attempts", 1.0),
+        ("timeout_ms", True),
+        ("timeout_ms", 500.0),
+        ("retryable_failure_codes", []),
+        ("interrupt_behavior", b"MARK_INTERRUPTED"),
+    ],
+)
+def test_cycle2_registry_validator_rejects_raw_private_policy_type_bypass(
+    policy_field: str,
+    malformed_value: object,
+) -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "get_order"
+    )
+    registration = registrations[index]
+    registrations[index] = registration.model_copy(
+        update={
+            "execution_policy": registration.execution_policy.model_copy(
+                update={policy_field: malformed_value}
+            )
+        }
+    )
+    malformed = snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
 def _retry_revalidation(
     *,
     remaining_run_time_budget_ms: int = 500,
@@ -1765,6 +1803,37 @@ def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> No
     assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
     assert decision.last_attempt_no == 3
     assert decision.candidate_next_attempt_no is None
+
+
+@pytest.mark.parametrize("malformed_kind", ["missing-id", "invalid-id", "non-model"])
+def test_cycle2_recovery_malformed_identity_stably_fails_closed(
+    malformed_kind: str,
+) -> None:
+    if malformed_kind == "non-model":
+        malformed: object = object()
+    else:
+        values = _tool_call_v2_values()
+        if malformed_kind == "missing-id":
+            values.pop("tool_call_id")
+        else:
+            values["tool_call_id"] = "not-a-uuid"
+        malformed = ToolCallRecordV2.model_construct(
+            **values,
+            attempt_count=0,
+            attempts=(),
+            status=ToolCallStatus.CREATED,
+        )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.tool_call_id is None
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
 
 
 def test_cycle2_terminal_recovery_matrix_preserves_child_attempt_evidence() -> None:

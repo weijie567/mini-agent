@@ -42,6 +42,7 @@ from .tool_system import (
     ToolSpec,
     ToolsetHash,
     build_cycle2_registry_snapshot,
+    cycle2_registry_private_policies_are_raw_exact,
     get_order_tool_spec,
     validate_cycle2_registry_snapshot,
 )
@@ -893,9 +894,7 @@ def _cycle2_malformed_rejection(
     raw_refs = getattr(candidate, "argument_binding_refs", ())
     if not isinstance(raw_refs, tuple):
         raw_refs = ()
-    binding_refs = tuple(
-        ref for ref in raw_refs if isinstance(ref, UUID)
-    )
+    binding_refs = tuple(ref for ref in raw_refs if isinstance(ref, UUID))
     if len(binding_refs) != len(set(binding_refs)):
         binding_refs = ()
     proposed_version = getattr(candidate, "proposed_base_task_state_version", None)
@@ -929,6 +928,76 @@ def _cycle2_malformed_rejection(
     )
 
 
+def _cycle2_raw_exact_type_preflight(
+    candidate: object,
+    loaded: object,
+) -> bool:
+    """Reject raw bypass values before any nested Pydantic coercion can occur."""
+
+    if (
+        type(candidate) is not Cycle2GatewayCandidate
+        or type(loaded) is not Cycle2GatewayLoadedClosure
+    ):
+        return False
+    try:
+        proposed_version = candidate.proposed_base_task_state_version
+        manifest_task_ref = loaded.context_manifest.task_state_ref_and_version
+        budget = loaded.budget
+        progress = loaded.progress_snapshot
+        token_counts = loaded.context_manifest.token_counts
+        integer_values = (
+            candidate.validated_task_state_version,
+            loaded.current_task.state_version,
+            loaded.current_request_unit.state_version,
+            budget.tool_calls_used,
+            budget.max_tool_calls,
+            budget.active_tool_calls,
+            budget.accepted_parallel_tool_calls,
+            budget.remaining_run_time_budget_ms,
+            progress.task_state_version,
+            *(binding.task_state_version for binding in loaded.current_input_bindings),
+            *(
+                target.task_state_version
+                for target in loaded.current_verified_order_targets
+            ),
+            *(
+                observation.task_state_version
+                for observation in loaded.current_target_observations
+            ),
+            *(step.task_state_version for step in progress.prior_tool_steps),
+        )
+        if any(type(value) is not int for value in integer_values):
+            return False
+        if proposed_version is not None and type(proposed_version) is not int:
+            return False
+        if (
+            manifest_task_ref is not None
+            and type(manifest_task_ref.state_version) is not int
+        ):
+            return False
+        if (
+            budget.max_tool_calls != 3
+            or budget.accepted_parallel_tool_calls != 0
+            or type(budget.closure_complete) is not bool
+            or budget.closure_complete is not True
+            or type(progress.history_complete) is not bool
+            or progress.history_complete is not True
+        ):
+            return False
+        if any(
+            count is not None and type(count) is not int
+            for count in (token_counts.input_tokens, token_counts.output_tokens)
+        ):
+            return False
+        if not cycle2_registry_private_policies_are_raw_exact(
+            loaded.registry_snapshot
+        ):
+            return False
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def evaluate_cycle2_control_gateway(
     *,
     candidate: Cycle2GatewayCandidate,
@@ -945,9 +1014,15 @@ def evaluate_cycle2_control_gateway(
 
     decided_at = require_utc(decided_at, field_name="decided_at")
     try:
-        candidate = Cycle2GatewayCandidate.model_validate(candidate.model_dump())
+        if not _cycle2_raw_exact_type_preflight(candidate, loaded_closure):
+            raise ValueError("Cycle 2 raw exact-type preflight failed")
+        candidate = Cycle2GatewayCandidate.model_validate(
+            candidate.model_dump(),
+            strict=True,
+        )
         loaded_closure = Cycle2GatewayLoadedClosure.model_validate(
-            loaded_closure.model_dump()
+            loaded_closure.model_dump(),
+            strict=True,
         )
     except (
         ValidationError,

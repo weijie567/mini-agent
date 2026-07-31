@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticSerializationError
 
 from .common import (
     AuditOnlyModel,
@@ -1169,7 +1170,7 @@ class ToolRecoveryDecision(StrEnum):
 class ToolRetryRecoveryDecision(RuntimePrivateModel):
     """Pure recovery result; ``durable_cas_claimed`` is intentionally false."""
 
-    tool_call_id: UUID
+    tool_call_id: UUID | None
     last_attempt_no: Annotated[int, Field(strict=True, ge=0)]
     decision: ToolRecoveryDecision
     stable_reason_code: SafeReasonCode
@@ -1184,6 +1185,11 @@ class ToolRetryRecoveryDecision(RuntimePrivateModel):
 
     @model_validator(mode="after")
     def executable_shape_is_closed(self) -> Self:
+        if (
+            self.decision is not ToolRecoveryDecision.FAIL_CLOSED
+            and self.tool_call_id is None
+        ):
+            raise ValueError("executable recovery evidence requires ToolCall identity")
         if self.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT:
             if self.candidate_next_attempt_no != 2 or self.last_attempt_no != 1:
                 raise ValueError("second-attempt decision requires attempt 1 only")
@@ -1194,7 +1200,7 @@ class ToolRetryRecoveryDecision(RuntimePrivateModel):
 
 def _recovery_decision(
     *,
-    tool_call_id: UUID,
+    tool_call_id: UUID | None,
     last_attempt_no: int,
     decision: ToolRecoveryDecision,
     stable_reason_code: str,
@@ -1211,24 +1217,61 @@ def _recovery_decision(
     )
 
 
+def _safe_malformed_recovery_identity(
+    tool_call: object,
+) -> tuple[UUID | None, int]:
+    """Extract only an exact UUID from an actual ToolCall contract instance."""
+
+    if type(tool_call) is not ToolCallRecordV2:
+        return None, 0
+    try:
+        raw_tool_call_id = getattr(tool_call, "tool_call_id")
+    except AttributeError:
+        return None, 0
+    tool_call_id = raw_tool_call_id if type(raw_tool_call_id) is UUID else None
+    try:
+        attempts = getattr(tool_call, "attempts")
+    except AttributeError:
+        return tool_call_id, 0
+    last_attempt_no = len(attempts) if type(attempts) is tuple else 0
+    return tool_call_id, last_attempt_no
+
+
 def decide_cycle2_tool_recovery(
     *,
-    tool_call: ToolCallRecordV2,
-    revalidation: Cycle2RetryRevalidation,
+    tool_call: object,
+    revalidation: object,
     decided_at: datetime,
 ) -> ToolRetryRecoveryDecision:
     """Evaluate restart evidence without claiming CAS, dispatch, or persistence."""
 
     decided_at = require_utc(decided_at, field_name="decided_at")
+    safe_tool_call_id, last_attempt_no = _safe_malformed_recovery_identity(
+        tool_call
+    )
+    if safe_tool_call_id is None:
+        return _recovery_decision(
+            tool_call_id=None,
+            last_attempt_no=last_attempt_no,
+            decision=ToolRecoveryDecision.FAIL_CLOSED,
+            stable_reason_code="RECOVERY_EVIDENCE_INVALID",
+            decided_at=decided_at,
+        )
     try:
         validated = ToolCallRecordV2.model_validate(tool_call.model_dump())
         validated_revalidation = Cycle2RetryRevalidation.model_validate(
             revalidation.model_dump()
         )
-    except (ValidationError, ValueError, TypeError):
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        AttributeError,
+        ValueError,
+        TypeError,
+    ):
         return _recovery_decision(
-            tool_call_id=tool_call.tool_call_id,
-            last_attempt_no=len(getattr(tool_call, "attempts", ())),
+            tool_call_id=safe_tool_call_id,
+            last_attempt_no=last_attempt_no,
             decision=ToolRecoveryDecision.FAIL_CLOSED,
             stable_reason_code="RECOVERY_EVIDENCE_INVALID",
             decided_at=decided_at,
@@ -1715,17 +1758,30 @@ def validate_cycle2_registry_snapshot(
     """Fail closed unless every scoped visible/private registration field is exact."""
 
     expected = build_cycle2_registry_snapshot()
-    actual_registrations = {
-        registration.tool_spec.name: registration
-        for registration in snapshot.canonical_registrations
-    }
     expected_registrations = {
         registration.tool_spec.name: registration
         for registration in expected.canonical_registrations
     }
+    try:
+        if type(snapshot) is not RegistrySnapshot:
+            raise TypeError("Cycle 2 snapshot must be the exact contract type")
+        if type(snapshot.canonical_registrations) is not tuple:
+            raise TypeError("Cycle 2 registrations must be a tuple")
+        actual_registrations = {
+            registration.tool_spec.name: registration
+            for registration in snapshot.canonical_registrations
+        }
+        private_policies_exact = cycle2_registry_private_policies_are_raw_exact(
+            snapshot
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            "snapshot does not match the exact Cycle 2 registry"
+        ) from None
     if (
         snapshot.tool_registry_version != expected.tool_registry_version
         or len(actual_registrations) != len(snapshot.canonical_registrations)
+        or not private_policies_exact
         or actual_registrations != expected_registrations
         or snapshot.provider_visible_toolset != expected.provider_visible_toolset
         or snapshot.provider_name_to_canonical_name
@@ -1735,3 +1791,57 @@ def validate_cycle2_registry_snapshot(
     ):
         raise ValueError("snapshot does not match the exact Cycle 2 registry")
     return snapshot
+
+
+def _cycle2_registration_private_policy_is_exact(
+    actual: object,
+    expected: ToolRegistration | None,
+) -> bool:
+    """Compare raw private policy fields without bool/int/float equality coercion."""
+
+    if type(actual) is not ToolRegistration or expected is None:
+        return False
+    policy = actual.execution_policy
+    expected_policy = expected.execution_policy
+    return (
+        type(policy) is ExecutionPolicy
+        and type(policy.timeout_ms) is int
+        and policy.timeout_ms == expected_policy.timeout_ms
+        and type(policy.max_attempts) is int
+        and policy.max_attempts == expected_policy.max_attempts
+        and type(policy.retryable_failure_codes) is tuple
+        and all(type(code) is str for code in policy.retryable_failure_codes)
+        and policy.retryable_failure_codes
+        == expected_policy.retryable_failure_codes
+        and type(policy.interrupt_behavior) is str
+        and policy.interrupt_behavior == expected_policy.interrupt_behavior
+    )
+
+
+def cycle2_registry_private_policies_are_raw_exact(
+    snapshot: object,
+) -> bool:
+    """Check raw private execution policies without validating other Gates."""
+
+    if type(snapshot) is not RegistrySnapshot:
+        return False
+    expected = build_cycle2_registry_snapshot()
+    expected_registrations = {
+        registration.tool_spec.name: registration
+        for registration in expected.canonical_registrations
+    }
+    try:
+        if type(snapshot.canonical_registrations) is not tuple:
+            return False
+        return (
+            len(snapshot.canonical_registrations) == len(expected_registrations)
+            and all(
+                _cycle2_registration_private_policy_is_exact(
+                    registration,
+                    expected_registrations.get(registration.tool_spec.name),
+                )
+                for registration in snapshot.canonical_registrations
+            )
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False

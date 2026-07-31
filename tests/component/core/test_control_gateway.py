@@ -17,7 +17,12 @@ from mini_agent.core.control_gateway import (
     evaluate_cycle2_control_gateway,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import ContextManifest, TokenCounts, VersionedRecordRef
+from mini_agent.core.memory import (
+    ContextManifest,
+    TaskStateRefAndVersion,
+    TokenCounts,
+    VersionedRecordRef,
+)
 from mini_agent.core.request_processing import (
     InitialRequestRoutableTaskGraphDecisionV2,
     InitialTaskIdentityAllocationV2,
@@ -1048,6 +1053,123 @@ def test_cycle2_gateway_strictly_reconstructs_bypassed_or_foreign_facts(
     gate = _evaluate_cycle2(candidate, loaded)
 
     assert gate.decision is GateDecisionValue.REJECT
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        "task-state-bool",
+        "task-state-float",
+        "request-unit-state-bool",
+        "request-unit-state-float",
+        "manifest-state-bool",
+        "manifest-state-float",
+        "accepted-parallel-false",
+        "accepted-parallel-float",
+    ],
+)
+def test_cycle2_gateway_preflights_raw_nested_integer_types(
+    bypass: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    if bypass.startswith("task-state"):
+        loaded = loaded.model_copy(
+            update={
+                "current_task": loaded.current_task.model_copy(
+                    update={
+                        "state_version": (
+                            True if bypass.endswith("bool") else 1.0
+                        )
+                    }
+                )
+            }
+        )
+    elif bypass.startswith("request-unit-state"):
+        loaded = loaded.model_copy(
+            update={
+                "current_request_unit": loaded.current_request_unit.model_copy(
+                    update={
+                        "state_version": (
+                            True if bypass.endswith("bool") else 1.0
+                        )
+                    }
+                )
+            }
+        )
+    elif bypass.startswith("manifest-state"):
+        candidate = candidate.model_copy(
+            update={"proposed_base_task_state_version": 1}
+        )
+        loaded = loaded.model_copy(
+            update={
+                "context_manifest": loaded.context_manifest.model_copy(
+                    update={
+                        "task_state_ref_and_version": (
+                            TaskStateRefAndVersion.model_construct(
+                                task_id=candidate.task_id,
+                                state_version=(
+                                    True if bypass.endswith("bool") else 1.0
+                                ),
+                            )
+                        )
+                    }
+                )
+            }
+        )
+    else:
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(
+                    update={"accepted_parallel_tool_calls": False}
+                    if bypass.endswith("false")
+                    else {"accepted_parallel_tool_calls": 0.0}
+                )
+            }
+        )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.state_version_valid is False
+
+
+@pytest.mark.parametrize(
+    ("policy_field", "malformed_value"),
+    [
+        ("max_attempts", True),
+        ("max_attempts", 1.0),
+        ("timeout_ms", True),
+        ("timeout_ms", 500.0),
+    ],
+)
+def test_cycle2_gateway_rejects_raw_malformed_private_registry_policy(
+    policy_field: str,
+    malformed_value: object,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    registrations = list(loaded.registry_snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "get_order"
+    )
+    registration = registrations[index]
+    registrations[index] = registration.model_copy(
+        update={
+            "execution_policy": registration.execution_policy.model_copy(
+                update={policy_field: malformed_value}
+            )
+        }
+    )
+    malformed_snapshot = loaded.registry_snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+    loaded = loaded.model_copy(update={"registry_snapshot": malformed_snapshot})
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.registration_valid is False
 
 
 def test_cycle2_gateway_fails_closed_when_complete_progress_history_is_omitted() -> None:
