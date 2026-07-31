@@ -1,15 +1,14 @@
 # E2E-01 Cycle 2｜Activation Readiness Decision Packet v0.1
 
-> **NON_NORMATIVE / USER_RULINGS_RECORDED / OWNER_ALIGNMENT_DRAFT_PREPARED / OA10_USER_APPROVED / R1_FINDINGS_REMEDIATED / R2_VERDICT_FAIL / R2_FINDINGS_REMEDIATED / R3_VERDICT_FAIL / R3_FINDINGS_REMEDIATED / R4_VERDICT_FAIL / R4_FINDING_REMEDIATED / R5_VERDICT_FAIL / R5_FINDING_REMEDIATED / R6_EXACT_FILE_REVIEW_PENDING / ACTIVATION_BLOCKED**
+> **NON_NORMATIVE / OWNER_ALIGNMENT_R6_PASS / PR_201_MERGED / ACTIVATION_BASE_FROZEN / SCOPED_CONTRACT_ACTIVE**
 >
-> 本文只帮助用户裁决 `OA-01..OA-11` 的 owner-alignment 路线，不是 active
-> implementation contract，不修改任何 canonical owner、Phase 状态、Case
-> lifecycle、Plan、Task Packet、Worktree、源码、测试或 Eval artifact。
+> 本文记录 `OA-01..OA-11` 的裁决、owner-alignment review / merge 与 scoped
+> contract Activation 证据；它不是 active implementation contract，也不拥有
+> canonical 语义或 Case lifecycle。规范性 scoped 合同是
+> [Cycle 2 Implementation Spec](e2e01-cycle2-implementation-spec.md)。
 >
-> 用户已经对 `OA-01..OA-11` 作出本文件第 7 节记录的分项裁决；用户批准不等于
-> owner alignment 已合并。只有后续 canonical owner alignment 变更经过独立审阅
-> 并合并，才能把对应 `OA-*` 标为 `CLOSED`。`OA-10` exact Run terminal 推荐方案
-> 已获用户批准。第一轮 owner-alignment exact-file review 的 `1 BLOCK + 2 HIGH +
+> 用户已对 `OA-01..OA-11` 作出第 7 节记录的分项裁决。第一轮
+> owner-alignment exact-file review 的 `1 BLOCK + 2 HIGH +
 > 1 LOW` 已按用户授权定向修订；第二轮 review 的 verdict 为
 > `FAIL / 1 BLOCK + 1 HIGH`，也已按用户授权作最小修订。第三轮 review 的 verdict
 > 为 `FAIL / 1 HIGH + 1 MEDIUM + 1 LOW`；用户已裁决 `CF-13` exact owner 语义，
@@ -19,13 +18,17 @@
 > Phase 2 import / delta 边界，不修改 Phase 1 Spec、代码或共享 owner。第五轮
 > review 的 verdict 为 `FAIL / 1 HIGH`：Phase 1 order success 与 process restart
 > 仍被 `RM-17/RM-I03` 重复拥有；本轮把它们改为 imported reference rows，并继续
-> 保持 Phase 1 与共享 owner 只读。第六轮 review 尚未完成，本 Packet 不能自证
-> Activation Readiness。
+> 保持 Phase 1 与共享 owner 只读。第六轮 exact-file review 与 PR #201
+> final exact-head review 均为 `PASS / 0 findings`；PR #201 已 squash merge 为
+> `9ee260f12a82b706269f8a62c460c781c64f1f47`。后续 Activation 仍以独立 PR 的
+> exact-head review / merge 为外部生效证据，本 Packet 不能自证。
 
 - **Created:** 2026-07-31
 - **Target phase:** Phase 2｜Cycle 2｜完成 E2E-01
 - **Target contract:** [E2E-01 Cycle 2 Implementation Spec](e2e01-cycle2-implementation-spec.md)
 - **Repository HEAD at analysis:** `8f73b1ef89444bbdccbc50777394bcc420b42b3f`
+- **Owner-alignment PR / merge:** `#201 / 9ee260f12a82b706269f8a62c460c781c64f1f47`
+- **Activation exact base SHA:** `9ee260f12a82b706269f8a62c460c781c64f1f47`
 - **Historical single-spec R3-reviewed target SHA-256:** `eeae4923c771a1ffababba1d17c6aa30b6627318aabfae4e839d7f29d8c71520`
 - **Historical single-spec M-01-remediated target SHA-256:** `5209c968302293b83e67c1a861d31c1a5218028fcdc6f6d58b35c7f8faff2732`
 - **Current owner-aligned draft SHA-256:** `f25a7cab888fe7a5c59f6e664f25130f802bdab2ff7108507e25f0f77b60ba55`
@@ -45,21 +48,52 @@
 - **Owner-alignment R5 verdict:** `FAIL / 1 HIGH`
 - **R5 remediation scope:** `import Phase 1 §8.1 order success + §10.4 restart；
   remove RM-17/RM-I03 from delta；four imported regression refs`
-- **Owner-alignment R6 review:** `PENDING`
+- **Owner-alignment R6 review:** `PASS / 0 BLOCK + 0 HIGH + 0 MEDIUM + 0 LOW`
 - **Current mechanical recheck:** `PASS`（`git diff --check`；14 个 longitudinal /
   13 个 Trajectory，且每个 Trajectory 恰有一个 `REQ_STOP`；9 个 JSON blocks；
   12 个引用 `CF-13` 的 exact rows 均含 model / Presentation bypass predicate；
   4 个 imported Mapper refs 均存在且 `RM-17/RM-I03` 不在 delta table，union
   ownership 机械检查通过；10 个目标 Markdown 的 180 个本地链接和 58 个
-  fragment 为 0 error；独立 semantic R6 review 仍为 `PENDING`，本检查不是独立
-  exact-file review，也不是 Activation PR 的 exact-head review）
-- **Phase 2 status:** `PLANNED_MAPPING_ONLY`
+  fragment 为 0 error；独立 semantic R6 review 与 PR #201 exact-head
+  containment 均为 `PASS`）
+- **Phase 2 status:** `CONTRACT_ACTIVE / READY_FOR_PLANNING`
 - **Target Case lifecycle:** `E2E01-02/03/05/06 = CONTRACT_DEFINED`
-- **Activation:** `NOT_STARTED`
+- **Activation:** `ACTIVE ON INDEPENDENT EXACT-HEAD REVIEWED PR MERGE`
 
-## 1. 本次审批要决定什么
+## 0. Activation identity 与 frozen contract bundle
 
-本次只决定：
+```text
+activation_base_sha = 9ee260f12a82b706269f8a62c460c781c64f1f47
+owner_alignment_pr = 201
+owner_alignment_merge_sha = 9ee260f12a82b706269f8a62c460c781c64f1f47
+activation_pr = PENDING_GITHUB_ALLOCATION
+hash_algorithm = SHA-256
+```
+
+Activation contract bundle 精确包含 7 个 canonical owner、imported Phase 1 scoped
+owner 与 Cycle 2 scoped owner；manifest 不包含本 Packet、`AGENTS.md` 或 `.planning`
+派生状态，避免自引用。任一 bundle 字节变化都会使 Activation exact-head review
+失效并要求重新冻结：
+
+| SHA-256 | Contract file |
+|---|---|
+| `5221b21e227bcd9e754aeb862bc79867273be9e32d7c5a129944ad2e675f28e4` | `PROJECT_DIRECTION.md` |
+| `481cb6ea2edee9559c68da72a37814341a6ef12771aa7d29e7f88eebb64e3b31` | `docs/business-capabilities.md` |
+| `d4ba3acb5b98450d7a24305140f4fa60cfbbcaee63b2515c5adab496c87f399b` | `docs/architecture/intent-design-reference.md` |
+| `2831ea71c1c2a73d4d992f81e0fb170204b0da1f6a5986106e5fc2d2422df128` | `docs/architecture/memory-design-reference.md` |
+| `58b90ba8376c247c5309eb3c40ac8445562f9f22daf53c977931c61750754833` | `docs/architecture/tool-calling-design-reference.md` |
+| `ad41b28b3dca28072572398546a5f6ed47344edb16a8e2ab249b341b2eb8ad95` | `docs/evaluation/agent-evaluation-strategy.md` |
+| `1d2f229bd90793ff4294578bf1af66f591833d6939854f16c306b7c9d4bc5fb5` | `docs/evaluation/p0-eval-coverage-matrix.md` |
+| `65b90e7db0aaa0c96895d1d9e9f41ae4cb22c5e73cb065284d6dab3cfca13cce` | `docs/implementation/e2e01-thin-slice-implementation-spec.md` |
+| `bf4434d1d41f21d299ddb5cce210afa6a346680df55d91914394ab080b50a30f` | `docs/implementation/e2e01-cycle2-implementation-spec.md` |
+
+Activation PR 的 final commit SHA、review verdict 与 merge SHA 由 GitHub PR
+metadata / review comment 持有；不得把 Packet 自己的 SHA 或尚未发生的 merge
+结果写成可自证事实。
+
+## 1. 原 owner-alignment 审批边界
+
+Owner-alignment Gate 当时只决定：
 
 1. 每个 `OA-*` 应由上游 owner 增加通用规则、条件式委托 scoped encoding，还是
    只确认现有规则已经覆盖。
@@ -68,11 +102,11 @@
 3. 哪些当前差异是显式 contract evolution，不能被实现或 Plan 静默吸收。
 4. 后续 owner-alignment 变更应满足的可证伪关闭条件。
 
-本次不决定：
+Owner-alignment Gate 当时不决定、并由后续独立 Activation Gate 处理：
 
 - canonical owner 的最终文字或 commit。
-- scoped contract Activation。
-- Phase 2 Plan、Task Packet、Wave、branch、Worktree 或 `base_sha`。
+- scoped contract Activation（现已单独处理）。
+- Phase 2 Plan、Task Packet、Wave、代码 branch / Worktree。
 - Python DTO、Port、migration、Fixture、测试或产品代码。
 - Case 从 `CONTRACT_DEFINED` 进入 `EXECUTABLE`。
 
@@ -573,47 +607,50 @@ R5 exact-file review = FAIL（1 HIGH）
   ↓
 cross-file conflict scan + R6 独立 owner-alignment exact-file review
   ↓
-owner-alignment merge
+R6 = PASS / 0 findings
   ↓
-独立 Activation PR（此时才允许创建）
+owner-alignment PR #201 merge = 9ee260f...
+  ↓
+独立 Activation PR（exact base = 9ee260f...）
+  ↓
+SCOPED_CONTRACT_ACTIVE / READY_FOR_PLANNING
 ```
 
-当前 draft 已按 Business → Intent / Memory / Core Runtime → Tool → Eval 的 owner
-依赖顺序准备。OA-10 不再等待用户选项，但 exact-file review、owner-alignment
-merge 与后续 Activation gate 仍逐项阻断；不得因为裁决已记录就跳到 Activation。
+Owner alignment 已按 Business → Intent / Memory / Core Runtime → Tool → Eval 的
+依赖顺序完成并合并。Activation 只解除 planning gate；不得因为 contract active
+就跳过 Plan、Task Packet、exact base、Wave 审批或 Case lifecycle owner。
 
 写入型 owner alignment 必须遵守一个文件一个明确 writer、single-writer 热点串行和
 独立 PR；本文不预建 branch、Worktree、Packet 或 SHA。
 
 ## 6. Cross-file impact inventory
 
-用户批准后，本轮已准备下列 owner-alignment draft。这里的“已准备”只表示当前
-working tree 有未合并文档变更，不表示独立 review、commit、PR 或 merge：
+下列 owner-alignment 文件已由 R6 / PR #201 精确审阅并合并：
 
 | 文件 | 作用 | 当前是否修改 |
 |---|---|---:|
-| `docs/business-capabilities.md` | `OA-01/02/04/05/06/08/09` Business ruling；`OA-10` no-outbound-result 边界并引用 Core lifecycle | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `PROJECT_DIRECTION.md` | Core Runtime、Application mapper、strict unknown-reason fence（含 Task / RequestUnit）、ToolCall / Run / link / Trace v2 records、shared Trace 与 scoped owner mapping | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/architecture/intent-design-reference.md` | `OA-01/03` ordinal binding 与 delegation | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/architecture/memory-design-reference.md` | `OA-02/03/05/06/08/10` record / freshness / recovery / no-result closure、按 Core owner 对齐的 Task / RequestUnit fence 与 v2 cutover | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/architecture/tool-calling-design-reference.md` | `OA-04/07/08/09/10` Tool / attempt evolution、`tool_call_record.p0.v2`、Task / RequestUnit fence 与 invalidated recovery handoff | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/evaluation/agent-evaluation-strategy.md` | `OA-07/10/11` 通用 Eval delegation 与 13-case no-result trajectory evidence | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/evaluation/p0-eval-coverage-matrix.md` | `OA-10/11` exact 14 + 13 mapping、CF-13 owner trigger、Task / RequestUnit no-write evidence、lifecycle hold 与状态措辞 | `R5_REVIEWED_UNCHANGED / R6_PENDING` |
-| `docs/implementation/e2e01-cycle2-implementation-spec.md` | 消费全部 owner ruling；import Phase 1 Mapper 且只拥有 Phase 2 delta；order success / restart 使用 imported refs；收紧 `RM-I05`、四类 v2 migration 与第 13 个 Trajectory；保持 `REVIEW_DRAFT` | `R5_FINDING_REMEDIATED / R6_PENDING` |
-| `docs/implementation/e2e01-cycle2-oa10-run-terminal-state-decision-brief.md` | 保留三方案比较并记录用户批准 `SUPERSEDED` | `USER_APPROVED / STATUS_SYNCED / R6_PENDING` |
-| `docs/implementation/e2e01-cycle2-activation-readiness-decision-packet.md` | 汇总用户裁决、R1/R2/R3/R4/R5 remediation、关闭证据和 review / Activation 边界；不自证 readiness | `R5_FINDING_REMEDIATED / R6_PENDING` |
+| `docs/business-capabilities.md` | `OA-01/02/04/05/06/08/09` Business ruling；`OA-10` no-outbound-result 边界并引用 Core lifecycle | `MERGED / PR #201` |
+| `PROJECT_DIRECTION.md` | Core Runtime、Application mapper、strict unknown-reason fence（含 Task / RequestUnit）、ToolCall / Run / link / Trace v2 records、shared Trace 与 scoped owner mapping | `MERGED / PR #201` |
+| `docs/architecture/intent-design-reference.md` | `OA-01/03` ordinal binding 与 delegation | `MERGED / PR #201` |
+| `docs/architecture/memory-design-reference.md` | `OA-02/03/05/06/08/10` record / freshness / recovery / no-result closure、按 Core owner 对齐的 Task / RequestUnit fence 与 v2 cutover | `MERGED / PR #201` |
+| `docs/architecture/tool-calling-design-reference.md` | `OA-04/07/08/09/10` Tool / attempt evolution、`tool_call_record.p0.v2`、Task / RequestUnit fence 与 invalidated recovery handoff | `MERGED / PR #201` |
+| `docs/evaluation/agent-evaluation-strategy.md` | `OA-07/10/11` 通用 Eval delegation 与 13-case no-result trajectory evidence | `MERGED / PR #201` |
+| `docs/evaluation/p0-eval-coverage-matrix.md` | `OA-10/11` exact 14 + 13 mapping、CF-13 owner trigger、Task / RequestUnit no-write evidence、lifecycle hold | `MERGED / PR #201；ACTIVATION STATUS ALIGNED` |
+| `docs/implementation/e2e01-cycle2-implementation-spec.md` | 消费全部 owner ruling；import Phase 1 Mapper 且只拥有 Phase 2 delta；作为 scoped active contract | `R6 PASS / ACTIVATED` |
+| `docs/implementation/e2e01-cycle2-oa10-run-terminal-state-decision-brief.md` | 保留三方案比较并记录用户批准 `SUPERSEDED` | `USER_APPROVED / OWNER_ALIGNMENT_CLOSED` |
+| `docs/implementation/e2e01-cycle2-activation-readiness-decision-packet.md` | 汇总裁决、review / merge、Activation base 与 bundle；不自证 external exact-head evidence | `ACTIVATION EVIDENCE INDEX` |
 
-只有 owner alignment 合并并准备 Activation PR 时，才评估：
+Activation cross-file impact scan 已评估：
 
 - `AGENTS.md` active owner 清单。
 - `.planning/ROADMAP.md`、`.planning/REQUIREMENTS.md`、`.planning/STATE.md` 的派生
   状态。
 - `.planning/GOVERNANCE.md` 的 owner mapping。
 - `.planning/ACTIVATION.md` 是否只需引用而不应覆盖其既有 GSD activation 历史。
-- 架构 README / 图形是否真的受语义变化影响。
-
-在正式影响扫描前，不把这些文件预先加入 allowlist，也不把“可能受影响”描述成
-“必须修改”。
+- 架构 README / 图形不拥有本次 scoped encoding，且现有 V2 抽象未被改变，因此
+  `NO_CHANGE`。
+- `.planning/ACTIVATION.md` 只记录既有 Phase 1 GSD activation 历史，因此
+  `NO_CHANGE`；Phase 2 Activation 证据由本 Packet 与独立 GitHub PR 持有。
 
 ## 7. 用户审批 Gate
 
@@ -621,36 +658,36 @@ working tree 有未合并文档变更，不表示独立 review、commit、PR 或
 
 | Alignment | 用户裁决 | Closure |
 |---|---|---|
-| `OA-01` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-02` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-03` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-04` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-05` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-06` | `CONDITIONALLY_APPROVED`：Business owns 120h / precedence / business meaning | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-07` | `CONDITIONALLY_APPROVED`：Tool general semantics + `tool_call_record.p0.v2`；Spec exact budget / codes；shared Trace unchanged | `OWNER_ALIGNMENT_DRAFT_PREPARED / R1_FINDING_REMEDIATED / NOT_CLOSED` |
-| `OA-08` | `CONDITIONALLY_APPROVED`：Business source authority；Spec producer implementation / canonical bytes | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-09` | `APPROVED` | `OWNER_ALIGNMENT_DRAFT_PREPARED / NOT_CLOSED` |
-| `OA-10` | `APPROVED`：`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`、no result / no Task or RequestUnit write、strict unknown-reason fence、audit-only `BLOCKED`、`INCOMPLETE` restart-only；Phase 1 Mapper imported unchanged，Phase 2 只拥有 delta | `OWNER_ALIGNMENT_DRAFT_PREPARED / R1_R2_R4_R5_FINDINGS_REMEDIATED / NOT_CLOSED` |
-| `OA-11` | `APPROVED + LIFECYCLE_HOLD`：14 longitudinal + 13 Trajectory；`CF-13` 只覆盖模型 / Presentation / Renderer 绕过安全 projection 后自行生成、修改或错误表达 approved 订单 / 物流事实或 deterministic `ShipmentAssessment.primary_result` | `OWNER_ALIGNMENT_DRAFT_PREPARED / R1_R2_R3_FINDINGS_REMEDIATED / NOT_CLOSED` |
+| `OA-01` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-02` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-03` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-04` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-05` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-06` | `CONDITIONALLY_APPROVED`：Business owns 120h / precedence / business meaning | `CLOSED / PR #201` |
+| `OA-07` | `CONDITIONALLY_APPROVED`：Tool general semantics + `tool_call_record.p0.v2`；Spec exact budget / codes；shared Trace unchanged | `CLOSED / PR #201` |
+| `OA-08` | `CONDITIONALLY_APPROVED`：Business source authority；Spec producer implementation / canonical bytes | `CLOSED / PR #201` |
+| `OA-09` | `APPROVED` | `CLOSED / PR #201` |
+| `OA-10` | `APPROVED`：`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`、no result / no Task or RequestUnit write、strict unknown-reason fence、audit-only `BLOCKED`、`INCOMPLETE` restart-only；Phase 1 Mapper imported unchanged，Phase 2 只拥有 delta | `CLOSED / PR #201` |
+| `OA-11` | `APPROVED + LIFECYCLE_HOLD`：14 longitudinal + 13 Trajectory；`CF-13` 只覆盖模型 / Presentation / Renderer 绕过安全 projection 后自行生成、修改或错误表达 approved 订单 / 物流事实或 deterministic `ShipmentAssessment.primary_result` | `CLOSED / PR #201` |
 
-批准本 Gate 只授权准备 canonical owner alignment 变更；仍不授权 Activation、
-Plan、Task Packet、Worktree 或功能代码。
+该 Gate 已由 R6 与 PR #201 关闭。独立 Activation 只授权
+`READY_FOR_PLANNING`；仍不授权 Task Packet、代码 Worktree 或功能代码。
 
 ## 8. Packet Acceptance Criteria
 
-- [ ] `OA-01..OA-11` 每项都区分 Current、Gap、Recommendation 与 Closure check。
-- [ ] 所有 owner 规则正文仍留在 canonical owner，目标 Spec 只接收明确的 scoped
+- [x] `OA-01..OA-11` 每项都区分 Current、Gap、Recommendation 与 Closure check。
+- [x] 所有 owner 规则正文仍留在 canonical owner，目标 Spec 只接收明确的 scoped
   delegation。
-- [ ] `OA-03/04/05/06/07/10` 被明确标记为 contract evolution，不能由实现偷渡。
-- [ ] `OA-09` 不重复已有 Tool visibility / hash 规则。
-- [ ] `OA-11` 明确保持四个 Case 为 `CONTRACT_DEFINED`。
-- [ ] 本 Packet 不创建 Plan、Task Packet、branch、Worktree、源码、测试、migration
+- [x] `OA-03/04/05/06/07/10` 被明确标记为 contract evolution，不能由实现偷渡。
+- [x] `OA-09` 不重复已有 Tool visibility / hash 规则。
+- [x] `OA-11` 明确保持四个 Case 为 `CONTRACT_DEFINED`。
+- [x] 本 Packet 不创建 Plan、Task Packet、代码 Worktree、源码、测试、migration
   或 Eval artifact。
-- [ ] 用户批准、owner alignment、Activation exact-head review 和 Activation merge
+- [x] 用户批准、owner alignment、Activation exact-head review 和 Activation merge
   被保留为不同证据。
 
 ---
 
-*Next allowed step: 冻结 R5-remediated owner-alignment 文件并执行第六轮独立
-exact-file review。只有 R6 review PASS 且 owner alignment 合并后，才可另行准备
-Activation；当前不推进 Plan、Task Packet、Worktree 或功能代码。*
+*Next allowed step: 只读完成 Phase 2 dependency / ownership / risk map，并在
+dedicated planning-status Worktree 准备 Plan。用户批准 Plan、Task Packet、exact
+base 与 Wave 前，不创建代码 Worktree、feature branch 或功能代码。*

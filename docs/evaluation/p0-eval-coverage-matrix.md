@@ -19,11 +19,11 @@ Case 的期望行为必须追溯到：
 - [RAG Design Reference](../architecture/rag-design-reference.md)：检索、排序、Evidence 状态和 RAG Eval。
 - [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)：`E2E01-01/04` 的具体编码、Fixture、双轨 lane 和目标命令；只作为上述 owner 的 scoped 实现映射。
 - [E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)：
-  当前仍是 `NON_NORMATIVE / REVIEW_DRAFT`。用户已批准把
-  `E2E01-02/03/05/06` 的 exact physical Eval encoding 条件式委托给该 Spec，
-  但只有其正式 Activation 后才生效；OA-10 exact ruling 已获用户批准，当前
-  owner-alignment draft 仍待独立 exact-file review 与合并，Activation 继续
-  `BLOCKED`。
+  当前是 `SCOPED_ACTIVE_IMPLEMENTATION_OWNER / CONTRACT_ACTIVE /
+  READY_FOR_PLANNING`。`E2E01-02/03/05/06` 的 exact physical Eval encoding
+  已条件式委托给该 Spec；owner alignment 经 R6 exact-file review `PASS` 并由
+  PR #201 squash merge 为 `9ee260f12a82b706269f8a62c460c781c64f1f47`。
+  此激活不改变下列 Case lifecycle。
 
 本文拥有：
 
@@ -377,10 +377,10 @@ Coverage Matrix owner 批准以下 mapping 边界，但不批准 lifecycle trans
   批准的 ToolCall（含 attempt child）/ Run / link / Trace v2 record semantics，
   不反向创造或兼容状态机。
 
-因此 `E2E01-02/03/05/06` 当前继续为 `CONTRACT_DEFINED`。OA-10 用户裁决已完成，
-但 owner-alignment exact-file review / merge 尚未完成，scoped Spec 未正式 Activation，
-authenticated artifacts / loader / Harness Result 未出现且 Coverage Matrix owner
-未另行裁决前，不得进入 `EXECUTABLE`。
+因此 `E2E01-02/03/05/06` 当前继续为 `CONTRACT_DEFINED`。OA-10 用户裁决、
+owner-alignment R6 review / PR #201 merge 与 scoped contract Activation 已完成，
+但 authenticated artifacts / loader / Harness Result 未出现且 Coverage Matrix
+owner 未另行裁决前，不得进入 `EXECUTABLE`。
 
 ### Cycle 3：E2E-02 高风险切片
 

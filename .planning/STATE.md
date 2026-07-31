@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
-current_phase: "1"
-current_phase_name: "Cycle 1｜第一最薄 E2E-01"
-current_plan: "complete"
-status: "phase_1_complete_next_phase_not_activated"
-last_updated: "2026-07-31T08:37:58+08:00"
-last_activity: "2026-07-31 — 用户继续接受有界RTA-D01；reviewed PR #199已squash merge到main；Phase 1 release transition complete"
+current_phase: "2"
+current_phase_name: "Cycle 2｜完成 E2E-01"
+current_plan: "not_started"
+status: "phase_2_contract_active_ready_for_planning"
+last_updated: "2026-07-31"
+last_activity: "2026-07-31 — Phase 2 owner alignment已由PR #201合并；scoped contract独立Activation后进入READY_FOR_PLANNING"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 8
-  completed_plans: 8
+  total_plans: 0
+  completed_plans: 0
   percent: 17
 ---
 
@@ -27,36 +27,38 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** Phase 1已完成；Phase 2 scoped contract与activation尚未开始
+**Current focus:** Phase 2 scoped contract 已激活；下一步是只读依赖 / ownership /
+risk map 与受控 Plan
 
 ## GSD 1.38.3 Compatibility Fields
 
-Current Phase: 1
-Current Phase Name: Cycle 1｜第一最薄 E2E-01
-Current Plan: complete
+Current Phase: 2
+Current Phase Name: Cycle 2｜完成 E2E-01
+Current Plan: not_started
 Total Phases: 6
-Total Plans in Phase: 8
-Status: Phase 1 complete / released to main / Phase 2 not activated
+Total Plans in Phase: 0
+Status: Phase 2 contract active / ready for planning / implementation not started
 Last Activity: 2026-07-31
-Last Activity Description: 六个authenticated Case已为`REGRESSION_GATE`，全部16 variants为PASS；Eval/Security re-review与controlled UAT已完成
-Progress: Phase 1 complete；1/6 phases
+Last Activity Description: Phase 1 release保持完成；Phase 2 owner alignment与scoped contract activation完成，Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 planning not started；1/6 phases
 
 ## Current Position
 
-Phase: 1 of 6（第一最薄 E2E-01）
-Plan: 8 of 8；全部42个implementation targets完成
-Status: `COMPLETE / IMPLEMENTATION_42_OF_42 / QUALITY_GATES_COMPLETE / RELEASED_TO_MAIN`
-Last activity: 2026-07-31 — 用户继续接受有界`RTA-D01`；reviewed PR #199 squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`
-Progress: `██████████` Phase 1 100% complete；milestone 1/6 phases
+Phase: 2 of 6（完成 E2E-01）
+Plan: `NOT_STARTED`
+Status: `CONTRACT_ACTIVE / READY_FOR_PLANNING / IMPLEMENTATION_NOT_STARTED`
+Last activity: 2026-07-31 — owner-alignment PR #201 squash merge为`9ee260f12a82b706269f8a62c460c781c64f1f47`；scoped contract Activation 独立完成
+Progress: Phase 1 100% complete；Phase 2 仅 contract active；milestone 1/6 phases
 
-Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2不因该transition自动激活。
+Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 完成本dedicated release-transition Packet的独立review与PR merge，确保derived状态与已合并`main`一致。
-2. 保持Phase 2为`PLANNED_MAPPING_ONLY`；在新的scoped canonical contract、dependency analysis、Task Packet和activation通过前不开始实现。
-3. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成，不作为Phase 1隐藏补项。
-4. 用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
+1. 只读完成 Phase 2 dependency / ownership / risk map，不创建功能代码。
+2. 在 dedicated planning-status Worktree 单写 Plan；冻结 exact base、allowlist、forbidden
+   files、验证、安全、Eval、rollback 与 handoff 后再进行独立 review。
+3. 用户批准 Plan / Task Packet / Wave 前，不创建代码 Worktree 或 feature branch。
+4. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
 
@@ -98,7 +100,9 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / PRIOR_CROSS_FILE_ALIGNMENT_COMPLETE`: planning-status PR #75 merge `b1deb0a...`、Project Direction PR #76 merge `879cb10...`、README PR #77 merge `0472f03...`与execution owner PR #78 merge `7cf4aef...`已依次完成F/E evidence-only对齐；它们未改变`B_FE_EXPAND`。
 - `CONFIRMED / RTA-D01_RELEASE_ACCEPTANCE`: mandatory Security re-review为`235 CLOSED + 1 ACCEPTED + 0 OPEN`；用户已在最终Phase 1 release gate继续接受该有界风险。
 - `CONFIRMED / MAIN_RELEASE`: PR #199 exact-head review为`PASS`，已squash merge到`main`，merge SHA `f15320e3c98a408727b1488db5a5c7f0a7a57931`。
-- `OPEN`: 后续第2–6阶段尚无scoped implementation owner；不得生成实现细节。
+- `CONFIRMED / PHASE2_OWNER_ALIGNMENT`: PR #201 exact-head review为`PASS`，squash merge SHA为`9ee260f12a82b706269f8a62c460c781c64f1f47`。
+- `CONFIRMED / PHASE2_CONTRACT_ACTIVE`: Cycle 2 scoped contract只授权 planning；四个 Case仍为`CONTRACT_DEFINED`，实现与证据均未开始。
+- `OPEN`: Phase 2 Plan / Task Packet / implementation；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
 
@@ -107,5 +111,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-07-31
-Stopped At: Phase 1 complete并released to main；Phase 2 scoped contract与activation尚未开始
-Resume File: [../docs/implementation/e2e01-thin-slice-multi-agent-plan.md](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)
+Stopped At: Phase 2 scoped contract active；ready for dependency / ownership / risk map 与 Plan
+Resume File: [../docs/implementation/e2e01-cycle2-implementation-spec.md](../docs/implementation/e2e01-cycle2-implementation-spec.md)

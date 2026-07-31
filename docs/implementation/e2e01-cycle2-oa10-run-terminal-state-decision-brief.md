@@ -1,18 +1,18 @@
 # E2E-01 Cycle 2｜OA-10 Run Terminal State Decision Brief
 
-> **NON_NORMATIVE / USER_RULING_APPROVED / OWNER_ALIGNMENT_DRAFT_PREPARED / R1_FINDINGS_REMEDIATED / R2_VERDICT_FAIL / R2_FINDINGS_REMEDIATED / R3_VERDICT_FAIL / R3_FINDINGS_REMEDIATED / R4_VERDICT_FAIL / R4_FINDING_REMEDIATED / R5_VERDICT_FAIL / R5_FINDING_REMEDIATED / R6_EXACT_FILE_REVIEW_PENDING / ACTIVATION_BLOCKED**
+> **NON_NORMATIVE / USER_RULING_APPROVED / OWNER_ALIGNMENT_R6_PASS / PR_201_MERGED / SCOPED_CONTRACT_ACTIVE**
 >
 > 本文只比较 obsolete Run 的 terminal-state 方案，不是 active contract，不修改
 > Phase、Case lifecycle、Plan、Task Packet、Worktree、源码、测试、migration 或
-> Eval artifact。用户已批准本文 A1 推荐方案；该批准只授权准备 owner alignment，
-> 不表示独立 review、merge 或 Activation 已完成。
+> Eval artifact。用户已批准本文 A1 推荐方案；规范性结果已进入 canonical owner
+> 与 Cycle 2 scoped active Spec。本文只保留方案比较与影响分析。
 
 - **Created:** 2026-07-31
 - **Repository baseline inspected:** `8f73b1ef89444bbdccbc50777394bcc420b42b3f`
 - **Target:** `E2E01-02/03/05/06`
-- **Current Phase 2 status:** `PLANNED_MAPPING_ONLY`
+- **Current Phase 2 status:** `CONTRACT_ACTIVE / READY_FOR_PLANNING`
 - **Current Case lifecycle:** `CONTRACT_DEFINED`
-- **Decision status:** `USER_APPROVED / OWNER_ALIGNMENT_NOT_CLOSED`
+- **Decision status:** `USER_APPROVED / OWNER_ALIGNMENT_CLOSED / PR #201`
 
 ## 1. 已批准且两种方案都必须满足的不变量
 
@@ -235,23 +235,25 @@ trace_event_record.p0.v1   → trace_event_record.p0.v2
 Trace v2 不新增 shared `TraceEvent` 字段。link v2 允许
 `result_task_state_version=null` 与 parent Run=`SUPERSEDED` 共同形成 no-result
 terminal closure；它不能写入新 Run 的 Task version。P0 exact-version-only 要求
-Activation 前冻结显式 v1→v2 migration、原子 cutover、完整 record-graph validation
-与 rollback fence，禁止 mixed active versions、read-time fallback 和无法表示 v2
-语义的 downgrade。本次只记录 logical contract 和 migration obligations，没有
-创建 physical migration、decoder 或 backward-compatibility runtime。
+Cycle 2 scoped contract 已冻结显式 v1→v2 migration、原子 cutover、完整
+record-graph validation 与 rollback fence，禁止 mixed active versions、
+read-time fallback 和无法表示 v2 语义的 downgrade。本次只记录 logical contract
+和 migration obligations，没有创建 physical migration、decoder 或
+backward-compatibility runtime。
 
 ## 9. Gate
 
-在 owner-alignment 文字完成独立 exact-file review 并合并之前：
+R6 与 PR #201 合并、独立 scoped contract Activation 后：
 
 ```text
 OA-10 user ruling = APPROVED
-OA-10 owner alignment = DRAFT_PREPARED / NOT_CLOSED
-Cycle 2 scoped Spec = REVIEW_DRAFT
-Activation = BLOCKED
-Planning = NOT_STARTED
+OA-10 owner alignment = CLOSED / PR #201
+Cycle 2 scoped Spec = SCOPED_ACTIVE_IMPLEMENTATION_OWNER
+Activation = CONTRACT_ACTIVE
+Planning = READY_FOR_PLANNING / PLAN_NOT_STARTED
 E2E01-02/03/05/06 = CONTRACT_DEFINED
 ```
 
-不得创建 Plan、Task Packet、Worktree、feature branch、migration、功能代码、测试
-或 Eval artifact。
+现在只允许只读 dependency / ownership / risk map 与受控 Plan。用户批准 Plan、
+Task Packet、exact base 与 Wave 前，不得创建代码 Worktree、feature branch、
+migration、功能代码、测试或 Eval artifact。

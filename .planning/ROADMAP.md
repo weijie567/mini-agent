@@ -13,7 +13,10 @@
 
 ## Overview
 
-P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Activation 已通过 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效，只有 Phase 1 active；Phase 2–6 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate mapping，不生成实现 Plan。
+P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Phase 1 已完成并 release；
+Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
+`CONTRACT_ACTIVE / READY_FOR_PLANNING`，但尚未创建 Plan 或实现。Phase 3–6 在对应
+scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate mapping。
 
 ## 🚧 **v0.1 GSD-only P0 execution**
 
@@ -137,15 +140,15 @@ Plans:
 7. Integrator 再手工同步 derived Requirements / Roadmap / State；不得调用自动 lifecycle API。
 8. Release 使用显式 GitHub `head=integration/e2e01-thin`、`base=main` 创建 PR；不调用 `gsd-ship`。
 
-截至 2026-07-31，第1–8项已完成：review/fix、Validation、controlled UAT、Case activation、exhaustive Result、`REGRESSION_GATE` synchronization、Eval re-audit与mandatory Security re-review均已有reviewed PR evidence；用户继续接受有界`RTA-D01`后，release PR #199以exact-head `PASS`合并到`main`。Phase 2仍需独立activation。
+截至 2026-07-31，第1–8项已完成：review/fix、Validation、controlled UAT、Case activation、exhaustive Result、`REGRESSION_GATE` synchronization、Eval re-audit与mandatory Security re-review均已有reviewed PR evidence；用户继续接受有界`RTA-D01`后，release PR #199以exact-head `PASS`合并到`main`。Phase 2 owner alignment 已由 PR #201 合并为 `9ee260f12a82b706269f8a62c460c781c64f1f47`，后续独立 Activation 只推进 scoped contract，不改变 Phase 1 release evidence。
 
 ### Phase 2: Cycle 2｜完成 E2E-01
 
-**Status**: `PLANNED_MAPPING_ONLY`
+**Status**: `CONTRACT_ACTIVE / READY_FOR_PLANNING / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
-**Depends on**: Phase 1
+**Depends on**: Phase 1（已完成并 release）
 
 **Requirements**: [E2E01-02, E2E01-03, E2E01-05, E2E01-06]
 
@@ -155,7 +158,9 @@ Plans:
 2. `E2E01-05` 与确实需要 `get_shipment` 的配对 Case 在同一可用工具集中验证。
 3. 第一版 Trajectory / E2E Baseline 依 canonical Eval owner 运行并保存结果。
 
-**Plans**: `TBD`；等待 Phase 1 反馈与 scoped implementation contract。
+**Plans**: `NOT_STARTED`；下一步先完成只读 dependency / ownership / risk map，再在
+dedicated planning-status Worktree 中形成可独立审阅的 Plan。Contract activation
+不授权 Task Packet、功能分支或产品代码。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
