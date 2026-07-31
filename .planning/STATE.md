@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-02_exact_packet"
-status: "phase_2_w1b_02_02_planning_review"
+current_plan: "02-02_repaired_status_alignment_gate"
+status: "phase_2_w1b_02_02_status_alignment_gate"
 last_updated: "2026-07-31"
-last_activity: "2026-07-31 — PR #206完成W1 planning；02-03/02-01经PR #207/#208 reviewed串行合入并形成B_C2_W1A；正在审阅02-02 exact Packet"
+last_activity: "2026-07-31 — PR #212修复W1 full gate并形成B_C2_W1_GATE_REPAIRED；PR #213 refreeze 02-02 Packet；三状态文件alignment candidate已形成"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -27,38 +27,42 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** `02-03` 与 `02-01` 已按 approved W1 顺序 reviewed merge，真实
-`B_C2_W1A` 已形成；当前只签发并独立审阅 `02-02` exact Task Packet，审阅 PASS 后
-按用户连续执行指令开始实现。
+**Current focus:** `02-03` 与 `02-01` 已按 approved W1 顺序 reviewed merge；历史
+`B_C2_W1A` 的 test-only full-gate regression 已由 PR #212 修复，当前产品实现 base 为
+`B_C2_W1_GATE_REPAIRED`。PR #213 已 refreeze `02-02` Packet；三状态文件 alignment
+candidate 是最后 planning gate，只有其 exact head `PASS`/merge 后才按用户连续指令
+创建 r2 实现 branch/Worktree。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-02_exact_packet
+Current Plan: 02-02_repaired_status_alignment_gate
 Total Phases: 6
 Total Plans in Phase: 4
-Status: Phase 2 W1B / 02-02 exact Packet independent review
+Status: Phase 2 W1B / 02-02 repaired status alignment gate
 Last Activity: 2026-07-31
-Last Activity Description: W1 的 02-03/02-01 已 reviewed merge；`B_C2_W1A = b5de7f4...`；02-02 尚未实现；Case仍为`CONTRACT_DEFINED`
+Last Activity Description: PR #212 reviewed repair形成`B_C2_W1_GATE_REPAIRED = 015c1e8...`；PR #213 refreeze已PASS/merge；旧`ecfad7e...` quarantined；Case仍为`CONTRACT_DEFINED`
 Progress: Phase 1 complete；Phase 2 W1B；Plan files 4/19、approved/executed 3/19、functional implementation 2/18；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-03 COMPLETE / 02-02 EXACT PACKET REVIEW`
-Status: `CONTRACT_ACTIVE / W1_PARTIAL / 02-02_PLANNING_REVIEW`
-Last activity: 2026-07-31 — PR #206 合并 W1 planning；PR #207/#208 reviewed 串行合入 integration 并形成真实 `B_C2_W1A`
+Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-03 COMPLETE / 02-02 REFROZEN / STATUS ALIGNMENT GATE`
+Status: `CONTRACT_ACTIVE / W1_PARTIAL / 02-02_STATUS_ALIGNMENT_GATE`
+Last activity: 2026-07-31 — PR #212/#213 reviewed merge依次形成 repaired base与refreeze control；PROJECT/ROADMAP/STATE alignment candidate已形成
 Progress: Phase 1 100% complete；Phase 2 W1 2/3 implementation Packet complete；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 exact `02-02` Plan/Task Packet 使用全新 Codex 窗口独立审阅至 PASS。
-2. 合并 planning PR，从 exact `B_C2_W1A` 创建 02-02 feature branch/Worktree 并实现
-   四文件 allowlist。
-3. 对 exact feature head 使用全新窗口 code review 至 PASS，latest-overlay 后串行
+1. 对本 dedicated planning-status PR 使用全新 Codex 窗口独立审阅至 PASS 并合并。
+2. 从 exact `B_C2_W1_GATE_REPAIRED = 015c1e8be204717dfa1af80d930a8333a41e8b92`
+   创建全新的 02-02 r2 feature branch/Worktree；旧 `ecfad7e...` 只能人工对照，不能
+   成为 ancestry、PR head 或 merge input。
+3. 在 r2 branch 形成四文件实现并运行 focused/neighbor/full gate；对 exact feature
+   head 使用全新窗口 code review 至 PASS，latest-overlay 后串行
    merge，冻结 `B_C2_CORE_123` 并运行完整 W1 gate。
 4. 然后按同一闭环签发/审阅/执行 W2 `02-04` 与 W3 `02-05`；W3 review PASS 后停止。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
@@ -131,9 +135,20 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / B_C2_TRACE`: PR #207 reviewed merge `985564d86a502b4cfd44dcdb8337d553859d9322`。
 - `CONFIRMED / B_C2_W1A`: PR #208 reviewed overlay/merge
   `b5de7f4f48404b61d9b4386c99cd2c37e744641a`，tree
-  `d1eb4d469cc0d9f41672f1e9294be3fbb18e23ec`。
-- `OPEN / 02-02_EXACT_PACKET`: dependency 已满足，当前等待独立 planning review PASS；
-  implementation branch/Worktree 尚未创建。
+  `d1eb4d469cc0d9f41672f1e9294be3fbb18e23ec`；这是历史 barrier，不再是可执行 base。
+- `CONFIRMED / B_C2_W1_GATE_REPAIRED`: PR #212 exact-head review `PASS` 并 merge 为
+  `015c1e8be204717dfa1af80d930a8333a41e8b92`，tree
+  `26b71d2ba3f2c638204cab7c078252c97b374f05`；canonical full 为
+  `2296 passed, 1 deselected, 12 warnings`。
+- `CONFIRMED / 02-02_REFREEZE_CONTROL`: PR #213 R2 exact-head review `PASS`，merge
+  successor 为 `fedd2d1a10ae088d3c762875bffd68ed828d8e3f`；它只推进 planning provenance，
+  不替换 repaired product base。
+- `GATE / 02-02_REPAIRED_STATUS_ALIGNMENT`: 本 exact candidate 只对齐 `PROJECT.md`、
+  `ROADMAP.md`、`STATE.md`；其独立 `PASS`/merge 是创建 r2 branch/Worktree 的必要条件。
+- `QUARANTINED / 02-02_PRIOR_HEAD`: `ecfad7e22ba542e50256274a94a6bb88fdf49b83`
+  基于历史 `b5de7f4...`，不得 push、merge、rebase、充当 reviewed head 或进入新 ancestry。
+- `OPEN / 02-02_R2_IMPLEMENTATION`: repaired base 已满足；r2 branch/Worktree 尚未创建；
+  `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`。
 - `OPEN`: `B_C2_CORE_123` 与 W2/W3；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -143,5 +158,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-07-31
-Stopped At: W1B 02-02 exact Packet independent review；implementation not started
+Stopped At: W1B 02-02 repaired status alignment gate；accepted r2 implementation not started
 Resume File: [phases/02-cycle-2-e2e-01/02-02-PLAN.md](phases/02-cycle-2-e2e-01/02-02-PLAN.md)
