@@ -386,12 +386,73 @@ def _selection_record(
     )
 
 
-def test_conflicting_source_message_selection_fails_closed() -> None:
+def test_exact_existing_source_message_selection_is_not_pre_cas_replay() -> None:
+    candidate_set = _candidate_set()
+    request = _selection_request(ordinal=2)
+    exact_existing = _selection_record(candidate_set, request, selected_index=1)
+
+    with pytest.raises(ValueError, match="CANDIDATE_REFRESH_REQUIRED"):
+        _validate_success(
+            candidate_set,
+            request,
+            existing_selection_records=(exact_existing,),
+        )
+
+
+@pytest.mark.parametrize(
+    "record_update",
+    [
+        {"private_owner_scope_ref": "owner-scope:other"},
+        {"conversation_id": UUID(int=81)},
+        {"task_id": UUID(int=82)},
+        {"request_unit_id": UUID(int=83)},
+        {"candidate_set_ref": UUID(int=84)},
+        {"search_observation_ref": UUID(int=85)},
+        {"owner_scoped_order_target_ref": "owner-order:other"},
+        {"selected_target_ref": "verified-target:other"},
+        {"base_task_state_version": 40, "result_task_state_version": 41},
+    ],
+)
+def test_same_source_message_with_wrong_selection_closure_fails_closed(
+    record_update: dict[str, object],
+) -> None:
+    candidate_set = _candidate_set()
+    request = _selection_request(ordinal=2)
+    existing = _selection_record(candidate_set, request, selected_index=1)
+    contradictory = OrderCandidateSelectionRecord.model_validate(
+        {**existing.model_dump(), **record_update}
+    )
+
+    with pytest.raises(ValueError, match="consumed or contradictory"):
+        _validate_success(
+            candidate_set,
+            request,
+            existing_selection_records=(contradictory,),
+        )
+
+
+def test_duplicate_existing_source_message_selection_fails_closed() -> None:
+    candidate_set = _candidate_set()
+    request = _selection_request(ordinal=2)
+    first = _selection_record(candidate_set, request, selected_index=1)
+    second = OrderCandidateSelectionRecord.model_validate(
+        {**first.model_dump(), "selection_id": uuid4()}
+    )
+
+    with pytest.raises(ValueError, match="CANDIDATE_REFRESH_REQUIRED"):
+        _validate_success(
+            candidate_set,
+            request,
+            existing_selection_records=(first, second),
+        )
+
+
+def test_conflicting_candidate_for_same_source_message_fails_closed() -> None:
     candidate_set = _candidate_set()
     request = _selection_request(ordinal=1)
     conflict = _selection_record(candidate_set, request, selected_index=1)
 
-    with pytest.raises(ValueError, match="conflicting"):
+    with pytest.raises(ValueError, match="CANDIDATE_REFRESH_REQUIRED"):
         _validate_success(
             candidate_set,
             request,

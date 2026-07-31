@@ -811,16 +811,9 @@ def validate_current_candidate_selection(
     if selected is None:
         raise ValueError("candidate ordinal is outside the current CandidateSet")
     for record in existing_selection_records:
-        if record.source_message_ref != request.source_message_ref:
-            continue
-        same_selection = (
-            record.ordinal_input_binding_ref == request.ordinal_input_binding_ref
-            and record.candidate_set_ref == candidate_set.candidate_set_id
-            and record.candidate_set_version == candidate_set.candidate_set_version
-            and record.observation_candidate_ref
-            == selected.observation_candidate_ref
-            and record.candidate_source_version == selected.candidate_source_version
-        )
-        if not same_selection:
-            raise ValueError("source message already has a conflicting selection")
+        if record.source_message_ref == request.source_message_ref:
+            raise ValueError(
+                "CANDIDATE_REFRESH_REQUIRED: source message selection is already "
+                "consumed or contradictory"
+            )
     return selected
