@@ -50,7 +50,7 @@ Progress: Phase 1 complete；Phase 2 W1B；Plan files 4/19、approved/executed 3
 Phase: 2 of 6（完成 E2E-01）
 Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-03 COMPLETE / 02-02 REFROZEN / STATUS ALIGNMENT GATE`
 Status: `CONTRACT_ACTIVE / W1_PARTIAL / 02-02_STATUS_ALIGNMENT_GATE`
-Last activity: 2026-07-31 — PR #212/#213 reviewed merge依次形成 repaired base与refreeze control；PROJECT/ROADMAP/STATE alignment candidate已形成
+Last activity: 2026-07-31 — PR #212/#213 reviewed merge依次形成 repaired base与refreeze control；PROJECT/REQUIREMENTS/ROADMAP/STATE alignment candidate已形成
 Progress: Phase 1 100% complete；Phase 2 W1 2/3 implementation Packet complete；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
