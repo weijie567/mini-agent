@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from mini_agent.core.common import FrozenJsonDict, freeze_json_value
 from mini_agent.core.control_gateway import (
     Cycle2AcceptedBindingFacts,
     Cycle2GatewayBudgetFacts,
@@ -1170,6 +1171,99 @@ def test_cycle2_gateway_rejects_raw_malformed_private_registry_policy(
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.registration_valid is False
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "min-length-bool",
+        "candidate-min-items-bool",
+        "ordinal-minimum-bool",
+        "effect-string",
+        "raw-schema-dict",
+        "raw-required-list",
+    ],
+)
+def test_cycle2_gateway_rejects_complete_registration_raw_type_drift(
+    variant: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.SEARCH_ORDERS)
+    registrations = list(loaded.registry_snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "search_orders"
+    )
+    registration = registrations[index]
+    if variant == "effect-string":
+        registrations[index] = registration.model_copy(update={"effect": "READ"})
+    else:
+        field_name = "input_schema" if variant in {
+            "min-length-bool",
+            "raw-schema-dict",
+            "raw-required-list",
+        } else "output_schema"
+        schema = registration.tool_spec.model_dump()[field_name]
+        if variant == "min-length-bool":
+            schema["properties"]["product_description"]["minLength"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "candidate-min-items-bool":
+            schema["properties"]["candidates"]["minItems"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "ordinal-minimum-bool":
+            schema["properties"]["candidates"]["items"]["properties"][
+                "ordinal"
+            ]["minimum"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "raw-schema-dict":
+            schema_value = schema
+        else:
+            original = registration.tool_spec.input_schema
+            schema_value = tuple.__new__(
+                FrozenJsonDict,
+                tuple(
+                    (key, ["product_description"] if key == "required" else value)
+                    for key, value in original.items()
+                ),
+            )
+        registrations[index] = registration.model_copy(
+            update={
+                "tool_spec": registration.tool_spec.model_copy(
+                    update={field_name: schema_value}
+                )
+            }
+        )
+    loaded = loaded.model_copy(
+        update={
+            "registry_snapshot": loaded.registry_snapshot.model_copy(
+                update={"canonical_registrations": tuple(registrations)}
+            )
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.registration_valid is False
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        Cycle2ToolName.SEARCH_ORDERS,
+        Cycle2ToolName.GET_ORDER,
+        Cycle2ToolName.GET_SHIPMENT,
+    ],
+)
+def test_cycle2_gateway_recursive_registry_preflight_accepts_exact_three_reads(
+    tool_name: Cycle2ToolName,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(tool_name)
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.registration_valid is True
 
 
 def test_cycle2_gateway_fails_closed_when_complete_progress_history_is_omitted() -> None:

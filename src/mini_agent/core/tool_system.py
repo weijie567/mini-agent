@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, Self, Sequence
 from uuid import UUID
 
 from pydantic import (
+    BaseModel,
     Field,
     JsonValue,
     ValidationError,
@@ -1774,6 +1775,28 @@ def validate_cycle2_registry_snapshot(
         private_policies_exact = cycle2_registry_private_policies_are_raw_exact(
             snapshot
         )
+        raw_snapshot_exact = (
+            _cycle2_raw_value_is_exact(
+                snapshot.tool_registry_version,
+                expected.tool_registry_version,
+            )
+            and _cycle2_raw_value_is_exact(
+                snapshot.canonical_registrations,
+                expected.canonical_registrations,
+            )
+            and _cycle2_raw_value_is_exact(
+                snapshot.provider_visible_toolset,
+                expected.provider_visible_toolset,
+            )
+            and _cycle2_raw_value_is_exact(
+                snapshot.provider_name_to_canonical_name,
+                expected.provider_name_to_canonical_name,
+            )
+            and _cycle2_raw_value_is_exact(
+                snapshot.model_visible_toolset_hash,
+                expected.model_visible_toolset_hash,
+            )
+        )
     except (AttributeError, TypeError, ValueError):
         raise ValueError(
             "snapshot does not match the exact Cycle 2 registry"
@@ -1782,6 +1805,7 @@ def validate_cycle2_registry_snapshot(
         snapshot.tool_registry_version != expected.tool_registry_version
         or len(actual_registrations) != len(snapshot.canonical_registrations)
         or not private_policies_exact
+        or not raw_snapshot_exact
         or actual_registrations != expected_registrations
         or snapshot.provider_visible_toolset != expected.provider_visible_toolset
         or snapshot.provider_name_to_canonical_name
@@ -1791,6 +1815,55 @@ def validate_cycle2_registry_snapshot(
     ):
         raise ValueError("snapshot does not match the exact Cycle 2 registry")
     return snapshot
+
+
+def _cycle2_raw_value_is_exact(actual: object, expected: object) -> bool:
+    """Recursively compare raw contract values without Python type coercion."""
+
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, BaseModel):
+        field_names = tuple(type(expected).model_fields)
+        return all(
+            field_name in actual.__dict__
+            and field_name in expected.__dict__
+            and _cycle2_raw_value_is_exact(
+                actual.__dict__[field_name],
+                expected.__dict__[field_name],
+            )
+            for field_name in field_names
+        )
+    if isinstance(expected, Mapping):
+        actual_items = tuple(actual.items())
+        expected_items = tuple(expected.items())
+        if len(actual_items) != len(expected_items):
+            return False
+        unmatched_actual = list(actual_items)
+        for expected_key, expected_value in expected_items:
+            matching_indexes = tuple(
+                index
+                for index, (actual_key, _actual_value) in enumerate(
+                    unmatched_actual
+                )
+                if _cycle2_raw_value_is_exact(actual_key, expected_key)
+            )
+            if len(matching_indexes) != 1:
+                return False
+            actual_key, actual_value = unmatched_actual.pop(matching_indexes[0])
+            if not _cycle2_raw_value_is_exact(actual_key, expected_key):
+                return False
+            if not _cycle2_raw_value_is_exact(actual_value, expected_value):
+                return False
+        return not unmatched_actual
+    if isinstance(expected, Sequence) and not isinstance(
+        expected,
+        (str, bytes, bytearray),
+    ):
+        return len(actual) == len(expected) and all(
+            _cycle2_raw_value_is_exact(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+    return actual == expected
 
 
 def _cycle2_registration_private_policy_is_exact(
@@ -1845,3 +1918,82 @@ def cycle2_registry_private_policies_are_raw_exact(
         )
     except (AttributeError, TypeError, ValueError):
         return False
+
+
+def cycle2_registry_precoercion_contract_is_raw_exact(
+    snapshot: object,
+) -> bool:
+    """Check the complete raw registry shape while preserving typed Action gating."""
+
+    if type(snapshot) is not RegistrySnapshot:
+        return False
+    expected = build_cycle2_registry_snapshot()
+    expected_registrations = {
+        registration.tool_spec.name: registration
+        for registration in expected.canonical_registrations
+    }
+    try:
+        if (
+            type(snapshot.canonical_registrations) is not tuple
+            or len(snapshot.canonical_registrations) != len(expected_registrations)
+            or not _cycle2_raw_value_is_exact(
+                snapshot.tool_registry_version,
+                expected.tool_registry_version,
+            )
+            or not _cycle2_raw_value_is_exact(
+                snapshot.provider_visible_toolset,
+                expected.provider_visible_toolset,
+            )
+            or not _cycle2_raw_value_is_exact(
+                snapshot.provider_name_to_canonical_name,
+                expected.provider_name_to_canonical_name,
+            )
+            or not _cycle2_raw_value_is_exact(
+                snapshot.model_visible_toolset_hash,
+                expected.model_visible_toolset_hash,
+            )
+        ):
+            return False
+        for registration in snapshot.canonical_registrations:
+            if type(registration) is not ToolRegistration:
+                return False
+            expected_registration = expected_registrations.get(
+                registration.tool_spec.name
+            )
+            if expected_registration is None:
+                return False
+            if not (
+                _cycle2_raw_value_is_exact(
+                    registration.tool_spec,
+                    expected_registration.tool_spec,
+                )
+                and _cycle2_raw_value_is_exact(
+                    registration.provider_visible_name,
+                    expected_registration.provider_visible_name,
+                )
+                and type(registration.effect) is ToolEffect
+                and _cycle2_raw_value_is_exact(
+                    registration.risk,
+                    expected_registration.risk,
+                )
+                and _cycle2_raw_value_is_exact(
+                    registration.idempotency,
+                    expected_registration.idempotency,
+                )
+                and (
+                    registration.unknown_result_recovery is None
+                    or type(registration.unknown_result_recovery) is str
+                )
+                and _cycle2_raw_value_is_exact(
+                    registration.handler_ref,
+                    expected_registration.handler_ref,
+                )
+                and _cycle2_raw_value_is_exact(
+                    registration.execution_policy,
+                    expected_registration.execution_policy,
+                )
+            ):
+                return False
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True

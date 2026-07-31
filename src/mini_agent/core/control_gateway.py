@@ -42,7 +42,7 @@ from .tool_system import (
     ToolSpec,
     ToolsetHash,
     build_cycle2_registry_snapshot,
-    cycle2_registry_private_policies_are_raw_exact,
+    cycle2_registry_precoercion_contract_is_raw_exact,
     get_order_tool_spec,
     validate_cycle2_registry_snapshot,
 )
@@ -989,7 +989,7 @@ def _cycle2_raw_exact_type_preflight(
             for count in (token_counts.input_tokens, token_counts.output_tokens)
         ):
             return False
-        if not cycle2_registry_private_policies_are_raw_exact(
+        if not cycle2_registry_precoercion_contract_is_raw_exact(
             loaded.registry_snapshot
         ):
             return False

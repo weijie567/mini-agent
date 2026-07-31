@@ -1206,6 +1206,88 @@ def test_cycle2_registry_validator_rejects_raw_private_policy_type_bypass(
         validate_cycle2_registry_snapshot(malformed)
 
 
+def _cycle2_registry_registration_raw_variant(variant: str) -> RegistrySnapshot:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "search_orders"
+    )
+    registration = registrations[index]
+    if variant == "effect-string":
+        registrations[index] = registration.model_copy(update={"effect": "READ"})
+    else:
+        field_name = "input_schema" if variant in {
+            "min-length-bool",
+            "raw-schema-dict",
+            "raw-required-list",
+        } else "output_schema"
+        schema = registration.tool_spec.model_dump()[field_name]
+        if variant == "min-length-bool":
+            schema["properties"]["product_description"]["minLength"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "candidate-min-items-bool":
+            schema["properties"]["candidates"]["minItems"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "ordinal-minimum-bool":
+            schema["properties"]["candidates"]["items"]["properties"][
+                "ordinal"
+            ]["minimum"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "raw-schema-dict":
+            schema_value = schema
+        else:
+            original = registration.tool_spec.input_schema
+            schema_value = tuple.__new__(
+                FrozenJsonDict,
+                tuple(
+                    (key, ["product_description"] if key == "required" else value)
+                    for key, value in original.items()
+                ),
+            )
+        registrations[index] = registration.model_copy(
+            update={
+                "tool_spec": registration.tool_spec.model_copy(
+                    update={field_name: schema_value}
+                )
+            }
+        )
+    return snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "min-length-bool",
+        "candidate-min-items-bool",
+        "ordinal-minimum-bool",
+        "effect-string",
+        "raw-schema-dict",
+        "raw-required-list",
+    ],
+)
+def test_cycle2_registry_rejects_complete_registration_raw_type_drift(
+    variant: str,
+) -> None:
+    malformed = _cycle2_registry_registration_raw_variant(variant)
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
+def test_cycle2_recursive_registry_comparison_accepts_exact_three_reads() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+
+    assert validate_cycle2_registry_snapshot(snapshot) is snapshot
+    assert tuple(
+        registration.tool_spec.name
+        for registration in snapshot.canonical_registrations
+    ) == ("search_orders", "get_order", "get_shipment")
+
+
 def _retry_revalidation(
     *,
     remaining_run_time_budget_ms: int = 500,
