@@ -7,15 +7,15 @@
 
 - 复选框表示 GSD 执行追踪，不等于 Case 已变为 `EXECUTABLE`、`REGRESSION_GATE` 或已经通过。
 - 只有 post-execution quality gate 完成、canonical owner 已依据可复现证据更新生命周期后，Integrator 才能手工同步勾选对应条目。
-- Phase 1当前已满足上述证据前提，但completion checkbox仍由最终release transition持有：`RTA-D01`用户确认与integration → `main`合并决定完成前保持未勾选。
+- Phase 1已满足上述证据前提并完成release transition：用户继续接受有界`RTA-D01`，reviewed PR #199已squash merge到`main`（`f15320e3...`），Integrator据此手工同步completion checkbox。
 - 禁止调用 `requirements.mark-complete` 或其他自动 lifecycle API；Roadmap / State progress 也只能由 Integrator 根据 Summary、PR 与硬证据手工同步。
 - Phase 2–6 只是 Coverage Matrix Cycle 的顺序映射；在 scoped implementation owner 出现前，不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
 ## Phase 1｜Cycle 1：第一最薄 E2E-01（W2 RUNTIME / INFRA / EVAL PLANNING）
 
-- [ ] **E2E01-01** — 可复现的 Component、Trajectory 与 E2E evidence已完成并进入`REGRESSION_GATE`；completion transition等待两项release用户决定。
-- [ ] **E2E01-04** — 安全等价、最小披露与禁止私有 Observation evidence已完成并进入`REGRESSION_GATE`；completion transition等待两项release用户决定。
+- [x] **E2E01-01** — 可复现的 Component、Trajectory 与 E2E evidence已完成并进入`REGRESSION_GATE`；Phase 1 release transition已完成。
+- [x] **E2E01-04** — 安全等价、最小披露与禁止私有 Observation evidence已完成并进入`REGRESSION_GATE`；Phase 1 release transition已完成。
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
@@ -58,8 +58,8 @@
 
 | Requirement | Phase | Canonical source | GSD 状态 |
 |---|---:|---|---|
-| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / RELEASE_TRANSITION_PENDING` |
-| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / RELEASE_TRANSITION_PENDING` |
+| `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
+| `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 | Pending |
 | `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 | Pending |

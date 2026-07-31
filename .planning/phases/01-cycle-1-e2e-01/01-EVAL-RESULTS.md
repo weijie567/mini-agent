@@ -144,4 +144,5 @@ exact SHA-256、双向 Case/script reference closure、唯一性和 closed-schem
 - 不证明 canonical 应用启动、线上监控、production readiness 或完整 P0。
 - controlled UAT 的 `end_user_uat` 仍为 `NOT_RUN`。
 - `RTA-D01` 仍是已接受但未消除的 bounded availability residual risk；
-  `REGRESSION_GATE`前mandatory复审已完成，release gate是否继续接受仍待用户确认。
+  `REGRESSION_GATE`前mandatory复审已完成，用户已在最终 Phase 1 release gate
+  继续接受；reviewed PR #199已squash merge到`main`（`f15320e3...`）。

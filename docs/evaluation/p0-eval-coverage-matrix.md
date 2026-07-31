@@ -320,9 +320,11 @@ Owner ruling 与 synchronization Packet 的 allowlist 不覆盖其他 active con
 
 `docs/business-capabilities.md`、`PROJECT_DIRECTION.md`、Thin Slice Spec、
 `AGENTS.md`、Eval owners、`README.md`、execution plan 与`.planning`派生状态已由
-PR #187–#196按single-writer顺序完成pre-release cross-file alignment。本owner
-最终收口不改变Case语义或lifecycle；当前release gate只剩`RTA-D01`用户确认与
-integration → `main`合并决定，完成前Phase completion transition保持锁定。
+PR #187–#196按single-writer顺序完成pre-release cross-file alignment。用户随后
+在最终 release gate 继续接受有界`RTA-D01`，reviewed release PR #199 已 squash
+merge到`main`（`f15320e3c98a408727b1488db5a5c7f0a7a57931`）。本owner最终收口
+不改变Case语义或lifecycle；Phase completion transition已解除决策锁，但Phase 2
+仍需独立scoped contract与activation。
 
 ### Cycle 2：完成 E2E-01
 
@@ -398,7 +400,7 @@ grading:
 | 项目 | 状态 |
 |---|---|
 | Strategy 与 Case contract | `CONFIRMED`：已由 active 文档定义 |
-| 第一最薄 E2E-01 Implementation Spec | `REGRESSION_GATE / OFFLINE_VERTICAL_IMPLEMENTED / RELEASE_DECISION_PENDING`：六 Case / 16 variants 已生成 lifecycle-valid Result 并进入 default local gate |
+| 第一最薄 E2E-01 Implementation Spec | `REGRESSION_GATE / OFFLINE_VERTICAL_IMPLEMENTED / PHASE_1_RELEASE_COMPLETE`：六 Case / 16 variants 已生成 lifecycle-valid Result 并进入 default local gate；用户风险确认与PR #199 `main` merge已完成 |
 | `G-RAG-INFRA` | `CONTRACT_DEFINED / PARTIAL_PREREQUISITE`：固定 pgvector Compose 与基础 migration 已出现；RAG capability probe、Corpus / Index 和 Gate Result 均未出现，不能宣称 RAG 基础设施 Gate 已激活 |
 | 15 个 Case family | `E2E01-01/04: REGRESSION_GATE`；其余 13 个 `CONTRACT_DEFINED` |
 | E2E01 versioned Dataset / Fixture artifacts | `REGRESSION_GATE / AUTHENTICATED`：六个 artifacts、manifest 与 loader 已完成 exact digest 同步，16 variants 可复现 |

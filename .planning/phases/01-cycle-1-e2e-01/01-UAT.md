@@ -353,5 +353,6 @@ PR #185/#186完成mandatory Eval / Security re-review。
 - controlled UAT仍是`CODEX_INTEGRATOR / DIRECT_CONTROLLED_EXECUTION / scoped PASS`；
 - `end_user_uat`仍是`NOT_RUN`；
 - 六个authenticated physical Case为`REGRESSION_GATE`；
-- 当前release只等待`RTA-D01`用户确认与integration → `main`合并决定；
+- 用户已继续接受有界`RTA-D01`，reviewed integration → `main` release PR #199已
+  squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`；
 - 真实credentialed Qwen、canonical产品启动和production readiness仍未证明。

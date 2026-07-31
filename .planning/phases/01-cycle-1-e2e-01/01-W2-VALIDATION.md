@@ -13,13 +13,13 @@ plan_artifacts: 49
 summary_artifacts: 24
 implementation_targets: "42/42"
 canonical_lifecycle: "E2E01-01/04_REGRESSION_GATE"
-release_transition: "PENDING_USER_DECISIONS"
+release_transition: "COMPLETE_PR_199_MERGED_TO_MAIN"
 ---
 
 # Phase 1 W2｜Validation Strategy
 
 > **DERIVED / NON_NORMATIVE**
-> 本文件只索引Phase 01截至01-08A及post-execution quality gate的Plan-task自动化反馈证据。`nyquist_compliant: true`本身不推进Case lifecycle；canonical Eval owner已在后续独立PR中将六个authenticated physical Case推进为`REGRESSION_GATE`。本文件只同步该事实，不表示真实Qwen Baseline、canonical产品启动、production readiness或release decision完成。
+> 本文件只索引Phase 01截至01-08A及post-execution quality gate的Plan-task自动化反馈证据。`nyquist_compliant: true`本身不推进Case lifecycle；canonical Eval owner已在后续独立PR中将六个authenticated physical Case推进为`REGRESSION_GATE`。本文件只同步该事实，不表示真实Qwen Baseline、canonical产品启动或production readiness；最终release completion另由用户风险确认、PR #199 exact-head review与`main` merge证据建立。
 
 ## Test Infrastructure
 
@@ -368,9 +368,9 @@ graphify update .
 | Real credentialed Qwen | E2E01-01/04 | 需要显式真实credential与受控external transport；缺凭据preflight只能证明fail-closed | 在approved exact integrated head配置凭据后单独运行`uv run pytest -m qwen_baseline tests/baseline/test_qwen_baseline.py -x`；在此之前保持`NOT_RUN / SKIPPED` |
 | Canonical lifecycle ruling | E2E01-01/04 | Case / artifact lifecycle只能由canonical Eval owner裁决 | `CONFIRMED`：PR #178/#180推进`EXECUTABLE`，PR #183/#184推进`REGRESSION_GATE`；本Validation只消费结果 |
 | Controlled UAT | E2E01-01/04 | 用户可观察体验与人工验收不是pytest替代项 | `COMPLETE / scoped PASS`：`CODEX_INTEGRATOR`以`DIRECT_CONTROLLED_EXECUTION`运行16 variants；`end_user_uat = NOT_RUN` |
-| Release decision | E2E01-01/04 | release需要跨owner证据与明确审批 | `PENDING_USER_DECISIONS`：是否继续接受`RTA-D01`；是否合并integration → `main` PR |
+| Release decision | E2E01-01/04 | release需要跨owner证据与明确审批 | `COMPLETE`：用户继续接受有界`RTA-D01`；exact-head review `PASS`的PR #199已squash merge到`main`（`f15320e3...`） |
 
-01-08的直接HTTP → Runtime → PostgreSQL测试和后续16-variant lifecycle-valid Results均已形成；controlled UAT也已完成scoped Integrator验收。它们仍不能替代真实credentialed Qwen、canonical产品启动、end-user UAT或最终release decision。
+01-08的直接HTTP → Runtime → PostgreSQL测试和后续16-variant lifecycle-valid Results均已形成；controlled UAT也已完成scoped Integrator验收。它们仍不能替代真实credentialed Qwen、canonical产品启动或end-user UAT，也不能单独替代最终release decision；该decision已由用户确认与PR #199 merge独立建立。
 
 ## Validation Sign-off
 
@@ -398,4 +398,4 @@ graphify update .
 
 八个gap均为01-07S/U/X/T/W/V、01-08、01-08A已存在绿色自动化证据未进入旧Validation索引；没有发现真实测试缺口或实现缺陷。denominator-neutral handoff / remediation另行分类，不计入这八个产品行为映射gap。
 
-**Approval:** `NYQUIST_PLAN_TASK_FEEDBACK_COVERED_THROUGH_01_08A / VALIDATION_INDEX_REFRESHED / NO_TEST_GAP / POST_QUALITY_STATUS_ALIGNED`。本派生Validation覆盖49份Plan artifact、42/42 implementation target及post-quality evidence；Case lifecycle当前为`REGRESSION_GATE`，全部16 variants为PASS。真实credentialed Qwen、canonical app-start、production readiness、`RTA-D01` release确认与main merge仍未完成。
+**Approval:** `NYQUIST_PLAN_TASK_FEEDBACK_COVERED_THROUGH_01_08A / VALIDATION_INDEX_REFRESHED / NO_TEST_GAP / POST_QUALITY_STATUS_ALIGNED / PHASE_1_RELEASE_COMPLETE`。本派生Validation覆盖49份Plan artifact、42/42 implementation target及post-quality evidence；Case lifecycle当前为`REGRESSION_GATE`，全部16 variants为PASS。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`。真实credentialed Qwen、canonical app-start、end-user UAT和production readiness仍未完成。

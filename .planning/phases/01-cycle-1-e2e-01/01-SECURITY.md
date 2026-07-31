@@ -8,7 +8,7 @@ audit_base_sha: c88a684f9510290c8570e0d4090ccb97b38afd80
 initial_audit_base_sha: 04442c9262a8a94e9c2c87a89831e99e41aa1418
 audit_date: 2026-07-31
 mandatory_review_trigger: REGRESSION_GATE_AND_RELEASE_GATE
-release_gate_risk_confirmation: PENDING_USER_DECISION
+release_gate_risk_confirmation: ACCEPTED_BY_USER_2026_07_31
 asvs_level: 1
 asvs_level_basis: INFERRED_FROM_GSD_DEFAULT
 block_on: open
@@ -292,7 +292,7 @@ canonical acceptance 和 active 实现证据共同决定：
 | Mandatory review triggers | 引入任何 Action / 副作用；建立 canonical 产品启动或生产可用性目标；引入 Trace outbox / async delivery；关键事件分类变化；目标 Case 从 `EXECUTABLE` 推进到 `REGRESSION_GATE`；进入任何 release gate 之前 |
 | Acceptance authority | scoped canonical owner ruling；不是 `01-07A-PLAN.md` 自证，也不是测试通过推导 |
 | Latest mandatory review | exact `c88a684f9510290c8570e0d4090ccb97b38afd80`；`REGRESSION_GATE` 未扩大 read-only scope，未引入 Action、canonical startup、Trace outbox / async delivery 或事件分类变化 |
-| Release decision | canonical acceptance 当前仍有效；是否在本次 Phase 1 release gate 继续接受，保留给用户最终裁决。拒绝接受将阻断 release，而不是把风险改写为 `CLOSED` |
+| Release decision | 用户已在本次 Phase 1 release gate 明确继续接受；reviewed release PR #199 已 squash merge 到 `main`（`f15320e3c98a408727b1488db5a5c7f0a7a57931`）。该决定不把风险改写为 `CLOSED`，也不延伸到后续 Action 或生产可用性范围 |
 | Audit date | 2026-07-31 |
 
 `EVB-D01` 虽在 Plan 中同为 `ACCEPT / BOUNDED`，但其当前 strict bounded grader
@@ -395,11 +395,11 @@ monitoring 与真实 credentialed Qwen 仍不属于已完成生产能力。
 - `threats_accepted: 1`
 - `threats_open: 0`
 - `security_gate: PASS WITH ACCEPTED RISK`
-- `release_gate_risk_confirmation: PENDING_USER_DECISION`
+- `release_gate_risk_confirmation: ACCEPTED_BY_USER_2026_07_31`
 
-若用户在最终 release gate 不继续接受 `RTA-D01`，本次 release 必须阻断并先建立新的
-canonical mitigation / owner ruling；不得把拒绝接受静默转换为 `OPEN` 已解决或
-`CLOSED`。
+用户已在最终 Phase 1 release gate 继续接受 `RTA-D01`，reviewed PR #199 已合并。
+未来若扩大到 Action、副作用或生产可用性目标，仍必须按 Mandatory review triggers
+重新审查；本次接受不得被静默转换为 `CLOSED` 或复用于更大范围。
 
 ## 13. 最终 Gate 与非声明
 
