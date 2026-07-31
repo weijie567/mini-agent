@@ -1,0 +1,79 @@
+{
+  "artifact_type": "EVAL_LANE_MANIFEST",
+  "artifact_id": "e2e01-thin-lanes",
+  "schema_version": "e2e01-thin-lane-schema-v1",
+  "lane_manifest_version": "e2e01-thin-lanes-v1",
+  "default_lane": "offline_gate",
+  "dataset_ref": {
+    "artifact_id": "e2e01-thin-cases",
+    "dataset_version": "e2e01-thin-dataset-v1",
+    "path": "evals/cases/e2e01-thin-slice.v1.json"
+  },
+  "fixture_ref": {
+    "artifact_id": "e2e01-thin-fixture",
+    "fixture_version": "e2e01-thin-fixture-v1",
+    "path": "evals/fixtures/e2e01-thin-slice.v1.json"
+  },
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-thin-version-manifest",
+    "path": "evals/manifests/e2e01-thin-slice.v1.json"
+  },
+  "lanes": [
+    {
+      "lane": "offline_gate",
+      "provider_adapter": "ScriptedModelProvider",
+      "model_config_version": "scripted-model-provider-config-v1",
+      "deterministic": true,
+      "release_gate": true,
+      "network_access": "FORBIDDEN",
+      "credential_policy": {
+        "required_env": [],
+        "when_missing": "NOT_APPLICABLE"
+      },
+      "model_script_catalog_ref": {
+        "artifact_id": "e2e01-thin-model-scripts",
+        "model_script_catalog_version": "e2e01-thin-model-scripts-v1",
+        "path": "evals/model_scripts/e2e01-thin-slice.v1.json"
+      },
+      "case_refs": [
+        "E2E01-01",
+        "E2E01-04-A",
+        "E2E01-04-B",
+        "E2E01-01+SEC-ARGUMENT-BINDING",
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL",
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "result_policy": {
+        "assertion_failure": "FAIL_COMMAND",
+        "critical_failure": "FAIL_CASE_AND_EVAL_RUN",
+        "missing_case_result": "FAIL_COMMAND"
+      }
+    },
+    {
+      "lane": "qwen_baseline",
+      "provider_adapter": "QwenResponsesAdapter",
+      "model_config_version": "qwen-responses-qwen3.7-plus-2026-05-26-v1",
+      "model_snapshot": "qwen3.7-plus-2026-05-26",
+      "deterministic": false,
+      "release_gate": false,
+      "network_access": "REQUIRED_WHEN_EXPLICITLY_ENABLED",
+      "credential_policy": {
+        "required_env": [
+          "DASHSCOPE_API_KEY",
+          "DASHSCOPE_BASE_URL"
+        ],
+        "when_missing": "NOT_RUN"
+      },
+      "case_refs": [
+        "E2E01-01",
+        "E2E01-04-A",
+        "E2E01-04-B"
+      ],
+      "result_policy": {
+        "ordinary_pass_rate_gate": "NOT_DEFINED",
+        "critical_failure": "FAIL_CASE_AND_EVAL_RUN",
+        "attempt_results": "APPEND_ONLY"
+      }
+    }
+  ]
+}

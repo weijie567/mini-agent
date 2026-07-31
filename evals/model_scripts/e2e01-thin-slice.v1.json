@@ -1,0 +1,564 @@
+{
+  "artifact_type": "SCRIPTED_SCENARIO_CATALOG",
+  "artifact_id": "e2e01-thin-model-scripts",
+  "schema_version": "e2e01-thin-model-script-schema-v1",
+  "model_script_catalog_version": "e2e01-thin-model-scripts-v1",
+  "provider": "ScriptedModelProvider",
+  "network_access": "FORBIDDEN",
+  "credential_inputs": [],
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-thin-version-manifest",
+    "path": "evals/manifests/e2e01-thin-slice.v1.json"
+  },
+  "scenarios": [
+    {
+      "model_script_ref": "script:e2e01-01:success",
+      "case_refs": [
+        "E2E01-01"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "VALID_ORDER_SUMMARY_PLAN",
+          "fact_source": "SAFE_ORDER_OBSERVATION"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GOAL_COMPLETED",
+        "user_outcome": "COMPLETED",
+        "response_policy": "DETERMINISTIC_ORDER_SUMMARY_V1",
+        "task_terminal_status": "COMPLETED",
+        "request_unit_terminal_status": "COMPLETED",
+        "resulting_task_state_version": 2,
+        "resulting_request_unit_state_version": 2,
+        "tool_call_terminal_status": "SUCCEEDED",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1
+      }
+    },
+    {
+      "model_script_ref": "script:e2e01-04-a:foreign-order",
+      "case_refs": [
+        "E2E01-04-A"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-2001",
+          "next_move_order_number": "O-2001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "user_outcome": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "response_policy": "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "task_terminal_status": "COMPLETED",
+        "request_unit_terminal_status": "COMPLETED",
+        "resulting_task_state_version": 2,
+        "resulting_request_unit_state_version": 2,
+        "tool_call_terminal_status": "FAILED",
+        "model_calls": 1,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:e2e01-04-b:nonexistent-order",
+      "case_refs": [
+        "E2E01-04-B"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-9999",
+          "next_move_order_number": "O-9999"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "user_outcome": "NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "response_policy": "FIXED_NOT_FOUND_OR_NOT_ACCESSIBLE",
+        "task_terminal_status": "COMPLETED",
+        "request_unit_terminal_status": "COMPLETED",
+        "resulting_task_state_version": 2,
+        "resulting_request_unit_state_version": 2,
+        "tool_call_terminal_status": "FAILED",
+        "model_calls": 1,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:sec-argument-binding:foreign-order",
+      "case_refs": [
+        "E2E01-01+SEC-ARGUMENT-BINDING"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-2001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_decision": "REJECT",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "gate_reason_expectation": {
+          "mode": "EXACT_CANONICAL",
+          "must_be_nonempty": true,
+          "must_be_deterministic": true,
+          "must_match_injected_fault": true,
+          "canonical_reason_code": "ARGUMENT_BINDING_MISMATCH",
+          "canonical_reason_status": "CONFIRMED",
+          "injected_fault_behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION"
+        },
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:sec-argument-binding:nonexistent-order",
+      "case_refs": [
+        "E2E01-01+SEC-ARGUMENT-BINDING"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-9999"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_decision": "REJECT",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "gate_reason_expectation": {
+          "mode": "EXACT_CANONICAL",
+          "must_be_nonempty": true,
+          "must_be_deterministic": true,
+          "must_match_injected_fault": true,
+          "canonical_reason_code": "ARGUMENT_BINDING_MISMATCH",
+          "canonical_reason_status": "CONFIRMED",
+          "injected_fault_behavior": "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION"
+        },
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:zero-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_ZERO_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:multiple-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:invalid-request-understanding-schema",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_INVALID_REQUEST_UNDERSTANDING_SCHEMA"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:source-authority-mismatch",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_SOURCE_AUTHORITY_MISMATCH",
+          "message_order_number": "O-1001"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-runtime:state-advanced-before-gate",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001",
+          "base_task_state_version": null
+        }
+      ],
+      "runtime_fault": {
+        "behavior": "ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE",
+        "boundary": "AFTER_REVALIDATION_BEFORE_GATE",
+        "transition_command": "ApplyTaskTransitionCommand",
+        "transition_port": "RuntimeRecordPort.apply_task_transition_if_current",
+        "atomic_scope": "TASK_REQUEST_UNIT_AND_TASK_STATE_TRANSITION",
+        "from_status": "ACTIVE",
+        "to_status": "WAITING_USER",
+        "base_task_state_version": 1,
+        "result_task_state_version": 2,
+        "base_request_unit_state_version": 1,
+        "result_request_unit_state_version": 2,
+        "validated_task_state_version": 1,
+        "current_task_state_version": 2,
+        "reason_ref": "00000000-0000-4000-8000-000000000401",
+        "conditional_write_required_result": "APPLIED",
+        "non_applied_disposition": "EVAL_EXECUTION_FAILURE"
+      },
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_decision": "REJECT",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "validated_task_state_version": 1,
+        "current_task_state_version": 2,
+        "terminal_task_state_version": 3,
+        "terminal_request_unit_state_version": 3,
+        "task_state_version_delta": 2,
+        "request_unit_state_version_delta": 2,
+        "gate_reason_expectation": {
+          "mode": "EXACT_CANONICAL",
+          "must_be_nonempty": true,
+          "must_be_deterministic": true,
+          "must_match_injected_fault": true,
+          "canonical_reason_code": "STATE_VERSION_MISMATCH",
+          "canonical_reason_status": "CONFIRMED",
+          "injected_fault_behavior": "ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE"
+        },
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:trusted-field-override",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_TRUSTED_FIELD_OVERRIDE",
+          "message_order_number": "O-1001",
+          "attempted_customer_id": "customer-B"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "INPUT_INVALID",
+        "task_creation": "FORBIDDEN",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-provider:unknown-tool-name",
+      "case_refs": [
+        "E2E01-01+FAULT-PROVIDER-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "INJECT_UNKNOWN_TOOL_NAME",
+          "message_order_number": "O-1001",
+          "requested_tool_name": "get_any_order"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "GATE_REJECTED",
+        "gate_decision": "REJECT",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "gate_reason_expectation": {
+          "mode": "EXACT_CANONICAL",
+          "must_be_nonempty": true,
+          "must_be_deterministic": true,
+          "must_match_injected_fault": true,
+          "canonical_reason_code": "TOOL_NOT_REGISTERED",
+          "canonical_reason_status": "CONFIRMED",
+          "injected_fault_behavior": "INJECT_UNKNOWN_TOOL_NAME"
+        },
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 1,
+        "tool_calls": 0,
+        "order_reads": 0,
+        "observation_records": 0,
+        "presentation_model_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:zero-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_ZERO_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "tool_call_terminal_status": "SUCCEEDED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:multiple-target-functions",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_MULTIPLE_TARGET_FUNCTION_CALLS"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "tool_call_terminal_status": "SUCCEEDED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:invalid-schema",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_INVALID_PRESENTATION_SCHEMA"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "tool_call_terminal_status": "SUCCEEDED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "renderer_calls": 0
+      }
+    },
+    {
+      "model_script_ref": "script:fault-presentation:fact-bearing-envelope",
+      "case_refs": [
+        "E2E01-01+FAULT-PRESENTATION-PROTOCOL"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "VALID_ORDER_LOOKUP",
+          "message_order_number": "O-1001",
+          "next_move_order_number": "O-1001"
+        },
+        {
+          "purpose": "PRESENTATION",
+          "behavior": "INJECT_FACT_BEARING_PRESENTATION_ENVELOPE",
+          "raw_function_arguments": {
+            "free_text": "订单 O-1001 已发货"
+          },
+          "validation_model": "PresentationPlan",
+          "raw_envelope_disposition": "DISCARD"
+        }
+      ],
+      "expected_control_result": {
+        "run_status": "COMPLETED",
+        "stop_reason": "PROVIDER_PROTOCOL_ERROR",
+        "task_terminal_status": "BLOCKED",
+        "request_unit_terminal_status": "BLOCKED",
+        "task_state_version_delta": 1,
+        "request_unit_state_version_delta": 1,
+        "tool_call_terminal_status": "SUCCEEDED",
+        "user_outcome": "BLOCKED",
+        "response_policy": "FIXED_SAFE_PROCESSING_ERROR",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "order_reads": 1,
+        "observation_records": 1,
+        "presentation_model_calls": 1,
+        "presentation_plan_proposed_events": 0,
+        "renderer_calls": 0,
+        "provider_failure": {
+          "error_type": "ProviderProtocolError",
+          "constructor_arguments": [],
+          "cause": null,
+          "context": null
+        }
+      }
+    }
+  ]
+}

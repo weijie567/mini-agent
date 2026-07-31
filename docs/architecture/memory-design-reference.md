@@ -714,6 +714,8 @@ Context Manifest 记录“模型实际看到了哪些输入”，用于：
 - `tool_registry_version` 标识本次模型调用使用的完整 Runtime 工具注册配置版本。
 - `model_visible_toolset_hash` 标识经过 Provider 名称与 Schema 适配后，模型实际看到的 ToolSpec 集合；它必须能解析到不可变的安全 Toolset Artifact。
 - `task_state_ref_and_version` 只有在模型调用实际加载了既有目标 Task 时才存在。当前消息尚未绑定既有 Task 的首次 Request Understanding 调用可以为空；Reducer 创建 Task 后，后续 Gate、Trace 和模型调用必须引用真实的 Task state version，不得使用伪造的 `0` 版本。
+- `token_counts` 对象本身必须存在；其中 `input_tokens` 与 `output_tokens` 只在对应方向由批准来源精确测量时记录。`None` 表示未知或未精确测量，整数 `0` 表示已观测到的精确零，正整数表示对应的精确计数，三者不得互相替代。
+- 当前第一薄切片的 `ModelProvider` 不暴露 exact usage 来源，因此 Core 必须使用字段均为 `None` 的必填 `TokenCounts` 对象诚实表达未知。后续 Runtime / Adapter 只能写入实际精确测量的值；不得从字符数、字节数或序列化 JSON 长度估算 Token，不得为补齐 Schema 填充占位 `0`，也不得用其他 fallback 伪造使用量证据。
 - Tool Calling 系统负责生成、冻结和校验工具集；Context Manifest 负责保存本次模型调用对该工具集的引用。具体 Hash、Artifact 和同快照校验规则以 [Tool Calling Design Reference](tool-calling-design-reference.md) 为准。
 - Context Manifest 不保存 Handler、Provider 密钥、可信 `customer_id`、授权范围或其他 Runtime 私有注册内容。
 
@@ -773,7 +775,102 @@ P0 使用一个持久化关系数据库作为以下数据的权威存储：
 
 Memory 领域契约不能依赖某个数据库特性。当前 P0 实现 profile 已在 [PROJECT_DIRECTION.md](../../PROJECT_DIRECTION.md) 中裁决为从第一条可执行订单切片开始统一使用 `PostgreSQL + pgvector + tsvector`，本地开发与测试通过 Docker Compose 启动，不保留 SQLite 过渡基线；该选择只约束当前基础设施实现，不改变本节的记录语义、Port 所有权、事务义务或可见性边界。具体 Compose、迁移与 RAG 激活要求分别服从 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 和 [RAG Design Reference](rag-design-reference.md)。
 
-### 15.2 Redis
+### 15.2 持久化读取、解码与逻辑版本
+
+本节消费 [PROJECT_DIRECTION.md](../../PROJECT_DIRECTION.md) 第 9.1 节的持久化四轴 ownership 与版本维度，并在 Memory owner 范围内固定 P0 的读取、完整性失败、启动恢复和 migration 行为。它是一条行为契约，不要求或定义名为 `PersistenceEnvelope`、`RecordSchemaSpec`、decoder、registry 或特定 Port 的实现 API，也不分配 Thin Slice Spec 第 10.1 节 17 项最低持久化记录的 item code 或 exact version；这些具体映射继续由后续 Thin Slice scoped owner 裁决。
+
+#### 15.2.1 Ownership 与 exact-version 门禁
+
+持久化不会合并四种 ownership：
+
+- `semantic owner` 定义逻辑记录、必填字段、不变量、逻辑 `record_schema_version`、兼容与迁移语义，以及安全失败行为。
+- `Python source owner` 只决定代码位置和依赖方向；记录位于某个 package 不会转移其语义 ownership。
+- `Port declaration owner` 只定义调用边界、用例协调位置和事务义务；Port 的源码位置不会改写入参或返回记录的语义 owner。
+- `adapter owner` 只保存和读取物理数据，并实现已经批准的 table / column / JSONB mapping、事务和 physical / data migration；Infrastructure 不得从物理形状发明逻辑字段、版本或兼容规则。
+
+以下五个版本维度必须保持独立：
+
+| 版本维度 | 本节约束 |
+|---|---|
+| `record_schema_version` | 某类持久化逻辑记录的结构与语义版本，由该记录的 `semantic owner` 批准 |
+| `state_version` | Task / RequestUnit 等工作投影的 optimistic concurrency / CAS 版本 |
+| `artifact_schema_version` | 可重放 Artifact 内容及 Hash 输入契约的版本 |
+| `tool_registry_version` | 一次 Runtime 启动实际使用的完整工具注册配置快照版本 |
+| Eval `version_manifest` | 一次 Eval 运行引用的 Dataset、Candidate、Baseline、Prompt / Model、Toolset 等单一版本快照 |
+
+P0 采用 `exact-version-only`。对已经从存储读取、准备按预期语义类型使用的 record、row 或 envelope，必须先确认其 record identity 与非空逻辑 `record_schema_version` 精确等于 active runtime 为该 `semantic owner` 批准的唯一版本，并确认 metadata 与 payload 的 identity / version 一致；通过后才能执行完整的 owner model validation。首版不存在多版本候选选择。
+
+以下情况统一属于内部 persistence integrity failure：
+
+- record identity 或 `record_schema_version` 缺失、未知、不受支持、与预期不匹配，或 metadata 与 payload 声明不一致；
+- 必填字段缺失、出现 owner model 禁止的额外字段、字段类型错误，或 payload 损坏；
+- payload 无法完整通过对应 `semantic owner` 批准的模型与不变量校验。
+
+发生 integrity failure 时，整个读取必须 fail closed。不得返回 partial object 或用户可见部分事实，不得按 current model “尽量解析”、强制补齐或选择 `fallback-to-latest`，也不得以 `state_version`、`artifact_schema_version`、`tool_registry_version` 或 Eval `version_manifest` 代替或推断 `record_schema_version`。
+
+#### 15.2.2 Owner-scoped 结果、可信范围与诊断
+
+读取必须区分两个阶段：
+
+1. 在任何 payload 被读取前，owner-scoped 查询得到 no-row、unauthorized 或 ownership-unverified 时，继续返回同一个不可区分的安全结果；这不是 persistence integrity failure，也不得泄露记录是否存在。
+2. 只有 storage row 已经按服务端可信 scope 读出后，才可能发现 identity、version 或完整 payload 的 integrity failure。此时完整读取 fail closed，不能把失败伪装成安全 `None`；内部必须保留稳定且受限的 integrity-failure category 与不含 PII 的 correlation reference，对外响应、普通 Trace 和模型上下文仍不得暴露资源存在与否。
+
+本节只规定行为差异，不规定 return type、exception、decoder 或 registry API。对外最小披露与内部错误可诊断性必须同时成立。
+
+Persisted `owner_customer_id`、关联 ID、metadata 或 payload 不能创建、覆盖或扩大 `CustomerContext`、`TrustedOwnerScope` 或内部 recovery authority。用户请求路径的可信范围只能由服务端认证上下文派生；启动恢复的内部 authority 也只能用于发现与条件 claim，不能使无效记录变得可信。
+
+Owner-scoped query 的物理过滤只是 pre-payload 安全边界，不是最终归属证明。Strict decode 后，任何携带 `owner_customer_id` 或等价 owner projection 的记录都必须与本次服务端 `TrustedOwnerScope` 精确一致。物理查询 scope 与 decoded owner 不一致属于 persistence integrity failure；不得将其降级为 absent / unauthorized，不得把记录重新绑定到当前 scope，也不得用 persisted owner 字段反向授权。
+
+对于按其 `semantic owner` 契约不携带 owner 字段的关联记录，必须通过同一个受控 record graph 中 owner-bearing root 的精确匹配证明归属，并严格解码、验证从 root 到该记录的全部关联边。孤立、归属不明、跨 owner 或无法形成闭合归属证明的记录属于 integrity failure；调用方提供的 ID、单条 payload 内的关联声明或物理外键本身都不能替代该证明。
+
+任何 integrity failure 都不得形成 Observation、Evidence、Context Manifest、模型输入、用户可见部分事实或权威状态迁移。受限内部诊断可以保留稳定失败类别、approved record kind、expected / observed version category 和不含 PII 的 correlation reference，但不得记录 raw payload、原始 Token、完整 `CustomerContext`、Cookie、secret 或不必要 PII。
+
+#### 15.2.3 Startup recovery 与 readiness
+
+Recovery discovery 继续使用独立内部 authority，但 active Run 及其恢复所需必备关联记录的 strict decode 与 conditional claim 必须位于一个 transactionally consistent snapshot 中，或使用能证明等价效果的 fencing / version-CAS。等价机制必须确保 claim 仍以本次完成严格解码的同一组记录投影为条件；不得以无锁预扫描或 stale decode 结果授权后续 claim。缺少该一致性保证时，recovery / startup readiness 必须失败。
+
+Recovery strict decode 必须在同一 transactionally consistent snapshot 或等价 fence 内验证完整关联闭包，而不是只验证每条 payload 可以独立构造模型。该闭包至少覆盖关联 Conversation、active Run、该 Run 的 `RunTaskLink`、linked Task、RequestUnit，以及本次 recovery 决策所需的 ToolCall，并必须同时证明：
+
+- 所有 owner-bearing root 的 decoded owner 一致，且内部 recovery authority 没有被 persisted owner projection 扩大；
+- `Run.conversation_id`、`RunTaskLink.run_id / task_id`、`RequestUnit.task_id`，以及所需 ToolCall 的 `run_id / task_id / request_unit_id` 都指向同一条受控关联链；
+- link 方向、对应关系、`semantic owner` 批准的 required cardinality 与 closed set 均成立，任何会影响恢复状态迁移或副作用判断的关联记录都没有被遗漏或留在未经验证的闭包外。
+
+跨 owner、跨 Run、跨 Task、跨 Conversation 的引用，关联缺失、多余或冲突，以及 required cardinality / closed-set violation 都属于 persistence integrity failure。即使闭包中的每条 payload 分别通过 owner model validation，也不能据此 claim。具体 record identity、exact version 和 cardinality 编码仍由对应 `semantic owner` 与 Thin Slice scoped owner 定义，本文不分配实现 API。
+
+只有同时满足以下条件，才允许 conditional claim：
+
+1. active Run 及其恢复所需的全部必备关联记录都通过预期 record identity、exact `record_schema_version` 和完整 payload validation；
+2. owner 一致性、完整关联闭包、跨记录引用、required cardinality 与 closed set 全部通过验证；
+3. strict decode、record graph validation 与 claim 之间的 transactionally consistent snapshot 或等价 fencing / version-CAS 门禁成立，且 claim 条件覆盖本次已验证闭包，闭包任一相关变化都会使 claim 失效。
+
+在所需恢复投影全部严格解码并通过上述门禁之前，不得执行依赖状态迁移或副作用。遇到无法安全解码的 active recovery candidate、必备关联记录或任何 record graph validation failure 时，恢复流程必须：
+
+- 不 claim，不写 Task、Run 或 ToolCall 状态；
+- 不调用模型、Tool 或 Renderer，也不 dispatch 任何副作用；
+- 不伪造 `INCOMPLETE`、`INTERRUPTED`、attempt、Observation 或 Action result；
+- 不跳过该记录、不把它当作已恢复，也不通过自动重复执行掩盖问题；
+- 只记录有界、受限的 integrity condition，并让 recovery / startup readiness 保持失败，直到显式修复、`semantic owner` 批准的 migration 或 operator resolution 完成。
+
+CAS conflict / not-applicable 与 integrity failure 必须分开。前者表示自一致性快照之后状态已被合法推进或条件不再适用，应从新的受控状态重新判定；后者表示记录根本不能被安全解释。两者都不得触发无条件覆盖，CAS conflict 也不能把 integrity failure 降级为普通竞争。
+
+本节只规定恢复的语义原子性和 readiness，不定义具体 decoder、registry、transaction 或 Port API。ToolCall 生命周期、durable dispatch fence，以及 Action `RESULT_UNKNOWN` 的权威恢复语义继续服从 [Tool Calling Design Reference](tool-calling-design-reference.md)；本文不得借完整性恢复改写 Tool / Action 状态机。
+
+#### 15.2.4 P0 migration runtime 边界
+
+P0 只接受 active runtime 已批准的 exact current version，不提供：
+
+- multi-version runtime compatibility 或 payload migration graph；
+- read-time upgrade、downgrade、rewrite 或 delete；
+- 自动 quarantine service；
+- 普通 request / recovery read 顺便执行的 migration。
+
+Future logical version 必须先由对应 `semantic owner` 明确定义 source / target version、转换不变量、安全影响、审计证据、失败原子性和 rollback。若 migration 涉及 `TraceEvent` / `TraceEventRecord` shared structure 或 specialized payload，还必须遵守 `PROJECT_DIRECTION.md` 第 9.1 节的 Core Runtime / Project Direction owner 与对应 specialized owner 联合批准关系。
+
+只有上述语义规则批准后，Infrastructure 才能通过显式、可审计且可 rollback 的 physical / data migration 实施。Migration 成功并通过批准的验证之前，新 runtime 不得报告 ready；失败不得留下部分转换后可被普通读取消费的状态。普通 request 和 recovery read 永远不得静默迁移、重写、删除或隔离未知 persisted data。
+
+ToolCall、Action `RESULT_UNKNOWN` 与 Eval record 的专项字段、状态和 payload 继续服从各自 canonical owner；Memory 本节不改变 Tool / Eval owner、Eval Case 生命周期或 Thin Slice scoped mapping。以上均为目标行为契约，不主张 codec、Adapter、业务表、migration 或 startup recovery 已落地。
+
+### 15.3 Redis
 
 P0 不使用 Redis 作为任何 Memory、Task、确认或动作结果的权威源。
 
@@ -786,7 +883,7 @@ P0 不使用 Redis 作为任何 Memory、Task、确认或动作结果的权威�
 
 缓存丢失不得改变任务真相或导致动作重复。
 
-### 15.3 向量检索
+### 15.4 向量检索
 
 P0 不需要向量数据库管理活动 Task。
 

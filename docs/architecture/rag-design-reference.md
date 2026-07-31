@@ -1,6 +1,6 @@
 # 消费者订单与配送售后 Agent｜RAG Design Reference
 
-更新日期：2026-07-25  
+更新日期：2026-07-26
 状态：P0 规范性设计参考  
 适用范围：退款政策 Corpus、`retrieve_refund_policy` 内部检索链路、Evidence 组装、RAG Trace 与 Eval  
 关联基线：[PROJECT_DIRECTION.md](../../PROJECT_DIRECTION.md) 第 2、5、6、10、11 节；Evidence 记录语义见 [Memory Design Reference](memory-design-reference.md)；工具执行语义见 [Tool Calling Design Reference](tool-calling-design-reference.md)
@@ -588,7 +588,7 @@ PostgreSQL
 6. 同一源文档、版本与 ingestion 配置能够生成相同 Block、Chunk、source span 和 hash；Sparse、Dense、RRF、Cross-Encoder fallback 与 EvidenceAssembler 的最小 Dataset 可以复现。
 7. Gate 失败时，订单与物流读路径可以继续运行，但 RAG Tool 不得注册为可用，退款资格必须停在 `UNDETERMINED` 或对应安全结果，不得使用未验证 Evidence。
 
-该 Gate 当前是 `CONTRACT_DEFINED`，不是已经存在或通过的运行门禁。实际 Compose 文件、镜像版本、migration、探测命令和结构化 Gate Result 出现前，不得宣称 PostgreSQL、pgvector、FTS 或 RAG 基础设施已经就绪。
+该 Gate 当前仍是 `CONTRACT_DEFINED`，不是已经存在或通过的运行门禁。W1 已提供固定 pgvector Compose、基础 migration、`vector` extension 校验和隔离 namespace，这只是 `PARTIAL_PREREQUISITE`；RAG migration、FTS / vector capability manifest、Corpus / Index、检索 Dataset 和结构化 Gate Result 尚未出现，因此不得宣称 `G-RAG-INFRA` 或 RAG 基础设施已经就绪。
 
 ## 12. Trace 与可观测性
 

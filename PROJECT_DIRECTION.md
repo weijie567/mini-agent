@@ -1,6 +1,6 @@
 # 消费者订单与配送售后 Agent｜P0 项目方向与架构决策
 
-更新日期：2026-07-26  
+更新日期：2026-07-31
 状态：P0 当前方向与架构基线
 
 > 本文是当前可执行方向的基线，不是不可变的永久结论。发现新的失败证据或更优候选方案时，按问题说明、影响分析、Eval 对照、owner 裁决和 cross-file alignment 演进；具体证据链见 [`Agent Evaluation Strategy`](docs/evaluation/agent-evaluation-strategy.md#10-eval-作为架构决策证据)。
@@ -344,7 +344,9 @@ Policy Corpus 的受控 ingestion、清洗、结构解析、Chunking，以及 Hy
 
 P0 的基础设施实现 profile 已裁决为从第一条可执行订单切片开始统一使用 `PostgreSQL + pgvector + tsvector`，本地开发与可复现测试通过 Docker Compose 启动数据库，不建立 SQLite 过渡实现。订单、物流、Runtime Record 与后续 Policy Corpus 共用这一关系数据库基础设施，但仍按 owner、事务和测试边界维护独立逻辑记录域；`pgvector` 在基础设施中可用不表示第一切片已经实现或使用 RAG。RAG Schema、索引与 `G-RAG-INFRA` 激活门禁以 [RAG Design Reference](docs/architecture/rag-design-reference.md) 为准，第一切片的 Compose、迁移和测试隔离目标契约以 [E2E-01 Thin Slice Implementation Spec](docs/implementation/e2e01-thin-slice-implementation-spec.md) 为准。
 
-上述内容当前仍是 `CONTRACT_DEFINED`：在 `compose.yaml`、Alembic migration、源码与测试真实出现并通过验证前，不得描述为数据库已经启动、Schema 已迁移或 `pgvector` 已可用。
+截至 2026-07-31，第一最薄 `E2E01-01/04` 已完成 W1 / W2、RU v2 contract closure、01-08 vertical integration、01-08A Qwen runner 与 post-execution quality evidence：`B_RU_V2_CONTRACT = 5c84e0e...`、`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d08...`。当前已实现固定 PostgreSQL / pgvector 与 migration / 隔离测试 namespace、Core / Application contract、受控 Runtime、Session / HTTP Adapter、PostgreSQL record / `get_order` Adapter 与恢复路径、RU v2 active persistence、`OfflineE2E01Composition`、真实 `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、双 Provider Adapter、13 个确定性 Grader、结构化 Result / Failure machinery 和 credential-aware Qwen runner。六个 authenticated physical Case、manifest 与 loader 已原子进入 `REGRESSION_GATE`；默认 `uv run pytest` 覆盖全部 16 个 variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，exact security re-review barrier `22c4cfa...` 的 canonical 串行门禁为 `2007 passed, 1 deselected, 12 warnings`。
+
+这些证据确认 scoped lifecycle-valid Component / Trajectory / E2E Result、可复现的 HTTP → Runtime → PostgreSQL 离线纵向路径、owner-scoped 非本人 / 不存在安全等价与 default local regression gate。Eval re-audit 为 `79/100 / NEEDS_WORK / critical gaps 0`；Security re-review 为 `PASS WITH ACCEPTED RISK`，其中 `RTA-D01` 只接受关键 Trace 写失败时拒绝当前 read-only 请求的有界 availability loss，最终 release 是否继续接受仍待用户裁决。Controlled UAT 由获授权的 `CODEX_INTEGRATOR` 直接执行并 scoped `PASS`，但 `end_user_uat` 仍为 `NOT_RUN`。这些证据不构成 canonical 产品进程启动、真实 credentialed Qwen Baseline、hosted CI、RAG Schema / FTS / capability manifest、线上监控、完整 E2E-01 / P0 或 production readiness；本文件不复制执行 Plan 的易漂移计数，也不创建第二道 barrier。用户已明确暂时停用 Graphify；后续不运行、不引用，也不把 freshness 作为门禁。
 
 ### 6.7 `DEVOPS-01`：完整应用容器化与单机部署演练（`DEFERRED`）
 
@@ -438,6 +440,45 @@ Memory 语义：
 - L2 Task Working Context：跨会话保存 Task State、RequestUnit Board、目标绑定，以及 Observation、Evidence 和 Action Record 的引用。
 
 L2 不复制权威事实、政策正文、确认或副作用结果。当前业务事实来自受控业务系统形成的 Observation；知识依据来自版本化 Evidence；确认、幂等和执行结果记录在 Decision & Action Ledger。用户陈述和模型总结不得自动升级为业务事实。
+
+### 9.1 持久化契约的四轴 ownership 与版本维度
+
+持久化边界同时存在四种 ownership；它们可以落在同一个 Python package 或由同一个开发者维护，但不能因此合并语义权限：
+
+| ownership 轴 | 负责 | 不得据此获得的权限 |
+|---|---|---|
+| `semantic owner` | 定义逻辑记录字段、不变量、逻辑 `record_schema_version`、兼容 / 转换规则和安全失败语义 | 不能把数据库或 Adapter 的偶然形状升级为领域契约 |
+| `Python source owner` | 决定当前类 / Protocol 的源码位置和允许的依赖方向 | 类位于 `application/` 不会把 Core、Tool、Memory、RAG、Action 或 Eval 语义转交给 Application |
+| `Port declaration owner` | 定义调用接口、用例协调位置和事务义务；当前 Protocol 可以继续位于 `application/ports.py` | 不能复制、放宽或改写记录的 `semantic owner` 契约，也不因声明 Port 而拥有所有入参 / 返回记录的语义 |
+| `adapter owner` | Infrastructure 拥有 table、column、index、JSONB mapping、transaction、Alembic mechanics 和数据库错误适配 | 不得定义第二套 DTO、record code 或逻辑版本，不得动态 import 未批准类型、`fallback-to-latest`，也不得改变授权、最小披露或状态迁移 |
+
+上述 `semantic owner` 按现有专项 owner 分配：Conversation 生命周期和消息语义服从 Application；Run / Task State 和共享 Trace 结构服从 Core Runtime；Observation、Evidence Binding、Context Manifest 与 Action Ledger 服从 Memory 及其中指定的 Evidence / ActionPolicy 边界；Policy Corpus、检索与排序 Artifact 服从 RAG；ToolCall / Toolset Artifact 服从 Tool；Eval Result / Failure 服从 Eval。`Python source owner`、`Port declaration owner` 或 `adapter owner` 只能消费这些契约，不能建立第二套 canonical 语义。
+
+以下五种版本维度互不替代，也不得由名称相近或存储在同一行而相互推断：
+
+| 版本维度 | 含义 |
+|---|---|
+| `record_schema_version` | 某类持久化逻辑记录的结构与语义版本，由该记录的 `semantic owner` 定义 |
+| `state_version` | Task / RequestUnit 等工作投影的 optimistic concurrency / CAS 版本 |
+| `artifact_schema_version` | 可重放 Artifact 内容及 Hash 输入契约的版本 |
+| `tool_registry_version` | 一次 Runtime 启动使用的完整工具注册配置快照版本 |
+| Eval `version_manifest` | 一次评价运行引用的 Dataset、Candidate、Baseline、Prompt / Model、Toolset 等单一版本快照 |
+
+可信身份和完整性边界不随持久化而转移：
+
+- `CustomerContext` 和由其派生的 `TrustedOwnerScope` 只能来自服务端可信认证上下文。模型输出、用户消息、persisted payload / metadata、源码位置或数据库字段都不能创建、覆盖或扩大 `customer_id` 与授权范围。
+- 私有资源不存在、非本人或无法确认归属时，对外结果仍不可区分；未经归属校验的 payload 不得进入标准 Observation、Memory、Context Manifest、模型输入或普通 Trace。
+- 未来 scoped decoder 对已由 owner-scoped lookup 读取到的 record / envelope 解码时，如必填字段、record code、`record_schema_version` 或 payload 缺失、损坏或不受支持，不得把该完整性错误伪装成 absent / unauthorized 的安全 `None`，也不得 fail open；业务查询“查无行 / 无权访问”仍按 active scoped contract 返回同一安全结果，不属于 decode / integrity failure。内部必须保留可诊断的完整性失败类别，但普通 Trace / 诊断不得记录 raw payload、原始 Token 或不必要的 PII，对外仍服从最小披露。
+
+逻辑与物理 migration 的批准边界如下：
+
+- 逻辑 `record_schema_version` 的兼容、转换、审计与回滚义务由对应 `semantic owner` 先行批准；Infrastructure 只能实现已批准的显式 physical / data migration。
+- Adapter 不得在读取时自行静默 upgrade、downgrade、quarantine、rewrite 或选择 `fallback-to-latest`。是否 exact-version-only、unknown / mismatch decode、startup recovery readiness 和允许的隔离策略，延期由 Plan 01-02 的 Memory owner scoped contract 裁决。
+- Thin Slice Spec 第 10.1 节当前 17 项最低持久化集合（包括 `ModelVisibleToolsetArtifact`）的 item code、版本和实现 API，延期由 Plan 01-03 的 Thin Slice scoped owner 裁决；不得从源码中的辅助 Pydantic 模型或 Command 反推额外 canonical record。
+
+`TraceEvent` / `TraceEventRecord` 采用一条更精确的联合所有权规则：共享 record structure、公共字段和逻辑 `record_schema_version` 的唯一项目级批准者，是本 Project Direction 所代表的 Core Runtime shared-contract owner（下称 `Core Runtime / Project Direction owner`）。Request Understanding、Tool、Memory、RAG、Action 和 Eval 等 `specialized owner` 继续拥有各自 event type、专项 payload 字段、visibility 和必备事件语义。只修改 shared record structure 的 future logical migration 由 `Core Runtime / Project Direction owner` 批准；同时修改专项 payload 的 migration 还必须取得对应 `specialized owner` 批准。Infrastructure 只执行双方已经批准的显式 physical / data migration，不能以存储实现反向覆盖任一语义 owner。
+
+本节只固定后续 Plan 必须服从的 ownership、版本和批准关系，不表示 `PersistenceEnvelope`、Record Schema registry、strict decoder、业务表、兼容层或对应 migration 已经实现。
 
 ## 10. Tool、RAG 与退款动作
 

@@ -1,10 +1,10 @@
 # 消费者订单与配送售后 Agent｜Agent Evaluation Strategy
 
-更新日期：2026-07-26  
+更新日期：2026-07-31<br>
 状态：P0 规范性评测策略  
 适用范围：P0 Agent 的 Eval-driven development、Dataset、Grader、评测门禁、报告与架构决策证据
 
-> 本文定义目标评测契约，不表示仓库中已经存在可运行源码、Eval Harness、自动化 Dataset、Baseline、评测阈值、线上监控或生产结果。当前可复现实现与运行结果均为 `NOT_FOUND`；完整 P0 的具体技术栈与质量阈值仍为 `OPEN`，第一最薄 E2E-01 只有 scoped 编码选择，尚未实现。
+> 本文定义目标评测契约，并区分“实现存在”“可复现离线纵向证据”“Case lifecycle”与“发布 Gate”。第一最薄 E2E-01 的六个 authenticated physical Case artifacts、manifest 与 loader 已为 `REGRESSION_GATE`；默认 `uv run pytest` 通过真实 `OfflineEvalHarness → HTTP → Runtime → PostgreSQL` 覆盖全部 16 个 authenticated script variants。聚合报告为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，exact security re-review barrier `22c4cfa672e7a4a91916100e9868585e6b2bcdf9` 的 full offline gate 为 `2007 passed, 1 deselected, 12 warnings`。真实 credentialed Qwen Baseline Result 仍为 `NOT_RUN`，canonical 产品启动与线上监控仍为 `NOT_FOUND`，普通质量阈值仍为 `OPEN`。
 
 ## 1. 文档所有权与适用边界
 
@@ -274,12 +274,12 @@ EvalRunConfig
 
 | 状态 | 含义 |
 |---|---|
-| `CONTRACT_DEFINED` | 已定义目标与断言，但尚无可运行 Harness 或 Fixture |
-| `EXECUTABLE` | 已有可复现入口，能产生结构化结果 |
+| `CONTRACT_DEFINED` | 已定义目标与断言；可以已有 loadable artifacts、Component machinery 或 direct execution seam，但尚未获 canonical owner 激活进入 Harness-dispatched 受测执行并产生 lifecycle-valid 结构化结果 |
+| `EXECUTABLE` | authenticated artifacts、manifest 与 loader 已按 owner 裁决同步激活，且可复现入口能产生 lifecycle-valid 结构化结果 |
 | `REGRESSION_GATE` | 已纳入持续门禁，失败会阻止对应发布范围 |
 | `RETIRED` | 已由新 Case 取代，并保留 `supersedes` 追溯 |
 
-不得把 `CONTRACT_DEFINED` 记为通过，也不得把跳过未实现能力记为成功。
+Fixture、Harness、SUT 或 direct Composition seam 的物理存在不自动改变 lifecycle。不得把 `CONTRACT_DEFINED` 记为通过，也不得把跳过未实现能力记为成功。
 
 ## 6. Dataset 治理
 
@@ -392,24 +392,80 @@ Trace：
 可运行 Harness 建立后，每次结果至少需要：
 
 ```text
+schema_version
 eval_run_id
 case_id
 lane
-dataset_version
-candidate_version
-baseline_version?
 attempt
 status: PASS | FAIL | SKIPPED | NOT_RUN
 grader_results[]
 critical_failures[]
-observed_outcome
-trace_ref
+observed_outcome?
+trace_ref?
+version_manifest
+  dataset_version
+  candidate_version
+  baseline_version?
+  fixture_versions[]
+  model_config_version?
+  prompt_version?
+  tool_registry_version?
+  corpus_version?
+  runtime_version?
 latency_summary?
 usage_summary?
 completed_at
 ```
 
-当前仓库没有该结果结构的实现或持久化技术选择。
+`version_manifest` 是该结果的单一版本快照，不再在记录顶层复制 `dataset_version`、`candidate_version` 或 `baseline_version`。其中：
+
+- `candidate_version` 标识被评价的源码 revision、build 或等价不可变候选版本，始终必填。
+- `baseline_version` 只在本次结果实际绑定或比较某个 Baseline 时存在。
+- `runtime_version` 标识 Runtime 自身版本；它可以与首版 `candidate_version` 使用同一个 revision，但两者语义不得混为一个字段。
+- Manifest 必须固定本次实际使用的 Case / Dataset、Fixture、Provider / Model 配置、Prompt、Tool Registry、Corpus 和 Runtime 的适用版本；某维度不适用时明确为空，不得填入猜测值。
+
+状态与可空字段的确定性规则：
+
+| `status` | `observed_outcome` | `trace_ref` | `grader_results[]` | `critical_failures[]` | latency / usage |
+|---|---|---|---|---|---|
+| `PASS` | 必填 | 必填 | 至少一项 | 必须为空 | 可选 |
+| `FAIL` | 必填 | 必填 | 至少一项 | 可为空；若非空仍为 `FAIL` | 可选 |
+| `SKIPPED` | 必须为空 | 必须为空 | 必须为空 | 必须为空 | 必须为空 |
+| `NOT_RUN` | 必须为空 | 必须为空 | 必须为空 | 必须为空 | 必须为空 |
+
+- `SKIPPED` 表示 Case 已被当前 lane 选择，但在任何受测执行开始前因明确的 `credential_policy` 或其他已声明前置条件而跳过。
+- `NOT_RUN` 表示整条 lane 未启动，或该 Case 没有进入本次执行；不得用它表示已经开始后发生的失败。
+- 一旦产生了可评价的受测结果，Case 结果只能是 `PASS` 或 `FAIL`；执行中断、Harness 错误或缺少预期 Case 结果不得降级为 `SKIPPED / NOT_RUN`。
+- 任一 Critical failure 强制对应 Case 与 Eval Run 为 `FAIL`；普通断言失败也可以在没有 Critical failure 时产生 `FAIL`。
+- 同一 `eval_run_id / case_id / lane` 的重复执行通过递增 `attempt` 追加记录，不能覆盖历史结果。
+
+如果 Harness、Trace Store、受测系统或 Grader 在形成合法的 `observed_outcome + trace_ref + grader_results` 前失败，不得伪造 Case `FAIL`。此时不创建不完整的 `EvalResultRecord`，而是追加：
+
+```text
+EvalExecutionFailureRecord
+  schema_version
+  eval_run_id
+  case_id?
+  lane
+  attempt?
+  failure_phase:
+    HARNESS_SETUP
+    CASE_SETUP
+    TRACE_PERSISTENCE
+    SYSTEM_UNDER_TEST
+    GRADING
+    RESULT_PERSISTENCE
+    RESULT_COMPLETENESS
+  safe_error_code
+  diagnostic_ref?
+  trace_ref?
+  version_manifest
+  occurred_at
+```
+
+该记录使对应命令和 Eval Run 失败，但不把基础设施 / Harness 故障误报成 Case 业务断言结果，也不计入 `PASS / FAIL / SKIPPED / NOT_RUN`。如果失败前已经形成满足上表的安全 Trace、Outcome 和至少一个 Grader 结果，则可以正常落盘 `FAIL`；否则 expected Case result 缺失本身由 `RESULT_COMPLETENESS` failure 记录并使命令失败。Failure Record 只保存安全 reason code 和受限诊断引用，不保存 secret、原始 Token、完整 Prompt 或不必要 PII。
+
+当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT。真实 authenticated artifacts 当前为 `REGRESSION_GATE`；默认离线门禁已对六 Case / 16 authenticated variants 生成并 reload lifecycle-valid PostgreSQL `PASS` Result，聚合证据见 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。测试隔离 schema teardown 后清理 Result rows；该报告不等于 production retention。derived `CONTRACT_DEFINED` bundle 仍用于验证 Harness 在 SUT / Provider / Trace / Grader / Result 前整批 fail closed。
 
 ## 9. P0 Coverage 与激活顺序
 
@@ -424,7 +480,7 @@ completed_at
 5. 进入 E2E-02，增加 RAG、ActionPolicy、安全副作用和故障恢复。
 6. 运行 Baseline 后再设置普通质量 Gate。
 
-`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄；在对应源码和 Harness 出现前，它仍只是 `CONTRACT_DEFINED`。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
+`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。Coverage Matrix owner 已完成 `EXECUTABLE` 与 `REGRESSION_GATE` 两次裁决；PR #184 完成 artifact / manifest / loader 原子同步和独立审查，全部 16 authenticated variants 的 lifecycle-valid offline Results 已进入默认测试命令。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
 
 ## 10. Eval 作为架构决策证据
 
@@ -458,20 +514,20 @@ completed_at
 - P0 业务范围、两条 E2E 和安全不变量已有 active owner。
 - Intent、Tool Calling、Memory 和 RAG 已定义各自目标 Eval obligations。
 - P0 至少需要 Component、Trajectory 和 E2E 三层 Eval。
-- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约，但尚无运行证据。
+- 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned Fixture / Case / script / lane artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader 和离线 Composition Root。
+- 六个 authenticated physical Cases 当前为 `REGRESSION_GATE`；真实 HTTP → Runtime → PostgreSQL exhaustive lane 已覆盖全部 16 authenticated variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，exact security re-review tree 的 full offline gate 为 `2007 passed, 1 deselected, 12 warnings`。
 
 ### 11.2 `NOT_FOUND`
 
-- 可运行源码和项目技术栈。
-- Eval Harness、自动化 Dataset、Fixture Loader 和 Grader 实现。
-- Baseline、回归报告、发布 Gate 和线上监控结果。
+- 真实 credentialed Qwen Baseline Result；runner 已实现，缺少凭据时只产生空 `NOT_RUN`。
+- canonical 产品进程启动、hosted CI 与线上监控结果。
 
 ### 11.3 `OPEN`
 
 - 完整 P0 的实现语言、测试框架和 Eval 平台；第一最薄 E2E-01 已由 scoped Spec 选择 Python、pytest 与目标命令。
 - 完整 P0 的 Model / Provider、Prompt、采样与重复运行策略；第一最薄切片已选择确定性 Provider 硬门禁与 Qwen 固定快照 Baseline。
 - 普通质量、延迟、成本和 RAG 指标阈值。
-- Eval Result、Dataset 和 Trace 的具体持久化技术。
+- 真实 Qwen Eval Run 的报告与聚合、Baseline / Candidate 结果比较，以及 production Result / 监控数据留存方案；deterministic offline 聚合报告已经出现，不等于这些上层能力。
 - 真实产品出现后的线上指标、抽样与人工复核流程。
 
 ## 12. 验收清单
