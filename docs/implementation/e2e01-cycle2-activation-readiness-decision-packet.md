@@ -110,21 +110,29 @@ Owner-alignment Gate 当时不决定、并由后续独立 Activation Gate 处理
 - Python DTO、Port、migration、Fixture、测试或产品代码。
 - Case 从 `CONTRACT_DEFINED` 进入 `EXECUTABLE`。
 
-## 2. 证据分类与裁决词汇
+## 2. Historical snapshot｜证据分类与裁决词汇
 
-本文使用：
+> **IMMUTABLE PRE-R6 OWNER-ALIGNMENT SNAPSHOT / SUPERSEDED FOR CURRENT STATUS**
+>
+> 第 2–4 节保留 owner alignment 合并前的分析过程。其 `Current`、`Gap`、
+> `OWNER ALIGNMENT NOT CLOSED` 与 closure checklist 均是当时的输入和审阅问题，
+> 不再表示当前状态；当前 closure 只以第 7 节 `CLOSED / PR #201` 和第 0 节
+> Activation identity 为准。下文已把 ruling 与 closure 标签同步为过去时 /
+> closed，避免 consumer 把历史分析当成当前 blocker。
 
-- `CONFIRMED`：当前 active owner、源码或状态文件中可以直接复核。
-- `CONTRACT_GAP`：草案需要的语义尚未由 active owner 精确拥有。
+当时使用：
+
+- `CONFIRMED`：当时 active owner、源码或状态文件中可以直接复核。
+- `CONTRACT_GAP`：当时草案需要的语义尚未由 active owner 精确拥有。
 - `RECOMMENDED`：本 Packet 初版中的建议标签；当前以第 7 节用户裁决为准，不能再
   用该标签推断审批状态。
-- `USER_APPROVED`：用户已批准建议方向，但不表示 owner 文档已经审阅、合并或
-  `CLOSED`。
+- `USER_APPROVED`：用户当时已批准建议方向；owner 文档随后由 R6 / PR #201
+  审阅、合并并 `CLOSED`。
 - `CONDITIONALLY_APPROVED`：用户批准方向并同时冻结 owner / scoped
   implementation 的分工条件。
-- `USER_APPROVED / OWNER_RULE_EVOLUTION`：用户已批准 exact owner semantics，但
-  owner 文档仍需独立 review 与合并后才 `CLOSED`。
-- `OPEN`：尚未取得可追溯裁决或合并证据。
+- `USER_APPROVED / OWNER_RULE_EVOLUTION`：用户已批准 exact owner semantics；
+  owner 文档随后由 R6 / PR #201 关闭。
+- `OPEN`：在该历史快照中尚未取得可追溯裁决或合并证据。
 
 建议裁决类型：
 
@@ -134,19 +142,19 @@ Owner-alignment Gate 当时不决定、并由后续独立 Activation Gate 处理
 | `SCOPED_DELEGATION` | owner 保留通用规则，只把 Phase 2 exact encoding 条件式委托给目标 Spec |
 | `REFERENCE_CONFIRMATION` | 既有 owner 已覆盖通用语义；只确认引用与 scoped Schema 边界，不改写规则 |
 | `LIFECYCLE_HOLD` | 批准合同映射但保持 Case 为 `CONTRACT_DEFINED` |
-| `BLOCK` | owner 拒绝或无法唯一裁决；Spec 返回 `REVIEW_DRAFT` 修订，不得 Activation |
+| `BLOCK` | 当时若 owner 拒绝或无法唯一裁决，Spec 返回 `REVIEW_DRAFT` 修订，不得 Activation |
 
 `SCOPED_DELEGATION` 必须同时写清：
 
 - 只适用于 `E2E01-02/03/05/06`。
-- 只在目标 Spec 正式 Activation 后生效。
+- 只在目标 Spec 正式 Activation 后生效；该条件现已由独立 Activation PR 满足。
 - 不把 exact encoding 升级为整个 P0 的通用语义。
 - Business、Intent、Tool、Memory、Eval 或 Core Trace 的通用不变量仍由原 owner
   保留。
 
-## 3. 总体裁决摘要
+## 3. Historical snapshot｜总体裁决摘要
 
-| Alignment | 当前判断 | 用户裁决 | Activation 前最低证据 |
+| Alignment | 当时判断 | 用户裁决 | Activation 前最低证据（现已满足） |
 |---|---|---|---|
 | `OA-01` | 通用业务流程已存在；exact 搜索编码缺失 | `USER_APPROVED / SCOPED_DELEGATION` | Business / Intent 条件式委托 exact 窗口、matching、alias、排序与上限 |
 | `OA-02` | 最小披露原则已存在；候选域白名单缺失 | `USER_APPROVED / SCOPED_DELEGATION` | Business / Memory / Presentation 明确各可见域只消费目标 Spec 的 exact projection |
@@ -168,10 +176,15 @@ CONDITIONALLY_APPROVED:     OA-06 / OA-07 / OA-08
 USER_APPROVED/EVOLUTION:    OA-10
 ```
 
-用户裁决不等于 owner alignment `CLOSED`。任一变更未通过独立 exact-file review /
-合并时，不能用“实现细节”绕过；目标 Spec 与 Activation 继续 `BLOCKED`。
+在该历史阶段，用户裁决尚不等于 owner alignment `CLOSED`，目标 Spec 与
+Activation 因而保持 `BLOCKED`。该 blocker 随 R6 `PASS` 与 PR #201 merge
+关闭；当前状态见第 0、7 节。
 
-## 4. 逐项裁决记录
+## 4. Historical snapshot｜逐项裁决记录
+
+以下 `Current` / `Gap` 描述 pre-R6 输入；全部 ruling 已由 R6 与 PR #201
+关闭。各 checklist 已在本次状态同步中标记为完成，但只证明 contract
+owner-alignment，不证明实现或 Case lifecycle。
 
 ### OA-01｜订单搜索窗口、matching 与稳定候选
 
@@ -189,7 +202,7 @@ active owner 未精确拥有 90 天、最多 5 个、NFKC / casefold、substring
 alias authority、稳定排序、截断和 refinement。它们当前只存在于目标 Spec
 [§7.1–7.2](e2e01-cycle2-implementation-spec.md#71-可信时间和搜索窗口)。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - Business owner 条件式委托 Phase 2 exact search semantics；同时确认 alias authority
   必须来自版本化受控配置或 Fixture，不能由模型、用户消息或当前实现偶然产生。
@@ -199,9 +212,9 @@ alias authority、稳定排序、截断和 refinement。它们当前只存在于
 
 **Closure check**
 
-- [ ] Business 与 Intent 都有可追溯的条件式 delegation。
-- [ ] owner 文档没有复制第二套 matching truth table。
-- [ ] owner 拒绝任一 D1 输入时，`OA-01=BLOCK` 并修订目标 Spec。
+- [x] Business 与 Intent 都有可追溯的条件式 delegation。
+- [x] owner 文档没有复制第二套 matching truth table。
+- [x] owner 拒绝任一 D1 输入时，`OA-01=BLOCK` 并修订目标 Spec。
 
 ### OA-02｜候选最小披露与可见域
 
@@ -221,7 +234,7 @@ alias authority、稳定排序、截断和 refinement。它们当前只存在于
 白名单，以及 UTC 日期、最多 3 个 matching items 和禁止 count 字段，尚无 active
 exact owner。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - 三个 owner 保留通用隐私和最小披露规则，条件式委托目标 Spec
   [§7.2.2](e2e01-cycle2-implementation-spec.md#722-agent-visible-output-与各可见域白名单)
@@ -233,8 +246,8 @@ exact owner。
 
 **Closure check**
 
-- [ ] 各可见域的 producer 与 consumer 唯一。
-- [ ] model / HTTP / Renderer / ordinary Trace 均无 target mapping、owner scope、
+- [x] 各可见域的 producer 与 consumer 唯一。
+- [x] model / HTTP / Renderer / ordinary Trace 均无 target mapping、owner scope、
   source token、raw payload 或未批准 count。
 
 ### OA-03｜候选集、序号绑定、CAS 与恢复闭包
@@ -255,7 +268,7 @@ exact owner。
 `candidate_ref → owner-scoped target` mapping、current-set uniqueness、selection
 expected version、exact hash、原子选择、重启恢复和 closed-set 校验。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - Intent owner 增加通用 ordinal-reference 规则：只有当前 Task 唯一、未过期、
   未 supersede、版本匹配的候选能力才能生成 verified target。
@@ -268,10 +281,10 @@ expected version、exact hash、原子选择、重启恢复和 closed-set 校验
 
 **Closure check**
 
-- [ ] CandidateSet 不复制业务事实或 target。
-- [ ] target mapping 对模型、Renderer、HTTP 和普通 Trace 不可见。
-- [ ] restart 后可以在同一 owner / Task / Observation / version 闭包内唯一解析。
-- [ ] 任一 missing、duplicate、expired、wrong-owner 或 CAS mismatch 都不调用业务
+- [x] CandidateSet 不复制业务事实或 target。
+- [x] target mapping 对模型、Renderer、HTTP 和普通 Trace 不可见。
+- [x] restart 后可以在同一 owner / Task / Observation / version 闭包内唯一解析。
+- [x] 任一 missing、duplicate、expired、wrong-owner 或 CAS mismatch 都不调用业务
   Tool。
 
 ### OA-04｜`get_shipment` 与 active Package cardinality
@@ -289,7 +302,7 @@ expected version、exact hash、原子选择、重启恢复和 closed-set 校验
 以及多 active Package 的 deterministic integrity failure 尚未由 active Business
 owner 裁决。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - Business owner 增加 P0 `0..1 active Package per Order` 规则；`>1` 是内部 source
   integrity failure，不得选择任一 Package，也不得披露数量。
@@ -301,9 +314,9 @@ owner 裁决。
 
 **Closure check**
 
-- [ ] zero / one / multiple active Package 各有唯一 outcome。
-- [ ] cardinality violation 不重试、不形成 Shipment Observation、不泄露 Package。
-- [ ] 如果 Business owner 不接受 `0..1`，`OA-04=BLOCK`，不得由实现挑选 Package。
+- [x] zero / one / multiple active Package 各有唯一 outcome。
+- [x] cardinality violation 不重试、不形成 Shipment Observation、不泄露 Package。
+- [x] 如果 Business owner 不接受 `0..1`，`OA-04=BLOCK`，不得由实现挑选 Package。
 
 ### OA-05｜Shipment projection、时间不变量与 freshness
 
@@ -320,7 +333,7 @@ owner 裁决。
 Shipment 字段组合、status/event-time 交叉不变量、5 分钟 TTL、读取即 stale、
 `FACTS_INSUFFICIENT` 与 source integrity failure 的边界尚未由 owner 精确裁决。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - Business owner 增加 P0 Shipment 事实有效组合与“缺事实”和“矛盾事实”不可混用的
   规则。
@@ -330,10 +343,10 @@ Shipment 字段组合、status/event-time 交叉不变量、5 分钟 TTL、读�
 
 **Closure check**
 
-- [ ] fresh / stale 的判定只使用可信时钟。
-- [ ] contradictory source 进入 integrity failure；合法但不足进入
+- [x] fresh / stale 的判定只使用可信时钟。
+- [x] contradictory source 进入 integrity failure；合法但不足进入
   `FACTS_INSUFFICIENT`。
-- [ ] stale refresh failure 不产生新的事实，也不复用旧事实完成目标。
+- [x] stale refresh failure 不产生新的事实，也不复用旧事实完成目标。
 
 ### OA-06｜确定性物流 Assessment
 
@@ -349,7 +362,7 @@ Shipment 字段组合、status/event-time 交叉不变量、5 分钟 TTL、读�
 120 小时阈值、四类 precedence、Claim current binding、可信 `assessed_at`、
 `rule_version`、reason code、supersession 与 replay 尚无 active exact owner。
 
-**Ruling — CONDITIONALLY_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — CONDITIONALLY_APPROVED / CLOSED BY PR #201**
 
 - Business owner 拥有 120 小时停滞阈值、
   `DELIVERED_NOT_RECEIVED > STALLED > DELAYED > NORMAL` primary-result
@@ -362,9 +375,9 @@ Shipment 字段组合、status/event-time 交叉不变量、5 分钟 TTL、读�
 
 **Closure check**
 
-- [ ] 同一输入、rule version 和可信时间产生唯一 primary result / reason code。
-- [ ] 用户“未收到”保持 Claim；没有 current target binding 时先 `ASK_USER`。
-- [ ] replay 不刷新 `assessed_at`，Observation / Claim / rule 变化使旧 assessment
+- [x] 同一输入、rule version 和可信时间产生唯一 primary result / reason code。
+- [x] 用户“未收到”保持 Claim；没有 current target binding 时先 `ASK_USER`。
+- [x] replay 不刷新 `assessed_at`，Observation / Claim / rule 变化使旧 assessment
   失效。
 
 ### OA-07｜attempt-level timeout、retry 与 crash recovery
@@ -387,7 +400,7 @@ attempt finalize truth table、`TIMEOUT ⇔ TOOL_CALL_TIMEOUT ⇔ timeout_phase 
 retry-decision persistence、timeout→success 历史、recovery decision 和 no-progress
 闭包需要 Tool owner 演进。
 
-**Ruling — CONDITIONALLY_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — CONDITIONALLY_APPROVED / CLOSED BY PR #201**
 
 - Tool owner 增加 attempt-level completion / retry / recovery 语义；500ms、最多
   2 attempts 和 exact retryable codes 仍委托目标 Spec
@@ -403,12 +416,12 @@ retry-decision persistence、timeout→success 历史、recovery decision 和 no
 
 **Closure check**
 
-- [ ] truth table 对全部 finalized attempt 组合是完整且互斥的。
-- [ ] attempt 1 timeout、attempt 2 success 时保留 attempt 1 的 timeout 与 retry
+- [x] truth table 对全部 finalized attempt 组合是完整且互斥的。
+- [x] attempt 1 timeout、attempt 2 success 时保留 attempt 1 的 timeout 与 retry
   evidence。
-- [ ] restart 不倒填未观察到的 outcome；不会创建第三次 attempt 或第二个同语义
+- [x] restart 不倒填未观察到的 outcome；不会创建第三次 attempt 或第二个同语义
   ToolCall。
-- [ ] `tool_call_record.p0.v2` conversion 保留 parent refs、status、
+- [x] `tool_call_record.p0.v2` conversion 保留 parent refs、status、
   `attempt_count`、child identity / order 与既有 outcome；新增字段只按 Tool owner
   exact conversion table 唯一重建，无法唯一重建则 migration fail closed，不允许
   默认补值或 mixed active versions。
@@ -427,7 +440,7 @@ retry-decision persistence、timeout→success 历史、recovery decision 和 no
 order candidate、search snapshot 和 Shipment source version 的唯一 producer、
 canonical bytes、传播链、受限 reader 和禁止消费者只在目标 Spec 中精确存在。
 
-**Ruling — CONDITIONALLY_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — CONDITIONALLY_APPROVED / CLOSED BY PR #201**
 
 - Business owner 拥有 source authority 语义：权威来自受控业务系统在可信 owner
   scope 下完成的一次读取；消费者不得从展示字段、数据库时间或当前代码重新计算
@@ -442,10 +455,10 @@ canonical bytes、传播链、受限 reader 和禁止消费者只在目标 Spec 
 
 **Closure check**
 
-- [ ] 每个 version / snapshot ref 只有一个 producer。
-- [ ] Search Observation、CandidateSet、Selection、Shipment Observation 和
+- [x] 每个 version / snapshot ref 只有一个 producer。
+- [x] Search Observation、CandidateSet、Selection、Shipment Observation 和
   Assessment 的 version 传播可闭合验证。
-- [ ] 任何 model / Renderer / HTTP / ordinary Trace 消费 authority metadata 都是
+- [x] 任何 model / Renderer / HTTP / ordinary Trace 消费 authority metadata 都是
   `BLOCK`。
 
 ### OA-09｜Agent-visible 与 Runtime-private Tool contract 分离
@@ -465,7 +478,7 @@ canonical bytes、传播链、受限 reader 和禁止消费者只在目标 Spec 
 通用语义没有冲突；尚缺的是 `search_orders` / `get_shipment` 的 exact scoped
 schemas、restricted raw result 与 source authority 应用。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - 采用 `REFERENCE_CONFIRMATION`：不修改上述通用规则。
 - Business 与 Tool owner 只条件式委托两个 Tool 的 exact visible/private schemas
@@ -474,10 +487,10 @@ schemas、restricted raw result 与 source authority 应用。
 
 **Closure check**
 
-- [ ] `model_visible_toolset_hash` 只随 Provider-visible ToolSpec 变化。
-- [ ] Runtime-private authority metadata、handler、owner scope 或 raw result 变化
+- [x] `model_visible_toolset_hash` 只随 Provider-visible ToolSpec 变化。
+- [x] Runtime-private authority metadata、handler、owner scope 或 raw result 变化
   不单独改变 model-visible hash。
-- [ ] Provider / business Adapter 不拥有第二套 DTO。
+- [x] Provider / business Adapter 不拥有第二套 DTO。
 
 ### OA-10｜Result Mapper、stop reason 与 obsolete Run
 
@@ -498,7 +511,7 @@ Phase 2 service unavailable、retry exhaustion、integrity、stale、facts insuf
 不变量与 exact terminal projection 已取得用户裁决，但 owner alignment 尚未完成
 独立审阅 / 合并，源码和 persistence 仍只有 v1 Phase 1 matrix。
 
-**Ruling — USER_APPROVED / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED / CLOSED BY PR #201**
 
 - exact terminal 使用
   `AgentRunStatus.SUPERSEDED +
@@ -525,14 +538,14 @@ Phase 2 service unavailable、retry exhaustion、integrity、stale、facts insuf
 
 **Closure check**
 
-- [ ] 每个 allowlisted internal outcome / failure code 恰好命中一条 `RM-*`。
-- [ ] 每个 `INTERRUPTED` 恰好命中一条 `RM-I*`。
-- [ ] obsolete Run 不发送响应、不覆盖新 Task，但保留 append-only audit evidence。
-- [ ] unknown / contradictory reason fail closed，不 fallback 到 completed 或
+- [x] 每个 allowlisted internal outcome / failure code 恰好命中一条 `RM-*`。
+- [x] 每个 `INTERRUPTED` 恰好命中一条 `RM-I*`。
+- [x] obsolete Run 不发送响应、不覆盖新 Task，但保留 append-only audit evidence。
+- [x] unknown / contradictory reason fail closed，不 fallback 到 completed 或
   safe-not-found。
-- [ ] v2 Run / link / Trace closure 与 v1→v2 migration / rollback contract 可机械
+- [x] v2 Run / link / Trace closure 与 v1→v2 migration / rollback contract 可机械
   验证，且 shared Trace 字段结构未改变。
-- [ ] mandatory OA-10 Trajectory 同时证明 `SUPERSEDED`、null link result、
+- [x] mandatory OA-10 Trajectory 同时证明 `SUPERSEDED`、null link result、
   audit-only `RunStopped(BLOCKED)`、attempt 2 absent，以及 no Agent result /
   Message / ResponseRendered / Task mutation。
 
@@ -552,9 +565,10 @@ Phase 2 service unavailable、retry exhaustion、integrity、stale、facts insuf
 
 14 个 longitudinal variants、13 个 mandatory non-HTTP trajectories、typed
 predicate grammar、pair identity、完整 input / grading / version manifest 和
-`CF-*` 引用尚无 active scoped encoding owner。
+`CF-*` 引用在当时尚无 active scoped encoding owner；现在由 activated Cycle 2
+Spec scoped 拥有。
 
-**Ruling — USER_APPROVED + LIFECYCLE_HOLD / OWNER ALIGNMENT NOT CLOSED**
+**Historical ruling — USER_APPROVED + LIFECYCLE_HOLD / CLOSED BY PR #201**
 
 - Eval Strategy owner 条件式委托目标 Spec
   [§9](e2e01-cycle2-implementation-spec.md#9-eval-contract) 拥有本阶段 exact
@@ -567,10 +581,10 @@ predicate grammar、pair identity、完整 input / grading / version manifest �
 
 **Closure check**
 
-- [ ] 14 个 longitudinal + 13 个 trajectory Case 都可唯一编码。
-- [ ] `E2E01-05` pair 使用相同 RegistrySnapshot、toolset hash、provider mapping
+- [x] 14 个 longitudinal + 13 个 trajectory Case 都可唯一编码。
+- [x] `E2E01-05` pair 使用相同 RegistrySnapshot、toolset hash、provider mapping
   和 fixture identity。
-- [ ] Activation 后 Case 仍为 `CONTRACT_DEFINED`；只有 authenticated artifacts、
+- [x] Activation 后 Case 仍为 `CONTRACT_DEFINED`；只有 authenticated artifacts、
   loader、Harness result 和 Coverage Matrix owner 后续裁决才能进入
   `EXECUTABLE`。
 
