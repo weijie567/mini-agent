@@ -16,8 +16,8 @@
 P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Phase 1 已完成并 release；
 Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
 `CONTRACT_ACTIVE / READY_FOR_PLANNING`；master Plan 已由 PR #203 合并，`02-00`
-已获批并由 PR #204/#205 完成。当前 Gate P2-B/P2-C 准备 `02-01` / `02-03`
-exact proposal；`02-02` 等待真实 `B_C2_W1A`，尚无功能实现。Phase 3–6
+已获批并由 PR #204/#205 完成。`02-03` 与 `02-01` 已由 PR #207/#208 reviewed
+串行合入并形成真实 `B_C2_W1A`；当前 W1B 正在审阅 `02-02` exact Packet。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
@@ -164,9 +164,9 @@ Plans:
 
 **Plans**: master Plan 的 `19` 个一对一 Plan / Task Packet slots
 （`02-00..18`）、`W0..W12`、最大并发 `2` 已获 Gate P2-A 批准并由 PR #203
-合并。`02-00` 已批准并执行；当前可从 exact `B_C2_OWNER_ALIGNED` 签发的只有
-`02-01` 与 `02-03`。`02-02` 的 typed Observation / Memory contract 依赖
-`02-01` 产生的 business types，必须等 `B_C2_W1A` 后再冻结 exact Packet；其余
+合并。`02-00`、`02-03` 与 `02-01` 已批准并执行；真实
+`B_C2_W1A` 已形成。`02-02` 的 typed Observation / Memory contract 现在从该
+exact barrier 签发并接受独立审阅；其余
 slot 继续等待各自前置 barrier。
 
 **Branch mapping**:
@@ -190,10 +190,10 @@ B_C2_START
 = initial implementation base
 ```
 
-`.planning/config.json` 中的 `integration/e2e01-cycle2` 只是 reserved mapping；
-branch 当前仍为 `NOT_CREATED`，因此 `B_C2_START` 仍为 `NOT_FROZEN`。Phase 1 的
-`integration/e2e01-thin` 保留为历史 release 证据。Gate P2-C 用户批准和 equality
-preflight 完成前，不授权功能 branch / Worktree 或产品代码。
+`.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
+`B_C2_START` 已冻结为 `B_C2_OWNER_ALIGNED` exact SHA/tree，随后 reviewed 02-03/02-01
+串行形成 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release 证据。
+02-02 feature branch/Worktree 仍需 planning exact-head review PASS 后才能创建。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
@@ -272,7 +272,7 @@ preflight 完成前，不授权功能 branch / Worktree 或产品代码。
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 1/19 | `02-00 approved/executed；02-01/03 exact proposal prepared；02-02 waits for B_C2_W1A；functional implementation 0/18` | - |
+| 2. 完成 E2E-01 | 3/19 | `02-00/01/03 complete；B_C2_W1A frozen；02-02 exact Packet under independent review；functional implementation 2/18` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
