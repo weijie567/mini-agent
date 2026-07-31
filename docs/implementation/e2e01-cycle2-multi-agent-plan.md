@@ -2,21 +2,29 @@
 
 更新日期：2026-07-31
 
-状态：`NON_NORMATIVE / PLAN_REVIEW_DRAFT / TASK_PACKETS_NOT_CREATED / IMPLEMENTATION_NOT_AUTHORIZED`
+状态：`NON_NORMATIVE / PLAN_APPROVED / GATE_P2_B_IN_PROGRESS / 02-00_EXACT_PACKET_PROPOSED / IMPLEMENTATION_NOT_AUTHORIZED`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
+
+批准证据：planning PR
+[#203](https://github.com/weijie567/mini-agent/pull/203) 已于 2026-07-31
+squash merge；`B_C2_PLAN_APPROVED =
+2879f5226a073051d1550fe079b4a427c1ec8cb1`，tree
+`d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`。
 
 > 本文是 Phase 2 的 phase-level master execution Plan。它只拥有未来 GSD
 > Plan / Task Packet 的拆分、依赖、文件 ownership proposal、Wave、门禁、交接和
 > 回滚顺序；不拥有产品、架构、业务、Tool、Memory、Eval 或 Case lifecycle 语义。
 >
-> 本文不是任一 implementation Task Packet，也不创建 `.planning/phases/02-*`
-> GSD Plan。只有本文通过独立 exact-head review、用户批准并经 planning PR 合并后，
-> Integrator 才能为每个 slot 分别准备“一份 GSD Plan + 一个 exact Task Packet”。
+> 本文不是任一 implementation Task Packet。本文已通过独立 exact-head review、
+> 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 现按真实 dependency barrier
+> 分批准备“一份 GSD Plan + 一个 exact Task Packet”。首份
+> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 只是 Gate
+> P2-B proposal，尚未获批或执行。
 >
-> 在用户进一步批准全部 Task Packet、Wave、initial exact implementation base 与
-> 执行上限前，不创建 `integration/e2e01-cycle2`、任何代码 feature branch /
-> Worktree、migration、测试、Eval artifact 或功能代码。
+> 在用户进一步批准当前可签发 Task Packet、对应 Wave、initial exact
+> implementation base 与执行上限前，不创建 `integration/e2e01-cycle2`、任何
+> 代码 feature branch / Worktree、migration、测试、Eval artifact 或功能代码。
 
 ## 1. Authority and scope
 
@@ -60,7 +68,7 @@ contract change。
 - 修改 Phase 1 `get_order` Schema、source version、500ms / one-attempt contract。
 - 新第三方依赖、canonical product startup、lint、type-check 或 build 命令，除非另有
   独立 owner 和批准。
-- 在本 Plan 审批前创建 implementation 资源。
+- 在 Gate P2-C 前创建 implementation 资源。
 
 ## 2. Planning status
 
@@ -68,21 +76,23 @@ contract change。
 |---|---|
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
-| Master Plan | `PLAN_REVIEW_DRAFT / NOT_APPROVED` |
-| Future GSD Plans | `NOT_CREATED` |
-| Task Packets | `NOT_CREATED` |
+| Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
+| Future GSD Plans | `02-00 PROPOSED / 02-01..18 NOT_CREATED` |
+| Task Packets | `02-00 EXACT PROPOSAL / NOT_APPROVED / NOT_EXECUTED` |
 | Proposed Plan / Packet slots / Waves | `19 / 13`（`02-00..18` / `W0..W12`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
-| Initial implementation base | `NOT_FROZEN` |
+| `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
+| Initial implementation base | `NOT_FROZEN`；等待 `02-00` merge successor |
 | Integration branch | `PROPOSED integration/e2e01-cycle2 / NOT_CREATED` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / RESERVED_MAPPING_ONLY` |
-| Feature branches / Worktrees | `NOT_CREATED / PROHIBITED` |
+| `02-00` execution branch / Worktree | `NOT_CREATED / USER APPROVAL REQUIRED` |
+| Integration / code feature branches / Worktrees | `NOT_CREATED / PROHIBITED` |
 | Writer assignments | role proposed; person / Agent `NOT_FROZEN` |
-| Execution concurrency | proposed maximum `2` writers |
+| Execution concurrency | approved ceiling `2` writers；当前 dispatch `0` |
 
-### 2.1 Current planning PR exact scope
+### 2.1 Gate P2-A planning PR exact scope
 
-本次 Gate P2-A revision 只允许以下七个文件：
+Gate P2-A planning PR #203 只包含以下七个文件：
 
 - `docs/implementation/e2e01-cycle2-dependency-ownership-risk-map.md`
 - `docs/implementation/e2e01-cycle2-multi-agent-plan.md`
@@ -92,21 +102,25 @@ contract change。
 - `.planning/ROADMAP.md`
 - `.planning/STATE.md`
 
-`.planning/ACTIVATION.md`、Phase 1 Plans / Summaries、canonical contract、源码、
+其 reviewed exact head 为
+`17743d1a78e015b7f2d736bf676762d000f4a475`，merge successor 即上述
+`B_C2_PLAN_APPROVED`。`.planning/ACTIVATION.md`、Phase 1 Plans / Summaries、
+canonical contract、源码、
 测试、migration、Eval artifact 与 Case lifecycle 均不得修改。Phase 1 的
 `integration/e2e01-thin` 记录保持历史原文；Phase 2 mapping 不声明 branch
 protection 已配置，因为 `integration/e2e01-cycle2` 当前尚不存在。
 
-## 3. Blocking decisions before Plan approval
+## 3. Approved base decision and remaining pre-activation correction
 
 ### `C2-BLOCK-01` — branch and base strategy
 
-旧 `integration/e2e01-thin` 与当前 `main` 已明显分叉，且名称 / history 均属于
-Phase 1。推荐：
+旧 `integration/e2e01-thin` 与 planning input `main` 已明显分叉，且名称 /
+history 均属于 Phase 1。Gate P2-A 已批准：
 
-1. 本 planning PR 只从 `main@b96fe8a...` 演进。
-2. master Plan 获批并合并后，把该 reviewed planning merge 的 exact successor
-   命名为 `B_C2_PLAN_APPROVED`。
+1. planning PR 只从 `main@b96fe8a...` 演进，并已满足 exact 7-file scope。
+2. reviewed planning merge 的 exact successor 已冻结为
+   `B_C2_PLAN_APPROVED = 2879f5226a073051d1550fe079b4a427c1ec8cb1`
+   / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`。
 3. 先在独立 owner-alignment branch 执行并 review `02-00`，其合并到 `main`
    的 exact successor 命名为 `B_C2_OWNER_ALIGNED`。
 4. Gate P2-C 的 branch activation 操作才可从 exact `B_C2_OWNER_ALIGNED`
@@ -119,20 +133,25 @@ Phase 1。推荐：
 7. 后续 Packet 不共享一个陈旧 base；每个 Wave 从已 reviewed、已串行 merge 的最新
    barrier 单独冻结 `base_sha`。
 
-该建议当前未获 Gate P2-A 用户批准。`.planning/config.json` 的 Phase 2 branch
-mapping 只是 reserved governance mapping，不证明分支存在，也不授权 Task Packet、
+该 base chain 已获 Gate P2-A 批准；但 `02-00`、`B_C2_OWNER_ALIGNED` 与
+`B_C2_START` 尚未完成。`.planning/config.json` 的 Phase 2 branch mapping 仍只是
+reserved governance mapping，不证明分支存在，也不授权 Task Packet execution、
 branch activation 或代码执行。
 
 ### `C2-BLOCK-02` — Eval model script path
 
 Cycle 2 Spec 指定 `evals/model-scripts/`，当前仓库和 loader 使用
-`evals/model_scripts/`。推荐由 `02-00` 的独立 zero-code contract correction
-把 Cycle 2 路径更正为 underscore 版本。该修正必须：
+`evals/model_scripts/`。已按批准方向准备 `02-00` 独立 zero-code contract
+correction，把 Cycle 2 路径更正为 underscore 版本。该修正必须：
 
 - 只改真正受影响的 active owner / consumer；
 - 通过 cross-file impact scan 和独立 exact-file review；
 - 不创建 Eval artifact、loader、测试或 lifecycle 结果；
 - 合并后的 exact SHA 成为后续 Eval Packet dependency。
+
+当前 [`02-00` exact Plan / Task Packet
+proposal](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 仍需独立
+exact-head review、用户批准与 planning PR merge；本次准备没有修改 scoped Spec。
 
 本 Plan 使用符号 `$C2_MODEL_SCRIPTS_PATH`，在 `02-00` 合并前不把任一拼写写入
 Eval implementation allowlist。
@@ -752,7 +771,7 @@ barrier 与 release。
 
 ### Gate P2-A — Master Plan
 
-用户需批准：
+状态：`PASSED / PR #203 MERGED / B_C2_PLAN_APPROVED FROZEN`。用户已批准：
 
 - 19 Plan / Task Packet slots（`02-00..18`）；
 - 13 controlled Waves（`W0..W12`）；
@@ -765,7 +784,16 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-P2-A 通过后才准备。用户需逐项或整组批准：
+状态：`IN_PROGRESS`。P2-A 通过后按真实 dependency barrier 分批准备；不得给尚未
+产生的 barrier 填造 SHA。当前只有 `02-00` 能以 `B_C2_PLAN_APPROVED` 为 exact
+base 签发；`02-01..18` 在各自前置 barrier 形成前继续为 `NOT_CREATED`。
+
+因此 Gate P2-B 分两步裁决：先批准 `02-00` 的 exact Packet；待其 reviewed merge
+真实形成 `B_C2_OWNER_ALIGNED` 后，再冻结并批准该 SHA / tree 为唯一
+`B_C2_START` 候选，同时签发当时 launchable 的下一批 Packet。前一步不得虚构后一步
+evidence。
+
+用户需逐项或整组批准：
 
 - 每个 GSD Plan / Task Packet的一对一映射；
 - exact `B_C2_OWNER_ALIGNED` SHA / tree，并批准它作为唯一允许的
@@ -804,21 +832,21 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
 本 Plan 只有在以下条件全部满足后才能从 `PLAN_REVIEW_DRAFT` 变为
 `PLAN_APPROVED`：
 
-- [ ] dependency / ownership / risk map 已独立复核。
-- [ ] `C2-BLOCK-01/02` 有明确用户裁决或被列为 Task Packet 前的强制 owner
+- [x] dependency / ownership / risk map 已独立复核。
+- [x] `C2-BLOCK-01/02` 有明确用户裁决或被列为 Task Packet 前的强制 owner
       remediation，且不会由 Executor猜测。
-- [ ] 19 slots / 13 Waves / max concurrency 2 获用户批准。
-- [ ] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
-- [ ] same-wave proposed file intersection为零。
-- [ ] single-writer hotspots唯一。
-- [ ] `.planning/config.json`、`.planning/GOVERNANCE.md`、Project / Roadmap /
+- [x] 19 slots / 13 Waves / max concurrency 2 获用户批准。
+- [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
+- [x] same-wave proposed file intersection为零。
+- [x] single-writer hotspots唯一。
+- [x] `.planning/config.json`、`.planning/GOVERNANCE.md`、Project / Roadmap /
       State 的 Phase 2 reserved branch mapping一致，且没有改写 Phase 1 历史
       branch 证据。
-- [ ] threat model覆盖 owner scope、binding、freshness、retry、migration、
+- [x] threat model覆盖 owner scope、binding、freshness、retry、migration、
       obsolete Run、disclosure、Eval lifecycle / evidence 与 read-only
       Action hard prohibition。
-- [ ] independent exact-head Plan review为 `PASS`。
-- [ ] planning PR只包含获批 planning artifacts、Phase 2 branch
+- [x] independent exact-head Plan review为 `PASS`。
+- [x] planning PR只包含获批 planning artifacts、Phase 2 branch
       governance / config 与必要状态索引，无源码、测试、migration、Eval artifact
       或 Case lifecycle mutation。
-- [ ] planning PR合并后才准备 exact GSD Plan / Task Packet set。
+- [x] planning PR合并后才准备 exact GSD Plan / Task Packet set。
