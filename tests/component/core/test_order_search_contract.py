@@ -46,6 +46,11 @@ CANDIDATE_VERSION = (
 SNAPSHOT_VERSION = (
     "mock-order-search-snapshot-source-version.p0.v1:sha256:" + "b" * 64
 )
+ORDER_SEARCH_FAILURE_CODE_OWNER = (
+    "ORDER_SEARCH_TRANSIENT",
+    "ORDER_SEARCH_UNAVAILABLE",
+    "ORDER_SEARCH_SOURCE_INTEGRITY",
+)
 
 
 def _matched_line(
@@ -558,15 +563,40 @@ def test_non_success_results_reject_partial_private_authority_metadata() -> None
         )
 
 
-@pytest.mark.parametrize("code", tuple(OrderSearchFailureCode))
-def test_all_and_only_order_search_failure_codes_form_system_failure_results(
-    code: OrderSearchFailureCode,
+def test_order_search_failure_code_allowlist_matches_the_exact_owner_strings() -> None:
+    assert {code.value for code in OrderSearchFailureCode} == set(
+        ORDER_SEARCH_FAILURE_CODE_OWNER
+    )
+
+
+@pytest.mark.parametrize("code_value", ORDER_SEARCH_FAILURE_CODE_OWNER)
+def test_each_owned_order_search_failure_code_forms_a_system_failure_result(
+    code_value: str,
 ) -> None:
     result = SearchOrdersResult(
         outcome=SearchOrdersOutcome.SYSTEM_FAILURE,
-        failure_code=code,
+        failure_code=code_value,
     )
-    assert result.failure_code is code
+    assert result.failure_code is not None
+    assert result.failure_code.value == code_value
+
+
+@pytest.mark.parametrize(
+    "invalid_code",
+    (
+        "ORDER_SEARCH_TIMEOUT",
+        "order_search_transient",
+        "SHIPMENT_SERVICE_TRANSIENT",
+    ),
+)
+def test_non_owned_order_search_failure_codes_are_rejected(
+    invalid_code: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        SearchOrdersResult(
+            outcome=SearchOrdersOutcome.SYSTEM_FAILURE,
+            failure_code=invalid_code,
+        )
 
 
 def test_model_visible_search_types_have_exact_minimum_disclosure() -> None:

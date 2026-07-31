@@ -539,6 +539,10 @@ class ShipmentAssessment(RuntimePrivateModel):
             raise ValueError(
                 "reason_codes do not match primary_result or fixed reason order"
             )
+        if self.supersedes_assessment_ref == self.assessment_id:
+            raise ValueError(
+                "supersedes_assessment_ref cannot equal assessment_id"
+            )
         if (
             self.primary_result is ShipmentAssessmentResult.DELIVERED_NOT_RECEIVED
             and self.claim_binding_ref is None

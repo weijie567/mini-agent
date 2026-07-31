@@ -42,6 +42,18 @@ from mini_agent.core.shipment import (
 
 NOW = datetime(2030, 4, 1, 12, 30, 45, 123456, tzinfo=UTC)
 SOURCE_VERSION = "mock-shipment-source-version.p0.v1:sha256:" + "c" * 64
+GET_SHIPMENT_INSUFFICIENCY_CODE_OWNER = (
+    "SHIPMENT_LATEST_EVENT_MISSING",
+    "SHIPMENT_PROMISE_MISSING_FOR_ACTIVE_DELIVERY",
+    "SHIPMENT_DELIVERED_AT_MISSING",
+)
+GET_SHIPMENT_FAILURE_CODE_OWNER = (
+    "SHIPMENT_SERVICE_TRANSIENT",
+    "SHIPMENT_SERVICE_UNAVAILABLE",
+    "SHIPMENT_RELATION_CARDINALITY_VIOLATION",
+    "SHIPMENT_SOURCE_INTEGRITY",
+    "SHIPMENT_SOURCE_VERSION_INVALID",
+)
 
 
 def _summary(
@@ -338,26 +350,76 @@ def test_result_rejects_partial_projection_authority_or_unknown_codes() -> None:
         _found_result(observed_at=NOW - timedelta(hours=3))
 
 
-@pytest.mark.parametrize("code", tuple(GetShipmentInsufficiencyCode))
-def test_all_and_only_insufficiency_codes_form_fact_insufficient_results(
-    code: GetShipmentInsufficiencyCode,
+def test_shipment_insufficiency_allowlist_matches_exact_owner_strings() -> None:
+    assert {code.value for code in GetShipmentInsufficiencyCode} == set(
+        GET_SHIPMENT_INSUFFICIENCY_CODE_OWNER
+    )
+
+
+@pytest.mark.parametrize("code_value", GET_SHIPMENT_INSUFFICIENCY_CODE_OWNER)
+def test_each_owned_insufficiency_code_forms_a_fact_insufficient_result(
+    code_value: str,
 ) -> None:
     result = GetShipmentResult(
         outcome=GetShipmentOutcome.FACTS_INSUFFICIENT,
-        insufficiency_code=code,
+        insufficiency_code=code_value,
     )
-    assert result.insufficiency_code is code
+    assert result.insufficiency_code is not None
+    assert result.insufficiency_code.value == code_value
 
 
-@pytest.mark.parametrize("code", tuple(GetShipmentFailureCode))
-def test_all_and_only_failure_codes_form_system_failure_results(
-    code: GetShipmentFailureCode,
+@pytest.mark.parametrize(
+    "invalid_code",
+    (
+        "SHIPMENT_FACTS_MISSING",
+        "shipment_latest_event_missing",
+        "SHIPMENT_SERVICE_TRANSIENT",
+    ),
+)
+def test_non_owned_shipment_insufficiency_codes_are_rejected(
+    invalid_code: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        GetShipmentResult(
+            outcome=GetShipmentOutcome.FACTS_INSUFFICIENT,
+            insufficiency_code=invalid_code,
+        )
+
+
+def test_shipment_failure_allowlist_matches_exact_owner_strings() -> None:
+    assert {code.value for code in GetShipmentFailureCode} == set(
+        GET_SHIPMENT_FAILURE_CODE_OWNER
+    )
+
+
+@pytest.mark.parametrize("code_value", GET_SHIPMENT_FAILURE_CODE_OWNER)
+def test_each_owned_failure_code_forms_a_system_failure_result(
+    code_value: str,
 ) -> None:
     result = GetShipmentResult(
         outcome=GetShipmentOutcome.SYSTEM_FAILURE,
-        failure_code=code,
+        failure_code=code_value,
     )
-    assert result.failure_code is code
+    assert result.failure_code is not None
+    assert result.failure_code.value == code_value
+
+
+@pytest.mark.parametrize(
+    "invalid_code",
+    (
+        "SHIPMENT_SNAPSHOT_STALE",
+        "shipment_service_transient",
+        "SHIPMENT_LATEST_EVENT_MISSING",
+    ),
+)
+def test_non_owned_shipment_failure_codes_are_rejected(
+    invalid_code: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        GetShipmentResult(
+            outcome=GetShipmentOutcome.SYSTEM_FAILURE,
+            failure_code=invalid_code,
+        )
 
 
 def test_shipment_source_token_uses_exact_canonical_json_bytes() -> None:
@@ -644,6 +706,32 @@ def test_assessment_model_rejects_invented_or_misordered_reasons() -> None:
                 ShipmentAssessmentReason.PROMISED_DELIVERY_TIME_PASSED,
                 ShipmentAssessmentReason.NO_TRACKING_UPDATE_FOR_120_HOURS,
             ),
+        )
+
+
+def test_assessment_rejects_self_supersession_in_factory_and_direct_model() -> None:
+    assessment_id = uuid4()
+    kwargs = _assessment_kwargs(assessed_at=NOW)
+    kwargs["assessment_id"] = assessment_id
+
+    with pytest.raises(ValidationError, match="supersedes_assessment_ref"):
+        ShipmentAssessment(
+            **kwargs,
+            primary_result=ShipmentAssessmentResult.NORMAL,
+            reason_codes=(ShipmentAssessmentReason.NO_P0_SHIPMENT_EXCEPTION,),
+            supersedes_assessment_ref=assessment_id,
+        )
+
+    observation_observed_at = NOW - timedelta(minutes=1)
+    with pytest.raises(ValidationError, match="supersedes_assessment_ref"):
+        assess_shipment(
+            shipment_summary=_summary(),
+            observation_observed_at=observation_observed_at,
+            observation_valid_until=shipment_valid_until(
+                observation_observed_at
+            ),
+            supersedes_assessment_ref=assessment_id,
+            **kwargs,
         )
 
 
