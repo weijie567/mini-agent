@@ -8,6 +8,8 @@
 - tree `d1eb4d469cc0d9f41672f1e9294be3fbb18e23ec`
 - `02-03` 已先合入，`02-01` 已通过 reviewed overlay 后合入。
 - 02-01 的 `order_search.py` / `shipment.py` 是 02-02 唯一 typed business DTO 来源。
+- Planning PR #210 已从 exact `B_C2_W1A` 创建并 reviewed merge；该 merge 只推进
+  `.planning/` 控制面，不替换 `B_C2_W1A` 产品 implementation base。
 
 ## 当前用户授权
 
@@ -17,10 +19,14 @@
 因此无需再次请求中间批准，但必须满足：
 
 1. 本 planning PR 的全新窗口 exact-file review 为 `PASS`。
-2. 合并后的 planning provenance 含 exact `02-02-PLAN.md` blob。
-3. implementation branch/Worktree 从上述 exact `B_C2_W1A` 创建。
-4. feature Draft PR 的全新窗口 exact-head code review 为 `PASS`。
-5. 合并 successor 冻结为 `B_C2_CORE_123`，完整 W1 gate 通过后才签发 W2。
+2. 合并后的 integration control head 含 exact `02-02-PLAN.md` blob；相对
+   `B_C2_W1A` 的累计 drift 必须仅为 reviewed planning provenance，且 Packet 的
+   required product/source blobs 全部未变。
+3. implementation branch/Worktree 仍从上述 exact product base `B_C2_W1A` 创建。
+4. feature Draft PR 通过后，将 exact implementation patch 叠加到冻结的 integration
+   control head；该 exact overlay 也必须由全新窗口 review 为 `PASS`。
+5. reviewed overlay 合并 successor 冻结为 `B_C2_CORE_123`，完整 W1 gate 通过后才
+   签发 W2。
 
 任何 `BLOCK/HIGH`、未处置 `MEDIUM`、allowlist/base/tree 漂移或测试失败都会暂停当前
 Packet 的 merge；只允许在原边界内修复并使用另一个全新窗口复审。
