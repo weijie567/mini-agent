@@ -569,14 +569,51 @@ ToolAttemptRecord
   finished_at?
   outcome?
   failure_code?
+  timeout_phase?
+  retry_decision?
 ```
 
 `ToolAttemptRecord` 使用两阶段持久化：
 
-- durable dispatch fence 创建当前 attempt 时，只记录 `tool_call_id`、递增且唯一的 `attempt_no` 与 `started_at`；`finished_at`、`outcome` 和 `failure_code` 必须为空。
+- durable dispatch fence 创建当前 attempt 时，只记录 `tool_call_id`、递增且唯一的 `attempt_no` 与 `started_at`；`finished_at`、`outcome`、`failure_code`、`timeout_phase` 和 `retry_decision` 必须为空。
 - 底层调用结束后，以 attempt 尚未完成为条件 finalize 同一条记录；`finished_at` 与 `outcome` 必须同时出现，`failure_code` 只在适用的非成功结果中出现。
+- timeout outcome 必须记录可信的 `timeout_phase`；非 timeout outcome 不得借用 timeout phase。是否重试必须由 Runtime 根据受控 failure classification、attempt / Run 预算和 current-state revalidation 形成显式 `retry_decision`，不能由模型或 Handler 自报。
+- finalized attempt 的 `retry_decision` 至少要能互斥表达：已安排下一次尝试、不满足重试条件、attempt 预算耗尽、Run 预算耗尽、状态 / 绑定已失效，以及该 outcome 不适用重试。具体序列化 code 可以由 active scoped contract 收窄，但不能合并这些不同语义。
 - 新的重试追加新的 `attempt_no`，不得用后一次尝试覆盖或复用先前记录。
 - 进程重启发现未完成 attempt 时，保留已持久化的开始事实，并按 ToolCall / Action 恢复规则结束或对账；不得倒填一个未观察到的成功、失败或超时 outcome。
+- 后一次 attempt 最终成功不能覆盖前一次 timeout / failure 及其 retry decision；同一 `tool_call_id` 的追加历史必须能够解释最终 ToolCall projection。
+
+`ToolAttemptRecord` 在 P0 persistence registry 中是 `ToolCallRecord` 的 logical
+child，不是独立 top-level record。上述 `timeout_phase`、`retry_decision` 与
+closed-matrix 变化因此推进父记录逻辑版本：
+
+```text
+tool_call_record.p0.v1 → tool_call_record.p0.v2
+```
+
+v2 必须保留 parent `tool_call_id`、Run / Task / RequestUnit / Context Manifest /
+Gate / InputBinding refs、ToolCall lifecycle、`attempt_count`，以及 child identity
+`(tool_call_id, attempt_no)` 和连续 `1..N` closure。v1→v2 只允许下列
+deterministic conversion：
+
+| v1 child shape | v2 `timeout_phase` | v2 `retry_decision` |
+|---|---|---|
+| unfinished attempt | `null` | `null` |
+| `SUCCESS` | `null` | `NOT_APPLICABLE` |
+| allowlisted `BUSINESS_FAILURE` | `null` | `NOT_RETRYABLE` |
+| allowlisted deterministic `SYSTEM_FAILURE` | `null` | `NOT_RETRYABLE` |
+| retryable `SYSTEM_FAILURE`，且 exact v1 RegistrySnapshot / ExecutionPolicy 证明 `max_attempts=1` | `null` | `MAX_ATTEMPTS_REACHED` |
+| `TIMEOUT + TOOL_CALL_TIMEOUT`，且 parent ToolCall 有 exact timeout phase、policy 证明 `max_attempts=1` | 从 parent 精确复制 | `MAX_ATTEMPTS_REACHED` |
+| allowlisted non-retryable `INTERRUPTED` | `null` | `NOT_RETRYABLE` |
+
+任何不命中一行、多个匹配、缺 RegistrySnapshot / ExecutionPolicy、unknown code、
+parent / child outcome 或 timeout metadata 矛盾的 v1 aggregate 都使 migration /
+startup readiness fail closed；不得重分类、补默认值或选择相近 decision。P0
+exact-version-only 规则要求 runtime、writer、strict decoder、recovery reader 与
+Eval reader 原子切换到 v2，禁止 v1 / v2 同时作为 active version、read-time
+fallback 或静默 downgrade。Activation 前必须冻结显式 v1→v2 conversion、失败
+原子性、审计与 rollback fence；physical migration、codec 和 reader / writer
+尚未实现，不能从本节推定完成。
 
 普通 ToolCall 状态：
 
@@ -652,6 +689,38 @@ Read / Retrieval 只有同时满足以下条件时才能重试：
 
 重试不得由模型无限要求；Runtime 负责 `max_attempts`。
 
+每次 retry 必须形成以下持久化顺序：
+
+```text
+finalize current ToolAttempt
+→ persist retry decision
+→ revalidate exact Run / Task / RequestUnit / argument bindings and budgets
+→ CAS claim next attempt number
+→ append next ToolAttempt under the same tool_call_id
+→ dispatch
+```
+
+不得先 dispatch 再补写 retry decision 或 attempt fence。进程在任一边界重启时：
+
+- 未完成 attempt 保留为“已开始但 outcome 未知”的事实；Read / Retrieval 不能
+  自动伪造失败、timeout 或成功，也不能无条件重新 dispatch。
+- 已完成 attempt 且持久化为“不重试”的决定，恢复器不得追加新 attempt。
+- 已完成 attempt 且持久化为“安排重试”的决定，恢复器只能在 exact current-state
+  revalidation、预算和 CAS 全部通过后追加下一 attempt；失败时终止 retry path，
+  不得先追加 attempt 再解释失败。若 owner-scoped exact current Run / Task /
+  RequestUnit / binding closure 唯一证明旧 Run 已被更新状态或绑定取代，ToolCall
+  终止为 `INTERRUPTED`，retry decision / recovery reason 使用
+  `STATE_OR_BINDING_INVALIDATED`，对应 Run 服从 Core Runtime owner 的
+  `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` no-result closure；不得生成
+  Observation、用户结果或 Task / RequestUnit 写入。若无法唯一证明 obsolete，则不得猜测
+  `SUPERSEDED`，必须 fail closed。其他具体 Run terminal result 继续服从 Core
+  Runtime / Application mapper owner。
+- 恢复不能超过 active `ExecutionPolicy.max_attempts`，不能创建第二个同语义
+  ToolCall 来绕过 attempt 预算，也不能对同一个确定性失败形成无进展循环。
+
+每个 Tool 的具体 `timeout_ms`、`max_attempts` 和 exact retryable failure codes
+继续由 active scoped implementation contract 拥有，不由本节给出统一数值。
+
 ### 10.3 Action 不通用重试
 
 `create_refund` 不使用普通 Read Tool 的自动重试：
@@ -681,6 +750,15 @@ Read / Retrieval 只有同时满足以下条件时才能重试：
 4. Read / Retrieval 不生成伪造 Observation。
 5. Action 已 dispatch 或无法判断时进入 `RESULT_UNKNOWN`。
 6. Provider 原生 Tool Calling 如果要求每个 call 都有配对 result，Adapter 可以生成协议级 `INTERRUPTED` 响应以闭合消息结构。
+
+用户新消息、Task version 或 argument binding 变化并不自动等于
+`SUPERSEDED`。只有 owner-scoped exact current-state revalidation 唯一证明当前
+Run 已 obsolete 时，Tool owner 才输出
+`STATE_OR_BINDING_INVALIDATED` 专项 recovery evidence，并把 Run terminal
+映射交给
+[Project Direction §9.2](../../PROJECT_DIRECTION.md#92-e2e-01-cycle-2-shared-runtime-owner-alignment)；
+Tool 层不得直接写 Task 或伪造用户结果。unknown、重复、非唯一或矛盾 evidence
+不得被整理成明确 invalidation reason。
 
 进程重启时，只有第 9.1 节 durable dispatch fence 得到实现和验证，持久化状态 `CREATED` 才能证明未发生 dispatch；恢复逻辑可以按第 9.3 节直接写入 `INTERRUPTED`，保留 `attempt_count=0` 且不追加 `ToolAttemptRecord`。如果状态为 `RUNNING`，必须保留既有 attempt；对于 Action，只要已经 dispatch 或无法确定是否 dispatch，Action Ledger 仍按 `RESULT_UNKNOWN` 处理。通用 ToolCall 的 `INTERRUPTED` 不能替代 Action Ledger 的权威结果，也不能被解释成业务系统明确失败。
 
@@ -797,6 +875,14 @@ model_call_id
 ```
 
 Trace 不应在每个事件中复制完整 Context Manifest。事件通过 `context_manifest_id` 关联；为检索进行的受控字段冗余属于存储实现，不改变 canonical contract。
+
+attempt-level timeout、retry decision 与 recovery evidence 优先落在 Tool owner
+拥有的专项记录 / event payload 中。本次规则演进不修改 shared `TraceEvent`
+structure；Core Runtime / Project Direction owner 已因
+`SUPERSEDED + STATE_OR_BINDING_INVALIDATED` 的 closed-matrix 语义变化批准
+`trace_event_record.p0.v2` 作为 Cycle 2 目标逻辑版本。该版本不授权 Tool owner
+新增共享字段；未来若确需改变共享字段或公共结构，仍必须由 Core Runtime /
+Project Direction owner 完成另一份独立影响分析与裁决。
 
 ### 12.3 隐私与审计
 
@@ -948,6 +1034,17 @@ Eval 启动时重新计算 Hash，并检查 Fixture 与预期版本一致。
 这些实现选择不得改变本文的确定性边界，也不得引入动态 Capability 路由或 Action 自动重试。
 
 `E2E01-01/04` 的首个具体选择见 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)；其中 Python、Qwen 和具体 Schema 只约束该切片，不覆盖本节的通用 Tool System 语义。
+
+`E2E01-02/03/05/06` 在
+[E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
+正式 Activation 后，可以 scoped 拥有 `search_orders` / `get_shipment` 的
+Agent-visible Schema、Runtime-private Query / Result、具体 producer
+implementation、canonical bytes、具体 `timeout_ms` / `max_attempts`、exact
+retryable failure codes 及测试向量。Business owner 仍拥有 source authority 语义和
+Order → active Package 的业务基数；具体 Infrastructure Adapter 类不是业务
+canonical owner。该条件式 delegation 不改变四个 Case 当前的
+`CONTRACT_DEFINED` lifecycle，也不证明任何 DTO、Executor、Adapter 或测试已经
+实现。
 
 ## 18. P0 验收清单
 

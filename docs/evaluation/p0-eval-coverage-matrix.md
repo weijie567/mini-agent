@@ -18,6 +18,12 @@ Case 的期望行为必须追溯到：
 - [Memory Design Reference](../architecture/memory-design-reference.md)：Task、Observation、Evidence、Action Ledger、恢复和 Context Manifest。
 - [RAG Design Reference](../architecture/rag-design-reference.md)：检索、排序、Evidence 状态和 RAG Eval。
 - [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md)：`E2E01-01/04` 的具体编码、Fixture、双轨 lane 和目标命令；只作为上述 owner 的 scoped 实现映射。
+- [E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)：
+  当前仍是 `NON_NORMATIVE / REVIEW_DRAFT`。用户已批准把
+  `E2E01-02/03/05/06` 的 exact physical Eval encoding 条件式委托给该 Spec，
+  但只有其正式 Activation 后才生效；OA-10 exact ruling 已获用户批准，当前
+  owner-alignment draft 仍待独立 exact-file review 与合并，Activation 继续
+  `BLOCKED`。
 
 本文拥有：
 
@@ -164,7 +170,7 @@ Case 的期望行为必须追溯到：
 | `CF-10` | Tool / Provider 错误被伪造成 Observation 或成功 | 所有含 Tool 的 Case、`FAULT-PROVIDER-PROTOCOL` | ToolCall 终态、normalization 与记录分流 | `G-CF` |
 | `CF-11` | 模拟退款被描述为真实支付渠道退款或到账 | `E2E02-04/06/07` | Outbound disclosure deterministic check + Model / Human review | `G-CF` |
 | `CF-12` | Trace 无法还原关键 Gate、Tool、权威引用、状态变化或停止原因 | 全部 Case、`FAULT-TRACE-DEGRADED` | Trace completeness grader | `G-CF`、`G-TRACE` |
-| `CF-13` | 订单号、商品、数量、日期或状态绕过安全投影与确定性 Renderer，由模型自由生成或修改 | `E2E01-01/05`、`FAULT-PRESENTATION-PROTOCOL` | PresentationPlan Schema、Gate、Renderer 输入 / 输出精确一致性 | `G-CF`、`G-E2E01` |
+| `CF-13` | 经批准的订单 / 物流业务事实或 deterministic `ShipmentAssessment.primary_result` 绕过安全 projection，由模型、Presentation 或 Renderer 自行生成、修改或错误表达 | `E2E01-01/02/03/05/06`、`FAULT-PRESENTATION-PROTOCOL` | approved projection 与 Observation / Assessment binding、PresentationPlan Schema、Gate、Renderer 输入 / 输出精确一致性 | `G-CF`、`G-E2E01` |
 | `CF-14` | 模型业务参数未绑定当前有效 InputBinding / verified ref，或状态变化后的旧 NextMove 被执行 | `E2E01-01/04`、`SEC-ARGUMENT-BINDING`、后续所有含资源参数的 Case | Candidate / Binding provenance、候选与重验版本、GateDecision、AuthorizedToolCommand、ToolCall 缺失断言 | `G-CF` |
 
 任何 `CF-*` 出现时：
@@ -331,6 +337,50 @@ merge到`main`（`f15320e3c98a408727b1488db5a5c7f0a7a57931`）。本owner最终�
 - 激活 `E2E01-02/03/05/06`；`E2E01-05` 必须与一个确实需要 `get_shipment` 的配对 Case 在同一可用工具集中运行。
 - 增加自然语言搜索、多候选、物流按需查询、新鲜度和 Read failure。
 - 运行第一版 Trajectory / E2E Baseline。
+
+#### Cycle 2 scoped mapping 与 lifecycle hold
+
+Coverage Matrix owner 批准以下 mapping 边界，但不批准 lifecycle transition：
+
+- 四个逻辑 Case 在 scoped Spec 正式 Activation 后，可以映射为 14 个 required
+  longitudinal physical variants 和 13 个 mandatory Trajectory cases；第 13 个
+  Case 专门证明 OA-10 obsolete Run 的 no-result closure。
+- 第 13 个 Trajectory 的 stable identity 是
+  `T2-retry-finalize-before-second-fence-state-invalidated`；它必须同时证明 retry
+  已 finalize、attempt 2 未创建、Run=`SUPERSEDED`、link result=`null`、
+  audit-only `RunStopped(BLOCKED)`，以及 no Agent result / Message /
+  `ResponseRendered` / Task mutation。
+- exact input、required / forbidden evidence、state / disclosure assertion、
+  predicate serialization、pair identity、version manifest 与 `CF-*` 引用由
+  scoped Spec 拥有；它们不得覆盖 Business、Intent、Tool、Memory、Core Trace
+  owner 的语义。
+- `CF-13` 在 Cycle 2 的适用范围包括经批准的订单 / 物流业务事实和 deterministic
+  `ShipmentAssessment.primary_result`；只有模型、Presentation 或 Renderer
+  绕过安全 projection，自行生成、修改或错误表达这些事实或结果时才触发。
+  Observation stale、source integrity、authority 或 freshness 问题继续使用各自
+  对应的 Critical Failure 或 deterministic release failure；除非同时发生上述
+  模型 / Presentation / Renderer 生成、修改或错误表达，否则不得引用 `CF-13`。
+- `E2E01-05` 的 order-only 与 shipment-needed 配对必须使用相同
+  RegistrySnapshot、model-visible toolset hash、provider mapping 和 fixture
+  identity，才能作为动态 Tool 选择证据。
+- attempt / retry / recovery predicate 只消费 Tool owner 事实；shared
+  `TraceEvent` structure 默认不因 Cycle 2 Eval 改变。
+- obsolete Run 的 no-result expectation 必须断言
+  `AgentRunStatus.SUPERSEDED +
+  StopReason.STATE_OR_BINDING_INVALIDATED`、audit-only
+  `RunStopped.user_outcome=BLOCKED`、`RunTaskLink.result_task_state_version=null`
+  和旧 Run 的 no result / no Message / no `ResponseRendered` / no Task /
+  RequestUnit write；
+  同时保留 append-only Tool / attempt / recovery evidence。`INCOMPLETE` 继续只
+  对应 `PROCESS_RESTART_DETECTED`，`CANCELLED` 不用于该分支，unknown /
+  contradictory reason 不得被猜测为 `SUPERSEDED`。相关 predicate 只消费 owner
+  批准的 ToolCall（含 attempt child）/ Run / link / Trace v2 record semantics，
+  不反向创造或兼容状态机。
+
+因此 `E2E01-02/03/05/06` 当前继续为 `CONTRACT_DEFINED`。OA-10 用户裁决已完成，
+但 owner-alignment exact-file review / merge 尚未完成，scoped Spec 未正式 Activation，
+authenticated artifacts / loader / Harness Result 未出现且 Coverage Matrix owner
+未另行裁决前，不得进入 `EXECUTABLE`。
 
 ### Cycle 3：E2E-02 高风险切片
 

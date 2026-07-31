@@ -482,6 +482,50 @@ EvalExecutionFailureRecord
 
 `E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。Coverage Matrix owner 已完成 `EXECUTABLE` 与 `REGRESSION_GATE` 两次裁决；PR #184 完成 artifact / manifest / loader 原子同步和独立审查，全部 16 authenticated variants 的 lifecycle-valid offline Results 已进入默认测试命令。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
 
+对 `E2E01-02/03/05/06`，本文作出条件式 scoped delegation：只有
+[E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
+正式 Activation 后，该 Spec 才拥有本阶段 14 个 longitudinal physical variants、
+13 个 mandatory Trajectory cases、typed predicate grammar、pair identity、完整
+input / grading / version manifest 和 `CF-*` 引用的 exact encoding。该 delegation
+不转移下列 ownership：
+
+- 业务结果、source authority、阈值和最小披露服从 Business owner。
+- ordinal binding、attempt / retry / recovery、Observation / derivation 和 Run /
+  Trace lifecycle 分别服从 Intent、Tool、Memory 与 Core Runtime owner。
+- Eval predicate alias 只能引用 owner 已批准的记录或事件，不能反向创造字段、
+  outcome、stop reason 或共享 `TraceEvent` structure。
+
+Coverage Matrix 对四个 Case 继续执行 `LIFECYCLE_HOLD`：scoped contract、
+Fixture、测试或实现的出现都不能自行把 `CONTRACT_DEFINED` 推进为
+`EXECUTABLE`。Core Runtime owner 已为 OA-10 裁决 obsolete Run 使用
+`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`，且不得产生 `AgentRunResult`、
+ASSISTANT Message、`ResponseRendered` 或 Task / RequestUnit mutation。该分支不能
+通过普通 HTTP Result 路径评价，必须由 exact closure / Trajectory evidence 同时
+证明：
+
+- Run terminal=`SUPERSEDED` 且 stop reason 精确为
+  `STATE_OR_BINDING_INVALIDATED`；
+- `RunStopped.user_outcome=BLOCKED` 只作为 audit disposition，不能被计为已发送的
+  `BLOCKED` 用户结果；
+- `RunTaskLink.result_task_state_version=null`，link 由 parent Run 的 no-result
+  terminal 逻辑关闭，没有借用新 Run 的 Task version；
+- 不存在该旧 Run 的 Agent result、ASSISTANT Message、`ResponseRendered`、
+  `TaskStateChanged` 或其他 Task / RequestUnit 写入；
+- 既有 ToolCall、attempt、retry / recovery 与安全 Trace evidence append-only
+  保留，unknown / contradictory reason 不被猜测为 `SUPERSEDED`。
+
+本阶段第 13 个 mandatory Trajectory 必须使用 stable identity
+`T2-retry-finalize-before-second-fence-state-invalidated` 对上述全部条件作一次
+同轨迹证明；Component-only mapping 或普通 HTTP 最终文本不能替代。
+
+`INCOMPLETE` 仍只与 `PROCESS_RESTART_DETECTED` 的 restart closure 配对；
+`CANCELLED` 不用于该分支。Eval predicate 只能消费 owner 已批准的
+`tool_call_record.p0.v2`（含 attempt child）、`agent_run_record.p0.v2`、
+`run_task_link_record.p0.v2` 与 `trace_event_record.p0.v2` 语义，不能自行兼容
+v1 / v2 或反向创造 attempt / terminal contract。上述 owner ruling 与 mapping
+不推进 Case lifecycle；owner alignment 独立 exact-file review、合并和 scoped
+Spec Activation 仍然缺失。
+
 ## 10. Eval 作为架构决策证据
 
 `PROJECT_DIRECTION.md` 是当前方向，不是不可改变的永久答案。架构演进使用：
