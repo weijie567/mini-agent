@@ -1844,7 +1844,7 @@ activation 后的实现必须创建并 exact-digest 绑定：
 ```text
 evals/cases/e2e01-cycle2.v1.json
 evals/fixtures/e2e01-cycle2.v1.json
-evals/model-scripts/e2e01-cycle2.v1.json
+evals/model_scripts/e2e01-cycle2.v1.json
 evals/manifests/e2e01-cycle2.v1.json
 evals/lanes/e2e01-cycle2.v1.json
 ```
