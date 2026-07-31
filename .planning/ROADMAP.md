@@ -18,11 +18,15 @@ Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
 `CONTRACT_ACTIVE / READY_FOR_PLANNING`；master Plan 已由 PR #203 合并，`02-00`
 已获批并由 PR #204/#205 完成。`02-03` 与 `02-01` 已由 PR #207/#208 reviewed
 串行合入并形成历史 `B_C2_W1A`；PR #212 修复 test-only full-gate regression 后
-形成 `B_C2_W1_GATE_REPAIRED`，PR #213 已完成 `02-02` Packet refreeze。当前 W1B
-的四份派生状态索引已形成 alignment candidate；该 exact head `PASS`/merge 前不创建
-r2 实现分支。Phase 3–6
+形成 `B_C2_W1_GATE_REPAIRED`，PR #213 refreeze `02-02`，PR #214/#215 reviewed
+merge 后冻结 `B_C2_CORE_123` 并关闭 W1。当前 W2 `02-04` exact Plan/Packet candidate
+等待全新任务 review；`PASS`/merge 前不创建 W2 实现分支。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
+
+Phase 2 integration branch 当前已启用 PR-required、enforce-admins、linear-history、
+conversation-resolution 保护，并禁用 force-push / deletion；每个 Packet preflight
+仍须从 GitHub API 机械验证，不把一次配置视为永久事实。
 
 ## 🚧 **v0.1 GSD-only P0 execution**
 
@@ -151,7 +155,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / MASTER_PLAN_APPROVED / GATE_P2_B_IN_PROGRESS / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W1_COMPLETE / W2_02-04_PLANNING_REVIEW / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -167,11 +171,11 @@ Plans:
 
 **Plans**: master Plan 的 `19` 个一对一 Plan / Task Packet slots
 （`02-00..18`）、`W0..W12`、最大并发 `2` 已获 Gate P2-A 批准并由 PR #203
-合并。`02-00`、`02-03` 与 `02-01` 已批准并执行；历史
-`B_C2_W1A` 已形成。PR #212/#213 已形成 repaired product base 与 refrozen Packet；
-`02-02` 的 typed Observation / Memory contract 只能从 `B_C2_W1_GATE_REPAIRED`
-创建新的 r2 branch/Worktree。旧 `ecfad7e...` head 保持 quarantined；其余
-slot 继续等待各自前置 barrier。
+合并。`02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
+PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`。旧
+`ecfad7e...` head 保持 quarantined。当前新增 `02-04` exact Plan/Packet candidate；
+其全新任务 review `PASS`/merge 前不创建 W2 implementation branch，其余 slot 继续
+等待各自前置 barrier。
 
 **Branch mapping**:
 
@@ -205,14 +209,23 @@ B_C2_W1_GATE_REPAIRED
 B_C2_W1B_REFREEZE_CONTROL
 = fedd2d1a10ae088d3c762875bffd68ed828d8e3f
 = PR #213 reviewed planning-only merge successor; does not replace product base
+
+B_C2_W1_STATUS_ALIGNED
+= 2aec3663a5d8e2456e6bf69f37ac1f8f343a6c19
+= PR #214 reviewed four-file status alignment successor
+
+B_C2_CORE_123
+= 241cf6b83761f5d91da5de7719f26838e2626e26
+= tree 83fcbf90770ffdc30ef37e35e94169bcb9ead3b3
+= PR #215 reviewed merge successor and exact W2 product base
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
 `B_C2_START` 已冻结为 `B_C2_OWNER_ALIGNED` exact SHA/tree，随后 reviewed 02-03/02-01
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
-证据。`02-02` r2 feature branch/Worktree 必须从 exact repaired product base 创建，
-且需本 dedicated status alignment exact-head review PASS/merge 后才允许创建；旧
-`ecfad7e...` 不得进入新 ancestry。
+证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
+`ecfad7e...` 未进入 ancestry。W2 `02-04` implementation 必须等本 six-file planning
+PR exact-head review `PASS`/merge 后，仍从 exact `B_C2_CORE_123` 创建。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
@@ -291,7 +304,7 @@ B_C2_W1B_REFREEZE_CONTROL
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 3/19 | `02-00/01/03 complete；B_C2_W1_GATE_REPAIRED frozen；02-02 Packet refrozen/PASS；status alignment is final pre-dispatch gate；functional implementation 2/18；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 4/19 | `02-00/01/02/03 complete；B_C2_CORE_123 frozen；W1 full 2340 passed；02-04 Plan/Packet candidate in fresh-review gate；functional implementation 3/18；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
