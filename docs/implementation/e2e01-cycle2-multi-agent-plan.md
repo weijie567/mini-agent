@@ -258,11 +258,13 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
   - `tests/component/core/test_cycle2_trace_contract.py`（new）
 - **Depends on:** exact `B_C2_START`；可与 `02-01` 首批并行，并按固定顺序先
   reviewed merge 为 `B_C2_TRACE`。
-- **Acceptance:** obsolete Run 不产生 Agent result / Message / ResponseRendered /
-  Task / RequestUnit write；unknown / contradictory reason fail closed；ordinary
-  Trace 只允许 exact safe whitelist，明确拒绝 raw customer / session scope、业务
-  payload、candidate summary、source-version token、prompt、stack / raw exception
-  与不必要 PII。
+- **Acceptance:** Core 可机械证明 `SUPERSEDED` exact terminal matrix、audit-only
+  `RunStopped` 组合、unknown / contradictory reason fail closed，且本 Packet 不创建
+  `AgentRunResult` representation；跨 record 的 Agent result / Message /
+  ResponseRendered / Task / RequestUnit write suppression 是后续 `02-05/09`
+  consumer acceptance。ordinary Trace 只允许 exact safe whitelist，明确拒绝 raw
+  customer / session scope、业务 payload、candidate summary、source-version token、
+  prompt、stack / raw exception 与不必要 PII。
 
 ### `02-04` — Tool / Gateway contracts
 
