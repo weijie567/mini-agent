@@ -2,8 +2,18 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
-from mini_agent.core.control_gateway import evaluate_control_gateway
+from mini_agent.core.control_gateway import (
+    Cycle2AcceptedBindingFacts,
+    Cycle2GatewayBudgetFacts,
+    Cycle2GatewayCandidate,
+    Cycle2GatewayLoadedClosure,
+    Cycle2ToolProgressFact,
+    Cycle2VerifiedOrderTargetFacts,
+    evaluate_control_gateway,
+    evaluate_cycle2_control_gateway,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, TokenCounts
 from mini_agent.core.request_processing import (
@@ -28,6 +38,7 @@ from mini_agent.core.request_understanding import (
 )
 from mini_agent.core.task_state import TaskStatus
 from mini_agent.core.tool_system import (
+    Cycle2ToolName,
     ExecutionPolicy,
     GateDecisionValue,
     GateReasonCode,
@@ -35,6 +46,7 @@ from mini_agent.core.tool_system import (
     ToolSpec,
     ToolEffect,
     ToolRegistration,
+    build_cycle2_registry_snapshot,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -500,3 +512,330 @@ def test_gateway_modules_are_pure_core_without_outer_layer_imports() -> None:
     assert "mini_agent.application" not in source
     assert "mini_agent.infrastructure" not in source
     assert "mini_agent.evaluation" not in source
+
+
+def _cycle2_gateway_case(
+    tool_name: Cycle2ToolName,
+    *,
+    binding_authority: InputAuthority = InputAuthority.USER_CLAIM,
+) -> tuple[Cycle2GatewayCandidate, Cycle2GatewayLoadedClosure]:
+    decision = _decision()
+    task = decision.task_graph.task
+    request_unit = decision.task_graph.request_unit
+    binding_id = uuid4()
+    model_call_id = uuid4()
+    context_manifest_id = uuid4()
+    snapshot = build_cycle2_registry_snapshot()
+    if tool_name is Cycle2ToolName.SEARCH_ORDERS:
+        binding_name = "product_description"
+        normalized_value = "跑鞋"
+        arguments = {"product_description": normalized_value}
+    else:
+        binding_name = "order_id"
+        normalized_value = "O-1001"
+        arguments = {"order_id": normalized_value}
+
+    binding = Cycle2AcceptedBindingFacts(
+        binding_id=binding_id,
+        private_owner_scope_ref="owner-scope-A",
+        owner_customer_id="customer-A",
+        task_id=task.task_id,
+        request_unit_id=request_unit.request_unit_id,
+        task_state_version=task.state_version,
+        name=binding_name,
+        normalized_value=normalized_value,
+        authority=binding_authority,
+        source_refs=(uuid4(),),
+        superseded_by=None,
+    )
+    request_unit = request_unit.model_copy(
+        update={"input_binding_refs": (binding_id,)}
+    )
+
+    target_ref = uuid4()
+    verified_targets: tuple[Cycle2VerifiedOrderTargetFacts, ...] = ()
+    candidate_refs = (binding_id,)
+    candidate_target_ref = None
+    if tool_name is Cycle2ToolName.GET_SHIPMENT:
+        verified_targets = (
+            Cycle2VerifiedOrderTargetFacts(
+                verified_target_ref=target_ref,
+                private_owner_scope_ref="owner-scope-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                task_state_version=task.state_version,
+                order_id="O-1001",
+                source_observation_ref=uuid4(),
+                input_binding_refs=(binding_id,),
+                superseded_by=None,
+            ),
+        )
+        candidate_refs = (binding_id, target_ref)
+        candidate_target_ref = target_ref
+
+    manifest = _manifest(
+        snapshot=snapshot,
+        run_id=decision.closure.record.run_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+    )
+    candidate = Cycle2GatewayCandidate(
+        run_id=decision.closure.record.run_id,
+        task_id=task.task_id,
+        request_unit_id=request_unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+        requested_provider_tool_name=tool_name.value,
+        candidate_arguments=arguments,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=candidate_refs,
+        verified_target_ref=candidate_target_ref,
+    )
+    loaded = Cycle2GatewayLoadedClosure(
+        customer_context=_context(),
+        private_owner_scope_ref="owner-scope-A",
+        current_task=task,
+        current_request_unit=request_unit,
+        current_input_bindings=(binding,),
+        current_verified_order_targets=verified_targets,
+        registry_snapshot=snapshot,
+        context_manifest=manifest,
+        budget=Cycle2GatewayBudgetFacts(
+            tool_calls_used=0,
+            max_tool_calls=3,
+            active_tool_calls=0,
+            accepted_parallel_tool_calls=0,
+            remaining_run_time_budget_ms=1500,
+        ),
+        prior_tool_steps=(),
+    )
+    return candidate, loaded
+
+
+def _evaluate_cycle2(
+    candidate: Cycle2GatewayCandidate,
+    loaded: Cycle2GatewayLoadedClosure,
+):
+    return evaluate_cycle2_control_gateway(
+        candidate=candidate,
+        loaded_closure=loaded,
+        gate_decision_id=uuid4(),
+        provider_tool_call_id="provider-cycle2-call",
+        decided_at=NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        Cycle2ToolName.SEARCH_ORDERS,
+        Cycle2ToolName.GET_ORDER,
+        Cycle2ToolName.GET_SHIPMENT,
+    ],
+)
+def test_cycle2_gateway_accepts_three_distinct_typed_binding_paths(
+    tool_name: Cycle2ToolName,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(tool_name)
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.reason_code is None
+    assert gate.resolved_canonical_tool_name == tool_name.value
+    assert gate.argument_binding_refs == candidate.argument_binding_refs
+    assert "tool_call_id" not in type(gate).model_fields
+    assert "authorized_tool_command" not in type(gate).model_fields
+    if tool_name is Cycle2ToolName.GET_ORDER:
+        assert loaded.current_verified_order_targets == ()
+        assert loaded.current_input_bindings[0].authority is InputAuthority.USER_CLAIM
+        assert candidate.verified_target_ref is None
+    elif tool_name is Cycle2ToolName.GET_SHIPMENT:
+        assert candidate.verified_target_ref is not None
+        assert candidate.verified_target_ref in candidate.argument_binding_refs
+
+
+def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        binding_authority=InputAuthority.MODEL_INFERENCE,
+    )
+    rejected = _evaluate_cycle2(candidate, loaded)
+    assert rejected.decision is GateDecisionValue.REJECT
+    assert rejected.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    unrelated_target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref="owner-scope-A",
+        owner_customer_id="customer-A",
+        task_id=loaded.current_task.task_id,
+        request_unit_id=loaded.current_request_unit.request_unit_id,
+        task_state_version=loaded.current_task.state_version,
+        order_id="O-9999",
+        source_observation_ref=uuid4(),
+        input_binding_refs=(loaded.current_input_bindings[0].binding_id,),
+        superseded_by=None,
+    )
+    with_unrelated_target = loaded.model_copy(
+        update={"current_verified_order_targets": (unrelated_target,)}
+    )
+    accepted = _evaluate_cycle2(candidate, with_unrelated_target)
+    assert accepted.decision is GateDecisionValue.ACCEPT
+    assert candidate.verified_target_ref is None
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("snapshot", GateReasonCode.SNAPSHOT_MISMATCH),
+        ("schema-extra", GateReasonCode.SCHEMA_INVALID),
+        ("binding-value", GateReasonCode.ARGUMENT_BINDING_MISMATCH),
+        ("binding-ref", GateReasonCode.ARGUMENT_BINDING_MISMATCH),
+        ("owner", GateReasonCode.STATE_VERSION_MISMATCH),
+        ("state", GateReasonCode.STATE_VERSION_MISMATCH),
+        ("budget", GateReasonCode.BUDGET_EXCEEDED),
+        ("progress", GateReasonCode.NO_PROGRESS),
+        ("target", GateReasonCode.ARGUMENT_BINDING_MISMATCH),
+    ],
+)
+def test_cycle2_gateway_compares_loaded_facts_and_fails_closed(
+    case: str,
+    expected_reason: GateReasonCode,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+
+    if case == "snapshot":
+        loaded = loaded.model_copy(
+            update={
+                "context_manifest": loaded.context_manifest.model_copy(
+                    update={"tool_registry_version": "drifted"}
+                )
+            }
+        )
+    elif case == "schema-extra":
+        candidate = candidate.model_copy(
+            update={"candidate_arguments": {"order_id": "O-1001", "ordinal": 2}}
+        )
+    elif case == "binding-value":
+        candidate = candidate.model_copy(
+            update={"candidate_arguments": {"order_id": "O-9999"}}
+        )
+    elif case == "binding-ref":
+        candidate = candidate.model_copy(
+            update={"argument_binding_refs": (uuid4(), candidate.verified_target_ref)}
+        )
+    elif case == "owner":
+        loaded = loaded.model_copy(
+            update={
+                "current_task": loaded.current_task.model_copy(
+                    update={"owner_customer_id": "customer-B"}
+                )
+            }
+        )
+    elif case == "state":
+        loaded = loaded.model_copy(
+            update={
+                "current_task": loaded.current_task.model_copy(
+                    update={"state_version": 2}
+                )
+            }
+        )
+    elif case == "budget":
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 3})
+            }
+        )
+    elif case == "progress":
+        loaded = loaded.model_copy(
+            update={
+                "prior_tool_steps": (
+                    Cycle2ToolProgressFact(
+                        canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+                        validated_arguments={"order_id": "O-1001"},
+                        task_state_version=candidate.validated_task_state_version,
+                        argument_binding_refs=candidate.argument_binding_refs,
+                    ),
+                )
+            }
+        )
+    elif case == "target":
+        candidate = candidate.model_copy(update={"verified_target_ref": uuid4()})
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is expected_reason
+    assert "tool_call_id" not in type(gate).model_fields
+
+
+def test_cycle2_gateway_rejects_unknown_trusted_and_action_candidates() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    unknown = candidate.model_copy(update={"requested_provider_tool_name": "create_refund"})
+    unknown_gate = _evaluate_cycle2(unknown, loaded)
+    assert unknown_gate.decision is GateDecisionValue.REJECT
+    assert unknown_gate.reason_code is GateReasonCode.TOOL_NOT_REGISTERED
+
+    injected = candidate.model_copy(
+        update={
+            "candidate_arguments": {
+                "order_id": "O-1001",
+                "customer_id": "customer-B",
+            }
+        }
+    )
+    injected_gate = _evaluate_cycle2(injected, loaded)
+    assert injected_gate.decision is GateDecisionValue.REJECT
+    assert injected_gate.reason_code is GateReasonCode.TRUSTED_FIELD_INJECTION
+
+    action_registration = loaded.registry_snapshot.canonical_registrations[1].model_copy(
+        update={
+            "effect": ToolEffect.ACTION,
+            "unknown_result_recovery": "RESULT_UNKNOWN_RECONCILIATION",
+        }
+    )
+    action_snapshot = RegistrySnapshot.build(
+        tool_registry_version=loaded.registry_snapshot.tool_registry_version,
+        registrations=(
+            loaded.registry_snapshot.canonical_registrations[0],
+            action_registration,
+            loaded.registry_snapshot.canonical_registrations[2],
+        ),
+    )
+    action_loaded = loaded.model_copy(
+        update={
+            "registry_snapshot": action_snapshot,
+            "context_manifest": loaded.context_manifest.model_copy(
+                update={
+                    "tool_registry_version": action_snapshot.tool_registry_version,
+                    "model_visible_toolset_hash": action_snapshot.model_visible_toolset_hash,
+                }
+            ),
+        }
+    )
+    action_gate = _evaluate_cycle2(candidate, action_loaded)
+    assert action_gate.decision is GateDecisionValue.REJECT
+    assert action_gate.action_boundary_valid is False
+    assert action_gate.reason_code is GateReasonCode.ACTION_REQUIRES_PROPOSAL
+
+
+def test_cycle2_gateway_typed_surface_has_no_public_or_model_target_authority() -> None:
+    candidate, _ = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Cycle2GatewayCandidate.model_validate(
+            {
+                **candidate.model_dump(),
+                "public_summary": {"order_number": "O-9999"},
+            }
+        )
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Cycle2GatewayCandidate.model_validate(
+            {
+                **candidate.model_dump(),
+                "model_selected_order_id": "O-9999",
+            }
+        )
