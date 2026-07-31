@@ -263,7 +263,7 @@ Resolve integration base/branch   Resolve Eval artifact path
 
 | ID | Severity | Evidence | Risk | Mandatory mitigation |
 |---|---|---|---|---|
-| `C2-RISK-01` | BLOCK | `CONFIRMED` | Phase 2 integration branch / base 尚未裁决 | 只推荐新 `integration/e2e01-cycle2`；用户批准后从 planning merge 的 exact `main` successor 创建 |
+| `C2-RISK-01` | BLOCK | `CONFIRMED` | Phase 2 integration branch / base 尚未获 Gate P2-A 用户批准 | 固定 `B_C2_PLAN_APPROVED → B_C2_OWNER_ALIGNED → integration/e2e01-cycle2@B_C2_START`；代码分支不得跳过 `02-00` merge successor |
 | `C2-RISK-02` | BLOCK | `CONFIRMED` | Spec 使用 `evals/model-scripts/`，仓库/loader 使用 `evals/model_scripts/` | Task Packet 前由 scoped owner 最小裁决并 cross-file 对齐；不得由 Eval writer猜测 |
 | `C2-RISK-03` | HIGH | `CONFIRMED` | v1→v2 转换无法唯一重建时可能伪造 attempt / terminal evidence | 全量预验证；unknown/contradictory fail closed；禁止默认值和 read-time fallback |
 | `C2-RISK-04` | HIGH | `CONFIRMED` | codec、DB constraint、reader/writer/recovery 分步激活形成 mixed active versions | 单一 cutover gate；所有 consumer ready 前不启用 v2 write |
@@ -286,22 +286,37 @@ Resolve integration base/branch   Resolve Eval artifact path
 机械事实：
 
 ```text
-.planning/config.json git.base_branch = integration/e2e01-thin
+.planning/config.json git.base_branch = integration/e2e01-cycle2
+integration/e2e01-cycle2 = NOT_CREATED / RESERVED_MAPPING_ONLY
 main = b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3
 integration/e2e01-thin = 250e4d2bf96e873592a687fe0e2629708a9a817d
 git rev-list --left-right --count main...integration/e2e01-thin = 4 194
 merge-base = 5d668f71b565dff9ecf353d215c41affe86cb637
 ```
 
-旧分支是 Phase 1 历史 integration，不是安全的 Cycle 2 start。推荐裁决：
+`integration/e2e01-thin` 继续作为 Phase 1 历史 integration 证据，不被重命名、
+重用或覆盖；它不是安全的 Cycle 2 start。Phase 2 推荐裁决：
 
 ```text
-base_branch = main
-future integration branch = integration/e2e01-cycle2
-initial implementation base = exact reviewed planning PR merge successor
+B_C2_PLAN_APPROVED
+= planning PR merge successor
+
+B_C2_OWNER_ALIGNED
+= 02-00 merge successor
+
+integration/e2e01-cycle2
+= branch created from exact B_C2_OWNER_ALIGNED
+
+B_C2_START
+= integration/e2e01-cycle2 exact head/tree immediately after creation
+= initial implementation base
 ```
 
-当前不创建该分支，也不冻结 SHA。
+因此 `B_C2_START` 的 SHA / tree 必须与 `B_C2_OWNER_ALIGNED` 相同；任何差异均
+`BLOCK`。`.planning/config.json` 中的新值只是 Phase 2 reserved mapping，不证明
+分支已存在，也不授权创建分支、Task Packet、代码 Worktree 或功能代码。当前不创建
+该分支，也不冻结 `B_C2_PLAN_APPROVED`、`B_C2_OWNER_ALIGNED` 或 `B_C2_START`
+的 SHA / tree。
 
 ### 7.2 `C2-BLOCK-02`：Eval model script 目录
 
@@ -326,7 +341,9 @@ Plan / exact Task Packet / PR 对齐。当前 Plan 不得自行把建议当成�
 
 1. Phase 2 可以形成 master execution Plan，但当前只能是
    `PLAN_REVIEW_DRAFT`。
-2. `C2-BLOCK-01/02` 在 Task Packet 冻结前必须关闭。
+2. `C2-BLOCK-01` 必须由 Gate P2-A 批准；`C2-BLOCK-02` 由获批的 `02-00`
+   exact Plan / Task Packet 关闭。二者关闭并形成 `B_C2_OWNER_ALIGNED` 前，
+   不得创建 Phase 2 integration branch 或冻结 `B_C2_START`。
 3. 推荐把全部已知后续工作拆成 19 个一对一 GSD Plan / Task Packet slots：
    `02-00` 零代码 scoped-owner correction、`02-01..18` 实现 / lifecycle /
    verification slots；共 13 个受控 Waves（`W0..W12`），最多两个并行 writer。

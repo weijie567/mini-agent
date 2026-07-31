@@ -27,7 +27,7 @@
   },
   "git": {
     "branching_strategy": "none",
-    "base_branch": "integration/e2e01-thin"
+    "base_branch": "integration/e2e01-cycle2"
   },
   "planning": {
     "commit_docs": true,

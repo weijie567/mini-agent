@@ -75,9 +75,27 @@ contract change。
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | Initial implementation base | `NOT_FROZEN` |
 | Integration branch | `PROPOSED integration/e2e01-cycle2 / NOT_CREATED` |
+| GSD config branch mapping | `integration/e2e01-cycle2 / RESERVED_MAPPING_ONLY` |
 | Feature branches / Worktrees | `NOT_CREATED / PROHIBITED` |
 | Writer assignments | role proposed; person / Agent `NOT_FROZEN` |
 | Execution concurrency | proposed maximum `2` writers |
+
+### 2.1 Current planning PR exact scope
+
+本次 Gate P2-A revision 只允许以下七个文件：
+
+- `docs/implementation/e2e01-cycle2-dependency-ownership-risk-map.md`
+- `docs/implementation/e2e01-cycle2-multi-agent-plan.md`
+- `.planning/config.json`
+- `.planning/GOVERNANCE.md`
+- `.planning/PROJECT.md`
+- `.planning/ROADMAP.md`
+- `.planning/STATE.md`
+
+`.planning/ACTIVATION.md`、Phase 1 Plans / Summaries、canonical contract、源码、
+测试、migration、Eval artifact 与 Case lifecycle 均不得修改。Phase 1 的
+`integration/e2e01-thin` 记录保持历史原文；Phase 2 mapping 不声明 branch
+protection 已配置，因为 `integration/e2e01-cycle2` 当前尚不存在。
 
 ## 3. Blocking decisions before Plan approval
 
@@ -91,13 +109,19 @@ Phase 1。推荐：
    命名为 `B_C2_PLAN_APPROVED`。
 3. 先在独立 owner-alignment branch 执行并 review `02-00`，其合并到 `main`
    的 exact successor 命名为 `B_C2_OWNER_ALIGNED`。
-4. 用户批准 implementation Task Packet / Wave 时，才从 exact
-   `B_C2_OWNER_ALIGNED` 创建 `integration/e2e01-cycle2`。
-5. `B_C2_START` 等于创建时该 integration branch 的 exact head/tree。
-6. 后续 Packet 不共享一个陈旧 base；每个 Wave 从已 reviewed、已串行 merge 的最新
+4. Gate P2-C 的 branch activation 操作才可从 exact `B_C2_OWNER_ALIGNED`
+   创建 `integration/e2e01-cycle2`。
+5. 创建后立即读取并冻结 integration branch 的 exact head / tree 为
+   `B_C2_START`；它必须与 `B_C2_OWNER_ALIGNED` 的 SHA / tree 相同，并且是
+   Phase 2 initial implementation base。
+6. 只有第 5 步的 equality preflight 通过后，才可创建首个代码 feature
+   branch / Worktree 或写功能代码。
+7. 后续 Packet 不共享一个陈旧 base；每个 Wave 从已 reviewed、已串行 merge 的最新
    barrier 单独冻结 `base_sha`。
 
-该建议当前未获用户批准，不能写入 Task Packet 或创建分支。
+该建议当前未获 Gate P2-A 用户批准。`.planning/config.json` 的 Phase 2 branch
+mapping 只是 reserved governance mapping，不证明分支存在，也不授权 Task Packet、
+branch activation 或代码执行。
 
 ### `C2-BLOCK-02` — Eval model script path
 
@@ -466,7 +490,7 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 
 | Wave | Ready slots | Concurrency | Merge order / exit barrier |
 |---|---|---:|---|
-| `W0` | `02-00` | 1 | zero-code owner correction；形成 `B_C2_OWNER_ALIGNED`，随后才可冻结 `B_C2_START` |
+| `W0` | `02-00` | 1 | zero-code owner correction；形成 `B_C2_OWNER_ALIGNED`；不创建 integration branch 或 `B_C2_START` |
 | `W1` | `02-01, 02-02, 02-03` | max 2 | serial review/merge；形成 `B_C2_CORE_123` |
 | `W2` | `02-04` | 1 | `B_C2_TOOL` |
 | `W3` | `02-05` | 1 | `B_C2_APP_CONTRACT` |
@@ -482,6 +506,10 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 
 ```text
 W0 scoped-owner path correction (zero feature code)
+  ↓
+P2-C branch activation:
+create integration/e2e01-cycle2 from B_C2_OWNER_ALIGNED
+and freeze equal SHA/tree as B_C2_START
   ↓
 W1 Core contracts
   ↓
@@ -740,7 +768,8 @@ barrier 与 release。
 P2-A 通过后才准备。用户需逐项或整组批准：
 
 - 每个 GSD Plan / Task Packet的一对一映射；
-- exact initial base / branch / Worktree；
+- exact `B_C2_OWNER_ALIGNED` SHA / tree，并批准它作为唯一允许的
+  `B_C2_START / initial implementation base` 值；branch / Worktree identity；
 - allowlist / forbidden files；
 - verification、security、Eval、rollback；
 - Wave dispatch 上限。
@@ -755,12 +784,20 @@ AND C2-BLOCK-01 approved
 AND 02-00 reviewed + merged
 AND B_C2_OWNER_ALIGNED exact SHA/tree frozen
 AND all launchable Plan/Task Packet pairs exact-head reviewed
-AND initial implementation base frozen
-AND user approves Wave + concurrency
+AND user approves branch activation + Wave + concurrency
 ```
 
-才允许创建 `integration/e2e01-cycle2` 与首个 Wave 的代码 Worktree / feature branch。
-Gate P2-C 前不存在任何隐含实现授权。
+以上是 Gate P2-C 的输入条件。Gate P2-C 只按以下顺序激活：
+
+1. 从 exact `B_C2_OWNER_ALIGNED` 创建 `integration/e2e01-cycle2`；
+2. 立即证明新 branch 的 exact head / tree 与 `B_C2_OWNER_ALIGNED` 相同，并冻结为
+   `B_C2_START = initial implementation base`；
+3. equality preflight 通过后，才允许为已批准的首个 Wave 创建代码 Worktree /
+   feature branch并写功能代码。
+
+Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败时立即把
+错误 branch 标记为不可用并停止，由 Integrator 提交精确 remediation / 用户裁决，
+不得继续第 3 步。
 
 ## 14. Plan acceptance criteria
 
@@ -774,10 +811,14 @@ Gate P2-C 前不存在任何隐含实现授权。
 - [ ] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [ ] same-wave proposed file intersection为零。
 - [ ] single-writer hotspots唯一。
+- [ ] `.planning/config.json`、`.planning/GOVERNANCE.md`、Project / Roadmap /
+      State 的 Phase 2 reserved branch mapping一致，且没有改写 Phase 1 历史
+      branch 证据。
 - [ ] threat model覆盖 owner scope、binding、freshness、retry、migration、
       obsolete Run、disclosure、Eval lifecycle / evidence 与 read-only
       Action hard prohibition。
 - [ ] independent exact-head Plan review为 `PASS`。
-- [ ] planning PR只包含获批 planning artifacts与必要状态索引，无源码、测试、
-      migration、Eval artifact或 Case lifecycle mutation。
+- [ ] planning PR只包含获批 planning artifacts、Phase 2 branch
+      governance / config 与必要状态索引，无源码、测试、migration、Eval artifact
+      或 Case lifecycle mutation。
 - [ ] planning PR合并后才准备 exact GSD Plan / Task Packet set。

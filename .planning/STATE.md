@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "not_started"
-status: "phase_2_contract_active_ready_for_planning"
+current_plan: "master_plan_review_draft"
+status: "phase_2_master_plan_governance_alignment_review_pending"
 last_updated: "2026-07-31"
-last_activity: "2026-07-31 — Phase 2 owner alignment已由PR #201合并；scoped contract独立Activation后进入READY_FOR_PLANNING"
+last_activity: "2026-07-31 — Phase 2 master Plan已按1 BLOCK + 1 HIGH修订base chain与phase-aware branch governance，等待final exact-head review"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -27,44 +27,53 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** Phase 2 scoped contract 已激活；下一步是只读依赖 / ownership /
-risk map 与受控 Plan
+**Current focus:** Phase 2 scoped contract 已激活；master Plan 与 branch governance
+修订完成，等待 final exact-head review 和 Gate P2-A
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: not_started
+Current Plan: master_plan_review_draft
 Total Phases: 6
 Total Plans in Phase: 0
-Status: Phase 2 contract active / ready for planning / implementation not started
+Status: Phase 2 master Plan review draft / governance alignment review pending / implementation not started
 Last Activity: 2026-07-31
-Last Activity Description: Phase 1 release保持完成；Phase 2 owner alignment与scoped contract activation完成，Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 planning not started；1/6 phases
+Last Activity Description: Phase 1 release保持完成；Phase 2 master Plan已按review修订base chain与branch mapping，Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 master Plan review draft；exact Task Packet 0/19；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `NOT_STARTED`
-Status: `CONTRACT_ACTIVE / READY_FOR_PLANNING / IMPLEMENTATION_NOT_STARTED`
-Last activity: 2026-07-31 — owner-alignment PR #201 squash merge为`9ee260f12a82b706269f8a62c460c781c64f1f47`；scoped contract Activation 独立完成
-Progress: Phase 1 100% complete；Phase 2 仅 contract active；milestone 1/6 phases
+Plan: `MASTER_PLAN_REVIEW_DRAFT / 19 PROPOSED SLOTS / 0 EXACT TASK PACKETS`
+Status: `CONTRACT_ACTIVE / GATE_P2_A_NOT_APPROVED / IMPLEMENTATION_NOT_STARTED`
+Last activity: 2026-07-31 — master Plan review发现的 initial-base BLOCK 与 branch-governance HIGH 已定向修订，等待 final exact-head review
+Progress: Phase 1 100% complete；Phase 2 master planning review；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 只读完成 Phase 2 dependency / ownership / risk map，不创建功能代码。
-2. 在 dedicated planning-status Worktree 单写 Plan；冻结 exact base、allowlist、forbidden
-   files、验证、安全、Eval、rollback 与 handoff 后再进行独立 review。
-3. 用户批准 Plan / Task Packet / Wave 前，不创建代码 Worktree 或 feature branch。
-4. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
+1. 对 planning / governance revision commit 进行 final exact-head 独立 review。
+2. review通过后由用户决定 Gate P2-A；批准并合并 planning PR 后才进入 Gate P2-B。
+3. Gate P2-B 先准备并审批 exact Plan / Task Packet；`02-00` merge形成
+   `B_C2_OWNER_ALIGNED` 后，Gate P2-C 才能创建
+   `integration/e2e01-cycle2` 并冻结相同 SHA / tree 为 `B_C2_START`。
+4. `B_C2_START` equality preflight 与用户批准前，不创建代码 Worktree /
+   feature branch，不写 Phase 2 产品代码。
+5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
 
 - `.planning/`是派生执行层；canonical owner保持在active docs。Roadmap / Requirements / State不能自行推进Case lifecycle。
 - Stock `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`gsd-ship`与自动lifecycle mutation仍禁用。
 - 一个GSD Plan对应一个精确Task Packet；Packet不跨repository、branch、Worktree、writer或ownership boundary。
+- Phase 1 `integration/e2e01-thin` 只保留历史 release 证据；Phase 2 reserved
+  mapping 为 `integration/e2e01-cycle2`，当前 `NOT_CREATED`。
+- Phase 2 base chain 固定为
+  `B_C2_PLAN_APPROVED → B_C2_OWNER_ALIGNED → integration/e2e01-cycle2@B_C2_START`；
+  `B_C2_START` 必须与 `B_C2_OWNER_ALIGNED` 的 SHA / tree 相同并作为 initial
+  implementation base。
 - 01-07D / 01-07H已从共同`B_CG`执行并串行形成`B_DH = 4a7e802e8aebc54e0582a1e4d99f140b56e7b131`；D只拥有Thin Slice exact mapping，H只拥有Core/Order additive representation。
 - 01-07N以`p0-ru-v2-cutover-r1`关闭旧E/F同base授权的合同缺口；它不实现Core、codec、migration或active routing。
 - 01-07O建立唯一、可机械解析的execution map；PR #107随后把J preflight确认的Y/Z/AA纳入r2 map并将目标分母从39修正为42。旧39分母只保留为历史快照，不是当前目标。
@@ -102,7 +111,10 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / MAIN_RELEASE`: PR #199 exact-head review为`PASS`，已squash merge到`main`，merge SHA `f15320e3c98a408727b1488db5a5c7f0a7a57931`。
 - `CONFIRMED / PHASE2_OWNER_ALIGNMENT`: PR #201 exact-head review为`PASS`，squash merge SHA为`9ee260f12a82b706269f8a62c460c781c64f1f47`。
 - `CONFIRMED / PHASE2_CONTRACT_ACTIVE`: Cycle 2 scoped contract只授权 planning；四个 Case仍为`CONTRACT_DEFINED`，实现与证据均未开始。
-- `OPEN`: Phase 2 Plan / Task Packet / implementation；Phase 3–6 scoped implementation owner。
+- `OPEN / PHASE2_MASTER_PLAN_REVIEW`: 19-slot / W0–W12 master Plan仍为
+  `PLAN_REVIEW_DRAFT`；Gate P2-A未批准，planning PR未合并。
+- `OPEN`: Phase 2 exact Task Packet / `B_C2_OWNER_ALIGNED` / `B_C2_START` /
+  implementation；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
 
@@ -111,5 +123,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-07-31
-Stopped At: Phase 2 scoped contract active；ready for dependency / ownership / risk map 与 Plan
-Resume File: [../docs/implementation/e2e01-cycle2-implementation-spec.md](../docs/implementation/e2e01-cycle2-implementation-spec.md)
+Stopped At: Phase 2 master Plan / governance revision complete；awaiting final exact-head review and Gate P2-A
+Resume File: [../docs/implementation/e2e01-cycle2-multi-agent-plan.md](../docs/implementation/e2e01-cycle2-multi-agent-plan.md)
