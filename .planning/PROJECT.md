@@ -15,11 +15,10 @@
 - 第一最薄切片契约：[E2E-01 Thin Slice Implementation Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md)。
 - Cycle 2 scoped 契约：[E2E-01 Cycle 2 Implementation Spec](../docs/implementation/e2e01-cycle2-implementation-spec.md)。
 - Phase 1 已完成的 historical Task Packet、ownership 与集成顺序：[Codex 多 Agent 实施计划](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
-- Phase 2 当前 Task Packet：`02-00/02-01/02-03 COMPLETE`；历史
-  `B_C2_W1A` 已形成。PR #212 修复其 02-03 test-only full-gate regression 并形成
-  `B_C2_W1_GATE_REPAIRED`；PR #213 已将 `02-02` exact Packet 重新冻结到 repaired
-  base。当前四份派生状态索引已形成同一 exact alignment candidate；只有该 candidate
-  取得独立 `PASS` 并合入 integration 后，才允许创建 r2 实现分支。
+- Phase 2 当前 Task Packet：`02-00/01/02/03 COMPLETE`。PR #214 完成 repaired
+  status alignment；PR #215 的 02-02 feature / overlay 均经全新任务审阅为 `PASS` 并
+  merge 为 `B_C2_CORE_123 = 241cf6b...`。W1 已完整关闭；当前只签发 W2 `02-04`
+  exact Plan/Packet 与执行卡，planning review `PASS`/merge 前不创建实现分支。
 - GSD 派生层治理：[GOVERNANCE.md](GOVERNANCE.md)；激活证据：[ACTIVATION.md](ACTIVATION.md)。
 
 ## Core Value
@@ -38,9 +37,10 @@
   master Plan 已由 PR #203 批准并合并；PR #204 合并 `02-00` planning provenance，
   PR #205 完成零代码 path correction 并形成 exact `B_C2_OWNER_ALIGNED`。PR #207 /
   #208 已 reviewed 串行合入并形成历史 `B_C2_W1A`；PR #212/#213 已依次完成
-  full-gate repair 与 `02-02` exact Packet refreeze。旧 `ecfad7e...` 实现 head 仅是
-  quarantined、不可发布的未审阅证据；本 dedicated status alignment exact candidate
-  必须 `PASS`/merge，之后才从 repaired base 创建 r2 实现 branch/Worktree。
+  full-gate repair 与 `02-02` exact Packet refreeze，PR #214 完成四状态文件 alignment，
+  PR #215 完成 02-02 r2 implementation / review / overlay merge。旧 `ecfad7e...` 实现
+  head 保持 quarantined；W2 产品实现必须等本 six-file planning candidate 经全新任务
+  `PASS` 并合入后，仍从 exact `B_C2_CORE_123` 创建。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
@@ -62,12 +62,16 @@
   `B_C2_TRACE = 985564d...` 与历史 `B_C2_W1A = b5de7f4...`。PR #212 reviewed
   merge 形成当前产品实现 base `B_C2_W1_GATE_REPAIRED = 015c1e8...`、tree
   `26b71d2...`；PR #213 reviewed merge `fedd2d1...` 只推进 refreeze planning
-  provenance，不替换该 repaired product base。
+  provenance，不替换该 repaired product base。PR #214 status alignment merge
+  `2aec3663...` 后，PR #215 reviewed merge 形成当前 W1 barrier
+  `B_C2_CORE_123 = 241cf6b83761f5d91da5de7719f26838e2626e26`、tree
+  `83fcbf90770ffdc30ef37e35e94169bcb9ead3b3`；canonical full 为
+  `2340 passed, 1 deselected, 12 warnings`。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 scoped owner、master Plan 与 `02-00` zero-code correction 已完成；历史 `B_C2_W1A = b5de7f4f...` 经 PR #212 修复为可执行 `B_C2_W1_GATE_REPAIRED = 015c1e8...`，PR #213 已 refreeze `02-02` Packet。当前四状态文件 alignment candidate 是 r2 dispatch 的最后 planning gate；Case仍为`CONTRACT_DEFINED`。随后 W1B、W2、W3 将依次按 review→implementation→code-review 闭环执行，W3 后停止。Phase 3–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 scoped owner、master Plan 与 `02-00` zero-code correction 已完成；W1 `02-01/02/03` 已 reviewed merge 并冻结 `B_C2_CORE_123 = 241cf6b...`，完整 gate 为`2340 passed, 1 deselected, 12 warnings`。Case仍为`CONTRACT_DEFINED`。当前进入 W2 `02-04` 的 Plan/Packet 全新任务审阅；通过后才实现并 code review，之后 W3 `02-05` 走同一闭环，W3 通过后停止。Phase 3–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## 不属于 GSD 派生层的事项
 
