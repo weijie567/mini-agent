@@ -24,6 +24,10 @@ merge 后冻结 `B_C2_CORE_123` 并关闭 W1。当前 W2 `02-04` exact Plan/Pack
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
+Phase 2 integration branch 当前已启用 PR-required、enforce-admins、linear-history、
+conversation-resolution 保护，并禁用 force-push / deletion；每个 Packet preflight
+仍须从 GitHub API 机械验证，不把一次配置视为永久事实。
+
 ## 🚧 **v0.1 GSD-only P0 execution**
 
 > `v0.1` 只是 GSD 1.38.3 parser 使用的派生 execution milestone 标识，不是产品版本、发布承诺或 canonical milestone。产品范围与生命周期仍由 active owners 拥有。

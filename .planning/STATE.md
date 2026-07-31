@@ -152,6 +152,9 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `2340 passed, 1 deselected, 12 warnings`。
 - `GATE / W2_02-04_PLANNING_REVIEW`: six-file Plan/Packet/Gate Card/status candidate
   必须由全新任务 exact-file review 至 `PASS` 并 merge；此前不创建 W2 实现分支。
+- `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
+  enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
+  disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
 - `OPEN`: `B_C2_TOOL` 与 W3 `B_C2_APP_CONTRACT`；`E2E01-02/03/05/06` Case 仍为
   `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 

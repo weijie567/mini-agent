@@ -19,6 +19,9 @@
   status alignment；PR #215 的 02-02 feature / overlay 均经全新任务审阅为 `PASS` 并
   merge 为 `B_C2_CORE_123 = 241cf6b...`。W1 已完整关闭；当前只签发 W2 `02-04`
   exact Plan/Packet 与执行卡，planning review `PASS`/merge 前不创建实现分支。
+  `integration/e2e01-cycle2` 已启用 PR-required、enforce-admins、linear-history、
+  conversation-resolution 保护，并禁用 force-push / deletion；dispatch 与 merge 前
+  仍须从 GitHub API 机械复核。
 - GSD 派生层治理：[GOVERNANCE.md](GOVERNANCE.md)；激活证据：[ACTIVATION.md](ACTIVATION.md)。
 
 ## Core Value

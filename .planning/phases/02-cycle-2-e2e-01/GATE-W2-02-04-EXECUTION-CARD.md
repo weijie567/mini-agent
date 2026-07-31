@@ -22,15 +22,18 @@
 因此无需再次请求中间批准，但必须满足：
 
 1. 本 six-file planning PR 的全新任务 exact-file review 为 `PASS`。
-2. reviewed planning PR 合并后，相对 `B_C2_CORE_123` 的累计 pre-dispatch drift
+2. GitHub `integration/e2e01-cycle2` branch protection 必须可机械读取：PR required、
+   enforce admins / linear history / conversation resolution 开启，force push / deletion
+   关闭；任一缺失即 `BLOCK`，不得用 admin bypass。
+3. reviewed planning PR 合并后，相对 `B_C2_CORE_123` 的累计 pre-dispatch drift
    只能是本 PR 的六份 `.planning/` 文件；Packet required source blobs 全部不变。
-3. 新 implementation branch/Worktree 从 exact `B_C2_CORE_123` 创建；不得从 planning
+4. 新 implementation branch/Worktree 从 exact `B_C2_CORE_123` 创建；不得从 planning
    merge successor 或其他未冻结产品 base 猜测创建。
-4. feature Draft PR 只改 Packet 四文件并运行 focused/neighbor/full gate；exact feature
+5. feature Draft PR 只改 Packet 四文件并运行 focused/neighbor/full gate；exact feature
    head 必须由全新任务 code review 至 `PASS`。
-5. feature patch 叠加到冻结 integration control head 后，exact overlay 也必须由另一
+6. feature patch 叠加到冻结 integration control head 后，exact overlay 也必须由另一
    全新任务 review 为 `PASS`，且 test-merge tree 与 reviewed overlay tree 相同。
-6. reviewed merge successor 冻结为 `B_C2_TOOL`；只有该 barrier 与完整 W2 gate 成立
+7. reviewed merge successor 冻结为 `B_C2_TOOL`；只有该 barrier 与完整 W2 gate 成立
    才签发 W3 `02-05`。
 
 任何 `BLOCK/HIGH`、未处置 `MEDIUM`、allowlist/base/tree/blob 漂移或测试失败都会暂停
