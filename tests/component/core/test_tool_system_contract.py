@@ -1288,6 +1288,94 @@ def test_cycle2_recursive_registry_comparison_accepts_exact_three_reads() -> Non
     ) == ("search_orders", "get_order", "get_shipment")
 
 
+def _cycle2_registry_model_envelope_variant(
+    layer: str,
+    bypass: str,
+) -> RegistrySnapshot:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    registration = registrations[0]
+    mappings = list(snapshot.provider_name_to_canonical_name)
+    missing_fields = {
+        "snapshot": "tool_registry_version",
+        "registration": "risk",
+        "tool-spec": "description",
+        "execution-policy": "timeout_ms",
+        "provider-binding": "canonical_tool_name",
+    }
+
+    def corrupt(model: object) -> object:
+        if bypass == "model-copy-extra":
+            malformed = model.model_copy(update={"unexpected_field": "unexpected"})
+            assert "unexpected_field" in malformed.__dict__
+            return malformed
+        raw = dict(model.__dict__)
+        if bypass == "model-construct-missing":
+            raw.pop(missing_fields[layer])
+            malformed = type(model).model_construct(**raw)
+            assert missing_fields[layer] not in malformed.__dict__
+            return malformed
+        malformed = type(model).model_construct(**raw)
+        object.__setattr__(
+            malformed,
+            "__pydantic_extra__",
+            {"unexpected_field": "unexpected"},
+        )
+        assert malformed.__pydantic_extra__ == {
+            "unexpected_field": "unexpected"
+        }
+        return malformed
+
+    if layer == "snapshot":
+        return corrupt(snapshot)
+    if layer == "registration":
+        registrations[0] = corrupt(registration)
+    elif layer == "tool-spec":
+        registrations[0] = registration.model_copy(
+            update={"tool_spec": corrupt(registration.tool_spec)}
+        )
+    elif layer == "execution-policy":
+        registrations[0] = registration.model_copy(
+            update={"execution_policy": corrupt(registration.execution_policy)}
+        )
+    else:
+        mappings[0] = corrupt(mappings[0])
+        return snapshot.model_copy(
+            update={"provider_name_to_canonical_name": tuple(mappings)}
+        )
+    return snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        "snapshot",
+        "registration",
+        "tool-spec",
+        "execution-policy",
+        "provider-binding",
+    ],
+)
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        "model-copy-extra",
+        "model-construct-extra",
+        "model-construct-missing",
+    ],
+)
+def test_cycle2_registry_validator_rejects_open_model_envelopes(
+    layer: str,
+    bypass: str,
+) -> None:
+    malformed = _cycle2_registry_model_envelope_variant(layer, bypass)
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
 def _retry_revalidation(
     *,
     remaining_run_time_budget_ms: int = 500,

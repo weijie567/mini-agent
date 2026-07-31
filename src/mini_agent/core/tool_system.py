@@ -1775,37 +1775,17 @@ def validate_cycle2_registry_snapshot(
         private_policies_exact = cycle2_registry_private_policies_are_raw_exact(
             snapshot
         )
-        raw_snapshot_exact = (
-            _cycle2_raw_value_is_exact(
-                snapshot.tool_registry_version,
-                expected.tool_registry_version,
-            )
-            and _cycle2_raw_value_is_exact(
-                snapshot.canonical_registrations,
-                expected.canonical_registrations,
-            )
-            and _cycle2_raw_value_is_exact(
-                snapshot.provider_visible_toolset,
-                expected.provider_visible_toolset,
-            )
-            and _cycle2_raw_value_is_exact(
-                snapshot.provider_name_to_canonical_name,
-                expected.provider_name_to_canonical_name,
-            )
-            and _cycle2_raw_value_is_exact(
-                snapshot.model_visible_toolset_hash,
-                expected.model_visible_toolset_hash,
-            )
-        )
+        raw_snapshot_exact = _cycle2_raw_value_is_exact(snapshot, expected)
     except (AttributeError, TypeError, ValueError):
         raise ValueError(
             "snapshot does not match the exact Cycle 2 registry"
         ) from None
+    if not raw_snapshot_exact:
+        raise ValueError("snapshot does not match the exact Cycle 2 registry")
     if (
         snapshot.tool_registry_version != expected.tool_registry_version
         or len(actual_registrations) != len(snapshot.canonical_registrations)
         or not private_policies_exact
-        or not raw_snapshot_exact
         or actual_registrations != expected_registrations
         or snapshot.provider_visible_toolset != expected.provider_visible_toolset
         or snapshot.provider_name_to_canonical_name
@@ -1823,11 +1803,11 @@ def _cycle2_raw_value_is_exact(actual: object, expected: object) -> bool:
     if type(actual) is not type(expected):
         return False
     if isinstance(expected, BaseModel):
+        if not _cycle2_model_envelope_is_raw_closed(actual, expected):
+            return False
         field_names = tuple(type(expected).model_fields)
         return all(
-            field_name in actual.__dict__
-            and field_name in expected.__dict__
-            and _cycle2_raw_value_is_exact(
+            _cycle2_raw_value_is_exact(
                 actual.__dict__[field_name],
                 expected.__dict__[field_name],
             )
@@ -1864,6 +1844,34 @@ def _cycle2_raw_value_is_exact(actual: object, expected: object) -> bool:
             for actual_item, expected_item in zip(actual, expected, strict=True)
         )
     return actual == expected
+
+
+def _cycle2_model_envelope_is_raw_closed(
+    actual: object,
+    expected: object,
+) -> bool:
+    """Require exactly declared payload fields and no Pydantic extras."""
+
+    if type(actual) is not type(expected) or not isinstance(expected, BaseModel):
+        return False
+    declared_fields = frozenset(type(expected).model_fields)
+    if (
+        type(actual.__dict__) is not dict
+        or type(expected.__dict__) is not dict
+        or frozenset(actual.__dict__) != declared_fields
+        or frozenset(expected.__dict__) != declared_fields
+    ):
+        return False
+    actual_extra = actual.__pydantic_extra__
+    expected_extra = expected.__pydantic_extra__
+    if actual_extra is None or expected_extra is None:
+        return actual_extra is None and expected_extra is None
+    return (
+        type(actual_extra) is dict
+        and type(expected_extra) is dict
+        and not actual_extra
+        and not expected_extra
+    )
 
 
 def _cycle2_registration_private_policy_is_exact(
@@ -1934,7 +1942,8 @@ def cycle2_registry_precoercion_contract_is_raw_exact(
     }
     try:
         if (
-            type(snapshot.canonical_registrations) is not tuple
+            not _cycle2_model_envelope_is_raw_closed(snapshot, expected)
+            or type(snapshot.canonical_registrations) is not tuple
             or len(snapshot.canonical_registrations) != len(expected_registrations)
             or not _cycle2_raw_value_is_exact(
                 snapshot.tool_registry_version,
@@ -1963,7 +1972,11 @@ def cycle2_registry_precoercion_contract_is_raw_exact(
             if expected_registration is None:
                 return False
             if not (
-                _cycle2_raw_value_is_exact(
+                _cycle2_model_envelope_is_raw_closed(
+                    registration,
+                    expected_registration,
+                )
+                and _cycle2_raw_value_is_exact(
                     registration.tool_spec,
                     expected_registration.tool_spec,
                 )
