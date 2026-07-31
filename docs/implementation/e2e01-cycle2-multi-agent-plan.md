@@ -80,7 +80,7 @@ contract change。
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
 | Future GSD Plans | `02-00 COMPLETE / 02-01+02-03 EXACT PROPOSAL / 02-02+02-04..18 NOT_CREATED` |
-| Task Packets | `02-00 APPROVED+EXECUTED / 02-01+02-03 REVIEWED EXACT PROPOSAL / 02-02 BLOCKED UNTIL B_C2_W1A` |
+| Task Packets | `02-00 APPROVED+EXECUTED / 02-01 REVIEWED EXACT PROPOSAL / 02-03 R1-FIXED+FINAL-REVIEW-PENDING / 02-02 BLOCKED UNTIL B_C2_W1A` |
 | Proposed Plan / Packet slots / Waves | `19 / 13`（`02-00..18` / `W0..W12`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
@@ -250,17 +250,21 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 ### `02-03` — Run / Trace v2 contract
 
 - **Owner:** Runtime Engineer / Core Runtime consumer.
-- **Goal:** 冻结 `SUPERSEDED`、新增 stop reasons 与 Run / Trace terminal closed
-  matrix；shared `TraceEvent` structure 不变。Run/Link persistence、conditional
-  no-result writer 与 finalizer 留给后续 Packet。
+- **Goal:** 以与 active v1 models 分离、尚未接入 codec / registry / runtime 的 v2
+  Core types 冻结 `SUPERSEDED`、新增 stop reasons 与 Run / Trace terminal closed
+  matrix；v1 / v2 shared `TraceEvent` structure 相同，active v1 types 与 binding
+  不变。Run/Link persistence、atomic cutover、conditional no-result writer 与 finalizer
+  留给后续 Packet。
 - **Proposed files:**
   - `src/mini_agent/core/trace.py`
   - `tests/component/core/test_cycle2_trace_contract.py`（new）
 - **Depends on:** exact `B_C2_START`；可与 `02-01` 首批并行，并按固定顺序先
   reviewed merge 为 `B_C2_TRACE`。
-- **Acceptance:** Core 可机械证明 `SUPERSEDED` exact terminal matrix、audit-only
-  `RunStopped` 组合、unknown / contradictory reason fail closed，且本 Packet 不创建
-  `AgentRunResult` representation；跨 record 的 Agent result / Message /
+- **Acceptance:** Core 可机械证明隔离的 v2 `SUPERSEDED` exact terminal matrix、
+  audit-only `RunStopped` 组合、unknown / contradictory reason fail closed；active v1
+  models 继续拒绝 v2-only values，v1 persistence encoder 对 v2 model 以 exact
+  source-model mismatch fail closed，且本 Packet 不创建 `AgentRunResult`
+  representation；跨 record 的 Agent result / Message /
   ResponseRendered / Task / RequestUnit write suppression 是后续 `02-05/09`
   consumer acceptance。ordinary Trace 只允许 exact safe whitelist，明确拒绝 raw
   customer / session scope、业务 payload、candidate summary、source-version token、
@@ -590,7 +594,7 @@ dependency 尚未形成时，该 slot 在 Task Packet freeze 前自动变为 `BL
 | `R07` | `07,08,12,14` |
 | `R08` | `01,04,07,08,14` |
 | `R09` | `01,02,07,11,14` |
-| `R10` | `02,09,12,14` |
+| `R10` | `01,02,09,12,14` |
 | `R11` | `01,02,12,14` |
 | `R12` | `04,05,09,11,14` |
 | `R13` | `04,07,09,12,14` |
@@ -603,8 +607,8 @@ dependency 尚未形成时，该 slot 在 Task Packet freeze 前自动变为 `BL
 | Case | Slots |
 |---|---|
 | `E2E01-02` | `01,07,08,12,13,14,15,16,17,18` |
-| `E2E01-03` | `02,08,11,12,13,14,15,16,17,18` |
-| `E2E01-05` | `04,07,08,12,13,14,15,16,17,18` |
+| `E2E01-03` | `01,02,03,08,11,12,13,14,15,16,17,18` |
+| `E2E01-05` | `01,03,04,07,08,12,13,14,15,16,17,18` |
 | `E2E01-06` | `01,02,03,04,07,09,11,12,13,14,15,16,17,18` |
 
 | Frozen decision | Slots |
@@ -799,7 +803,7 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / 02-00 COMPLETE / 02-01+02-03 EXACT / 02-02 WAITING`。
+状态：`IN_PROGRESS / 02-00 COMPLETE / 02-01 EXACT / 02-03 R1-FIXED+FINAL-REVIEW-PENDING / 02-02 WAITING`。
 P2-A 通过后按真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造
 SHA。`02-00` 已完成并形成 exact `B_C2_OWNER_ALIGNED`。当前只有 `02-01` 与
 `02-03` 能从该唯一 `B_C2_START` 候选精确签发。

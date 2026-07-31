@@ -35,14 +35,16 @@
 ### `02-03` — Run / Trace v2 Core contract
 
 - Plan：[02-03-PLAN.md](02-03-PLAN.md)
-- reviewed source head：`44692b0c157d2ffb5377790762530c2234a2f8df`
-- exact Plan blob：`0ec86cc13f0cb352247521259a8e28c8fc4768a7`
+- superseded R0 source head：`44692b0c157d2ffb5377790762530c2234a2f8df`
+- revised exact Plan blob：`cbd0b16a34171fda9dced3b53c089fafe7c6fb46`
 - implementation base：`4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`
 - future branch：`codex/e2e01-cycle2-run-trace-v2-contract`（`NOT_CREATED`）
 - owned files：`trace.py` + 一个专门 component test file，详见 Packet。
-- contract disposition：实现批准的 OA-10 / stop vocabulary；不改变 shared
-  `TraceEvent` field set，不实现 Persistence、Mapper、finalizer 或 retry executor。
-- independent exact-file review：`PASS / 0 BLOCK / 0 HIGH / 0 MEDIUM / 0 LOW / 0 INFO`。
+- contract disposition：以独立、未激活的 v2 Core types 实现批准的 OA-10 / stop
+  vocabulary；active v1 types / codec binding 与 shared `TraceEvent` field set 保持不变，
+  不实现 Persistence、registry/runtime activation、Mapper、finalizer 或 retry executor。
+- independent exact-file review：R1 为 `FAIL / 1 BLOCK / 0 HIGH / 1 MEDIUM / 0 LOW / 0 INFO`；
+  本 revision 已按 R1 修正，等待新的 final exact-head review，未获 PASS 前不得执行。
 
 ## 3. 为什么本轮没有 `02-02` exact Packet
 
