@@ -320,9 +320,11 @@ Owner ruling 与 synchronization Packet 的 allowlist 不覆盖其他 active con
 
 `docs/business-capabilities.md`、`PROJECT_DIRECTION.md`、Thin Slice Spec、
 `AGENTS.md`、Eval owners、`README.md`、execution plan 与`.planning`派生状态已由
-PR #187–#196按single-writer顺序完成pre-release cross-file alignment。本owner
-最终收口不改变Case语义或lifecycle；当前release gate只剩`RTA-D01`用户确认与
-integration → `main`合并决定，完成前Phase completion transition保持锁定。
+PR #187–#196按single-writer顺序完成pre-release cross-file alignment。用户随后
+在最终 release gate 继续接受有界`RTA-D01`，reviewed release PR #199 已 squash
+merge到`main`（`f15320e3c98a408727b1488db5a5c7f0a7a57931`）。本owner最终收口
+不改变Case语义或lifecycle；Phase completion transition已解除决策锁，但Phase 2
+仍需独立scoped contract与activation。
 
 ### Cycle 2：完成 E2E-01
 

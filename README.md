@@ -13,7 +13,7 @@
 - `OfflineE2E01Composition`、real `EvalCaseSut`、PostgreSQL exact owner-scoped `EvalEvidence` reader、直接 HTTP → Runtime → PostgreSQL 离线纵向 evidence 与 credential-aware Qwen runner；
 - `B_RU_V2_CONTRACT = 5c84e0e...`、`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`、`B_01_08A = 11d6d08...` 已形成；Phase Review findings、controlled UAT、Eval / Security re-review 与 lifecycle activation 均已完成，exact security re-review barrier `22c4cfa...` 的 canonical offline gate 为 `2007 passed, 1 deselected, 12 warnings`。
 
-这表示第一最薄 scoped deterministic offline slice 已形成真实 `REGRESSION_GATE`：六个 authenticated physical Case 的全部 16 个 variants 经 `OfflineEvalHarness → HTTP → Runtime → PostgreSQL` 得到 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，并进入默认 `uv run pytest`。Controlled UAT 由获授权的 `CODEX_INTEGRATOR` 直接执行并作 scoped `PASS`，但 `end_user_uat` 为 `NOT_RUN`。当前仍没有 canonical 应用启动、真实 credentialed Qwen Baseline、hosted CI、完整 E2E-01 / P0 或 production readiness；`RTA-D01` 是否在 release gate 继续接受以及是否合并到 `main` 仍待用户裁决。
+这表示第一最薄 scoped deterministic offline slice 已形成真实 `REGRESSION_GATE`：六个 authenticated physical Case 的全部 16 个 variants 经 `OfflineEvalHarness → HTTP → Runtime → PostgreSQL` 得到 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，并进入默认 `uv run pytest`。Controlled UAT 由获授权的 `CODEX_INTEGRATOR` 直接执行并作 scoped `PASS`，但 `end_user_uat` 为 `NOT_RUN`。用户已在最终 release gate 继续接受有界的 `RTA-D01`，reviewed release PR [#199](https://github.com/weijie567/mini-agent/pull/199) 已 squash merge 到 `main`，merge SHA 为 `f15320e3c98a408727b1488db5a5c7f0a7a57931`。当前仍没有 canonical 应用启动、真实 credentialed Qwen Baseline、hosted CI、完整 E2E-01 / P0 或 production readiness。
 
 实时范围与权威边界见：
 
@@ -66,7 +66,7 @@ integration PR → main
 
 `W2-CONTRACT-FREEZE` 已通过 PR #9 合并，GSD activation 已由 [PR #10](https://github.com/weijie567/mini-agent/pull/10) 生效。RU v2 contract closure、01-08 vertical integration 与 01-08A runner 依次由 PR #149、#153、#156 与 #158 形成 reviewed barriers；Phase Review 的 CR-01 / WR-01 分别由 PR #161 / #162 修复。完整 writer、allowlist、barrier、失败 lineage 与执行顺序只以[多 Agent 实施计划](docs/implementation/e2e01-thin-slice-multi-agent-plan.md)为准；README 不维护第二套 execution map 或计数。用户已明确暂时停用 Graphify；后续不运行或引用 Graphify，也不把 freshness 作为当前或后续 barrier 门禁。Historical Runtime [PR #28](https://github.com/weijie567/mini-agent/pull/28) 与 Infra [PR #30](https://github.com/weijie567/mini-agent/pull/30) 只保留 review evidence，不 rebase / force-push。
 
-Post-execution review / fix closure、Validation、controlled UAT、Eval activation / Results / regression gate、mandatory Security re-review、execution-plan 与 `.planning` 派生状态同步均已完成。当前 release gate 只剩 `RTA-D01` 最终用户裁决，以及显式 integration → `main` PR 的合并决定；Phase completion transition在两项决定完成前保持锁定，禁止用 stock lifecycle API 自动推进 [STATE](.planning/STATE.md)、[ROADMAP](.planning/ROADMAP.md) 或 [REQUIREMENTS](.planning/REQUIREMENTS.md)。
+Post-execution review / fix closure、Validation、controlled UAT、Eval activation / Results / regression gate、mandatory Security re-review、execution-plan 与 `.planning` 派生状态同步均已完成。用户已继续接受 `RTA-D01`，Phase 1 release PR #199 已合并到 `main`；Integrator 已手工完成 [STATE](.planning/STATE.md)、[ROADMAP](.planning/ROADMAP.md) 与 [REQUIREMENTS](.planning/REQUIREMENTS.md) 的 Phase completion transition，stock lifecycle API 仍禁用。Phase 2–6 仍需各自的 scoped canonical contract 与 activation，不因 Phase 1 完成而自动启动。
 
 ## GSD
 

@@ -4,7 +4,7 @@
 状态：`ACTIVE / REGRESSION_GATE / RELEASE_DECISION_PENDING`
 适用范围：`E2E01-01`、`E2E01-04` 的首个可执行纵向切片
 
-> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划、`AGENTS.md` 与 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。当前六个 authenticated physical Case、manifest 与 loader 已原子进入 `REGRESSION_GATE`；默认 `uv run pytest` 覆盖全部 16 个 variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical 串行门禁为 `2007 passed, 1 deselected, 12 warnings`。Controlled UAT、Eval re-audit 与 mandatory Security re-review 已完成；`RTA-D01` 是否在最终 release gate 继续接受以及是否合并到 `main` 仍待用户裁决。该状态只证明本 scoped deterministic offline slice，不证明 canonical 产品启动、真实 credentialed Qwen Baseline、完整 E2E-01 / P0 或 production readiness。
+> 本文拥有第一最薄 E2E-01 的具体编码、HTTP、Fixture、持久化投影、Provider Adapter、Eval 数据与目标命令契约。本文本身不证明任何目标已经实现；实时实现状态与可复现命令分别见实施计划、`AGENTS.md` 与 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。当前六个 authenticated physical Case、manifest 与 loader 已原子进入 `REGRESSION_GATE`；默认 `uv run pytest` 覆盖全部 16 个 variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical 串行门禁为 `2007 passed, 1 deselected, 12 warnings`。Controlled UAT、Eval re-audit 与 mandatory Security re-review 已完成；用户已在最终 release gate 继续接受有界 `RTA-D01`，reviewed PR #199 已 squash merge 到 `main`（`f15320e3c98a408727b1488db5a5c7f0a7a57931`）。该状态只证明本 scoped deterministic offline slice，不证明 canonical 产品启动、真实 credentialed Qwen Baseline、完整 E2E-01 / P0 或 production readiness。
 
 ## 1. 权威边界
 
@@ -1932,4 +1932,6 @@ uv run uvicorn mini_agent.main:app --reload
 Eval / Security re-review 与 `2007 passed, 1 deselected, 12 warnings` 的串行套件
 建立可复现证据。该结论不把本节未拥有的 canonical app startup、真实 credentialed
 Qwen、hosted CI、完整 E2E-01 / P0 或 production readiness 纳入完成范围；最终
-release 仍受 `RTA-D01` 用户裁决与 integration → `main` 合并决定约束。
+Phase 1 release gate 已由用户继续接受 `RTA-D01`，reviewed integration → `main`
+PR #199 已 squash merge 为 `f15320e3c98a408727b1488db5a5c7f0a7a57931`。
+这项完成状态不扩大本节的 scoped risk acceptance，也不启动后续 Action scope。
