@@ -4,15 +4,15 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-00_exact_packet_proposal"
-status: "phase_2_gate_p2b_02_00_planning"
+current_plan: "02-02_exact_packet"
+status: "phase_2_w1b_02_02_planning_review"
 last_updated: "2026-07-31"
-last_activity: "2026-07-31 — 02-00 proposal@69379df独立审阅PASS；用户审阅发现1 MEDIUM + 1 LOW，定向修订后待新exact-head复审"
+last_activity: "2026-07-31 — PR #206完成W1 planning；02-03/02-01经PR #207/#208 reviewed串行合入并形成B_C2_W1A；正在审阅02-02 exact Packet"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 0
+  total_plans: 4
+  completed_plans: 3
   percent: 17
 ---
 
@@ -27,40 +27,40 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** Phase 2 master Plan 已通过 Gate P2-A 并合并；Gate P2-B
-准备唯一当前可精确签发的 `02-00` Plan / Task Packet proposal
+**Current focus:** `02-03` 与 `02-01` 已按 approved W1 顺序 reviewed merge，真实
+`B_C2_W1A` 已形成；当前只签发并独立审阅 `02-02` exact Task Packet，审阅 PASS 后
+按用户连续执行指令开始实现。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-00_exact_packet_proposal
+Current Plan: 02-02_exact_packet
 Total Phases: 6
-Total Plans in Phase: 1
-Status: Phase 2 Gate P2-B / 02-00 exact Packet proposal / implementation not started
+Total Plans in Phase: 4
+Status: Phase 2 W1B / 02-02 exact Packet independent review
 Last Activity: 2026-07-31
-Last Activity Description: Phase 1 release保持完成；Phase 2 planning PR #203已合并，`B_C2_PLAN_APPROVED`已冻结，Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 Gate P2-B；exact Task Packet proposal 1/19、approved 0/19、executed 0/19；1/6 phases
+Last Activity Description: W1 的 02-03/02-01 已 reviewed merge；`B_C2_W1A = b5de7f4...`；02-02 尚未实现；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1B；Plan files 4/19、approved/executed 3/19、functional implementation 2/18；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00 EXACT PROPOSAL`
-Status: `CONTRACT_ACTIVE / GATE_P2_B_IN_PROGRESS / IMPLEMENTATION_NOT_STARTED`
-Last activity: 2026-07-31 — `69379df...`独立审阅已`PASS`；用户审阅发现的`1 MEDIUM + 1 LOW`正在定向关闭，修订后的新head仍需复审
-Progress: Phase 1 100% complete；Phase 2 Gate P2-B planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-03 COMPLETE / 02-02 EXACT PACKET REVIEW`
+Status: `CONTRACT_ACTIVE / W1_PARTIAL / 02-02_PLANNING_REVIEW`
+Last activity: 2026-07-31 — PR #206 合并 W1 planning；PR #207/#208 reviewed 串行合入 integration 并形成真实 `B_C2_W1A`
+Progress: Phase 1 100% complete；Phase 2 W1 2/3 implementation Packet complete；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 `02-00` exact Plan / Task Packet proposal 进行独立 exact-head review。
-2. review通过后由用户决定是否批准并合并本 Gate P2-B planning PR。
-3. 只有用户批准的 `02-00` 才能创建 owner-alignment branch / Worktree；merge形成
-   `B_C2_OWNER_ALIGNED` 后，Gate P2-C 才能创建
-   `integration/e2e01-cycle2` 并冻结相同 SHA / tree 为 `B_C2_START`。
-4. `B_C2_START` equality preflight 与用户批准前，不创建代码 Worktree /
-   feature branch，不写 Phase 2 产品代码。
+1. 对 exact `02-02` Plan/Task Packet 使用全新 Codex 窗口独立审阅至 PASS。
+2. 合并 planning PR，从 exact `B_C2_W1A` 创建 02-02 feature branch/Worktree 并实现
+   四文件 allowlist。
+3. 对 exact feature head 使用全新窗口 code review 至 PASS，latest-overlay 后串行
+   merge，冻结 `B_C2_CORE_123` 并运行完整 W1 gate。
+4. 然后按同一闭环签发/审阅/执行 W2 `02-04` 与 W3 `02-05`；W3 review PASS 后停止。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
@@ -68,8 +68,14 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `.planning/`是派生执行层；canonical owner保持在active docs。Roadmap / Requirements / State不能自行推进Case lifecycle。
 - Stock `gsd-import`、`gsd-plan-phase`、`gsd-execute-phase`、`gsd-verify-work`、`gsd-ship`与自动lifecycle mutation仍禁用。
 - 一个GSD Plan对应一个精确Task Packet；Packet不跨repository、branch、Worktree、writer或ownership boundary。
-- Phase 1 `integration/e2e01-thin` 只保留历史 release 证据；Phase 2 reserved
-  mapping 为 `integration/e2e01-cycle2`，当前 `NOT_CREATED`。
+- Phase 1 `integration/e2e01-thin` 只保留历史 release 证据；Phase 2
+  `integration/e2e01-cycle2` 已从 exact `B_C2_OWNER_ALIGNED` 创建，并已串行合入
+  reviewed 02-03/02-01。
+- `CONFIRMED / B_C2_OWNER_ALIGNED`: PR #204 merge successor
+  `74db04a938f725f1e4bbf113b23de613dbbb433e` 保存 `02-00` planning provenance；
+  PR #205 merge successor / exact owner-aligned base 为
+  `4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`，tree
+  `521ac2c7611b20683089ab41a74d07c9a2bb8fc7`。
 - Phase 2 base chain 固定为
   `B_C2_PLAN_APPROVED → B_C2_OWNER_ALIGNED → integration/e2e01-cycle2@B_C2_START`；
   `B_C2_START` 必须与 `B_C2_OWNER_ALIGNED` 的 SHA / tree 相同并作为 initial
@@ -112,16 +118,23 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / RTA-D01_RELEASE_ACCEPTANCE`: mandatory Security re-review为`235 CLOSED + 1 ACCEPTED + 0 OPEN`；用户已在最终Phase 1 release gate继续接受该有界风险。
 - `CONFIRMED / MAIN_RELEASE`: PR #199 exact-head review为`PASS`，已squash merge到`main`，merge SHA `f15320e3c98a408727b1488db5a5c7f0a7a57931`。
 - `CONFIRMED / PHASE2_OWNER_ALIGNMENT`: PR #201 exact-head review为`PASS`，squash merge SHA为`9ee260f12a82b706269f8a62c460c781c64f1f47`。
-- `CONFIRMED / PHASE2_CONTRACT_ACTIVE`: Cycle 2 scoped contract只授权 planning；四个 Case仍为`CONTRACT_DEFINED`，实现与证据均未开始。
+- `CONFIRMED / PHASE2_CONTRACT_ACTIVE`: Activation 当时只授权 planning；四个 Case
+  当前仍为 `CONTRACT_DEFINED`，但 02-03/02-01 Core contract implementation 已开始并
+  reviewed merge；不得把这两项实现误报为 Case evidence 或 lifecycle advancement。
 - `CONFIRMED / PHASE2_MASTER_PLAN_APPROVED`: 19-slot / W0–W12 master Plan 已由
   Gate P2-A 批准；planning PR #203 merge SHA 为
   `2879f5226a073051d1550fe079b4a427c1ec8cb1`。
-- `OPEN / GATE_P2_B`: `02-00` exact Task Packet 仅为 proposal；前一exact head
-  `69379df...`已获独立审阅`PASS`，但用户审阅发现`1 MEDIUM + 1 LOW`。
-  定向修订后的新head必须重新exact-head review；仍未用户批准、
-  planning merge 或执行。
-- `OPEN`: `B_C2_OWNER_ALIGNED` / `B_C2_START` / implementation；Phase 3–6
-  scoped implementation owner。
+- `CONFIRMED / C2_BLOCK_02_CLOSED`: `02-00` 已由用户批准并经 PR #204/#205
+  reviewed merge；scoped model-script path 已与 repository/loader underscore 路径对齐。
+- `CONFIRMED / B_C2_START`: `integration/e2e01-cycle2` 已从 exact owner-aligned base
+  创建为 `4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`，tree `521ac2c...`。
+- `CONFIRMED / B_C2_TRACE`: PR #207 reviewed merge `985564d86a502b4cfd44dcdb8337d553859d9322`。
+- `CONFIRMED / B_C2_W1A`: PR #208 reviewed overlay/merge
+  `b5de7f4f48404b61d9b4386c99cd2c37e744641a`，tree
+  `d1eb4d469cc0d9f41672f1e9294be3fbb18e23ec`。
+- `OPEN / 02-02_EXACT_PACKET`: dependency 已满足，当前等待独立 planning review PASS；
+  implementation branch/Worktree 尚未创建。
+- `OPEN`: `B_C2_CORE_123` 与 W2/W3；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
 
@@ -130,5 +143,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-07-31
-Stopped At: Gate P2-B 02-00 review-disposition remediation；69379df prior review PASS，new exact head awaiting independent review and user approval
-Resume File: [phases/02-cycle-2-e2e-01/02-00-PLAN.md](phases/02-cycle-2-e2e-01/02-00-PLAN.md)
+Stopped At: W1B 02-02 exact Packet independent review；implementation not started
+Resume File: [phases/02-cycle-2-e2e-01/02-02-PLAN.md](phases/02-cycle-2-e2e-01/02-02-PLAN.md)
