@@ -2,7 +2,7 @@
 
 更新日期：2026-07-31
 
-状态：`NON_NORMATIVE / READ_ONLY_RESEARCH_SNAPSHOT / P2_A_DECISION_APPLIED`
+状态：`NON_NORMATIVE / RESEARCH_MAP / P2_A_AND_02_00_DECISIONS_APPLIED / GATE_P2_C_PENDING`
 
 研究基线：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -18,9 +18,11 @@
 后续 Gate P2-A 证据：planning PR
 [#203](https://github.com/weijie567/mini-agent/pull/203) 已合并，
 `B_C2_PLAN_APPROVED = 2879f5226a073051d1550fe079b4a427c1ec8cb1`
-/ tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`。这只关闭 master Plan /
-initial-chain 决策，不代表 `02-00`、`B_C2_OWNER_ALIGNED`、`B_C2_START` 或
-实现已完成。
+/ tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`。后续 `02-00` 已由用户批准，
+planning PR #204 与 zero-code owner correction PR #205 已合并；
+`B_C2_OWNER_ALIGNED = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`
+/ tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7`。这仍不代表
+`B_C2_START`、integration branch 或功能实现已完成。
 
 ## 1. 证据口径
 
@@ -73,9 +75,12 @@ initial-chain 决策，不代表 `02-00`、`B_C2_OWNER_ALIGNED`、`B_C2_START` �
 - `NOT_FOUND`：Cycle 2 Alembic revision、Mock Shipment physical model、
   Phase 2 Eval bundle、14 longitudinal Result、13 mandatory Trajectory Result。
 - `CONFIRMED / POST-SNAPSHOT`：Phase 2 master execution Plan 已由 PR #203
-  批准并合并；Gate P2-B 当前只准备 `02-00` exact Plan / Task Packet proposal。
-- `NOT_FOUND`：已批准并执行的 `02-00` Task Packet pair、implementation
-  integration branch、代码 feature Worktree 或功能代码。
+  批准并合并；`02-00` 已经 PR #204/#205 reviewed merge 并关闭
+  `C2-BLOCK-02`。
+- `CONFIRMED`：`02-01` / `02-03` exact Plan / Task Packet proposal 已准备；
+  `02-02` 因 typed business contract dependency 等待真实 `B_C2_W1A`。
+- `NOT_FOUND`：Phase 2 implementation integration branch、代码 feature Worktree
+  或功能代码。
 - `CONFIRMED`：当前 RegistrySnapshot 只注册 `get_order`。
 - `CONFIRMED`：当前 `ReadToolExecutor.execute_get_order` 强制
   `max_attempts == 1`，没有 Cycle 2 retry surface。
@@ -272,8 +277,8 @@ Resolve integration base/branch   Resolve Eval artifact path
 
 | ID | Severity | Evidence | Risk | Mandatory mitigation |
 |---|---|---|---|---|
-| `C2-RISK-01` | BLOCK | `CONFIRMED / PARTIALLY CLOSED` | Gate P2-A 已批准并冻结 `B_C2_PLAN_APPROVED`；`02-00`、`B_C2_OWNER_ALIGNED`、integration branch / `B_C2_START` 仍未形成 | 保持 `B_C2_PLAN_APPROVED → B_C2_OWNER_ALIGNED → integration/e2e01-cycle2@B_C2_START`；代码分支不得跳过 `02-00` merge successor |
-| `C2-RISK-02` | BLOCK | `CONFIRMED` | Spec 使用 `evals/model-scripts/`，仓库/loader 使用 `evals/model_scripts/` | Task Packet 前由 scoped owner 最小裁决并 cross-file 对齐；不得由 Eval writer猜测 |
+| `C2-RISK-01` | BLOCK | `CONFIRMED / PARTIALLY CLOSED` | `B_C2_OWNER_ALIGNED` 已冻结，但 integration branch / `B_C2_START` 仍未形成 | Gate P2-C 只可从 exact owner-aligned SHA 创建 branch并证明 SHA/tree equality；失败即停 |
+| `C2-RISK-02` | BLOCK | `CLOSED / PR #205` | scoped Spec 与 repository/loader 的 model-script 目录曾不一致 | 保留 reviewed zero-code correction；后续 Eval Packet只消费 underscore 路径 |
 | `C2-RISK-03` | HIGH | `CONFIRMED` | v1→v2 转换无法唯一重建时可能伪造 attempt / terminal evidence | 全量预验证；unknown/contradictory fail closed；禁止默认值和 read-time fallback |
 | `C2-RISK-04` | HIGH | `CONFIRMED` | codec、DB constraint、reader/writer/recovery 分步激活形成 mixed active versions | 单一 cutover gate；所有 consumer ready 前不启用 v2 write |
 | `C2-RISK-05` | HIGH | `CONFIRMED` | CandidateSet、pending question、selection、target 分事务会留下悬空 capability | owner-scoped exact reader + CAS + one-transaction closure；dangling/wrong-owner/duplicate reject |
@@ -287,6 +292,7 @@ Resolve integration base/branch   Resolve Eval artifact path
 | `C2-RISK-13` | MEDIUM | `INFERRED` | 过少大 Packet 会重演 Phase 1 返工；过多临时插入会失控 | master Plan 预列完整 slots；数量变化和新 slot 都回到用户审批 |
 | `C2-RISK-14` | CRITICAL | `CONFIRMED` | 只读 Cycle 2 意外注册或触发 Action / side-effect recovery | Registry exact 等于三个 READ tools；无 confirmation、ActionPolicy、idempotency claim、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery |
 | `C2-RISK-15` | CRITICAL | `CONFIRMED` | ordinary Trace 泄露 trusted scope、业务 payload、候选摘要、source token、prompt、stack 或不必要 PII | Core exact whitelist + typed disclosure grader + HTTP / Trajectory negative evidence |
+| `C2-RISK-16` | BLOCK | `CONFIRMED` | `02-02` 的 Search/Shipment Observation 直接依赖 `02-01` 的 typed business projection；从 `B_C2_START` 独立签发会迫使复制、弱化或越权实现 | `02-01` / `02-03` 可并行；先合并 `02-03`，再 overlay/merge `02-01` 形成 `B_C2_W1A`；之后才签发 exact `02-02` |
 
 ## 7. Gate decisions and remaining blockers
 
@@ -326,10 +332,12 @@ B_C2_START
 分支已存在，也不授权创建分支、Task Packet execution、代码 Worktree 或功能代码。
 Gate P2-A 后已冻结 `B_C2_PLAN_APPROVED =
 2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree
-`d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`；当前仍不创建该分支，也不冻结
-`B_C2_OWNER_ALIGNED` 或 `B_C2_START` 的 SHA / tree。
+`d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf`；`02-00` reviewed merge 后又冻结
+`B_C2_OWNER_ALIGNED = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`
+/ tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7`。当前仍不创建 integration branch，
+也不冻结 `B_C2_START`。
 
-### 7.2 `C2-BLOCK-02`：Eval model script 目录
+### 7.2 `C2-BLOCK-02`：Eval model script 目录（已关闭）
 
 Active Cycle 2 Spec 第 9.1 节指定：
 
@@ -343,24 +351,25 @@ evals/model-scripts/e2e01-cycle2.v1.json
 evals/model_scripts/
 ```
 
-推荐裁决：把 scoped Spec 的目标路径最小更正为
-`evals/model_scripts/e2e01-cycle2.v1.json`，保留现有 package / loader 约定；在
-功能实现 Task Packet 冻结前通过 `02-00` 独立 zero-code owner-alignment
-Plan / exact Task Packet / PR 对齐。Gate P2-B 已生成 `02-00` proposal，但在
-独立 exact-head review、用户批准和 planning PR merge 前不得执行，也不得把
-proposal 当成已完成 contract correction。
+已执行裁决：保留现有 package / loader 约定，把 scoped Spec 的目标路径最小更正为
+`evals/model_scripts/e2e01-cycle2.v1.json`。用户已批准 `02-00`；planning PR #204
+与 zero-code owner correction PR #205 均已 reviewed merge，后者形成 exact
+`B_C2_OWNER_ALIGNED`。该 blocker 不再阻止 Gate P2-C。
 
 ## 8. Planning conclusions
 
 1. Phase 2 master execution Plan 已通过 Gate P2-A 与 PR #203；这不批准任一
    implementation Packet。
-2. `C2-BLOCK-01` 的 Gate P2-A 决策已完成；`C2-BLOCK-02` 仍须由获批并执行的
-   `02-00` exact Plan / Task Packet 关闭。形成 `B_C2_OWNER_ALIGNED` 前，
-   不得创建 Phase 2 integration branch 或冻结 `B_C2_START`。
+2. `C2-BLOCK-02` 已由获批并执行的 `02-00` 关闭；`B_C2_OWNER_ALIGNED` 已精确
+   冻结。Gate P2-C 用户批准和 equality preflight 前，仍不得创建 Phase 2
+   integration branch 或冻结 `B_C2_START`。
 3. 推荐把全部已知后续工作拆成 19 个一对一 GSD Plan / Task Packet slots：
    `02-00` 零代码 scoped-owner correction、`02-01..18` 实现 / lifecycle /
    verification slots；共 13 个受控 Waves（`W0..W12`），最多两个并行 writer。
 4. master Plan 批准不等于批准 Task Packet；Task Packet 批准不等于代码已经实现。
-5. 用户批准当前可签发 exact Packet、对应 Wave、initial base chain 与执行上限
+5. 当前只有 `02-01` / `02-03` 可从 owner-aligned base 精确签发；两者 reviewed
+   串行 merge 形成真实 `B_C2_W1A` 后，才可生成 `02-02` exact Packet。该内部
+   dependency refinement 不增加 slot、Wave 或并发上限。
+6. 用户批准当前可签发 exact Packet、对应 Wave、initial base chain 与执行上限
    前，不创建 implementation branch、代码 Worktree 或功能代码；未来 Packet
    必须等真实 dependency barrier 产生后逐批签发，不能预填未来 SHA。

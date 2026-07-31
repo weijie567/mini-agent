@@ -2,7 +2,7 @@
 
 更新日期：2026-07-31
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / GATE_P2_B_IN_PROGRESS / 02-00_EXACT_PACKET_PROPOSED / IMPLEMENTATION_NOT_AUTHORIZED`
+状态：`NON_NORMATIVE / PLAN_APPROVED / 02-00_COMPLETE / GATE_P2_C_APPROVAL_PENDING / IMPLEMENTATION_NOT_AUTHORIZED`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -19,8 +19,10 @@ squash merge；`B_C2_PLAN_APPROVED =
 > 本文不是任一 implementation Task Packet。本文已通过独立 exact-head review、
 > 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 现按真实 dependency barrier
 > 分批准备“一份 GSD Plan + 一个 exact Task Packet”。首份
-> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 只是 Gate
-> P2-B proposal，尚未获批或执行。
+> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 已获用户批准并
+> 由 PR #204/#205 执行完成；当前只准备 [`02-01`](../../.planning/phases/02-cycle-2-e2e-01/02-01-PLAN.md)
+> 与 [`02-03`](../../.planning/phases/02-cycle-2-e2e-01/02-03-PLAN.md) 的 exact
+> proposal。`02-02` 必须等待真实 `B_C2_W1A`，不得预填 SHA。
 >
 > 在用户进一步批准当前可签发 Task Packet、对应 Wave、initial exact
 > implementation base 与执行上限前，不创建 `integration/e2e01-cycle2`、任何
@@ -77,15 +79,16 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `02-00 PROPOSED / 02-01..18 NOT_CREATED` |
-| Task Packets | `02-00 EXACT PROPOSAL / NOT_APPROVED / NOT_EXECUTED` |
+| Future GSD Plans | `02-00 COMPLETE / 02-01+02-03 EXACT PROPOSAL / 02-02+02-04..18 NOT_CREATED` |
+| Task Packets | `02-00 APPROVED+EXECUTED / 02-01+02-03 REVIEWED EXACT PROPOSAL / 02-02 BLOCKED UNTIL B_C2_W1A` |
 | Proposed Plan / Packet slots / Waves | `19 / 13`（`02-00..18` / `W0..W12`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
-| Initial implementation base | `NOT_FROZEN`；等待 `02-00` merge successor |
+| `B_C2_OWNER_ALIGNED` | `4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
+| Initial implementation base | `NOT_FROZEN`；Gate P2-C 后必须与 `B_C2_OWNER_ALIGNED` exact equal |
 | Integration branch | `PROPOSED integration/e2e01-cycle2 / NOT_CREATED` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / RESERVED_MAPPING_ONLY` |
-| `02-00` execution branch / Worktree | `NOT_CREATED / USER APPROVAL REQUIRED` |
+| `02-00` execution | `COMPLETE / PR #204+#205 / ZERO FUNCTION CODE` |
 | Integration / code feature branches / Worktrees | `NOT_CREATED / PROHIBITED` |
 | Writer assignments | role proposed; person / Agent `NOT_FROZEN` |
 | Execution concurrency | approved ceiling `2` writers；当前 dispatch `0` |
@@ -133,28 +136,27 @@ history 均属于 Phase 1。Gate P2-A 已批准：
 7. 后续 Packet 不共享一个陈旧 base；每个 Wave 从已 reviewed、已串行 merge 的最新
    barrier 单独冻结 `base_sha`。
 
-该 base chain 已获 Gate P2-A 批准；但 `02-00`、`B_C2_OWNER_ALIGNED` 与
-`B_C2_START` 尚未完成。`.planning/config.json` 的 Phase 2 branch mapping 仍只是
-reserved governance mapping，不证明分支存在，也不授权 Task Packet execution、
-branch activation 或代码执行。
+该 base chain 已获 Gate P2-A 批准；`02-00` 已执行并形成 exact
+`B_C2_OWNER_ALIGNED = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`
+/ tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7`。`B_C2_START` 尚未形成；
+`.planning/config.json` 的 Phase 2 branch mapping 仍只是 reserved governance
+mapping，不证明分支存在，也不授权 branch activation 或代码执行。
 
 ### `C2-BLOCK-02` — Eval model script path
 
-Cycle 2 Spec 指定 `evals/model-scripts/`，当前仓库和 loader 使用
-`evals/model_scripts/`。已按批准方向准备 `02-00` 独立 zero-code contract
-correction，把 Cycle 2 路径更正为 underscore 版本。该修正必须：
+Cycle 2 Spec 曾指定 `evals/model-scripts/`，而仓库和 loader 使用
+`evals/model_scripts/`。用户已批准 `02-00` 独立 zero-code contract correction，
+并由 PR #204/#205 完成 underscore 路径对齐。该修正满足：
 
 - 只改真正受影响的 active owner / consumer；
 - 通过 cross-file impact scan 和独立 exact-file review；
 - 不创建 Eval artifact、loader、测试或 lifecycle 结果；
 - 合并后的 exact SHA 成为后续 Eval Packet dependency。
 
-当前 [`02-00` exact Plan / Task Packet
-proposal](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 仍需独立
-exact-head review、用户批准与 planning PR merge；本次准备没有修改 scoped Spec。
-
-本 Plan 使用符号 `$C2_MODEL_SCRIPTS_PATH`，在 `02-00` 合并前不把任一拼写写入
-Eval implementation allowlist。
+`02-00` planning provenance merge successor 为
+`74db04a938f725f1e4bbf113b23de613dbbb433e`；PR #205 merge successor 即
+`B_C2_OWNER_ALIGNED`。后续 Eval implementation allowlist 只消费已对齐的
+`evals/model_scripts/`，不得恢复旧拼写。
 
 ## 4. Collaboration model
 
@@ -223,7 +225,8 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
   - `src/mini_agent/core/shipment.py`（new）
   - `tests/component/core/test_order_search_contract.py`（new）
   - `tests/component/core/test_shipment_contract.py`（new）
-- **Depends on:** `B_C2_START`。
+- **Depends on:** exact `B_C2_START`；可与 `02-03` 首批并行。`02-03` 先合并后，
+  本 Packet 必须在 latest integration overlay 复验再合并并形成 `B_C2_W1A`。
 - **Acceptance:** D1/D2/D5/D6/D7 与 R02–R04/R08–R11 均有 exact typed component
   vectors；Phase 1 `GetOrder*` public shape 和 source hash 不变。
 
@@ -237,7 +240,10 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
   - `src/mini_agent/core/memory.py`
   - `tests/component/core/test_candidate_selection_contract.py`（new）
   - `tests/component/core/test_cycle2_memory_contract.py`（new）
-- **Depends on:** `B_C2_START`。
+- **Depends on:** reviewed `B_C2_W1A`，因为 `SearchOrdersObservation` 与
+  `ShipmentObservation.normalized_value` 必须直接消费 `02-01` 的 typed business
+  projections；不得复制类型、弱化为 `dict/Any`、使用 synthetic overlay 或扩大
+  allowlist。真实 barrier 形成前，本 Plan / Packet 保持 `NOT_CREATED`。
 - **Acceptance:** CandidateSet 不复制业务事实；wrong-owner、dangling、duplicate、
   stale、superseded、wrong-version 和 out-of-range 均 fail closed。
 
@@ -249,7 +255,8 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 - **Proposed files:**
   - `src/mini_agent/core/trace.py`
   - `tests/component/core/test_cycle2_trace_contract.py`（new）
-- **Depends on:** `B_C2_START`。
+- **Depends on:** exact `B_C2_START`；可与 `02-01` 首批并行，并按固定顺序先
+  reviewed merge 为 `B_C2_TRACE`。
 - **Acceptance:** obsolete Run 不产生 Agent result / Message / ResponseRendered /
   Task / RequestUnit write；unknown / contradictory reason fail closed；ordinary
   Trace 只允许 exact safe whitelist，明确拒绝 raw customer / session scope、业务
@@ -510,7 +517,7 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 | Wave | Ready slots | Concurrency | Merge order / exit barrier |
 |---|---|---:|---|
 | `W0` | `02-00` | 1 | zero-code owner correction；形成 `B_C2_OWNER_ALIGNED`；不创建 integration branch 或 `B_C2_START` |
-| `W1` | `02-01, 02-02, 02-03` | max 2 | serial review/merge；形成 `B_C2_CORE_123` |
+| `W1` | `02-01, 02-02, 02-03` | max 2 | 先并行 `02-01 + 02-03`；`02-03` 先 merge → `B_C2_TRACE`；`02-01` overlay/merge → `B_C2_W1A`；再签发并执行 exact `02-02` → `B_C2_CORE_123` |
 | `W2` | `02-04` | 1 | `B_C2_TOOL` |
 | `W3` | `02-05` | 1 | `B_C2_APP_CONTRACT` |
 | `W4` | `02-06, 02-08, 02-09, 02-13` | max 2 | each exact review + serial merge；形成 `B_C2_LEAVES` |
@@ -530,7 +537,11 @@ P2-C branch activation:
 create integration/e2e01-cycle2 from B_C2_OWNER_ALIGNED
 and freeze equal SHA/tree as B_C2_START
   ↓
-W1 Core contracts
+W1a `02-01` business contracts || `02-03` Run/Trace contract
+  ↓ 02-03 reviewed merge = B_C2_TRACE
+  ↓ 02-01 latest-overlay reviewed merge = B_C2_W1A
+W1b issue exact `02-02` from B_C2_W1A
+  ↓ reviewed merge = B_C2_CORE_123
   ↓
 W2 Tool / Gateway
   ↓
@@ -558,9 +569,10 @@ W12 Harness / HTTP E2E and lifecycle-valid Results
 Post-execution quality gates
 ```
 
-同一 Wave 只表示依赖允许，不表示同时启动全部 slot。Integrator 每次最多 dispatch
-两个 writer，合并始终逐个进行。任一 proposed allowlist 出现交集时，该 slot 在
-Task Packet freeze 前自动变为 `BLOCKED`。
+同一 Wave 只表示受同一个 exit barrier 管理，不表示同时启动全部 slot。W1 的
+`02-02` 具有内部真实依赖，不能与 `02-01` 同 base 启动。Integrator 每次最多
+dispatch 两个 writer，合并始终逐个进行。任一 proposed allowlist 出现交集或 typed
+dependency 尚未形成时，该 slot 在 Task Packet freeze 前自动变为 `BLOCKED`。
 
 ## 7. Requirement and decision coverage
 
@@ -784,14 +796,14 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS`。P2-A 通过后按真实 dependency barrier 分批准备；不得给尚未
-产生的 barrier 填造 SHA。当前只有 `02-00` 能以 `B_C2_PLAN_APPROVED` 为 exact
-base 签发；`02-01..18` 在各自前置 barrier 形成前继续为 `NOT_CREATED`。
+状态：`IN_PROGRESS / 02-00 COMPLETE / 02-01+02-03 EXACT / 02-02 WAITING`。
+P2-A 通过后按真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造
+SHA。`02-00` 已完成并形成 exact `B_C2_OWNER_ALIGNED`。当前只有 `02-01` 与
+`02-03` 能从该唯一 `B_C2_START` 候选精确签发。
 
-因此 Gate P2-B 分两步裁决：先批准 `02-00` 的 exact Packet；待其 reviewed merge
-真实形成 `B_C2_OWNER_ALIGNED` 后，再冻结并批准该 SHA / tree 为唯一
-`B_C2_START` 候选，同时签发当时 launchable 的下一批 Packet。前一步不得虚构后一步
-evidence。
+`02-02` 不在本轮 approval scope：它依赖 `02-01` 提供的 typed business
+projections，只有 reviewed `B_C2_W1A` 真实形成后才能生成 exact Plan / Packet 并
+返回用户批准。该顺序保留 19 slots、W0–W12 和 max concurrency 2，不新增 Wave。
 
 用户需逐项或整组批准：
 
@@ -811,7 +823,7 @@ master Plan approved + merged
 AND C2-BLOCK-01 approved
 AND 02-00 reviewed + merged
 AND B_C2_OWNER_ALIGNED exact SHA/tree frozen
-AND all launchable Plan/Task Packet pairs exact-head reviewed
+AND 02-01 and 02-03 Plan/Task Packet pairs exact-head reviewed
 AND user approves branch activation + Wave + concurrency
 ```
 
@@ -820,8 +832,12 @@ AND user approves branch activation + Wave + concurrency
 1. 从 exact `B_C2_OWNER_ALIGNED` 创建 `integration/e2e01-cycle2`；
 2. 立即证明新 branch 的 exact head / tree 与 `B_C2_OWNER_ALIGNED` 相同，并冻结为
    `B_C2_START = initial implementation base`；
-3. equality preflight 通过后，才允许为已批准的首个 Wave 创建代码 Worktree /
-   feature branch并写功能代码。
+3. equality preflight 通过后，只允许为已批准的 `02-01` / `02-03` 创建代码
+   Worktree / feature branch并写功能代码，最多两个 writer；
+4. `02-03` reviewed merge 后冻结 `B_C2_TRACE`，`02-01` latest-overlay reviewed
+   merge 后冻结 `B_C2_W1A`；
+5. `B_C2_W1A` 形成后另行准备、review并请求用户批准 exact `02-02`，不得把本次
+   Gate P2-C 批准解释为预先批准未来 `02-02`。
 
 Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败时立即把
 错误 branch 标记为不可用并停止，由 Integrator 提交精确 remediation / 用户裁决，
