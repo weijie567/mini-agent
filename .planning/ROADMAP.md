@@ -15,8 +15,10 @@
 
 P0 依照 Coverage Matrix 的 Cycle 1–4 分成六个连续 Phase。Phase 1 已完成并 release；
 Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
-`CONTRACT_ACTIVE / READY_FOR_PLANNING`，但尚未创建 Plan 或实现。Phase 3–6 在对应
-scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate mapping。
+`CONTRACT_ACTIVE / READY_FOR_PLANNING`；master Plan 已由 PR #203 合并，当前
+Gate P2-B 只存在 `02-00` exact proposal，尚无获批执行 Packet 或实现。Phase 3–6
+在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
+mapping。
 
 ## 🚧 **v0.1 GSD-only P0 execution**
 
@@ -50,7 +52,7 @@ scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与
 3. 适用 Critical failure 为零，结构化 Eval Result、Trace 与版本 manifest 可追溯；缺失证据不得以 GSD 状态代替。
 4. Exact integration head 通过 canonical 命令、独立 review、validation、适用的 Eval / Security audit 与 UAT。
 
-**Plans**: 当前磁盘49份`*-PLAN.md` artifact与24份Summary均已由Validation分类；八个numbered Plan和全部42个implementation targets完成。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review；六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。用户已继续接受有界`RTA-D01`，reviewed PR #199已squash merge到`main`（`f15320e3...`），Phase与已完成Task Packet checkbox由Integrator手工同步；historical blocked replacement rows仍保持未勾选。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
+**Plans**: Phase 1 的49份historical `*-PLAN.md` artifact与24份Summary均已由Validation分类；八个numbered Plan和全部42个implementation targets完成。当前磁盘另有一份尚未批准或执行的Phase 2 `02-00` proposal，不计入Phase 1完成数。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review；六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。用户已继续接受有界`RTA-D01`，reviewed PR #199已squash merge到`main`（`f15320e3...`），Phase与已完成Task Packet checkbox由Integrator手工同步；historical blocked replacement rows仍保持未勾选。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 Plans:
 
@@ -145,7 +147,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / MASTER_PLAN_REVIEW_DRAFT / GATE_P2_A_NOT_APPROVED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / MASTER_PLAN_APPROVED / GATE_P2_B_IN_PROGRESS / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -159,15 +161,17 @@ Plans:
 2. `E2E01-05` 与确实需要 `get_shipment` 的配对 Case 在同一可用工具集中验证。
 3. 第一版 Trajectory / E2E Baseline 依 canonical Eval owner 运行并保存结果。
 
-**Plans**: master Plan 当前提议 `19` 个一对一 Plan / Task Packet slots
-（`02-00..18`）、`W0..W12`、最大并发 `2`；仍为 `PLAN_REVIEW_DRAFT`，精确
-Task Packet 均未创建。
+**Plans**: master Plan 的 `19` 个一对一 Plan / Task Packet slots
+（`02-00..18`）、`W0..W12`、最大并发 `2` 已获 Gate P2-A 批准并由 PR #203
+合并。Gate P2-B 当前只准备可合法冻结 exact base 的 `02-00` proposal；
+`02-01..18` 等各自前置 barrier 后再签发。
 
 **Branch mapping**:
 
 ```text
 B_C2_PLAN_APPROVED
-= planning PR merge successor
+= 2879f5226a073051d1550fe079b4a427c1ec8cb1
+= planning PR #203 merge successor
 
 B_C2_OWNER_ALIGNED
 = 02-00 merge successor
@@ -183,8 +187,8 @@ B_C2_START
 
 `.planning/config.json` 中的 `integration/e2e01-cycle2` 只是 reserved mapping；
 branch 当前仍为 `NOT_CREATED`。Phase 1 的 `integration/e2e01-thin` 保留为历史
-release 证据。Gate P2-A、planning PR merge、P2-B、`02-00` 与 Gate P2-C 顺序
-完成前，不授权功能 branch / Worktree 或产品代码。
+release 证据。Gate P2-A 与 planning PR merge 已完成；P2-B、`02-00` 与 Gate
+P2-C 顺序完成前，不授权功能 branch / Worktree 或产品代码。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
@@ -263,7 +267,7 @@ release 证据。Gate P2-A、planning PR merge、P2-B、`02-00` 与 Gate P2-C �
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 0/TBD | `Not started` | - |
+| 2. 完成 E2E-01 | 0/19 | `Gate P2-B in progress；02-00 exact proposal 1/19；approved 0/19；executed 0/19` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
