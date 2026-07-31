@@ -9,7 +9,6 @@ from mini_agent.application.persistence import (
     P0PersistenceIntegrityError,
     P0RecordCode,
     encode_persistence_record,
-    encode_persistence_record_versioned,
 )
 from mini_agent.core.tool_system import ToolCallStatus
 from mini_agent.core.trace import (
@@ -538,7 +537,7 @@ def test_v2_trace_preserves_phase1_tool_lifecycle_validation() -> None:
         )
 
 
-def test_active_v1_persistence_encoders_reject_v2_source_models() -> None:
+def test_active_v1_persistence_encoder_rejects_v2_source_models() -> None:
     v2_records = (
         (
             P0RecordCode.AGENT_RUN_RECORD,
@@ -561,20 +560,12 @@ def test_active_v1_persistence_encoders_reject_v2_source_models() -> None:
     )
 
     for record_code, record in v2_records:
-        for encode in (
-            lambda: encode_persistence_record(record_code, record),
-            lambda: encode_persistence_record_versioned(
-                record_code,
-                f"{record_code.value}.p0.v1",
-                record,
-            ),
-        ):
-            with pytest.raises(P0PersistenceIntegrityError) as error:
-                encode()
-            assert (
-                error.value.category
-                is P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
-            )
+        with pytest.raises(P0PersistenceIntegrityError) as error:
+            encode_persistence_record(record_code, record)
+        assert (
+            error.value.category
+            is P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+        )
 
 
 def test_active_v1_persistence_bindings_still_emit_only_v1_envelopes() -> None:
