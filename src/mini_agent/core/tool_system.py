@@ -29,6 +29,7 @@ from .common import (
     require_utc,
     thaw_json_value,
 )
+from .shipment import GetShipmentInsufficiencyCode
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 ToolName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
@@ -658,47 +659,38 @@ class ToolAttemptRecordV2(AuditOnlyModel):
         return self
 
 
-class Cycle2RetryRevalidation(RuntimePrivateModel):
-    """Typed expected/current facts used by pure retry and recovery decisions."""
+class Cycle2ToolDispatchFacts(RuntimePrivateModel):
+    """Immutable parent dispatch identity used by retry/recovery closure checks."""
 
-    expected_owner_scope_ref: NonEmptyString
-    current_owner_scope_ref: NonEmptyString
-    expected_task_id: UUID
-    current_task_id: UUID
-    expected_request_unit_id: UUID
-    current_request_unit_id: UUID
-    expected_task_state_version: Annotated[int, Field(strict=True, ge=1)]
-    current_task_state_version: Annotated[int, Field(strict=True, ge=1)]
-    expected_argument_binding_refs: Annotated[
-        tuple[UUID, ...], Field(min_length=1)
-    ]
-    current_argument_binding_refs: Annotated[
-        tuple[UUID, ...], Field(min_length=1)
-    ]
-    expected_verified_target_ref: UUID | None = None
-    current_verified_target_ref: UUID | None = None
-    remaining_run_time_budget_ms: Annotated[int, Field(strict=True, ge=0)]
+    tool_call_id: UUID
+    run_id: UUID
+    private_owner_scope_ref: NonEmptyString
+    task_id: UUID
+    request_unit_id: UUID
+    validated_task_state_version: Annotated[int, Field(strict=True, ge=1)]
+    argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    verified_target_ref: UUID | None = None
 
-    @field_validator(
-        "expected_argument_binding_refs",
-        "current_argument_binding_refs",
-    )
+    @field_validator("argument_binding_refs")
     @classmethod
     def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
         if len(value) != len(set(value)):
-            raise ValueError("retry binding refs must be unique")
+            raise ValueError("dispatch binding refs must be unique")
         return value
+
+
+class Cycle2RetryRevalidation(RuntimePrivateModel):
+    """Parent -> expected -> current closure used by pure retry decisions."""
+
+    parent_dispatch_facts: Cycle2ToolDispatchFacts
+    expected_dispatch_facts: Cycle2ToolDispatchFacts
+    current_dispatch_facts: Cycle2ToolDispatchFacts
+    remaining_run_time_budget_ms: Annotated[int, Field(strict=True, ge=0)]
 
     def current_closure_matches(self) -> bool:
         return (
-            self.expected_owner_scope_ref == self.current_owner_scope_ref
-            and self.expected_task_id == self.current_task_id
-            and self.expected_request_unit_id == self.current_request_unit_id
-            and self.expected_task_state_version == self.current_task_state_version
-            and self.expected_argument_binding_refs
-            == self.current_argument_binding_refs
-            and self.expected_verified_target_ref
-            == self.current_verified_target_ref
+            self.parent_dispatch_facts == self.expected_dispatch_facts
+            and self.expected_dispatch_facts == self.current_dispatch_facts
         )
 
 
@@ -722,8 +714,8 @@ _CYCLE2_BUSINESS_FAILURE_CODES: dict[Cycle2ToolName, frozenset[str]] = {
     Cycle2ToolName.GET_SHIPMENT: frozenset(
         {
             "NO_SHIPMENT",
-            "FACTS_INSUFFICIENT",
             "NOT_FOUND_OR_NOT_ACCESSIBLE",
+            *(code.value for code in GetShipmentInsufficiencyCode),
         }
     ),
 }
@@ -805,6 +797,7 @@ def decide_cycle2_tool_retry(
 
     if not isinstance(canonical_tool_name, Cycle2ToolName):
         raise TypeError("canonical_tool_name must be a Cycle2ToolName")
+    revalidation = Cycle2RetryRevalidation.model_validate(revalidation.model_dump())
     if type(attempt_no) is not int or attempt_no < 1:
         raise ValueError("attempt_no must be a strict positive integer")
     max_attempts = _CYCLE2_MAX_ATTEMPTS[canonical_tool_name]
@@ -902,10 +895,16 @@ class Cycle2ToolTerminalProjection(RuntimePrivateModel):
 
 def project_cycle2_tool_terminal(
     attempt: ToolAttemptRecordV2,
+    *,
+    canonical_tool_name: Cycle2ToolName,
 ) -> Cycle2ToolTerminalProjection:
     """Project only a finalized, non-retrying attempt to parent terminal fields."""
 
     validated = ToolAttemptRecordV2.model_validate(attempt.model_dump())
+    _validate_cycle2_attempt_for_tool(
+        validated,
+        canonical_tool_name=canonical_tool_name,
+    )
     if validated.outcome is None or validated.finished_at is None:
         raise ValueError("terminal projection requires a finalized attempt")
     if validated.retry_decision is ToolRetryDecision.RETRY_SCHEDULED:
@@ -940,6 +939,13 @@ def project_cycle2_tool_terminal(
     raise ValueError("unknown terminal attempt outcome")
 
 
+class ToolRecoveryDisposition(StrEnum):
+    """The only recovery-only parent terminal exceptions for Cycle 2 Reads."""
+
+    UNFINISHED_ATTEMPT_INTERRUPTED = "UNFINISHED_ATTEMPT_INTERRUPTED"
+    RETRY_SCHEDULED_STATE_INVALIDATED = "RETRY_SCHEDULED_STATE_INVALIDATED"
+
+
 class ToolCallRecordV2(AuditOnlyModel):
     """Inactive Cycle 2 parent aggregate with append-only attempt evidence."""
 
@@ -953,8 +959,10 @@ class ToolCallRecordV2(AuditOnlyModel):
     provider_tool_call_id: NonEmptyString | None = None
     canonical_tool_name: Cycle2ToolName
     tool_registry_version: Literal["e2e01-cycle2-tools.p0.v1"]
+    private_owner_scope_ref: NonEmptyString
     validated_task_state_version: Annotated[int, Field(strict=True, ge=1)]
     argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    verified_target_ref: UUID | None = None
     effect: Literal[ToolEffect.READ]
     attempt_count: Annotated[int, Field(strict=True, ge=0, le=2)]
     attempts: Annotated[tuple[ToolAttemptRecordV2, ...], Field(max_length=2)]
@@ -965,6 +973,8 @@ class ToolCallRecordV2(AuditOnlyModel):
     timeout_phase: ToolTimeoutPhase | None = None
     interruption_reason: SafeReasonCode | None = None
     result_ref: UUID | None = None
+    recovery_disposition: ToolRecoveryDisposition | None = None
+    recovery_decision_ref: UUID | None = None
 
     @field_validator("started_at", "finished_at")
     @classmethod
@@ -979,6 +989,20 @@ class ToolCallRecordV2(AuditOnlyModel):
         if len(value) != len(set(value)):
             raise ValueError("ToolCallRecordV2 binding refs must be unique")
         return value
+
+    def dispatch_facts(self) -> Cycle2ToolDispatchFacts:
+        """Return the immutable parent fields that every retry must revalidate."""
+
+        return Cycle2ToolDispatchFacts(
+            tool_call_id=self.tool_call_id,
+            run_id=self.run_id,
+            private_owner_scope_ref=self.private_owner_scope_ref,
+            task_id=self.task_id,
+            request_unit_id=self.request_unit_id,
+            validated_task_state_version=self.validated_task_state_version,
+            argument_binding_refs=self.argument_binding_refs,
+            verified_target_ref=self.verified_target_ref,
+        )
 
     @model_validator(mode="after")
     def aggregate_is_closed(self) -> Self:
@@ -1036,12 +1060,14 @@ class ToolCallRecordV2(AuditOnlyModel):
                 and self.attempt_count == 0
             )
             if self.finished_at is None:
-                raise ValueError("terminal v2 ToolCall requires finalized attempt")
+                raise ValueError("terminal v2 ToolCall requires parent finish timestamp")
             if pre_dispatch_interruption:
                 if (
                     self.interruption_reason not in _CYCLE2_INTERRUPTION_CODES
                     or self.failure_code is not None
                     or self.timeout_phase is not None
+                    or self.recovery_disposition is not None
+                    or self.recovery_decision_ref is not None
                 ):
                     raise ValueError(
                         "pre-dispatch interruption requires only a stable reason"
@@ -1049,17 +1075,62 @@ class ToolCallRecordV2(AuditOnlyModel):
             else:
                 if not self.attempts:
                     raise ValueError("terminal v2 ToolCall requires finalized attempt")
-                projection = project_cycle2_tool_terminal(self.attempts[-1])
-                if (
-                    self.status is not projection.status
-                    or self.finished_at != projection.finished_at
-                    or self.failure_code != projection.failure_code
-                    or self.timeout_phase is not projection.timeout_phase
-                    or self.interruption_reason != projection.interruption_reason
+                last = self.attempts[-1]
+                unfinished_recovery = (
+                    last.finished_at is None
+                    and self.status is ToolCallStatus.INTERRUPTED
+                    and self.interruption_reason == "PROCESS_RESTART_DETECTED"
+                    and self.recovery_disposition
+                    is ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+                    and self.recovery_decision_ref is not None
+                    and self.failure_code is None
+                    and self.timeout_phase is None
+                    and self.finished_at >= last.started_at
+                )
+                scheduled_invalidation_recovery = (
+                    last.finished_at is not None
+                    and last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
+                    and self.status is ToolCallStatus.INTERRUPTED
+                    and self.interruption_reason == "STATE_OR_BINDING_INVALIDATED"
+                    and self.recovery_disposition
+                    is ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+                    and self.recovery_decision_ref is not None
+                    and self.failure_code is None
+                    and self.timeout_phase is None
+                    and self.finished_at >= last.finished_at
+                )
+                if last.finished_at is None or (
+                    last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
                 ):
-                    raise ValueError(
-                        "ToolCall terminal fields must exactly project last attempt"
+                    if not (
+                        unfinished_recovery or scheduled_invalidation_recovery
+                    ):
+                        raise ValueError(
+                            "recovery disposition/ref does not match the approved "
+                            "terminal exception"
+                        )
+                else:
+                    if (
+                        self.recovery_disposition is not None
+                        or self.recovery_decision_ref is not None
+                    ):
+                        raise ValueError(
+                            "ordinary terminal projection cannot carry recovery metadata"
+                        )
+                    projection = project_cycle2_tool_terminal(
+                        last,
+                        canonical_tool_name=self.canonical_tool_name,
                     )
+                    if (
+                        self.status is not projection.status
+                        or self.finished_at != projection.finished_at
+                        or self.failure_code != projection.failure_code
+                        or self.timeout_phase is not projection.timeout_phase
+                        or self.interruption_reason != projection.interruption_reason
+                    ):
+                        raise ValueError(
+                            "ToolCall terminal fields must exactly project last attempt"
+                        )
             if self.status is ToolCallStatus.SUCCEEDED:
                 if self.result_ref is None:
                     raise ValueError("SUCCEEDED v2 ToolCall requires result_ref")
@@ -1076,6 +1147,8 @@ class ToolCallRecordV2(AuditOnlyModel):
                     self.timeout_phase,
                     self.interruption_reason,
                     self.result_ref,
+                    self.recovery_disposition,
+                    self.recovery_decision_ref,
                 )
             ):
                 raise ValueError("non-terminal v2 ToolCall cannot carry terminal metadata")
@@ -1097,7 +1170,7 @@ class ToolRetryRecoveryDecision(RuntimePrivateModel):
     """Pure recovery result; ``durable_cas_claimed`` is intentionally false."""
 
     tool_call_id: UUID
-    last_attempt_no: Annotated[int, Field(strict=True, ge=0, le=2)]
+    last_attempt_no: Annotated[int, Field(strict=True, ge=0)]
     decision: ToolRecoveryDecision
     stable_reason_code: SafeReasonCode
     candidate_next_attempt_no: Literal[2] | None = None
@@ -1149,6 +1222,9 @@ def decide_cycle2_tool_recovery(
     decided_at = require_utc(decided_at, field_name="decided_at")
     try:
         validated = ToolCallRecordV2.model_validate(tool_call.model_dump())
+        validated_revalidation = Cycle2RetryRevalidation.model_validate(
+            revalidation.model_dump()
+        )
     except (ValidationError, ValueError, TypeError):
         return _recovery_decision(
             tool_call_id=tool_call.tool_call_id,
@@ -1194,12 +1270,23 @@ def decide_cycle2_tool_recovery(
         and last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
         and validated.attempt_count == 1
     ):
+        if (
+            validated.dispatch_facts()
+            != validated_revalidation.parent_dispatch_facts
+        ):
+            return _recovery_decision(
+                tool_call_id=validated.tool_call_id,
+                last_attempt_no=1,
+                decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+                stable_reason_code="STATE_OR_BINDING_INVALIDATED",
+                decided_at=decided_at,
+            )
         current_retry = decide_cycle2_tool_retry(
             canonical_tool_name=validated.canonical_tool_name,
             attempt_no=last.attempt_no,
             outcome=last.outcome,
             failure_code=last.failure_code,
-            revalidation=revalidation,
+            revalidation=validated_revalidation,
         )
         if current_retry is ToolRetryDecision.RETRY_SCHEDULED:
             return _recovery_decision(

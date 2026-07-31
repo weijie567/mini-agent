@@ -9,13 +9,15 @@ from mini_agent.core.control_gateway import (
     Cycle2GatewayBudgetFacts,
     Cycle2GatewayCandidate,
     Cycle2GatewayLoadedClosure,
+    Cycle2GatewayProgressSnapshot,
+    Cycle2TargetObservationFacts,
     Cycle2ToolProgressFact,
     Cycle2VerifiedOrderTargetFacts,
     evaluate_control_gateway,
     evaluate_cycle2_control_gateway,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import ContextManifest, TokenCounts
+from mini_agent.core.memory import ContextManifest, TokenCounts, VersionedRecordRef
 from mini_agent.core.request_processing import (
     InitialRequestRoutableTaskGraphDecisionV2,
     InitialTaskIdentityAllocationV2,
@@ -219,6 +221,7 @@ def _manifest(
     run_id: UUID,
     model_call_id: UUID,
     context_manifest_id: UUID,
+    observation_refs_and_versions: tuple[VersionedRecordRef, ...] = (),
 ) -> ContextManifest:
     return ContextManifest(
         context_manifest_id=context_manifest_id,
@@ -227,6 +230,7 @@ def _manifest(
         tool_registry_version=snapshot.tool_registry_version,
         model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
         selected_message_refs=(uuid4(),),
+        observation_refs_and_versions=observation_refs_and_versions,
         redaction_policy_version="redaction-v1",
         token_counts=TokenCounts(input_tokens=None, output_tokens=None),
         assembled_at=NOW,
@@ -554,9 +558,13 @@ def _cycle2_gateway_case(
 
     target_ref = uuid4()
     verified_targets: tuple[Cycle2VerifiedOrderTargetFacts, ...] = ()
+    target_observations: tuple[Cycle2TargetObservationFacts, ...] = ()
+    manifest_observation_refs: tuple[VersionedRecordRef, ...] = ()
     candidate_refs = (binding_id,)
     candidate_target_ref = None
     if tool_name is Cycle2ToolName.GET_SHIPMENT:
+        source_observation_ref = uuid4()
+        source_observation_version = "shipment-observation-v1"
         verified_targets = (
             Cycle2VerifiedOrderTargetFacts(
                 verified_target_ref=target_ref,
@@ -566,9 +574,33 @@ def _cycle2_gateway_case(
                 request_unit_id=request_unit.request_unit_id,
                 task_state_version=task.state_version,
                 order_id="O-1001",
-                source_observation_ref=uuid4(),
+                source_observation_ref=source_observation_ref,
+                source_observation_version=source_observation_version,
                 input_binding_refs=(binding_id,),
                 superseded_by=None,
+            ),
+        )
+        target_observations = (
+            Cycle2TargetObservationFacts(
+                observation_ref=source_observation_ref,
+                observation_version=source_observation_version,
+                private_owner_scope_ref="owner-scope-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_target_ref=target_ref,
+                input_binding_refs=(binding_id,),
+                superseded_by=None,
+            ),
+        )
+        request_unit = request_unit.model_copy(
+            update={"observation_refs": (source_observation_ref,)}
+        )
+        manifest_observation_refs = (
+            VersionedRecordRef(
+                record_ref=source_observation_ref,
+                version=source_observation_version,
             ),
         )
         candidate_refs = (binding_id, target_ref)
@@ -579,6 +611,7 @@ def _cycle2_gateway_case(
         run_id=decision.closure.record.run_id,
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
+        observation_refs_and_versions=manifest_observation_refs,
     )
     candidate = Cycle2GatewayCandidate(
         run_id=decision.closure.record.run_id,
@@ -600,16 +633,30 @@ def _cycle2_gateway_case(
         current_request_unit=request_unit,
         current_input_bindings=(binding,),
         current_verified_order_targets=verified_targets,
+        current_target_observations=target_observations,
         registry_snapshot=snapshot,
         context_manifest=manifest,
         budget=Cycle2GatewayBudgetFacts(
+            run_id=decision.closure.record.run_id,
+            context_manifest_id=context_manifest_id,
+            tool_registry_version=snapshot.tool_registry_version,
+            model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+            closure_complete=True,
             tool_calls_used=0,
             max_tool_calls=3,
             active_tool_calls=0,
             accepted_parallel_tool_calls=0,
             remaining_run_time_budget_ms=1500,
         ),
-        prior_tool_steps=(),
+        progress_snapshot=Cycle2GatewayProgressSnapshot(
+            run_id=decision.closure.record.run_id,
+            context_manifest_id=context_manifest_id,
+            tool_registry_version=snapshot.tool_registry_version,
+            model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+            task_state_version=task.state_version,
+            history_complete=True,
+            prior_tool_steps=(),
+        ),
     )
     return candidate, loaded
 
@@ -667,20 +714,52 @@ def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() 
     assert rejected.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
 
     candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    source_observation_ref = uuid4()
+    source_observation_version = "shipment-observation-unrelated-v1"
+    unrelated_target_ref = uuid4()
     unrelated_target = Cycle2VerifiedOrderTargetFacts(
-        verified_target_ref=uuid4(),
+        verified_target_ref=unrelated_target_ref,
         private_owner_scope_ref="owner-scope-A",
         owner_customer_id="customer-A",
         task_id=loaded.current_task.task_id,
         request_unit_id=loaded.current_request_unit.request_unit_id,
         task_state_version=loaded.current_task.state_version,
         order_id="O-9999",
-        source_observation_ref=uuid4(),
+        source_observation_ref=source_observation_ref,
+        source_observation_version=source_observation_version,
+        input_binding_refs=(loaded.current_input_bindings[0].binding_id,),
+        superseded_by=None,
+    )
+    unrelated_observation = Cycle2TargetObservationFacts(
+        observation_ref=source_observation_ref,
+        observation_version=source_observation_version,
+        private_owner_scope_ref="owner-scope-A",
+        owner_customer_id="customer-A",
+        task_id=loaded.current_task.task_id,
+        request_unit_id=loaded.current_request_unit.request_unit_id,
+        task_state_version=loaded.current_task.state_version,
+        verified_target_ref=unrelated_target_ref,
         input_binding_refs=(loaded.current_input_bindings[0].binding_id,),
         superseded_by=None,
     )
     with_unrelated_target = loaded.model_copy(
-        update={"current_verified_order_targets": (unrelated_target,)}
+        update={
+            "current_verified_order_targets": (unrelated_target,),
+            "current_target_observations": (unrelated_observation,),
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={"observation_refs": (source_observation_ref,)}
+            ),
+            "context_manifest": loaded.context_manifest.model_copy(
+                update={
+                    "observation_refs_and_versions": (
+                        VersionedRecordRef(
+                            record_ref=source_observation_ref,
+                            version=source_observation_version,
+                        ),
+                    )
+                }
+            ),
+        }
     )
     accepted = _evaluate_cycle2(candidate, with_unrelated_target)
     assert accepted.decision is GateDecisionValue.ACCEPT
@@ -752,14 +831,28 @@ def test_cycle2_gateway_compares_loaded_facts_and_fails_closed(
     elif case == "progress":
         loaded = loaded.model_copy(
             update={
-                "prior_tool_steps": (
-                    Cycle2ToolProgressFact(
-                        canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
-                        validated_arguments={"order_id": "O-1001"},
-                        task_state_version=candidate.validated_task_state_version,
-                        argument_binding_refs=candidate.argument_binding_refs,
-                    ),
-                )
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={
+                        "prior_tool_steps": (
+                            Cycle2ToolProgressFact(
+                                run_id=candidate.run_id,
+                                context_manifest_id=candidate.context_manifest_id,
+                                tool_registry_version=(
+                                    loaded.registry_snapshot.tool_registry_version
+                                ),
+                                model_visible_toolset_hash=(
+                                    loaded.registry_snapshot.model_visible_toolset_hash
+                                ),
+                                canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+                                validated_arguments={"order_id": "O-1001"},
+                                task_state_version=(
+                                    candidate.validated_task_state_version
+                                ),
+                                argument_binding_refs=candidate.argument_binding_refs,
+                            ),
+                        )
+                    }
+                ),
             }
         )
     elif case == "target":
@@ -839,3 +932,157 @@ def test_cycle2_gateway_typed_surface_has_no_public_or_model_target_authority() 
                 "model_selected_order_id": "O-9999",
             }
         )
+
+
+@pytest.mark.parametrize("extra_name", ["not_received_claim", "product_description"])
+def test_cycle2_gateway_selects_candidate_binding_from_complete_multi_binding_closure(
+    extra_name: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    primary = loaded.current_input_bindings[0]
+    extra = Cycle2AcceptedBindingFacts(
+        binding_id=uuid4(),
+        private_owner_scope_ref=loaded.private_owner_scope_ref,
+        owner_customer_id=loaded.customer_context.customer_id,
+        task_id=loaded.current_task.task_id,
+        request_unit_id=loaded.current_request_unit.request_unit_id,
+        task_state_version=loaded.current_task.state_version,
+        name=extra_name,
+        normalized_value=("包裹还没收到" if extra_name == "not_received_claim" else "跑鞋"),
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(uuid4(),),
+        superseded_by=None,
+    )
+    loaded = loaded.model_copy(
+        update={
+            "current_input_bindings": (extra, primary),
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={"input_binding_refs": (extra.binding_id, primary.binding_id)}
+            ),
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.argument_binding_refs == candidate.argument_binding_refs
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["missing", "wrong-version", "superseded", "wrong-owner", "omitted-manifest"],
+)
+def test_cycle2_shipment_target_requires_exact_current_observation_closure(
+    drift: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    observation = loaded.current_target_observations[0]
+    if drift == "missing":
+        loaded = loaded.model_copy(update={"current_target_observations": ()})
+    elif drift == "wrong-version":
+        loaded = loaded.model_copy(
+            update={
+                "current_target_observations": (
+                    observation.model_copy(update={"observation_version": "v999"}),
+                )
+            }
+        )
+    elif drift == "superseded":
+        loaded = loaded.model_copy(
+            update={
+                "current_target_observations": (
+                    observation.model_copy(update={"superseded_by": uuid4()}),
+                )
+            }
+        )
+    elif drift == "wrong-owner":
+        loaded = loaded.model_copy(
+            update={
+                "current_target_observations": (
+                    observation.model_copy(update={"owner_customer_id": "customer-B"}),
+                )
+            }
+        )
+    else:
+        loaded = loaded.model_copy(
+            update={
+                "context_manifest": loaded.context_manifest.model_copy(
+                    update={"observation_refs_and_versions": ()}
+                )
+            }
+        )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.argument_binding_valid is False
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    ["bool-state", "bool-budget", "foreign-budget-run", "foreign-progress-run"],
+)
+def test_cycle2_gateway_strictly_reconstructs_bypassed_or_foreign_facts(
+    bypass: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    if bypass == "bool-state":
+        candidate = candidate.model_copy(update={"validated_task_state_version": True})
+    elif bypass == "bool-budget":
+        loaded = loaded.model_copy(
+            update={"budget": loaded.budget.model_copy(update={"tool_calls_used": False})}
+        )
+    elif bypass == "foreign-budget-run":
+        loaded = loaded.model_copy(
+            update={"budget": loaded.budget.model_copy(update={"run_id": uuid4()})}
+        )
+    else:
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"run_id": uuid4()}
+                )
+            }
+        )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+
+
+def test_cycle2_gateway_fails_closed_when_complete_progress_history_is_omitted() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    raw = dict(loaded.__dict__)
+    raw.pop("progress_snapshot")
+    incomplete = Cycle2GatewayLoadedClosure.model_construct(**raw)
+
+    gate = _evaluate_cycle2(candidate, incomplete)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.progress_valid is False
+
+
+def test_cycle2_gateway_fails_closed_on_model_construct_candidate_omission() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    raw = dict(candidate.__dict__)
+    raw.pop("argument_binding_refs")
+    incomplete = Cycle2GatewayCandidate.model_construct(**raw)
+
+    gate = _evaluate_cycle2(incomplete, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.schema_valid is False
+    assert gate.argument_binding_valid is False
+
+
+def test_cycle2_get_order_preserves_phase1_trim_and_case_normalization() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    candidate = candidate.model_copy(
+        update={"candidate_arguments": {"order_id": " o-1001 "}}
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.schema_valid is True
+    assert gate.argument_binding_valid is True

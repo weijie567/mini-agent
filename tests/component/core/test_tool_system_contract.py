@@ -17,6 +17,7 @@ from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
     CYCLE2_TOOL_REGISTRY_VERSION,
     Cycle2RetryRevalidation,
+    Cycle2ToolDispatchFacts,
     Cycle2ToolName,
     Cycle2ToolTerminalProjection,
     ExecutionPolicy,
@@ -33,6 +34,7 @@ from mini_agent.core.tool_system import (
     ToolEffect,
     ToolRegistration,
     ToolRecoveryDecision,
+    ToolRecoveryDisposition,
     ToolResult,
     ToolResultOutcome,
     ToolRetryDecision,
@@ -1173,24 +1175,49 @@ def _retry_revalidation(
     current_task_state_version: int = 3,
     current_binding_refs: tuple = (),
     current_verified_target_ref=None,
+    parent_tool_call: ToolCallRecordV2 | None = None,
+    current_run_id=None,
+    current_task_id=None,
+    current_request_unit_id=None,
+    current_tool_call_id=None,
 ) -> Cycle2RetryRevalidation:
-    binding_refs = current_binding_refs or (uuid4(),)
-    verified_target_ref = current_verified_target_ref or uuid4()
-    task_id = uuid4()
-    request_unit_id = uuid4()
+    if parent_tool_call is None:
+        binding_refs = current_binding_refs or (uuid4(),)
+        verified_target_ref = current_verified_target_ref or uuid4()
+        parent = Cycle2ToolDispatchFacts(
+            tool_call_id=uuid4(),
+            run_id=uuid4(),
+            private_owner_scope_ref="owner-A",
+            task_id=uuid4(),
+            request_unit_id=uuid4(),
+            validated_task_state_version=3,
+            argument_binding_refs=binding_refs,
+            verified_target_ref=verified_target_ref,
+        )
+    else:
+        parent = parent_tool_call.dispatch_facts()
+        binding_refs = current_binding_refs or parent.argument_binding_refs
+        verified_target_ref = (
+            current_verified_target_ref
+            if current_verified_target_ref is not None
+            else parent.verified_target_ref
+        )
+    current = parent.model_copy(
+        update={
+            "tool_call_id": current_tool_call_id or parent.tool_call_id,
+            "run_id": current_run_id or parent.run_id,
+            "private_owner_scope_ref": current_owner_scope_ref,
+            "task_id": current_task_id or parent.task_id,
+            "request_unit_id": current_request_unit_id or parent.request_unit_id,
+            "validated_task_state_version": current_task_state_version,
+            "argument_binding_refs": binding_refs,
+            "verified_target_ref": verified_target_ref,
+        }
+    )
     return Cycle2RetryRevalidation(
-        expected_owner_scope_ref="owner-A",
-        current_owner_scope_ref=current_owner_scope_ref,
-        expected_task_id=task_id,
-        current_task_id=task_id,
-        expected_request_unit_id=request_unit_id,
-        current_request_unit_id=request_unit_id,
-        expected_task_state_version=3,
-        current_task_state_version=current_task_state_version,
-        expected_argument_binding_refs=binding_refs,
-        current_argument_binding_refs=binding_refs,
-        expected_verified_target_ref=verified_target_ref,
-        current_verified_target_ref=verified_target_ref,
+        parent_dispatch_facts=parent,
+        expected_dispatch_facts=parent,
+        current_dispatch_facts=current,
         remaining_run_time_budget_ms=remaining_run_time_budget_ms,
     )
 
@@ -1235,8 +1262,10 @@ def _tool_call_v2_values(
         "gate_decision_id": uuid4(),
         "canonical_tool_name": canonical_tool_name,
         "tool_registry_version": CYCLE2_TOOL_REGISTRY_VERSION,
+        "private_owner_scope_ref": "owner-A",
         "validated_task_state_version": 3,
         "argument_binding_refs": (uuid4(),),
+        "verified_target_ref": uuid4(),
         "effect": ToolEffect.READ,
         "started_at": NOW,
     }
@@ -1468,7 +1497,14 @@ def test_cycle2_terminal_projection_is_exact(
         timeout_phase=timeout_phase,
         retry_decision=decision,
     )
-    projection = project_cycle2_tool_terminal(attempt)
+    projection = project_cycle2_tool_terminal(
+        attempt,
+        canonical_tool_name=(
+            Cycle2ToolName.GET_ORDER
+            if outcome is ToolResultOutcome.TIMEOUT
+            else Cycle2ToolName.SEARCH_ORDERS
+        ),
+    )
 
     assert isinstance(projection, Cycle2ToolTerminalProjection)
     assert projection.status is status
@@ -1489,7 +1525,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
     )
     assert decide_cycle2_tool_recovery(
         tool_call=created,
-        revalidation=_retry_revalidation(),
+        revalidation=_retry_revalidation(parent_tool_call=created),
         decided_at=NOW,
     ).decision is ToolRecoveryDecision.INTERRUPT_WITHOUT_ATTEMPT
 
@@ -1503,7 +1539,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
     )
     assert decide_cycle2_tool_recovery(
         tool_call=running_unfinished,
-        revalidation=_retry_revalidation(),
+        revalidation=_retry_revalidation(parent_tool_call=running_unfinished),
         decided_at=NOW,
     ).decision is ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
 
@@ -1521,7 +1557,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
     )
     append = decide_cycle2_tool_recovery(
         tool_call=before_second_fence,
-        revalidation=_retry_revalidation(),
+        revalidation=_retry_revalidation(parent_tool_call=before_second_fence),
         decided_at=NOW,
     )
     assert isinstance(append, ToolRetryRecoveryDecision)
@@ -1538,7 +1574,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
     )
     decision = decide_cycle2_tool_recovery(
         tool_call=after_second_fence,
-        revalidation=_retry_revalidation(),
+        revalidation=_retry_revalidation(parent_tool_call=after_second_fence),
         decided_at=NOW,
     )
     assert decision.decision is ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
@@ -1581,7 +1617,10 @@ def test_cycle2_recovery_revalidation_failure_terminates_without_append() -> Non
 
     decision = decide_cycle2_tool_recovery(
         tool_call=before_second_fence,
-        revalidation=_retry_revalidation(current_owner_scope_ref="owner-B"),
+        revalidation=_retry_revalidation(
+            parent_tool_call=before_second_fence,
+            current_owner_scope_ref="owner-B",
+        ),
         decided_at=NOW,
     )
 
@@ -1610,7 +1649,7 @@ def test_cycle2_recovery_already_terminal_has_no_executable_authority() -> None:
 
     decision = decide_cycle2_tool_recovery(
         tool_call=terminal,
-        revalidation=_retry_revalidation(),
+        revalidation=_retry_revalidation(parent_tool_call=terminal),
         decided_at=NOW,
     )
 
@@ -1631,3 +1670,188 @@ def test_cycle2_v2_allows_interrupted_created_call_without_fake_attempt() -> Non
     assert record.attempts == ()
     assert record.attempt_count == 0
     assert record.interruption_reason == "PROCESS_RESTART_DETECTED"
+
+
+@pytest.mark.parametrize(
+    "current_change",
+    [
+        {"current_tool_call_id": uuid4()},
+        {"current_run_id": uuid4()},
+        {"current_task_id": uuid4()},
+        {"current_request_unit_id": uuid4()},
+        {"current_verified_target_ref": uuid4()},
+        {"current_binding_refs": (uuid4(),)},
+    ],
+)
+def test_cycle2_recovery_binds_retry_to_parent_dispatch_closure(
+    current_change: dict[str, object],
+) -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=_retry_revalidation(
+            parent_tool_call=parent,
+            **current_change,
+        ),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH
+    assert decision.stable_reason_code == "STATE_OR_BINDING_INVALIDATED"
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_recovery_rejects_revalidation_for_a_different_parent() -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:
+    tool_call_id = uuid4()
+    malformed = ToolCallRecordV2.model_construct(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=3,
+        attempts=(
+            _attempt_v2(tool_call_id=tool_call_id),
+            _attempt_v2(tool_call_id=tool_call_id, attempt_no=2),
+            ToolAttemptRecordV2.model_construct(
+                tool_call_id=tool_call_id,
+                attempt_no=3,
+                started_at=NOW,
+            ),
+        ),
+        status=ToolCallStatus.RUNNING,
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.last_attempt_no == 3
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_terminal_recovery_matrix_preserves_child_attempt_evidence() -> None:
+    tool_call_id = uuid4()
+    unfinished = _attempt_v2(tool_call_id=tool_call_id)
+    unfinished_terminal = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(unfinished,),
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=NOW + timedelta(seconds=1),
+        interruption_reason="PROCESS_RESTART_DETECTED",
+        recovery_disposition=ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED,
+        recovery_decision_ref=uuid4(),
+    )
+    assert unfinished_terminal.attempts[-1].finished_at is None
+
+    scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    invalidated_terminal = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(scheduled,),
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=scheduled.finished_at + timedelta(milliseconds=1),
+        interruption_reason="STATE_OR_BINDING_INVALIDATED",
+        recovery_disposition=(
+            ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+        ),
+        recovery_decision_ref=uuid4(),
+    )
+    assert invalidated_terminal.attempts[-1].retry_decision is (
+        ToolRetryDecision.RETRY_SCHEDULED
+    )
+
+
+def test_cycle2_terminal_recovery_exceptions_require_exact_disposition_and_ref() -> None:
+    tool_call_id = uuid4()
+    unfinished = _attempt_v2(tool_call_id=tool_call_id)
+    with pytest.raises(ValidationError, match="recovery disposition"):
+        ToolCallRecordV2(
+            **_tool_call_v2_values(tool_call_id=tool_call_id),
+            attempt_count=1,
+            attempts=(unfinished,),
+            status=ToolCallStatus.INTERRUPTED,
+            finished_at=NOW + timedelta(seconds=1),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+        )
+
+
+def test_cycle2_terminal_projector_rejects_unscoped_failure_code() -> None:
+    arbitrary = _attempt_v2(
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="UNSCOPED_FAILURE_CODE",
+        retry_decision=ToolRetryDecision.NOT_RETRYABLE,
+    )
+    with pytest.raises(ValueError, match="unknown system failure"):
+        project_cycle2_tool_terminal(
+            arbitrary,
+            canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        )
+
+
+def test_cycle2_get_shipment_uses_exact_insufficiency_failure_vocabulary() -> None:
+    exact_codes = {
+        "SHIPMENT_LATEST_EVENT_MISSING",
+        "SHIPMENT_PROMISE_MISSING_FOR_ACTIVE_DELIVERY",
+        "SHIPMENT_DELIVERED_AT_MISSING",
+    }
+    for code in exact_codes:
+        assert decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            outcome=ToolResultOutcome.BUSINESS_FAILURE,
+            failure_code=code,
+            revalidation=_retry_revalidation(),
+        ) is ToolRetryDecision.NOT_RETRYABLE
+
+    with pytest.raises(ValueError, match="unknown business failure"):
+        decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            outcome=ToolResultOutcome.BUSINESS_FAILURE,
+            failure_code="FACTS_INSUFFICIENT",
+            revalidation=_retry_revalidation(),
+        )

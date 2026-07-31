@@ -8,7 +8,15 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
-from pydantic import Field, JsonValue, field_serializer, field_validator, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticSerializationError
 
 from .common import (
     RuntimePrivateModel,
@@ -32,6 +40,7 @@ from .tool_system import (
     ToolEffect,
     ToolRegistration,
     ToolSpec,
+    ToolsetHash,
     build_cycle2_registry_snapshot,
     get_order_tool_spec,
     validate_cycle2_registry_snapshot,
@@ -49,7 +58,7 @@ class Cycle2AcceptedBindingFacts(RuntimePrivateModel):
     task_id: UUID
     request_unit_id: UUID
     task_state_version: Annotated[int, Field(strict=True, ge=1)]
-    name: Literal["product_description", "order_id"]
+    name: Literal["product_description", "order_id", "not_received_claim"]
     normalized_value: Annotated[str, Field(strict=True, min_length=1)]
     authority: InputAuthority
     validation_status: Literal["ACCEPTED"] = "ACCEPTED"
@@ -70,7 +79,9 @@ class Cycle2AcceptedBindingFacts(RuntimePrivateModel):
                 self.normalized_value
             ):
                 raise ValueError("search binding must store its exact normalized value")
-        elif _ORDER_ID_PATTERN.fullmatch(self.normalized_value) is None:
+        elif self.name == "order_id" and _ORDER_ID_PATTERN.fullmatch(
+            self.normalized_value
+        ) is None:
             raise ValueError("order_id binding must be an exact normalized Order ID")
         return self
 
@@ -86,6 +97,7 @@ class Cycle2VerifiedOrderTargetFacts(RuntimePrivateModel):
     task_state_version: Annotated[int, Field(strict=True, ge=1)]
     order_id: Annotated[str, Field(strict=True, pattern=r"^O-[0-9]{4,20}$")]
     source_observation_ref: UUID
+    source_observation_version: Annotated[str, Field(strict=True, min_length=1)]
     input_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     superseded_by: UUID | None = None
 
@@ -97,7 +109,34 @@ class Cycle2VerifiedOrderTargetFacts(RuntimePrivateModel):
         return value
 
 
+class Cycle2TargetObservationFacts(RuntimePrivateModel):
+    """Current typed Observation provenance for one verified Order target."""
+
+    observation_ref: UUID
+    observation_version: Annotated[str, Field(strict=True, min_length=1)]
+    private_owner_scope_ref: Annotated[str, Field(min_length=1)]
+    owner_customer_id: Annotated[str, Field(min_length=1)]
+    task_id: UUID
+    request_unit_id: UUID
+    task_state_version: Annotated[int, Field(strict=True, ge=1)]
+    verified_target_ref: UUID
+    input_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    superseded_by: UUID | None = None
+
+    @field_validator("input_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("target Observation binding refs must be unique")
+        return value
+
+
 class Cycle2GatewayBudgetFacts(RuntimePrivateModel):
+    run_id: UUID
+    context_manifest_id: UUID
+    tool_registry_version: Literal["e2e01-cycle2-tools.p0.v1"]
+    model_visible_toolset_hash: ToolsetHash
+    closure_complete: Literal[True]
     tool_calls_used: Annotated[int, Field(strict=True, ge=0)]
     max_tool_calls: Literal[3]
     active_tool_calls: Annotated[int, Field(strict=True, ge=0)]
@@ -108,6 +147,10 @@ class Cycle2GatewayBudgetFacts(RuntimePrivateModel):
 class Cycle2ToolProgressFact(RuntimePrivateModel):
     """A prior validated step used for deterministic no-progress comparison."""
 
+    run_id: UUID
+    context_manifest_id: UUID
+    tool_registry_version: Literal["e2e01-cycle2-tools.p0.v1"]
+    model_visible_toolset_hash: ToolsetHash
     canonical_tool_name: Cycle2ToolName
     validated_arguments: Mapping[str, JsonValue]
     task_state_version: Annotated[int, Field(strict=True, ge=1)]
@@ -130,6 +173,18 @@ class Cycle2ToolProgressFact(RuntimePrivateModel):
         self, value: Mapping[str, JsonValue]
     ) -> dict[str, JsonValue]:
         return thaw_json_value(value)
+
+
+class Cycle2GatewayProgressSnapshot(RuntimePrivateModel):
+    """Complete run-bound history used by deterministic no-progress checks."""
+
+    run_id: UUID
+    context_manifest_id: UUID
+    tool_registry_version: Literal["e2e01-cycle2-tools.p0.v1"]
+    model_visible_toolset_hash: ToolsetHash
+    task_state_version: Annotated[int, Field(strict=True, ge=1)]
+    history_complete: Literal[True]
+    prior_tool_steps: tuple[Cycle2ToolProgressFact, ...]
 
 
 class Cycle2GatewayCandidate(RuntimePrivateModel):
@@ -183,11 +238,12 @@ class Cycle2GatewayLoadedClosure(RuntimePrivateModel):
     current_input_bindings: Annotated[
         tuple[Cycle2AcceptedBindingFacts, ...], Field(min_length=1)
     ]
-    current_verified_order_targets: tuple[Cycle2VerifiedOrderTargetFacts, ...] = ()
+    current_verified_order_targets: tuple[Cycle2VerifiedOrderTargetFacts, ...]
+    current_target_observations: tuple[Cycle2TargetObservationFacts, ...]
     registry_snapshot: RegistrySnapshot
     context_manifest: ContextManifest
     budget: Cycle2GatewayBudgetFacts
-    prior_tool_steps: tuple[Cycle2ToolProgressFact, ...] = ()
+    progress_snapshot: Cycle2GatewayProgressSnapshot
 
     @model_validator(mode="after")
     def loaded_fact_identities_are_unique(self) -> Self:
@@ -196,10 +252,22 @@ class Cycle2GatewayLoadedClosure(RuntimePrivateModel):
             target.verified_target_ref
             for target in self.current_verified_order_targets
         )
+        observation_ids = tuple(
+            observation.observation_ref
+            for observation in self.current_target_observations
+        )
+        observation_target_ids = tuple(
+            observation.verified_target_ref
+            for observation in self.current_target_observations
+        )
         if len(binding_ids) != len(set(binding_ids)):
             raise ValueError("loaded Cycle 2 bindings must be unique")
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("loaded Cycle 2 verified targets must be unique")
+        if len(observation_ids) != len(set(observation_ids)):
+            raise ValueError("loaded Cycle 2 target Observations must be unique")
+        if len(observation_target_ids) != len(set(observation_target_ids)):
+            raise ValueError("loaded Cycle 2 target Observation owners must be unique")
         return self
 
 
@@ -496,7 +564,14 @@ def _cycle2_schema_valid(
     if set(arguments) != {"order_id"}:
         return False
     order_id = arguments.get("order_id")
-    return type(order_id) is str and _ORDER_ID_PATTERN.fullmatch(order_id) is not None
+    if type(order_id) is not str:
+        return False
+    if tool_name is Cycle2ToolName.GET_ORDER:
+        normalized = order_id.strip()
+        if normalized[:2].casefold() == "o-":
+            normalized = f"O-{normalized[2:]}"
+        return _ORDER_ID_PATTERN.fullmatch(normalized) is not None
+    return _ORDER_ID_PATTERN.fullmatch(order_id) is not None
 
 
 def _cycle2_normalized_argument(
@@ -513,9 +588,94 @@ def _cycle2_normalized_argument(
         except (TypeError, ValueError):
             return None
     value = arguments.get("order_id")
-    if type(value) is not str or _ORDER_ID_PATTERN.fullmatch(value) is None:
+    if type(value) is not str:
         return None
-    return "order_id", value
+    normalized_value = value
+    if tool_name is Cycle2ToolName.GET_ORDER:
+        normalized_value = value.strip()
+        if normalized_value[:2].casefold() == "o-":
+            normalized_value = f"O-{normalized_value[2:]}"
+    if _ORDER_ID_PATTERN.fullmatch(normalized_value) is None:
+        return None
+    return "order_id", normalized_value
+
+
+def _cycle2_loaded_graph_complete(loaded: Cycle2GatewayLoadedClosure) -> bool:
+    """Verify the complete current binding/target/Observation record closure."""
+
+    task = loaded.current_task
+    request_unit = loaded.current_request_unit
+    owner_customer_id = loaded.customer_context.customer_id
+    binding_ids = tuple(binding.binding_id for binding in loaded.current_input_bindings)
+    if set(binding_ids) != set(request_unit.input_binding_refs):
+        return False
+    for binding in loaded.current_input_bindings:
+        if not (
+            binding.superseded_by is None
+            and binding.private_owner_scope_ref == loaded.private_owner_scope_ref
+            and binding.owner_customer_id == owner_customer_id
+            and binding.task_id == task.task_id
+            and binding.request_unit_id == request_unit.request_unit_id
+            and binding.task_state_version == task.state_version
+        ):
+            return False
+
+    targets_by_ref = {
+        target.verified_target_ref: target
+        for target in loaded.current_verified_order_targets
+    }
+    observations_by_target = {
+        observation.verified_target_ref: observation
+        for observation in loaded.current_target_observations
+    }
+    if set(targets_by_ref) != set(observations_by_target):
+        return False
+    if set(request_unit.observation_refs) != {
+        observation.observation_ref
+        for observation in loaded.current_target_observations
+    }:
+        return False
+    manifest_observations = {
+        (record.record_ref, record.version)
+        for record in loaded.context_manifest.observation_refs_and_versions
+    }
+    closure_observations = {
+        (observation.observation_ref, observation.observation_version)
+        for observation in loaded.current_target_observations
+    }
+    if (
+        len(manifest_observations)
+        != len(loaded.context_manifest.observation_refs_and_versions)
+        or len(closure_observations) != len(loaded.current_target_observations)
+        or len(set(request_unit.observation_refs))
+        != len(request_unit.observation_refs)
+        or manifest_observations != closure_observations
+    ):
+        return False
+    binding_id_set = set(binding_ids)
+    for target_ref, target in targets_by_ref.items():
+        observation = observations_by_target[target_ref]
+        if not (
+            target.superseded_by is None
+            and observation.superseded_by is None
+            and target.private_owner_scope_ref == loaded.private_owner_scope_ref
+            and observation.private_owner_scope_ref == loaded.private_owner_scope_ref
+            and target.owner_customer_id == owner_customer_id
+            and observation.owner_customer_id == owner_customer_id
+            and target.task_id == task.task_id == observation.task_id
+            and target.request_unit_id
+            == request_unit.request_unit_id
+            == observation.request_unit_id
+            and target.task_state_version
+            == task.state_version
+            == observation.task_state_version
+            and target.source_observation_ref == observation.observation_ref
+            and target.source_observation_version == observation.observation_version
+            and target.input_binding_refs == observation.input_binding_refs
+            and set(target.input_binding_refs).issubset(binding_id_set)
+        ):
+            return False
+    return True
 
 
 def _cycle2_argument_binding_valid(
@@ -524,9 +684,8 @@ def _cycle2_argument_binding_valid(
     loaded: Cycle2GatewayLoadedClosure,
     tool_name: Cycle2ToolName | None,
 ) -> bool:
-    if tool_name is None or len(loaded.current_input_bindings) != 1:
+    if tool_name is None or not _cycle2_loaded_graph_complete(loaded):
         return False
-    binding = loaded.current_input_bindings[0]
     normalized = _cycle2_normalized_argument(
         tool_name=tool_name,
         arguments=candidate.candidate_arguments,
@@ -534,6 +693,16 @@ def _cycle2_argument_binding_valid(
     if normalized is None:
         return False
     expected_name, normalized_value = normalized
+    matching_bindings = tuple(
+        binding
+        for binding in loaded.current_input_bindings
+        if binding.binding_id in candidate.argument_binding_refs
+        and binding.name == expected_name
+        and binding.normalized_value == normalized_value
+    )
+    if len(matching_bindings) != 1:
+        return False
+    binding = matching_bindings[0]
     common_binding_closed = (
         binding.name == expected_name
         and binding.normalized_value == normalized_value
@@ -543,7 +712,7 @@ def _cycle2_argument_binding_valid(
         and binding.task_id == candidate.task_id
         and binding.request_unit_id == candidate.request_unit_id
         and binding.task_state_version == candidate.validated_task_state_version
-        and loaded.current_request_unit.input_binding_refs == (binding.binding_id,)
+        and binding.binding_id in loaded.current_request_unit.input_binding_refs
     )
     if not common_binding_closed:
         return False
@@ -562,9 +731,28 @@ def _cycle2_argument_binding_valid(
             and candidate.argument_binding_refs == (binding.binding_id,)
         )
 
-    if len(loaded.current_verified_order_targets) != 1:
+    matching_targets = tuple(
+        target
+        for target in loaded.current_verified_order_targets
+        if target.verified_target_ref == candidate.verified_target_ref
+    )
+    if len(matching_targets) != 1:
         return False
-    target = loaded.current_verified_order_targets[0]
+    target = matching_targets[0]
+    matching_observations = tuple(
+        observation
+        for observation in loaded.current_target_observations
+        if observation.observation_ref == target.source_observation_ref
+        and observation.verified_target_ref == target.verified_target_ref
+    )
+    if len(matching_observations) != 1:
+        return False
+    observation = matching_observations[0]
+    manifest_ref_matches = sum(
+        manifest_ref.record_ref == target.source_observation_ref
+        and manifest_ref.version == target.source_observation_version
+        for manifest_ref in loaded.context_manifest.observation_refs_and_versions
+    ) == 1
     return (
         target.superseded_by is None
         and target.private_owner_scope_ref == loaded.private_owner_scope_ref
@@ -573,7 +761,11 @@ def _cycle2_argument_binding_valid(
         and target.request_unit_id == candidate.request_unit_id
         and target.task_state_version == candidate.validated_task_state_version
         and target.order_id == normalized_value
-        and target.input_binding_refs == (binding.binding_id,)
+        and binding.binding_id in target.input_binding_refs
+        and target.source_observation_ref
+        in loaded.current_request_unit.observation_refs
+        and observation.observation_version == target.source_observation_version
+        and manifest_ref_matches
         and candidate.verified_target_ref == target.verified_target_ref
         and candidate.argument_binding_refs
         == (binding.binding_id, target.verified_target_ref)
@@ -613,9 +805,20 @@ def _cycle2_state_version_valid(
     )
 
 
-def _cycle2_budget_valid(budget: Cycle2GatewayBudgetFacts) -> bool:
+def _cycle2_budget_valid(
+    *,
+    candidate: Cycle2GatewayCandidate,
+    loaded: Cycle2GatewayLoadedClosure,
+) -> bool:
+    budget = loaded.budget
+    snapshot = loaded.registry_snapshot
     return (
-        budget.max_tool_calls == 3
+        budget.closure_complete is True
+        and budget.run_id == candidate.run_id
+        and budget.context_manifest_id == candidate.context_manifest_id
+        and budget.tool_registry_version == snapshot.tool_registry_version
+        and budget.model_visible_toolset_hash == snapshot.model_visible_toolset_hash
+        and budget.max_tool_calls == 3
         and 0 <= budget.tool_calls_used < budget.max_tool_calls
         and budget.active_tool_calls == 0
         and budget.accepted_parallel_tool_calls == 0
@@ -631,6 +834,27 @@ def _cycle2_progress_valid(
 ) -> bool:
     if tool_name is None:
         return False
+    progress = loaded.progress_snapshot
+    snapshot = loaded.registry_snapshot
+    if not (
+        progress.history_complete is True
+        and progress.run_id == candidate.run_id
+        and progress.context_manifest_id == candidate.context_manifest_id
+        and progress.tool_registry_version == snapshot.tool_registry_version
+        and progress.model_visible_toolset_hash
+        == snapshot.model_visible_toolset_hash
+        and progress.task_state_version == candidate.validated_task_state_version
+        and all(
+            step.run_id == progress.run_id
+            and step.context_manifest_id == progress.context_manifest_id
+            and step.tool_registry_version == progress.tool_registry_version
+            and step.model_visible_toolset_hash
+            == progress.model_visible_toolset_hash
+            and step.task_state_version == progress.task_state_version
+            for step in progress.prior_tool_steps
+        )
+    ):
+        return False
     normalized = _cycle2_normalized_argument(
         tool_name=tool_name,
         arguments=candidate.candidate_arguments,
@@ -644,7 +868,64 @@ def _cycle2_progress_valid(
         and step.validated_arguments == validated_arguments
         and step.task_state_version == candidate.validated_task_state_version
         and step.argument_binding_refs == candidate.argument_binding_refs
-        for step in loaded.prior_tool_steps
+        for step in progress.prior_tool_steps
+    )
+
+
+def _cycle2_malformed_rejection(
+    *,
+    candidate: object,
+    gate_decision_id: UUID,
+    provider_tool_call_id: str | None,
+    decided_at: datetime,
+) -> GateDecision:
+    """Return auditable non-executable evidence for bypassed malformed input."""
+
+    model_call_id = getattr(candidate, "model_call_id", None)
+    if not isinstance(model_call_id, UUID):
+        model_call_id = UUID(int=0)
+    context_manifest_id = getattr(candidate, "context_manifest_id", None)
+    if not isinstance(context_manifest_id, UUID):
+        context_manifest_id = UUID(int=0)
+    requested_name = getattr(candidate, "requested_provider_tool_name", None)
+    if type(requested_name) is not str or not requested_name:
+        requested_name = "invalid_cycle2_candidate"
+    raw_refs = getattr(candidate, "argument_binding_refs", ())
+    if not isinstance(raw_refs, tuple):
+        raw_refs = ()
+    binding_refs = tuple(
+        ref for ref in raw_refs if isinstance(ref, UUID)
+    )
+    if len(binding_refs) != len(set(binding_refs)):
+        binding_refs = ()
+    proposed_version = getattr(candidate, "proposed_base_task_state_version", None)
+    if type(proposed_version) is not int or proposed_version < 1:
+        proposed_version = None
+    validated_version = getattr(candidate, "validated_task_state_version", None)
+    if type(validated_version) is not int or validated_version < 1:
+        validated_version = None
+    return GateDecision(
+        gate_decision_id=gate_decision_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+        provider_tool_call_id=provider_tool_call_id,
+        requested_provider_tool_name=requested_name,
+        resolved_canonical_tool_name=None,
+        snapshot_match=False,
+        registration_valid=False,
+        schema_valid=False,
+        trusted_field_valid=False,
+        argument_binding_valid=False,
+        argument_binding_refs=binding_refs,
+        budget_valid=False,
+        progress_valid=False,
+        proposed_base_task_state_version=proposed_version,
+        validated_task_state_version=validated_version,
+        state_version_valid=False,
+        action_boundary_valid=False,
+        decision=GateDecisionValue.REJECT,
+        reason_code=GateReasonCode.SCHEMA_INVALID,
+        decided_at=decided_at,
     )
 
 
@@ -663,6 +944,24 @@ def evaluate_cycle2_control_gateway(
     """
 
     decided_at = require_utc(decided_at, field_name="decided_at")
+    try:
+        candidate = Cycle2GatewayCandidate.model_validate(candidate.model_dump())
+        loaded_closure = Cycle2GatewayLoadedClosure.model_validate(
+            loaded_closure.model_dump()
+        )
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        return _cycle2_malformed_rejection(
+            candidate=candidate,
+            gate_decision_id=gate_decision_id,
+            provider_tool_call_id=provider_tool_call_id,
+            decided_at=decided_at,
+        )
     snapshot = loaded_closure.registry_snapshot
     manifest = loaded_closure.context_manifest
     snapshot_match = (
@@ -730,7 +1029,10 @@ def evaluate_cycle2_control_gateway(
         loaded=loaded_closure,
         tool_name=tool_name,
     )
-    budget_valid = _cycle2_budget_valid(loaded_closure.budget)
+    budget_valid = _cycle2_budget_valid(
+        candidate=candidate,
+        loaded=loaded_closure,
+    )
     progress_valid = _cycle2_progress_valid(
         candidate=candidate,
         tool_name=tool_name,
@@ -766,14 +1068,14 @@ def evaluate_cycle2_control_gateway(
         reason_code = GateReasonCode.TRUSTED_FIELD_INJECTION
     elif not schema_valid:
         reason_code = GateReasonCode.SCHEMA_INVALID
+    elif not state_version_valid:
+        reason_code = GateReasonCode.STATE_VERSION_MISMATCH
     elif not argument_binding_valid:
         reason_code = GateReasonCode.ARGUMENT_BINDING_MISMATCH
     elif not budget_valid:
         reason_code = GateReasonCode.BUDGET_EXCEEDED
     elif not progress_valid:
         reason_code = GateReasonCode.NO_PROGRESS
-    elif not state_version_valid:
-        reason_code = GateReasonCode.STATE_VERSION_MISMATCH
 
     accepted = all(checks)
     return GateDecision(
