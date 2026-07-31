@@ -250,8 +250,9 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
 ### `02-03` — Run / Trace v2 contract
 
 - **Owner:** Runtime Engineer / Core Runtime consumer.
-- **Goal:** 冻结 `SUPERSEDED`、新增 stop reasons、no-result closure 与 v2
-  Run / Link / Trace record semantics；shared `TraceEvent` structure 不变。
+- **Goal:** 冻结 `SUPERSEDED`、新增 stop reasons 与 Run / Trace terminal closed
+  matrix；shared `TraceEvent` structure 不变。Run/Link persistence、conditional
+  no-result writer 与 finalizer 留给后续 Packet。
 - **Proposed files:**
   - `src/mini_agent/core/trace.py`
   - `tests/component/core/test_cycle2_trace_contract.py`（new）
