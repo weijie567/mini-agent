@@ -1943,8 +1943,54 @@ def test_cycle2_recovery_rejects_revalidation_for_a_different_parent() -> None:
         decided_at=NOW,
     )
 
-    assert decision.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_CONTRADICTORY"
     assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+@pytest.mark.parametrize(
+    "foreign_field",
+    ["tool_call_id", "run_id", "task_id", "request_unit_id"],
+)
+def test_cycle2_recovery_foreign_parent_identity_fails_closed(
+    foreign_field: str,
+) -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    revalidation = _retry_revalidation(parent_tool_call=parent)
+    foreign_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={foreign_field: uuid4()}
+    )
+    foreign_revalidation = revalidation.model_copy(
+        update={
+            "parent_dispatch_facts": foreign_dispatch,
+            "expected_dispatch_facts": foreign_dispatch,
+            "current_dispatch_facts": foreign_dispatch,
+        }
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=foreign_revalidation,
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_CONTRADICTORY"
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
 
 
 def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:

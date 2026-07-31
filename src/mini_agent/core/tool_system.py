@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from copy import deepcopy
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self, Sequence
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -1278,6 +1278,20 @@ def decide_cycle2_tool_recovery(
             decided_at=decided_at,
         )
 
+    actual_dispatch_facts = validated.dispatch_facts()
+    if (
+        actual_dispatch_facts != validated_revalidation.parent_dispatch_facts
+        or validated_revalidation.parent_dispatch_facts
+        != validated_revalidation.expected_dispatch_facts
+    ):
+        return _recovery_decision(
+            tool_call_id=validated.tool_call_id,
+            last_attempt_no=validated.attempt_count,
+            decision=ToolRecoveryDecision.FAIL_CLOSED,
+            stable_reason_code="RECOVERY_EVIDENCE_CONTRADICTORY",
+            decided_at=decided_at,
+        )
+
     if validated.status in {
         ToolCallStatus.SUCCEEDED,
         ToolCallStatus.FAILED,
@@ -1314,17 +1328,6 @@ def decide_cycle2_tool_recovery(
         and last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
         and validated.attempt_count == 1
     ):
-        if (
-            validated.dispatch_facts()
-            != validated_revalidation.parent_dispatch_facts
-        ):
-            return _recovery_decision(
-                tool_call_id=validated.tool_call_id,
-                last_attempt_no=1,
-                decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
-                stable_reason_code="STATE_OR_BINDING_INVALIDATED",
-                decided_at=decided_at,
-            )
         current_retry = decide_cycle2_tool_retry(
             canonical_tool_name=validated.canonical_tool_name,
             attempt_no=last.attempt_no,
@@ -1846,31 +1849,75 @@ def _cycle2_raw_value_is_exact(actual: object, expected: object) -> bool:
     return actual == expected
 
 
+def _pydantic_model_envelope_is_raw_closed(value: object) -> bool:
+    """Validate only declared payload storage, leaving Pydantic slots untouched."""
+
+    if not isinstance(value, BaseModel) or type(value.__dict__) is not dict:
+        return False
+    if frozenset(value.__dict__) != frozenset(type(value).model_fields):
+        return False
+    extra = value.__pydantic_extra__
+    return extra is None or (type(extra) is dict and not extra)
+
+
+def cycle2_pydantic_model_graph_is_raw_closed(*roots: object) -> bool:
+    """Recursively close every BaseModel envelope in a trusted Cycle 2 graph."""
+
+    seen: set[int] = set()
+
+    def visit(value: object) -> bool:
+        if isinstance(value, BaseModel):
+            if not _pydantic_model_envelope_is_raw_closed(value):
+                return False
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(
+                visit(value.__dict__[field_name])
+                for field_name in type(value).model_fields
+            )
+        if isinstance(value, Mapping):
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(
+                visit(key) and visit(item) for key, item in value.items()
+            )
+        if isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(visit(item) for item in value)
+        if isinstance(value, AbstractSet):
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(visit(item) for item in value)
+        return True
+
+    try:
+        return all(visit(root) for root in roots)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return False
+
+
 def _cycle2_model_envelope_is_raw_closed(
     actual: object,
     expected: object,
 ) -> bool:
     """Require exactly declared payload fields and no Pydantic extras."""
 
-    if type(actual) is not type(expected) or not isinstance(expected, BaseModel):
-        return False
-    declared_fields = frozenset(type(expected).model_fields)
-    if (
-        type(actual.__dict__) is not dict
-        or type(expected.__dict__) is not dict
-        or frozenset(actual.__dict__) != declared_fields
-        or frozenset(expected.__dict__) != declared_fields
-    ):
-        return False
-    actual_extra = actual.__pydantic_extra__
-    expected_extra = expected.__pydantic_extra__
-    if actual_extra is None or expected_extra is None:
-        return actual_extra is None and expected_extra is None
     return (
-        type(actual_extra) is dict
-        and type(expected_extra) is dict
-        and not actual_extra
-        and not expected_extra
+        type(actual) is type(expected)
+        and _pydantic_model_envelope_is_raw_closed(actual)
+        and _pydantic_model_envelope_is_raw_closed(expected)
     )
 
 

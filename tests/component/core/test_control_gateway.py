@@ -1,8 +1,9 @@
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from mini_agent.core.common import FrozenJsonDict, freeze_json_value
 from mini_agent.core.control_gateway import (
@@ -1360,6 +1361,197 @@ def test_cycle2_gateway_rejects_open_registry_model_envelopes(
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.registration_valid is False
+
+
+def _cycle2_complete_gateway_model_graph() -> tuple[
+    Cycle2GatewayCandidate,
+    Cycle2GatewayLoadedClosure,
+]:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    task_ref = TaskStateRefAndVersion(
+        task_id=candidate.task_id,
+        state_version=candidate.validated_task_state_version,
+    )
+    candidate = candidate.model_copy(
+        update={
+            "proposed_base_task_state_version": candidate.validated_task_state_version
+        }
+    )
+    prior_step = Cycle2ToolProgressFact(
+        run_id=candidate.run_id,
+        context_manifest_id=candidate.context_manifest_id,
+        tool_registry_version=loaded.registry_snapshot.tool_registry_version,
+        model_visible_toolset_hash=(
+            loaded.registry_snapshot.model_visible_toolset_hash
+        ),
+        canonical_tool_name=Cycle2ToolName.GET_ORDER,
+        validated_arguments={"order_id": "O-9999"},
+        task_state_version=candidate.validated_task_state_version,
+        argument_binding_refs=(loaded.current_input_bindings[0].binding_id,),
+    )
+    loaded = loaded.model_copy(
+        update={
+            "context_manifest": loaded.context_manifest.model_copy(
+                update={"task_state_ref_and_version": task_ref}
+            ),
+            "progress_snapshot": loaded.progress_snapshot.model_copy(
+                update={"prior_tool_steps": (prior_step,)}
+            ),
+        }
+    )
+    assert _evaluate_cycle2(candidate, loaded).decision is GateDecisionValue.ACCEPT
+    return candidate, loaded
+
+
+def _nested_gateway_models(value: object) -> tuple[BaseModel, ...]:
+    found: list[BaseModel] = []
+    seen: set[int] = set()
+
+    def visit(current: object) -> None:
+        current_id = id(current)
+        if current_id in seen:
+            return
+        if isinstance(current, BaseModel):
+            seen.add(current_id)
+            found.append(current)
+            for field_name in type(current).model_fields:
+                if field_name in current.__dict__:
+                    visit(current.__dict__[field_name])
+            return
+        if isinstance(current, Mapping):
+            seen.add(current_id)
+            for key, item in current.items():
+                visit(key)
+                visit(item)
+            return
+        if isinstance(current, tuple):
+            seen.add(current_id)
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return tuple(found)
+
+
+def _replace_gateway_model(
+    value: object,
+    target: BaseModel,
+    replacement: BaseModel,
+) -> object:
+    if value is target:
+        return replacement
+    if isinstance(value, BaseModel):
+        updates: dict[str, object] = {}
+        for field_name in type(value).model_fields:
+            if field_name not in value.__dict__:
+                continue
+            original = value.__dict__[field_name]
+            replaced = _replace_gateway_model(original, target, replacement)
+            if replaced is not original:
+                updates[field_name] = replaced
+        return value.model_copy(update=updates) if updates else value
+    if isinstance(value, tuple):
+        replaced_items = tuple(
+            _replace_gateway_model(item, target, replacement) for item in value
+        )
+        return replaced_items if any(
+            replaced is not original
+            for replaced, original in zip(replaced_items, value, strict=True)
+        ) else value
+    return value
+
+
+def _assert_gateway_graph_corruption_rejected(
+    *,
+    candidate: Cycle2GatewayCandidate,
+    loaded: Cycle2GatewayLoadedClosure,
+    target: BaseModel,
+    replacement: BaseModel,
+    vector: str,
+) -> None:
+    malformed_candidate = _replace_gateway_model(candidate, target, replacement)
+    malformed_loaded = _replace_gateway_model(loaded, target, replacement)
+    gate = _evaluate_cycle2(malformed_candidate, malformed_loaded)
+    label = f"{type(target).__name__}:{vector}"
+    assert gate.decision is GateDecisionValue.REJECT, label
+    assert gate.reason_code is GateReasonCode.SCHEMA_INVALID, label
+    assert gate.registration_valid is False, label
+
+
+def test_cycle2_gateway_raw_preflight_closes_complete_nested_model_graph() -> None:
+    candidate, loaded = _cycle2_complete_gateway_model_graph()
+    nodes = _nested_gateway_models(candidate) + _nested_gateway_models(loaded)
+    discovered_types = {type(node).__name__ for node in nodes}
+    assert {
+        "Cycle2GatewayCandidate",
+        "Cycle2GatewayLoadedClosure",
+        "CustomerContext",
+        "TaskRecord",
+        "RequestUnitRecord",
+        "Cycle2AcceptedBindingFacts",
+        "Cycle2VerifiedOrderTargetFacts",
+        "Cycle2TargetObservationFacts",
+        "RegistrySnapshot",
+        "ToolRegistration",
+        "ToolSpec",
+        "ExecutionPolicy",
+        "ProviderToolNameBinding",
+        "ContextManifest",
+        "TaskStateRefAndVersion",
+        "VersionedRecordRef",
+        "TokenCounts",
+        "Cycle2GatewayBudgetFacts",
+        "Cycle2GatewayProgressSnapshot",
+        "Cycle2ToolProgressFact",
+    }.issubset(discovered_types)
+
+    missing_vectors: set[tuple[str, str, str]] = set()
+    for node in nodes:
+        raw_extra = node.model_copy(update={"unexpected_field": "unexpected"})
+        _assert_gateway_graph_corruption_rejected(
+            candidate=candidate,
+            loaded=loaded,
+            target=node,
+            replacement=raw_extra,
+            vector="raw-extra",
+        )
+        pydantic_extra = type(node).model_construct(**node.__dict__)
+        object.__setattr__(
+            pydantic_extra,
+            "__pydantic_extra__",
+            {"unexpected_field": "unexpected"},
+        )
+        _assert_gateway_graph_corruption_rejected(
+            candidate=candidate,
+            loaded=loaded,
+            target=node,
+            replacement=pydantic_extra,
+            vector="pydantic-extra",
+        )
+        for field_name, field in type(node).model_fields.items():
+            missing = type(node).model_construct(**node.__dict__)
+            missing.__dict__.pop(field_name)
+            field_kind = "required" if field.is_required() else "default"
+            missing_vectors.add((type(node).__name__, field_name, field_kind))
+            _assert_gateway_graph_corruption_rejected(
+                candidate=candidate,
+                loaded=loaded,
+                target=node,
+                replacement=missing,
+                vector=f"missing-{field_kind}:{field_name}",
+            )
+
+    assert ("CustomerContext", "provenance", "default") in missing_vectors
+    assert (
+        "Cycle2AcceptedBindingFacts",
+        "validation_status",
+        "default",
+    ) in missing_vectors
+    assert (
+        "Cycle2AcceptedBindingFacts",
+        "superseded_by",
+        "default",
+    ) in missing_vectors
 
 
 def test_cycle2_gateway_fails_closed_when_complete_progress_history_is_omitted() -> None:
