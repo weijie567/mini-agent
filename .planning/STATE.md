@@ -7,7 +7,7 @@ current_phase_name: "Cycle 2｜完成 E2E-01"
 current_plan: "02-02_repaired_status_alignment_gate"
 status: "phase_2_w1b_02_02_status_alignment_gate"
 last_updated: "2026-07-31"
-last_activity: "2026-07-31 — PR #212修复W1 full gate并形成B_C2_W1_GATE_REPAIRED；PR #213 refreeze 02-02 Packet；三状态文件alignment candidate已形成"
+last_activity: "2026-07-31 — PR #212修复W1 full gate并形成B_C2_W1_GATE_REPAIRED；PR #213 refreeze 02-02 Packet；四状态文件alignment candidate已形成"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -29,7 +29,7 @@ See: [PROJECT.md](PROJECT.md)
 
 **Current focus:** `02-03` 与 `02-01` 已按 approved W1 顺序 reviewed merge；历史
 `B_C2_W1A` 的 test-only full-gate regression 已由 PR #212 修复，当前产品实现 base 为
-`B_C2_W1_GATE_REPAIRED`。PR #213 已 refreeze `02-02` Packet；三状态文件 alignment
+`B_C2_W1_GATE_REPAIRED`。PR #213 已 refreeze `02-02` Packet；四状态文件 alignment
 candidate 是最后 planning gate，只有其 exact head `PASS`/merge 后才按用户连续指令
 创建 r2 实现 branch/Worktree。
 
@@ -143,8 +143,9 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / 02-02_REFREEZE_CONTROL`: PR #213 R2 exact-head review `PASS`，merge
   successor 为 `fedd2d1a10ae088d3c762875bffd68ed828d8e3f`；它只推进 planning provenance，
   不替换 repaired product base。
-- `GATE / 02-02_REPAIRED_STATUS_ALIGNMENT`: 本 exact candidate 只对齐 `PROJECT.md`、
-  `ROADMAP.md`、`STATE.md`；其独立 `PASS`/merge 是创建 r2 branch/Worktree 的必要条件。
+- `GATE / 02-02_REPAIRED_STATUS_ALIGNMENT`: 本 replacement exact candidate 只对齐
+  `PROJECT.md`、`REQUIREMENTS.md`、`ROADMAP.md`、`STATE.md`；其独立 `PASS`/merge
+  是创建 r2 branch/Worktree 的必要条件。
 - `QUARANTINED / 02-02_PRIOR_HEAD`: `ecfad7e22ba542e50256274a94a6bb88fdf49b83`
   基于历史 `b5de7f4...`，不得 push、merge、rebase、充当 reviewed head 或进入新 ancestry。
 - `OPEN / 02-02_R2_IMPLEMENTATION`: repaired base 已满足；r2 branch/Worktree 尚未创建；

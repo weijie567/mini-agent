@@ -19,7 +19,7 @@ Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
 已获批并由 PR #204/#205 完成。`02-03` 与 `02-01` 已由 PR #207/#208 reviewed
 串行合入并形成历史 `B_C2_W1A`；PR #212 修复 test-only full-gate regression 后
 形成 `B_C2_W1_GATE_REPAIRED`，PR #213 已完成 `02-02` Packet refreeze。当前 W1B
-的三份派生状态索引已形成 alignment candidate；该 exact head `PASS`/merge 前不创建
+的四份派生状态索引已形成 alignment candidate；该 exact head `PASS`/merge 前不创建
 r2 实现分支。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
