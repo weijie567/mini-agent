@@ -66,7 +66,7 @@
 activation_base_sha = 9ee260f12a82b706269f8a62c460c781c64f1f47
 owner_alignment_pr = 201
 owner_alignment_merge_sha = 9ee260f12a82b706269f8a62c460c781c64f1f47
-activation_pr = PENDING_GITHUB_ALLOCATION
+activation_pr = 202
 hash_algorithm = SHA-256
 ```
 
