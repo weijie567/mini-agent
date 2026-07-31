@@ -425,11 +425,50 @@ def test_snapshot_source_token_preserves_stable_candidate_order() -> None:
 
 
 @pytest.mark.parametrize(
+    ("count", "valid"),
+    [(2, False), (3, False), (4, False), (5, True)],
+)
+def test_truncated_snapshot_source_token_requires_exactly_five_candidates(
+    count: int,
+    valid: bool,
+) -> None:
+    query = build_search_orders_query(
+        customer_id="customer-a",
+        product_description="鞋",
+        trusted_now=NOW,
+    )
+    candidates = tuple(
+        _candidate(f"O-{1001 + index}", NOW - timedelta(days=index))
+        for index in range(count)
+    )
+
+    if valid:
+        token = compute_order_search_snapshot_source_version(
+            query=query,
+            ordered_candidates=candidates,
+            truncated=True,
+        )
+        assert token.startswith(
+            "mock-order-search-snapshot-source-version.p0.v1:sha256:"
+        )
+    else:
+        with pytest.raises(ValueError, match="truncated=true"):
+            compute_order_search_snapshot_source_version(
+                query=query,
+                ordered_candidates=candidates,
+                truncated=True,
+            )
+
+
+@pytest.mark.parametrize(
     ("outcome", "count", "truncated", "failure_code", "valid"),
     [
         (SearchOrdersOutcome.UNIQUE, 1, False, None, True),
         (SearchOrdersOutcome.UNIQUE, 1, True, None, False),
         (SearchOrdersOutcome.MULTIPLE, 2, False, None, True),
+        (SearchOrdersOutcome.MULTIPLE, 2, True, None, False),
+        (SearchOrdersOutcome.MULTIPLE, 3, True, None, False),
+        (SearchOrdersOutcome.MULTIPLE, 4, True, None, False),
         (SearchOrdersOutcome.MULTIPLE, 5, True, None, True),
         (SearchOrdersOutcome.MULTIPLE, 1, False, None, False),
         (SearchOrdersOutcome.NO_MATCH, 0, False, None, True),
@@ -472,6 +511,37 @@ def test_search_result_closed_outcome_matrix(
     else:
         with pytest.raises(ValidationError):
             SearchOrdersResult(**payload)
+
+
+@pytest.mark.parametrize(
+    ("count", "valid"),
+    [(2, False), (3, False), (4, False), (5, True)],
+)
+def test_truncated_agent_output_requires_exactly_five_candidates(
+    count: int,
+    valid: bool,
+) -> None:
+    candidates = tuple(
+        SearchOrdersAgentCandidate(
+            ordinal=index + 1,
+            **_candidate(
+                f"O-{1001 + index}",
+                NOW - timedelta(days=index),
+            ).public_summary.model_dump(),
+        )
+        for index in range(count)
+    )
+    payload = {
+        "outcome": SearchOrdersAgentOutcome.MULTIPLE,
+        "candidates": candidates,
+        "truncated": True,
+    }
+
+    if valid:
+        assert len(SearchOrdersAgentOutput(**payload).candidates) == 5
+    else:
+        with pytest.raises(ValidationError, match="truncated=true"):
+            SearchOrdersAgentOutput(**payload)
 
 
 def test_non_success_results_reject_partial_private_authority_metadata() -> None:

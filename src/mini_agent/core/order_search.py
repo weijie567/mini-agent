@@ -403,6 +403,8 @@ class SearchOrdersResult(RuntimePrivateModel):
         elif self.outcome is SearchOrdersOutcome.MULTIPLE:
             if not 2 <= count <= ORDER_SEARCH_MAX_CANDIDATES:
                 raise ValueError("MULTIPLE requires two to five candidates")
+            if self.truncated and count != ORDER_SEARCH_MAX_CANDIDATES:
+                raise ValueError("truncated=true requires exactly five candidates")
             if not authority_complete:
                 raise ValueError("MULTIPLE requires complete snapshot authority metadata")
             if self.failure_code is not None:
@@ -465,6 +467,11 @@ class SearchOrdersAgentOutput(ModelVisibleModel):
         elif self.outcome is SearchOrdersAgentOutcome.MULTIPLE:
             if len(self.candidates) < 2:
                 raise ValueError("MULTIPLE Agent output requires at least two candidates")
+            if (
+                self.truncated
+                and len(self.candidates) != ORDER_SEARCH_MAX_CANDIDATES
+            ):
+                raise ValueError("truncated=true requires exactly five candidates")
         else:
             raise ValueError("only successful outcomes have Agent-visible output")
         return self
@@ -595,6 +602,8 @@ def compute_order_search_snapshot_source_version(
     candidates = tuple(ordered_candidates)
     if not 1 <= len(candidates) <= ORDER_SEARCH_MAX_CANDIDATES:
         raise ValueError("snapshot requires one to five ordered candidates")
+    if truncated and len(candidates) != ORDER_SEARCH_MAX_CANDIDATES:
+        raise ValueError("truncated=true requires exactly five ordered candidates")
     if candidates != sort_order_candidates(candidates):
         raise ValueError(
             "ordered_candidates must use ordered_at DESC, order_number ASC order"
