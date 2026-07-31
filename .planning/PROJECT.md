@@ -47,14 +47,16 @@
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 scoped owner 已激活但执行未开始；Phase 3–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 scoped owner 已激活，master Plan仍为`PLAN_REVIEW_DRAFT`；`integration/e2e01-cycle2`只是reserved mapping且当前`NOT_CREATED`，执行未开始。Phase 3–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## 不属于 GSD 派生层的事项
 
 - 不重新定义 P0 用户、业务目标、Tool Catalog、Mock 系统或安全不变量。
 - 不重新定义 Core / Application DTO、Port、状态机、Evidence、Action Ledger 或 Eval 语义。
 - 不以 `$gsd-new-project` 或 `$gsd-new-milestone` 重建当前 P0。
-- 不让 GSD executor 直接写 `main`、`integration/e2e01-thin` 或共享 `.planning/STATE.md`。
+- 不让 GSD executor 直接写 `main`、任何 phase-specific integration branch
+  （Phase 1 历史 `integration/e2e01-thin`、Phase 2 reserved
+  `integration/e2e01-cycle2`）或共享 `.planning/STATE.md`。
 - 不运行 stock `$gsd-execute-phase`、`phase.complete`、`requirements.mark-complete`、`roadmap.update-plan-progress` 或 `$gsd-ship`；实现、生命周期同步与两级 PR 均由 Integrator 按 [GOVERNANCE.md](GOVERNANCE.md) 显式控制。
 - 不把计划、Review、UAT 或 GSD 报告自身当作“已实现 / 已通过”的充分证据。
 

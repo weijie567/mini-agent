@@ -144,7 +144,8 @@ Plans:
 
 ### Phase 2: Cycle 2｜完成 E2E-01
 
-**Status**: `CONTRACT_ACTIVE / READY_FOR_PLANNING / CASES_CONTRACT_DEFINED`
+**Status**:
+`CONTRACT_ACTIVE / MASTER_PLAN_REVIEW_DRAFT / GATE_P2_A_NOT_APPROVED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -158,9 +159,32 @@ Plans:
 2. `E2E01-05` 与确实需要 `get_shipment` 的配对 Case 在同一可用工具集中验证。
 3. 第一版 Trajectory / E2E Baseline 依 canonical Eval owner 运行并保存结果。
 
-**Plans**: `NOT_STARTED`；下一步先完成只读 dependency / ownership / risk map，再在
-dedicated planning-status Worktree 中形成可独立审阅的 Plan。Contract activation
-不授权 Task Packet、功能分支或产品代码。
+**Plans**: master Plan 当前提议 `19` 个一对一 Plan / Task Packet slots
+（`02-00..18`）、`W0..W12`、最大并发 `2`；仍为 `PLAN_REVIEW_DRAFT`，精确
+Task Packet 均未创建。
+
+**Branch mapping**:
+
+```text
+B_C2_PLAN_APPROVED
+= planning PR merge successor
+
+B_C2_OWNER_ALIGNED
+= 02-00 merge successor
+
+integration/e2e01-cycle2
+= created from exact B_C2_OWNER_ALIGNED at Gate P2-C
+
+B_C2_START
+= branch exact head/tree immediately after creation
+= B_C2_OWNER_ALIGNED exact SHA/tree
+= initial implementation base
+```
+
+`.planning/config.json` 中的 `integration/e2e01-cycle2` 只是 reserved mapping；
+branch 当前仍为 `NOT_CREATED`。Phase 1 的 `integration/e2e01-thin` 保留为历史
+release 证据。Gate P2-A、planning PR merge、P2-B、`02-00` 与 Gate P2-C 顺序
+完成前，不授权功能 branch / Worktree 或产品代码。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 

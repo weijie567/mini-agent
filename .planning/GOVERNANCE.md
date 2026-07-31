@@ -19,6 +19,7 @@
 | `E2E01-01/04` scoped 实现契约 | [e2e01-thin-slice-implementation-spec.md](../docs/implementation/e2e01-thin-slice-implementation-spec.md) | Phase 1 Plans |
 | `E2E01-02/03/05/06` scoped 实现契约 | [e2e01-cycle2-implementation-spec.md](../docs/implementation/e2e01-cycle2-implementation-spec.md) | Phase 2 dependency / ownership / risk map 与后续受控 Plan |
 | Wave、ownership、Task Packet、集成顺序 | [e2e01-thin-slice-multi-agent-plan.md](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md) | Phase 1 wave / status |
+| Phase 2 Wave、ownership、Task Packet、集成顺序 | [e2e01-cycle2-multi-agent-plan.md](../docs/implementation/e2e01-cycle2-multi-agent-plan.md) | Phase 2 branch / wave / status |
 
 专门 owner **只在自身范围内优先**。不得用文档类别、提交时间、文件新旧或 `.planning/` 生成顺序静默覆盖其他 owner；绝不采用 “newest wins”。
 
@@ -87,19 +88,35 @@ Stock GSD 1.38.3 的 Worktree / lifecycle 模型与本项目不兼容，因此�
 
 | GSD 对象 | GitHub / Codex 对象 |
 |---|---|
-| Phase | `integration/e2e01-thin` 上的一个可验证阶段 |
+| Phase | 对应 phase-specific integration branch 上的一个可验证阶段 |
 | Plan | 一个精确 Task Packet |
 | Wave | 一组 ownership 不重叠、由 Integrator 预建的独立 Worktree |
 | Executor | 只写 Task Packet feature branch 的 Codex Agent |
 | Review / Verification | GitHub exact-head review、机械检查与证据索引 |
 | Release | 显式 GitHub feature → integration 与 integration → `main` PR |
 
+Phase-specific branch mapping：
+
+| Phase | Integration branch | 状态与 base chain |
+|---|---|---|
+| Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `RESERVED / NOT_CREATED`；`B_C2_PLAN_APPROVED = planning PR merge successor` → `B_C2_OWNER_ALIGNED = 02-00 merge successor` → branch 从 exact `B_C2_OWNER_ALIGNED` 创建 → 创建时 exact head/tree 冻结为 `B_C2_START = initial implementation base` |
+
+`.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只是当前
+Phase 2 的 reserved mapping。它不证明该 branch 存在，也不授权 GSD 或 Agent
+创建 branch / Worktree、冻结 Task Packet 或写功能代码。Gate P2-C 前仍必须保持
+branch `NOT_CREATED`；创建后必须证明 `B_C2_START` 与
+`B_C2_OWNER_ALIGNED` 的 SHA / tree 相同。
+
 执行规则：
 
 1. Feature branch 只 push 到 Task Packet 指定的 repository / head branch。
 2. Feature PR 先以 draft PR 指向 Task Packet 指定的 integration branch。
 3. Integrator 逐个集成；每次 merge 后，下一个分支针对最新 integration head 重验并取得新的 exact-head review。
-4. 完整 phase gate 通过后，显式使用 `head=integration/e2e01-thin`、`base=main` 创建 release PR。
+4. 完整 phase gate 通过后，使用该 Phase mapping 的显式 integration head 与
+   `base=main` 创建 release PR；Phase 1 历史值为
+   `head=integration/e2e01-thin`，Phase 2 目标值为
+   `head=integration/e2e01-cycle2`。
 5. 禁止直接 push `main` 或 active integration branch；GSD `branching_strategy=none` 不提供例外。
 6. 不调用 stock `gsd-ship`：它的单一 base 模型不能表达本项目 feature → integration 与 integration → `main` 两级 PR。
 
