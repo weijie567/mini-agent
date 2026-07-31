@@ -339,13 +339,13 @@ Gate P2-A 后已冻结 `B_C2_PLAN_APPROVED =
 
 ### 7.2 `C2-BLOCK-02`：Eval model script 目录（已关闭）
 
-Active Cycle 2 Spec 第 9.1 节指定：
+`02-00` 修正前，Cycle 2 Spec 第 9.1 节曾指定：
 
 ```text
 evals/model-scripts/e2e01-cycle2.v1.json
 ```
 
-当前 loader、Phase 1 manifests、tests 与 tracked directory 使用：
+当前 active Spec、loader、Phase 1 manifests、tests 与 tracked directory 已统一使用：
 
 ```text
 evals/model_scripts/
