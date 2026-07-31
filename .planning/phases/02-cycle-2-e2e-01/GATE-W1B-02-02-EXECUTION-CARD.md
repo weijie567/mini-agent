@@ -16,6 +16,10 @@
   formal review，保持 quarantined；不得 push、merge、rebase 或充当本轮 reviewed head。
 - 本 refreeze planning PR 从 exact `B_C2_W1_GATE_REPAIRED` 创建；merge 后只允许
   `.planning/` 控制面相对该 repaired product base 前移。
+- `.planning/PROJECT.md`、`.planning/ROADMAP.md`、`.planning/STATE.md` 当前仍含旧
+  `B_C2_W1A` 执行指令；本 two-file PR 不越过 single-writer allowlist 修它们。其
+  reviewed merge 后必须创建 dedicated planning-status PR 完成对齐，且该 PR reviewed
+  merge 前 `02-02` r2 dispatch 继续 `BLOCKED`。
 
 ## 当前用户授权
 
@@ -25,14 +29,18 @@
 因此无需再次请求中间批准，但必须满足：
 
 1. 本 planning PR 的全新窗口 exact-file review 为 `PASS`。
-2. 合并后的 integration control head 含 exact `02-02-PLAN.md` blob；相对
+2. 本 planning PR reviewed merge 后，由 dedicated single-writer planning-status PR
+   对齐 `PROJECT.md`、`ROADMAP.md`、`STATE.md` 的 repaired base/tree、旧
+   `ecfad7e...` quarantine、r2 ancestry 与 Case 仍为 `CONTRACT_DEFINED`；该状态 PR
+   必须经全新窗口 exact-head review 为 `PASS` 并合并。
+3. 两个 planning PR 合并后的 integration control head 含 exact `02-02-PLAN.md` blob；相对
    `B_C2_W1_GATE_REPAIRED` 的累计 drift 必须仅为 reviewed planning provenance，
    且 Packet 的 required product/source blobs 全部未变。
-3. 新的 r2 implementation branch/Worktree 从上述 exact repaired product base 创建；
+4. 新的 r2 implementation branch/Worktree 从上述 exact repaired product base 创建；
    旧 branch/head 只可作为人工对照，不得成为 ancestry 或 merge input。
-4. feature Draft PR 通过后，将 exact implementation patch 叠加到冻结的 integration
+5. feature Draft PR 通过后，将 exact implementation patch 叠加到冻结的 integration
    control head；该 exact overlay 也必须由全新窗口 review 为 `PASS`。
-5. reviewed overlay 合并 successor 冻结为 `B_C2_CORE_123`，完整 W1 gate 通过后才
+6. reviewed overlay 合并 successor 冻结为 `B_C2_CORE_123`，完整 W1 gate 通过后才
    签发 W2。
 
 任何 `BLOCK/HIGH`、未处置 `MEDIUM`、allowlist/base/tree 漂移或测试失败都会暂停当前
