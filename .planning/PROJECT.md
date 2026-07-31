@@ -13,7 +13,9 @@
 - P0 架构方向：[PROJECT_DIRECTION.md](../PROJECT_DIRECTION.md)。
 - Eval 方法与 Case 激活顺序：[Agent Evaluation Strategy](../docs/evaluation/agent-evaluation-strategy.md) 与 [P0 Eval Coverage Matrix](../docs/evaluation/p0-eval-coverage-matrix.md)。
 - 第一最薄切片契约：[E2E-01 Thin Slice Implementation Spec](../docs/implementation/e2e01-thin-slice-implementation-spec.md)。
-- 当前 Task Packet、ownership 与集成顺序：[Codex 多 Agent 实施计划](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+- Cycle 2 scoped 契约：[E2E-01 Cycle 2 Implementation Spec](../docs/implementation/e2e01-cycle2-implementation-spec.md)。
+- Phase 1 已完成的 historical Task Packet、ownership 与集成顺序：[Codex 多 Agent 实施计划](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
+- Phase 2 当前 Task Packet：`NONE / NOT_STARTED`；只能在受控 Plan 获批后创建。
 - GSD 派生层治理：[GOVERNANCE.md](GOVERNANCE.md)；激活证据：[ACTIVATION.md](ACTIVATION.md)。
 
 ## Core Value
@@ -26,9 +28,10 @@
 
 - [x] [REQUIREMENTS.md](REQUIREMENTS.md) 映射的 Phase 1 release transition已完成：`E2E01-01/04`实现与quality evidence完整，用户继续接受有界`RTA-D01`，reviewed PR #199已squash merge到`main`（`f15320e3...`）。
 
-### Planned Mapping
+### Active Contract / Planned Execution
 
-- Phase 2–6 只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
+- Phase 2 scoped implementation owner 已激活为 `CONTRACT_ACTIVE / READY_FOR_PLANNING`；当前只允许 dependency / ownership / risk map 与受控 Plan，尚无 Task Packet 或实现。
+- Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
 
@@ -39,12 +42,12 @@
 
 - 01-07I/P形成`B_IP = bbe14fadc0cd2e14ad35e19177b079fcab685dfc`后，01-07K/L经PR #94–#98串行形成`B_DEPENDENCY = e54a6a4d77208695440c2caf03c3ab32f9d37108`；01-07M经PR #99–#101形成`B_DEPENDENCY_M = 42fa2ec7ef1a61a2edfd78d69ca4e6a5d32aa1c3`；Q oracle remediation与Plan/feature PR #102–#106形成`B_Q = 2b9fde6f0e09308a53b86a4929ea3b639660f82e`。Execution-owner r2 PR #107把Y/Z/AA纳入唯一map并把目标分母修正为42；Y/Z PR #108–#111形成`B_YZ = d704b87480f0a4252744f4c009cef9a86c08fa05`，AA及其quality-gate remediation PR #112–#120形成`B_J_READY = b8d32d50775a0d3f4a0d3e7e609c717f6c540b33`。J Plan、exact-reader scope alignment与Runtime feature PR #121–#124最终形成scoped `B_ACTIVE = 7f92b5e0a05714a6a9d7325861499d7cc0bf04dd`、tree `f70b20215e569acf3ad196cc050e9a23700d4bae`。
 - Activation feature base：`85eb2a7fc4cc131e67e44dbba132b526e36ae6a3`；reviewed feature head：`957cabd6b31dd2156848acd515d2e8dc3d19bd50`；effective integration merge：`624475681847be5a8e463e32dafd28a0483b213b`。
-- Phase 1 / Coverage Matrix Cycle 1 的 `E2E01-01/04`已完成scoped release transition；Phase 2尚未activation，当前没有自动开始的实现Phase。
+- Phase 1 / Coverage Matrix Cycle 1 的 `E2E01-01/04`已完成scoped release transition；Phase 2 scoped contract 以 owner-alignment merge `9ee260f12a82b706269f8a62c460c781c64f1f47` 为精确 base，经独立 Activation 激活为 `READY_FOR_PLANNING`，但没有自动创建 Plan、Task Packet 或实现 Phase。
 - Plan 01-01、01-02 与 01-03 已分别通过 planning / owner PR、181 个 serial tests 与独立 exact-head review完成 evidence index；Plan 01-04 已通过 planning PR #18、feature PR #19、134 个 focused / 315 个 full tests、两路 final exact-head review 与 Graphify code + semantic freshness gate；Packet 01-04D 已通过 planning PR #20、feature PR #21、210 个 focused / 344 个 full tests、两路 final exact-head review 与 post-merge Graphify gate。五个已完成 Packet 都不改变 `E2E01-01/04` lifecycle。
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 scoped owner 已激活但执行未开始；Phase 3–6仍需各自scoped owner与activation。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
 ## 不属于 GSD 派生层的事项
 

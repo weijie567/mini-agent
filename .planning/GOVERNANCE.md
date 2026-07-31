@@ -17,6 +17,7 @@
 | Eval 方法、Dataset、Grader、Gate | [agent-evaluation-strategy.md](../docs/evaluation/agent-evaluation-strategy.md) | validation / eval review 索引 |
 | P0 Case ID、mapping、Critical failure、生命周期 | [p0-eval-coverage-matrix.md](../docs/evaluation/p0-eval-coverage-matrix.md) | `REQUIREMENTS.md`、Roadmap Phase mapping |
 | `E2E01-01/04` scoped 实现契约 | [e2e01-thin-slice-implementation-spec.md](../docs/implementation/e2e01-thin-slice-implementation-spec.md) | Phase 1 Plans |
+| `E2E01-02/03/05/06` scoped 实现契约 | [e2e01-cycle2-implementation-spec.md](../docs/implementation/e2e01-cycle2-implementation-spec.md) | Phase 2 dependency / ownership / risk map 与后续受控 Plan |
 | Wave、ownership、Task Packet、集成顺序 | [e2e01-thin-slice-multi-agent-plan.md](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md) | Phase 1 wave / status |
 
 专门 owner **只在自身范围内优先**。不得用文档类别、提交时间、文件新旧或 `.planning/` 生成顺序静默覆盖其他 owner；绝不采用 “newest wins”。
