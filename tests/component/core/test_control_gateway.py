@@ -65,6 +65,7 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 def _context(customer_id: str = "customer-A") -> CustomerContext:
     return CustomerContext(
+        provenance="SERVER_AUTH_ADAPTER",
         subject_ref="subject-A",
         customer_id=customer_id,
         auth_scopes=frozenset({"orders:read"}),
@@ -237,8 +238,12 @@ def _manifest(
         tool_registry_version=snapshot.tool_registry_version,
         model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
         selected_message_refs=(uuid4(),),
+        task_state_ref_and_version=None,
         observation_refs_and_versions=observation_refs_and_versions,
+        evidence_refs_and_versions=(),
+        action_record_refs=(),
         redaction_policy_version="redaction-v1",
+        truncation_decisions=(),
         token_counts=TokenCounts(input_tokens=None, output_tokens=None),
         assembled_at=NOW,
     )
@@ -531,8 +536,20 @@ def _cycle2_gateway_case(
     binding_authority: InputAuthority = InputAuthority.USER_CLAIM,
 ) -> tuple[Cycle2GatewayCandidate, Cycle2GatewayLoadedClosure]:
     decision = _decision()
-    task = decision.task_graph.task
-    request_unit = decision.task_graph.request_unit
+    task = decision.task_graph.task.model_copy(
+        update={
+            "last_outcome_ref": decision.task_graph.task.last_outcome_ref,
+        }
+    )
+    request_unit = decision.task_graph.request_unit.model_copy(
+        update={
+            field_name: decision.task_graph.request_unit.__dict__[field_name]
+            for field_name, field in type(
+                decision.task_graph.request_unit
+            ).model_fields.items()
+            if not field.is_required()
+        }
+    )
     binding_id = uuid4()
     model_call_id = uuid4()
     context_manifest_id = uuid4()
@@ -556,6 +573,7 @@ def _cycle2_gateway_case(
         name=binding_name,
         normalized_value=normalized_value,
         authority=binding_authority,
+        validation_status="ACCEPTED",
         source_refs=(uuid4(),),
         superseded_by=None,
     )
@@ -709,6 +727,68 @@ def test_cycle2_gateway_accepts_three_distinct_typed_binding_paths(
     elif tool_name is Cycle2ToolName.GET_SHIPMENT:
         assert candidate.verified_target_ref is not None
         assert candidate.verified_target_ref in candidate.argument_binding_refs
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [Cycle2ToolName.GET_ORDER, Cycle2ToolName.GET_SHIPMENT],
+)
+def test_cycle2_gateway_rejects_duplicate_request_unit_binding_refs(
+    tool_name: Cycle2ToolName,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(tool_name)
+    binding_ref = loaded.current_request_unit.input_binding_refs[0]
+    loaded = loaded.model_copy(
+        update={
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={"input_binding_refs": (binding_ref, binding_ref)}
+            )
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.argument_binding_valid is False
+    assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "history_variant",
+    ["budget-ahead", "history-ahead", "duplicate-step-identity"],
+)
+def test_cycle2_gateway_reconciles_complete_progress_history(
+    history_variant: str,
+) -> None:
+    candidate, loaded = _cycle2_complete_gateway_model_graph()
+    prior_step = loaded.progress_snapshot.prior_tool_steps[0]
+    if history_variant == "budget-ahead":
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 2})
+            }
+        )
+    elif history_variant == "history-ahead":
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 0})
+            }
+        )
+    else:
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 2}),
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (prior_step, prior_step)}
+                ),
+            }
+        )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.progress_valid is False
+    assert gate.reason_code is GateReasonCode.NO_PROGRESS
 
 
 def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() -> None:
@@ -957,6 +1037,7 @@ def test_cycle2_gateway_selects_candidate_binding_from_complete_multi_binding_cl
         name=extra_name,
         normalized_value=("包裹还没收到" if extra_name == "not_received_claim" else "跑鞋"),
         authority=InputAuthority.USER_CLAIM,
+        validation_status="ACCEPTED",
         source_refs=(uuid4(),),
         superseded_by=None,
     )
@@ -1397,6 +1478,7 @@ def _cycle2_complete_gateway_model_graph() -> tuple[
             "progress_snapshot": loaded.progress_snapshot.model_copy(
                 update={"prior_tool_steps": (prior_step,)}
             ),
+            "budget": loaded.budget.model_copy(update={"tool_calls_used": 1}),
         }
     )
     assert _evaluate_cycle2(candidate, loaded).decision is GateDecisionValue.ACCEPT
@@ -1504,6 +1586,9 @@ def test_cycle2_gateway_raw_preflight_closes_complete_nested_model_graph() -> No
         "Cycle2GatewayProgressSnapshot",
         "Cycle2ToolProgressFact",
     }.issubset(discovered_types)
+    assert all(
+        node.model_fields_set == set(type(node).model_fields) for node in nodes
+    )
 
     missing_vectors: set[tuple[str, str, str]] = set()
     for node in nodes:
@@ -1540,6 +1625,18 @@ def test_cycle2_gateway_raw_preflight_closes_complete_nested_model_graph() -> No
                 replacement=missing,
                 vector=f"missing-{field_kind}:{field_name}",
             )
+            if not field.is_required():
+                payload = node.model_dump()
+                payload.pop(field_name)
+                defaulted = type(node).model_validate(payload)
+                assert field_name not in defaulted.model_fields_set
+                _assert_gateway_graph_corruption_rejected(
+                    candidate=candidate,
+                    loaded=loaded,
+                    target=node,
+                    replacement=defaulted,
+                    vector=f"validated-missing-default:{field_name}",
+                )
 
     assert ("CustomerContext", "provenance", "default") in missing_vectors
     assert (

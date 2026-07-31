@@ -15,6 +15,7 @@ from pydantic import (
     BaseModel,
     Field,
     JsonValue,
+    TypeAdapter,
     ValidationError,
     field_serializer,
     field_validator,
@@ -1258,10 +1259,28 @@ def decide_cycle2_tool_recovery(
             stable_reason_code="RECOVERY_EVIDENCE_INVALID",
             decided_at=decided_at,
         )
+    if (
+        type(revalidation) is not Cycle2RetryRevalidation
+        or not cycle2_pydantic_model_graph_is_raw_closed(
+            tool_call,
+            revalidation,
+        )
+    ):
+        return _recovery_decision(
+            tool_call_id=safe_tool_call_id,
+            last_attempt_no=last_attempt_no,
+            decision=ToolRecoveryDecision.FAIL_CLOSED,
+            stable_reason_code="RECOVERY_EVIDENCE_INVALID",
+            decided_at=decided_at,
+        )
     try:
-        validated = ToolCallRecordV2.model_validate(tool_call.model_dump())
+        validated = ToolCallRecordV2.model_validate(
+            tool_call.model_dump(),
+            strict=True,
+        )
         validated_revalidation = Cycle2RetryRevalidation.model_validate(
-            revalidation.model_dump()
+            revalidation.model_dump(),
+            strict=True,
         )
     except (
         ValidationError,
@@ -1869,6 +1888,20 @@ def cycle2_pydantic_model_graph_is_raw_closed(*roots: object) -> bool:
         if isinstance(value, BaseModel):
             if not _pydantic_model_envelope_is_raw_closed(value):
                 return False
+            if (
+                type(value.__pydantic_fields_set__) is not set
+                or value.__pydantic_fields_set__
+                != set(type(value).model_fields)
+            ):
+                return False
+            for field_name, field in type(value).model_fields.items():
+                raw_field_value = value.__dict__[field_name]
+                if isinstance(raw_field_value, (BaseModel, Mapping)):
+                    continue
+                TypeAdapter(field.annotation).validate_python(
+                    raw_field_value,
+                    strict=True,
+                )
             value_id = id(value)
             if value_id in seen:
                 return True

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 
 from mini_agent.core.common import (
@@ -55,6 +55,10 @@ from mini_agent.core.tool_system import (
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def _with_all_model_fields_explicit(model: BaseModel) -> BaseModel:
+    return model.model_copy(update=dict(model.__dict__))
 
 
 def _spec(name: str, description: str = "Safe synthetic read contract.") -> ToolSpec:
@@ -1443,6 +1447,11 @@ def _attempt_v2(
         "tool_call_id": tool_call_id or uuid4(),
         "attempt_no": attempt_no,
         "started_at": NOW + timedelta(milliseconds=attempt_no - 1),
+        "finished_at": None,
+        "outcome": None,
+        "failure_code": None,
+        "timeout_phase": None,
+        "retry_decision": None,
     }
     if outcome is not None:
         values.update(
@@ -1731,6 +1740,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
         attempts=(),
         status=ToolCallStatus.CREATED,
     )
+    created = _with_all_model_fields_explicit(created)
     assert decide_cycle2_tool_recovery(
         tool_call=created,
         revalidation=_retry_revalidation(parent_tool_call=created),
@@ -1745,6 +1755,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
         attempts=(unfinished,),
         status=ToolCallStatus.RUNNING,
     )
+    running_unfinished = _with_all_model_fields_explicit(running_unfinished)
     assert decide_cycle2_tool_recovery(
         tool_call=running_unfinished,
         revalidation=_retry_revalidation(parent_tool_call=running_unfinished),
@@ -1763,6 +1774,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
         attempts=(finalized,),
         status=ToolCallStatus.RUNNING,
     )
+    before_second_fence = _with_all_model_fields_explicit(before_second_fence)
     append = decide_cycle2_tool_recovery(
         tool_call=before_second_fence,
         revalidation=_retry_revalidation(parent_tool_call=before_second_fence),
@@ -1780,6 +1792,7 @@ def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> No
         attempts=(finalized, second_fence),
         status=ToolCallStatus.RUNNING,
     )
+    after_second_fence = _with_all_model_fields_explicit(after_second_fence)
     decision = decide_cycle2_tool_recovery(
         tool_call=after_second_fence,
         revalidation=_retry_revalidation(parent_tool_call=after_second_fence),
@@ -1822,6 +1835,7 @@ def test_cycle2_recovery_revalidation_failure_terminates_without_append() -> Non
         attempts=(finalized,),
         status=ToolCallStatus.RUNNING,
     )
+    before_second_fence = _with_all_model_fields_explicit(before_second_fence)
 
     decision = decide_cycle2_tool_recovery(
         tool_call=before_second_fence,
@@ -1854,6 +1868,7 @@ def test_cycle2_recovery_already_terminal_has_no_executable_authority() -> None:
         finished_at=failure.finished_at,
         failure_code="ORDER_SEARCH_UNAVAILABLE",
     )
+    terminal = _with_all_model_fields_explicit(terminal)
 
     decision = decide_cycle2_tool_recovery(
         tool_call=terminal,
@@ -1907,6 +1922,7 @@ def test_cycle2_recovery_binds_retry_to_parent_dispatch_closure(
         attempts=(retry_scheduled,),
         status=ToolCallStatus.RUNNING,
     )
+    parent = _with_all_model_fields_explicit(parent)
 
     decision = decide_cycle2_tool_recovery(
         tool_call=parent,
@@ -1936,6 +1952,7 @@ def test_cycle2_recovery_rejects_revalidation_for_a_different_parent() -> None:
         attempts=(retry_scheduled,),
         status=ToolCallStatus.RUNNING,
     )
+    parent = _with_all_model_fields_explicit(parent)
 
     decision = decide_cycle2_tool_recovery(
         tool_call=parent,
@@ -1969,6 +1986,7 @@ def test_cycle2_recovery_foreign_parent_identity_fails_closed(
         attempts=(retry_scheduled,),
         status=ToolCallStatus.RUNNING,
     )
+    parent = _with_all_model_fields_explicit(parent)
     revalidation = _retry_revalidation(parent_tool_call=parent)
     foreign_dispatch = revalidation.parent_dispatch_facts.model_copy(
         update={foreign_field: uuid4()}
@@ -1991,6 +2009,239 @@ def test_cycle2_recovery_foreign_parent_identity_fails_closed(
     assert decision.stable_reason_code == "RECOVERY_EVIDENCE_CONTRADICTORY"
     assert decision.candidate_next_attempt_no is None
     assert decision.durable_cas_claimed is False
+
+
+def _cycle2_recovery_retry_case() -> tuple[
+    ToolCallRecordV2,
+    Cycle2RetryRevalidation,
+]:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    tool_call = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    tool_call = _with_all_model_fields_explicit(tool_call)
+    revalidation = _retry_revalidation(parent_tool_call=tool_call)
+    baseline = decide_cycle2_tool_recovery(
+        tool_call=tool_call,
+        revalidation=revalidation,
+        decided_at=NOW,
+    )
+    assert baseline.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+    return tool_call, revalidation
+
+
+def _nested_recovery_models(value: object) -> tuple[BaseModel, ...]:
+    found: list[BaseModel] = []
+    seen: set[int] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, BaseModel):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            found.append(current)
+            for field_name in type(current).model_fields:
+                if field_name in current.__dict__:
+                    visit(current.__dict__[field_name])
+            return
+        if isinstance(current, Mapping):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            for key, item in current.items():
+                visit(key)
+                visit(item)
+            return
+        if isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return tuple(found)
+
+
+def _replace_recovery_model(
+    value: object,
+    target: BaseModel,
+    replacement: BaseModel,
+) -> object:
+    if value is target:
+        return replacement
+    if isinstance(value, BaseModel):
+        updates: dict[str, object] = {}
+        for field_name in type(value).model_fields:
+            if field_name not in value.__dict__:
+                continue
+            original = value.__dict__[field_name]
+            replaced = _replace_recovery_model(original, target, replacement)
+            if replaced is not original:
+                updates[field_name] = replaced
+        return value.model_copy(update=updates) if updates else value
+    if isinstance(value, tuple):
+        replaced_items = tuple(
+            _replace_recovery_model(item, target, replacement) for item in value
+        )
+        return replaced_items if any(
+            replaced is not original
+            for replaced, original in zip(replaced_items, value, strict=True)
+        ) else value
+    return value
+
+
+def _assert_recovery_graph_corruption_rejected(
+    *,
+    tool_call: ToolCallRecordV2,
+    revalidation: Cycle2RetryRevalidation,
+    target: BaseModel,
+    replacement: BaseModel,
+    vector: str,
+) -> None:
+    malformed_tool_call = _replace_recovery_model(
+        tool_call,
+        target,
+        replacement,
+    )
+    malformed_revalidation = _replace_recovery_model(
+        revalidation,
+        target,
+        replacement,
+    )
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed_tool_call,
+        revalidation=malformed_revalidation,
+        decided_at=NOW,
+    )
+    label = f"{type(target).__name__}:{vector}"
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED, label
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_INVALID", label
+    assert decision.candidate_next_attempt_no is None, label
+    assert decision.durable_cas_claimed is False, label
+
+
+def test_cycle2_recovery_raw_preflight_closes_complete_evidence_graph() -> None:
+    tool_call, revalidation = _cycle2_recovery_retry_case()
+    nodes = _nested_recovery_models(tool_call) + _nested_recovery_models(
+        revalidation
+    )
+    assert {
+        "ToolCallRecordV2",
+        "ToolAttemptRecordV2",
+        "Cycle2RetryRevalidation",
+        "Cycle2ToolDispatchFacts",
+    } == {type(node).__name__ for node in nodes}
+    assert all(
+        node.model_fields_set == set(type(node).model_fields) for node in nodes
+    )
+
+    for node in nodes:
+        _assert_recovery_graph_corruption_rejected(
+            tool_call=tool_call,
+            revalidation=revalidation,
+            target=node,
+            replacement=node.model_copy(
+                update={"unexpected_field": "unexpected"}
+            ),
+            vector="raw-extra",
+        )
+        pydantic_extra = type(node).model_construct(**node.__dict__)
+        object.__setattr__(
+            pydantic_extra,
+            "__pydantic_extra__",
+            {"unexpected_field": "unexpected"},
+        )
+        _assert_recovery_graph_corruption_rejected(
+            tool_call=tool_call,
+            revalidation=revalidation,
+            target=node,
+            replacement=pydantic_extra,
+            vector="pydantic-extra",
+        )
+        for field_name, field in type(node).model_fields.items():
+            missing = type(node).model_construct(**node.__dict__)
+            missing.__dict__.pop(field_name)
+            _assert_recovery_graph_corruption_rejected(
+                tool_call=tool_call,
+                revalidation=revalidation,
+                target=node,
+                replacement=missing,
+                vector=f"missing:{field_name}",
+            )
+            if not field.is_required():
+                payload = node.model_dump()
+                payload.pop(field_name)
+                defaulted = type(node).model_construct(**payload)
+                assert field_name not in defaulted.model_fields_set
+                _assert_recovery_graph_corruption_rejected(
+                    tool_call=tool_call,
+                    revalidation=revalidation,
+                    target=node,
+                    replacement=defaulted,
+                    vector=f"default-regained:{field_name}",
+                )
+
+
+def test_cycle2_recovery_rejects_raw_coercive_nested_evidence() -> None:
+    tool_call, revalidation = _cycle2_recovery_retry_case()
+    attempt = tool_call.attempts[0]
+    raw_attempt = attempt.model_copy(update={"outcome": attempt.outcome.value})
+    raw_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={"run_id": str(revalidation.parent_dispatch_facts.run_id)}
+    )
+    variants = (
+        (
+            tool_call.model_copy(update={"run_id": str(tool_call.run_id)}),
+            revalidation,
+        ),
+        (
+            tool_call.model_copy(
+                update={"canonical_tool_name": tool_call.canonical_tool_name.value}
+            ),
+            revalidation,
+        ),
+        (tool_call.model_copy(update={"attempts": (raw_attempt,)}), revalidation),
+        (
+            tool_call,
+            revalidation.model_copy(
+                update={
+                    "parent_dispatch_facts": raw_dispatch,
+                    "expected_dispatch_facts": raw_dispatch,
+                    "current_dispatch_facts": raw_dispatch,
+                }
+            ),
+        ),
+        (
+            tool_call,
+            revalidation.model_copy(
+                update={"remaining_run_time_budget_ms": 500.0}
+            ),
+        ),
+    )
+
+    for malformed_tool_call, malformed_revalidation in variants:
+        decision = decide_cycle2_tool_recovery(
+            tool_call=malformed_tool_call,
+            revalidation=malformed_revalidation,
+            decided_at=NOW,
+        )
+        assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+        assert decision.stable_reason_code == "RECOVERY_EVIDENCE_INVALID"
+        assert decision.candidate_next_attempt_no is None
+        assert decision.durable_cas_claimed is False
 
 
 def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:

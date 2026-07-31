@@ -609,7 +609,11 @@ def _cycle2_loaded_graph_complete(loaded: Cycle2GatewayLoadedClosure) -> bool:
     request_unit = loaded.current_request_unit
     owner_customer_id = loaded.customer_context.customer_id
     binding_ids = tuple(binding.binding_id for binding in loaded.current_input_bindings)
-    if set(binding_ids) != set(request_unit.input_binding_refs):
+    if (
+        len(request_unit.input_binding_refs)
+        != len(set(request_unit.input_binding_refs))
+        or set(binding_ids) != set(request_unit.input_binding_refs)
+    ):
         return False
     for binding in loaded.current_input_bindings:
         if not (
@@ -838,8 +842,15 @@ def _cycle2_progress_valid(
         return False
     progress = loaded.progress_snapshot
     snapshot = loaded.registry_snapshot
+    prior_steps = progress.prior_tool_steps
     if not (
         progress.history_complete is True
+        and loaded.budget.tool_calls_used == len(prior_steps)
+        and not any(
+            left == right
+            for index, left in enumerate(prior_steps)
+            for right in prior_steps[index + 1 :]
+        )
         and progress.run_id == candidate.run_id
         and progress.context_manifest_id == candidate.context_manifest_id
         and progress.tool_registry_version == snapshot.tool_registry_version
