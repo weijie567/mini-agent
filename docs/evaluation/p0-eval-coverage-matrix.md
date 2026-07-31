@@ -318,10 +318,11 @@ Owner ruling 与 synchronization Packet 的 allowlist 不覆盖其他 active con
   Validation / Eval / Security / Result 派生工件：在独立 planning-status Packet
   中记录最终 exact barrier；历史 Plan / Summary 不重写。
 
-`docs/business-capabilities.md`、`PROJECT_DIRECTION.md`、Thin Slice Spec 与
-`AGENTS.md` 已由 PR #187–#190 对齐；`README.md`、execution plan 与 `.planning`
-派生状态仍由后续 single-writer Packet 完成。在这些 Packet 合并前不得声称仓库已经
-cross-file aligned。
+`docs/business-capabilities.md`、`PROJECT_DIRECTION.md`、Thin Slice Spec、
+`AGENTS.md`、Eval owners、`README.md`、execution plan 与`.planning`派生状态已由
+PR #187–#196按single-writer顺序完成pre-release cross-file alignment。本owner
+最终收口不改变Case语义或lifecycle；当前release gate只剩`RTA-D01`用户确认与
+integration → `main`合并决定，完成前Phase completion transition保持锁定。
 
 ### Cycle 2：完成 E2E-01
 
