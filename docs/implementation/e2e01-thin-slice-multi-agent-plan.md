@@ -1589,6 +1589,8 @@ Activation 生效后，Integrator 仍是共享 `.planning/STATE.md`、Roadmap、
 | W2 dispatch | `RU_V2_CONTRACT_AND_01_08A_REVIEWED_MERGED / IMPLEMENTATION_42_OF_42 / QUALITY_GATES_COMPLETE` | PR #149形成`B_RU_V2_CONTRACT = 5c84e0e...`；PR #153形成`B_01_08 = b8a2cf3...`；PR #156形成`B_01_08A_COMPOSITION = c59eaea...`；PR #158形成`B_01_08A = 11d6d08...`；后续quality evidence不替换产品实现barrier |
 | `E2E01-01/04` 生命周期 | `REGRESSION_GATE / LIFECYCLE_VALID_RESULTS_PRESENT` | Coverage Matrix owner经PR #178/#180激活为`EXECUTABLE`，PR #181/#182形成全部16 variants的默认gate与聚合Result，PR #183/#184完成`REGRESSION_GATE`裁决及artifact同步；controlled UAT为scoped `PASS`，但`end_user_uat = NOT_RUN` |
 
+Release ancestry preflight确认`main`的PR #1 merge `5d668f7...`与integration的PR #2 merge `6c6d041...`来自同一bootstrap但SHA不同，直接merge-tree会在`AGENTS.md`与本文件产生历史重放冲突。本release-topology Packet以ancestry-only merge `6d8341ac...`记录`main` parent，tree与pre-merge integration精确相同；本段是唯一内容diff。该Packet必须通过PR以merge commit合入integration，禁止squash或rebase，否则`main` ancestry会再次丢失。
+
 W0、W1、W2.0 contract freeze、GSD activation、01-07全链、RU v1 contract closure与01-08/01-08A均已有reviewed feature和post-merge证据；全部42个implementation targets已完成。Canonical Case lifecycle已由对应owner推进为`REGRESSION_GATE`，派生状态也已同步；Requirements / Phase completion transition仅因最终release决策保持锁定。本execution owner不维护第二份Case lifecycle。PR #107、01-07X preflight remediation、01-07T physical handoff remediation、01-07V Eval handoff remediation与01-08A Composition handoff route只修订execution / acceptance route；所有handoff均为denominator-neutral，不增加42 target。
 
 PR #187–#195已按single-writer顺序对齐Business、Project Direction、Thin Slice Spec、`AGENTS.md`、Eval owners、execution plan、`.planning`派生状态与`README.md`。本次最终execution-owner收口不修改marker-bounded execution map、分母或任何Case语义；派生状态不得反向覆盖active owner。
