@@ -103,7 +103,7 @@ def normalize_search_aliases(aliases: Iterable[str]) -> tuple[str, ...]:
 class SearchOrdersInput(ModelVisibleModel):
     """The only model-proposable order-search field."""
 
-    product_description: Annotated[str, Field(strict=True, min_length=1, max_length=80)]
+    product_description: Annotated[str, Field(strict=True)]
 
     @field_validator("product_description")
     @classmethod

@@ -94,6 +94,21 @@ def test_normalization_is_nfkc_trim_whitespace_collapse_and_casefold() -> None:
     assert normalize_product_description("Straße") == "strasse"
 
 
+def test_normalization_precedes_the_one_to_eighty_scalar_boundary() -> None:
+    raw_over_limit = "a" * 80 + " "
+    assert len(raw_over_limit) > 80
+    assert normalize_product_description(raw_over_limit) == "a" * 80
+    assert SearchOrdersInput(product_description=raw_over_limit).product_description == (
+        raw_over_limit
+    )
+
+    normalized_over_limit = " " + "a" * 81 + " "
+    with pytest.raises(ValueError, match="after normalization"):
+        normalize_product_description(normalized_over_limit)
+    with pytest.raises(ValidationError, match="after normalization"):
+        SearchOrdersInput(product_description=normalized_over_limit)
+
+
 @pytest.mark.parametrize("invalid", ["", " \t\n ", "a" * 81, "\ud800", 1])
 def test_normalization_rejects_non_scalar_empty_overlong_or_non_string(
     invalid: object,
