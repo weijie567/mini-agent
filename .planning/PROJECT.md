@@ -32,7 +32,9 @@
   c775ef45...` / tree `c598651b...`。Adapter dispatch preflight随后确认 search
   authority物理层缺少canonical `status`与durable restricted raw snapshot承载；用户
   批准按建议修正，PR #254 reviewed加入`02-10R`、slots `27→28`且不新增wave。
-  当前审核`02-10R` exact Plan；原`02-07/02-11` Plans/Worktrees暂停并等待真实successor；
+  PR #255/#256已reviewed完成 planning/implementation，并冻结
+  `B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`；当前审核
+  从该真实successor第二次重冻结的`02-07/02-11` exact Plans，旧Worktrees保持暂停；
   writer 上限仍为 2。
   `integration/e2e01-cycle2` 已启用 PR-required、enforce-admins、linear-history、
   conversation-resolution 保护，并禁用 force-push / deletion；dispatch 与 merge 前
@@ -72,8 +74,8 @@
   `B_C2_02_09_DISPATCH_READY`；PR #244/#245又形成reviewed `B_C2_LEAVES`。W4已完成，
   W5 `02-10`已完成并冻结`B_C2_PHYSICAL`；PR #250已批准W6
   `02-07R` owner correction，PR #251/#252已reviewed完成。PR #254随后批准
-  `02-10R` physical correction与28 slots；当前审核该exact Plan，原`02-07/02-11`
-  已暂停，等待真实`02-10R` successor后重冻结。
+  `02-10R` physical correction与28 slots；PR #255/#256已reviewed完成并冻结
+  `B_C2_SEARCH_AUTHORITY_PHYSICAL`；当前审核第二次重冻结的`02-07/02-11` exact Plans。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
@@ -109,7 +111,7 @@
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W5；`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`，W5 focused/neighbor为`66/277 passed`，两条upgrade path、migration head与overlay通过。PR #250已将授权集合更正为27 slots / 16 waves；PR #251/#252已reviewed完成`02-07R`并冻结`B_C2_BUSINESS_READ_PORTS`。PR #254 reviewed批准`02-10R`并将授权集合更正为28 slots / 16 waves；当前19/28 complete。W6正在审核`02-10R` exact Plan，原`02-07/02-11`暂停且须在真实successor后重冻结。Case仍为`CONTRACT_DEFINED`；canonical full只由W6 exit拥有，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W5；`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`，W5 focused/neighbor为`66/277 passed`，两条upgrade path、migration head与overlay通过。PR #250已将授权集合更正为27 slots / 16 waves；PR #251/#252已reviewed完成`02-07R`并冻结`B_C2_BUSINESS_READ_PORTS`。PR #254 reviewed批准`02-10R`并将授权集合更正为28 slots / 16 waves；PR #255/#256已reviewed完成并冻结`B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`，当前20/28 complete。W6正在审核从其真实successor第二次重冻结的`02-07/02-11` exact Plans。Case仍为`CONTRACT_DEFINED`；canonical full只由W6 exit拥有，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
 
 ## 不属于 GSD 派生层的事项
 
