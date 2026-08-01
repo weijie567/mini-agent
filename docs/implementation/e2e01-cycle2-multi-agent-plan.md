@@ -1,8 +1,8 @@
 # E2E-01 Cycle 2｜Codex 多 Agent 实施计划
 
-更新日期：2026-08-01
+更新日期：2026-08-02
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / W4_R1_R2_R3_MERGED / 02-09_DISPATCH_GRANT_OWNER_RULING`
+状态：`NON_NORMATIVE / PLAN_APPROVED / W5_MERGED / 02-07R_OWNER_CORRECTION_APPROVED`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -37,6 +37,14 @@ squash merge；`B_C2_PLAN_APPROVED =
 > 未在 fence 时重验 current state/bindings；recovered fence 只返回 enum，使 executor
 > 继续使用 pre-CAS budget。该 implementation head未发布；先增加 `02-09R4 / W4R2`
 > dispatch-grant correction，再从真实 R4 successor第二次重冻结 02-09。
+> W5 已完成并形成
+> `B_C2_PHYSICAL = bf8e88b2c0124aee82dffc7e54ae03ec0fdbea50` / tree
+> `fccc5a1f87a0b00dd31ba61ee8c960901c7601da`。W6 preflight 证明 canonical
+> Cycle 2 Spec 把 `SearchOrdersQuery/Result` 与 `GetShipmentQuery/Result` 的 outbound
+> Business Read Port 声明归属 Application，但当前 `02-07` Infrastructure allowlist
+> 无权补全该边界。用户于 2026-08-02 明确授权先新增 `02-07R`
+> Application-owner correction Packet，将总 slot 数从 26 调整为 27；不新增
+> Wave label。`02-07/02-11` 只能在 reviewed `02-07R` 真实 successor 上重冻结。
 >
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
 > 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
@@ -94,18 +102,18 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `W1-W3R + 02-06/13/08 + 02-09R1/R2/R3 COMPLETE / 02-09 QUARANTINED / 02-09R4 OWNER RULING` |
-| Task Packets | `W4 LEAVES EXCEPT 02-09 REVIEWED MERGE / DISPATCH-GRANT OWNER GAP CONFIRMED / R4 PLAN PENDING` |
-| Proposed Plan / Packet slots / Waves | `26 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
+| Future GSD Plans | `W1-W5 COMPLETE / 02-07R OWNER CORRECTION APPROVED / W6 REFREEZE PENDING` |
+| Task Packets | `18 COMPLETE / 02-07R PLAN PENDING / 02-07 AND 02-11 BLOCKED UNTIL REVIEWED 02-07R SUCCESSOR` |
+| Proposed Plan / Packet slots / Waves | `27 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / a380d48e5c39de3441104fda44d893693e7a24ce` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 5069a3c730aa650d211cc686102c95fd90d65f9c` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W3R + W4 02-06/13/08 + R1/R2/R3 COMPLETE；02-09 local head QUARANTINED / UNPUBLISHED` |
-| Writer assignments | `02-09 writer PAUSED；Integrator R4 owner-ruling single writer ACTIVE` |
-| Execution concurrency | approved ceiling `2` writers；当前 writer `1`（owner ruling） |
+| Integration / code feature branches / Worktrees | `W1..W5 COMPLETE；早期 W6 draft QUARANTINED / UNPUBLISHED` |
+| Writer assignments | `Integrator 02-07R owner-ruling single writer ACTIVE；02-07/11 writers NOT DISPATCHED` |
+| Execution concurrency | approved ceiling `2` writers；当前 implementation writer `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
 
@@ -202,10 +210,11 @@ Tech Lead / Integrator
 
 ## 5. Future Plan / Task Packet slots
 
-以下 26 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
+以下 27 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
 `02-02R/02-04R/02-05R` 是用户授权的 W4 前 correction set，
 `02-09R1/02-09R2/02-09R3` 是 02-09 preflight 触发的 recovery owner correction
-set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correction。
+set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correction，
+`02-07R` 是 W6 preflight 触发的 Application Business Read Port owner correction。
 `02-00` 是零功能代码的
 scoped-owner correction；其余 slot 覆盖实现、remediation、lifecycle 与
 post-activation verification。
@@ -386,6 +395,23 @@ post-activation verification。
   闭合；unknown version、mixed active version、logical child mismatch、conversion
   ambiguity 全部 fail closed；无 read-time fallback。
 
+### `02-07R` — Application Business Read Port owner correction
+
+- **Owner:** Runtime Engineer / Application outbound ports（single writer）。
+- **Goal:** 仅按现行 Cycle 2 Spec 补全 `SearchOrdersPort` 与
+  `GetShipmentPort` 的 Application-owned Protocol 声明，使后续 Infrastructure
+  Adapter 实现有明确 Port 边界；不更改 DTO、Adapter、Runtime、Action 或
+  Case lifecycle。
+- **Proposed files:**
+  - `src/mini_agent/application/ports.py`
+  - `tests/component/application/test_ports_contract.py`
+- **Depends on:** reviewed `B_C2_PHYSICAL` 与 2026-08-02 用户对 owner correction /
+  `26 → 27` slot 调整的明确授权。
+- **Acceptance:** 两个 Protocol 只消费 canonical `SearchOrdersQuery/Result` 与
+  `GetShipmentQuery/Result`；保持 async 调用面与 strict DTO 边界；不扩大
+  `customer_id` 或授权来源；不实现查询、持久化、组装、工具注册或
+  lifecycle 变更。
+
 ### `02-07` — Mock Order / Shipment business adapters
 
 - **Owner:** Infrastructure Engineer / Business physical implementation.
@@ -397,7 +423,8 @@ post-activation verification。
   - `src/mini_agent/infrastructure/shipment/postgres.py`（new）
   - `tests/integration/test_postgres_search_orders.py`（new）
   - `tests/integration/test_postgres_get_shipment.py`（new）
-- **Depends on:** reviewed `02-01/05/10` barriers。
+- **Depends on:** reviewed `02-01/05/10` barriers 与 reviewed `02-07R` 真实 merge
+  successor；旧 draft 不可执行，必须从该 successor 重冻结 exact base/tree/blobs。
 - **Acceptance:** foreign owner never enters result；search stable；Package cardinality
   >1 deterministic failure；source version只由同一次 owner-scoped read生成；
   `search_orders` 只读 reviewed search-authority table，Phase 1 `get_order` 的
@@ -522,7 +549,9 @@ post-activation verification。
   - `tests/integration/test_postgres_record_adapters.py`
   - `tests/integration/test_postgres_recovery.py`
   - `tests/integration/test_postgres_atomicity.py`
-- **Depends on:** reviewed `02-06/10` barriers。
+- **Depends on:** reviewed `02-06/10` barriers 与 reviewed `02-07R` 真实 merge
+  successor；因本 Packet 读取 Application Port contract，旧 draft 不可执行，
+  必须从该 successor 重冻结 exact base/tree/blobs。
 - **Acceptance:** half-write、wrong-owner、dangling、duplicate、mixed version、
   retry fence conflict 全部零部分写入并 fail closed；本 slot 不产生 confirmation、
   ActionPolicy、idempotency claim / key、Action Ledger write 或 `RESULT_UNKNOWN`
@@ -667,7 +696,7 @@ post-activation verification。
 | `W4R2` | `02-09R4` | 1 | dispatch-grant contract correction；形成新的 exact `B_C2_02_09_DISPATCH_READY` |
 | `W4 resumed` | `02-09` | 1 | 仅从 `B_C2_02_09_DISPATCH_READY` 第二次重冻结后执行；形成 `B_C2_LEAVES` |
 | `W5` | `02-10` | 1 | `B_C2_PHYSICAL` |
-| `W6` | `02-07, 02-11` | max 2 | business / record Adapter files不重叠；serial merge；形成 `B_C2_INFRA` |
+| `W6` | `02-07R → (02-07, 02-11)` | 1 → max 2 | Application Port owner correction先 reviewed merge；两个 Adapter Packet 从真实 successor 重冻结后可并行写入，仍 serial merge；形成 `B_C2_INFRA` |
 | `W7` | `02-12` | 1 | `B_C2_RUNTIME` |
 | `W8` | `02-14` | 1 | `B_C2_EVAL_MACHINERY`；Case 仍为 `CONTRACT_DEFINED` |
 | `W9` | `02-15` | 1 | `B_C2_EXECUTION_SEAM`；Case 仍为 `CONTRACT_DEFINED` |
@@ -697,6 +726,8 @@ W3R Application atomic continuation correction
 W4 codecs + RU + retry + Eval bundle
   ↓
 W5 migration
+  ↓
+W6 Application Business Read Port correction
   ↓
 W6 business adapters || PostgreSQL persistence / recovery
   ↓
@@ -959,8 +990,10 @@ barrier 与 release。
 1. **先完整暴露 slots，不用“大包”隐藏复杂度。** 原 19 slots / 13 wave labels 与
    Gate P2-A1 的 22 / 14 都保留为历史批准层级；本轮“有问题先修复”的用户指令经
    Gate P2-A2 收口为增加 `02-09R1/R2/R3` 与 `W4R`；replacement 02-09 review的两个
-   HIGH 再由 Gate P2-A3 增加 `02-09R4 / W4R2`。当前冻结集合为 26 slots /
-   16 wave labels / max 2 writers。后续再增减任一 slot 仍需重新裁决 master Plan。
+   HIGH 再由 Gate P2-A3 增加 `02-09R4 / W4R2`；W6 Application Port owner
+   缺口经 2026-08-02 用户明确授权由 Gate P2-A4 增加 `02-07R`，不增加
+   wave label。当前冻结集合为 27 slots / 16 wave labels / max 2 writers。
+   后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
    contract change / review；不生成临时 replacement Plan。
 3. **同一 finding 优先在原 Packet 内关闭。** 只有跨 allowlist / owner / base 的
@@ -1114,7 +1147,8 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
 - [x] 原 19 slots / 13 Waves / max concurrency 2 已由 Gate P2-A 批准；Gate P2-A1
       历史增加三个 W3R correction slots，形成 22 / 14；本轮用户“有问题先修复”
       指令经 Gate P2-A2 增加 `02-09R1/R2/R3` 与 `W4R`，又经 Gate P2-A3增加
-      `02-09R4 / W4R2`；当前冻结为 26 slots / 16 wave labels，并发上限仍为 2。
+      `02-09R4 / W4R2`；Gate P2-A4 又增加 `02-07R` 但不新增 wave
+      label；当前冻结为 27 slots / 16 wave labels，并发上限仍为 2。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
 - [x] single-writer hotspots唯一。
