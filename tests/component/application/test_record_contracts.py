@@ -2,6 +2,7 @@ import pickle
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from pathlib import Path
 from typing import get_type_hints
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from mini_agent.application.records import (
     AcceptedOrderSearchQueryBindingReadClosure,
     AgentRunCommand,
     AgentRunResult,
+    AppendInitialToolAttemptV2Command,
     AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
@@ -23,6 +25,7 @@ from mini_agent.application.records import (
     ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
     Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
     Cycle2RunBudgetPolicyEvidence,
     Cycle2WriteResult,
     CreateInitialTaskGraphV2Command,
@@ -10177,6 +10180,214 @@ def _c2_recovery_decision_record(
         candidate_next_attempt_no=decision.candidate_next_attempt_no,
         decided_at=decision.decided_at,
     )
+
+
+def _c2_initial_append_command(
+    closure: ToolRetryRecoveryReadClosureV2,
+    *,
+    started_at: datetime | None = None,
+) -> AppendToolAttemptV2Command:
+    attempt = ToolAttemptRecordV2(
+        tool_call_id=closure.tool_call_record.tool_call_id,
+        attempt_no=1,
+        started_at=started_at or closure.trusted_read_at,
+    )
+    running = _c2_project(
+        closure.tool_call_record,
+        status=ToolCallStatus.RUNNING,
+        attempts=(attempt,),
+        attempt_count=1,
+    )
+    return AppendToolAttemptV2Command(
+        owner_scope=closure.owner_scope,
+        expected_record=closure.tool_call_record,
+        next_running_record=running,
+        started_attempt=attempt,
+    )
+
+
+def test_cycle2_read_dispatch_grant_has_exact_closed_matrix() -> None:
+    tool_call_id = uuid4()
+    applied = Cycle2ReadDispatchGrant(
+        write_result=Cycle2DispatchFenceWriteResult.APPLIED,
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        trusted_fenced_at=UTC_NOW,
+        effective_timeout_ms=500,
+    )
+    assert applied.tool_call_id == tool_call_id
+    assert applied.attempt_no == 1
+    assert applied.effective_timeout_ms == 500
+    assert applied.contract_visibility is ContractVisibility.RUNTIME_PRIVATE
+    assert set(type(applied).model_fields) == {
+        "write_result",
+        "tool_call_id",
+        "attempt_no",
+        "trusted_fenced_at",
+        "effective_timeout_ms",
+    }
+    assert "schema_version" not in type(applied).model_fields
+    assert {
+        "customer_id",
+        "payload",
+        "result_ref",
+        "action_id",
+        "idempotency_key",
+    }.isdisjoint(type(applied).model_fields)
+    persistence_source = Path(
+        application_records_module.__file__
+    ).with_name("persistence.py").read_text(encoding="utf-8")
+    assert "Cycle2ReadDispatchGrant" not in persistence_source
+
+    for write_result in Cycle2DispatchFenceWriteResult:
+        if write_result is Cycle2DispatchFenceWriteResult.APPLIED:
+            continue
+        grant = Cycle2ReadDispatchGrant(write_result=write_result)
+        assert grant.tool_call_id is None
+        assert grant.attempt_no is None
+        assert grant.trusted_fenced_at is None
+        assert grant.effective_timeout_ms is None
+
+
+def test_cycle2_read_dispatch_grant_rejects_partial_or_dirty_matrix() -> None:
+    complete = {
+        "tool_call_id": uuid4(),
+        "attempt_no": 2,
+        "trusted_fenced_at": UTC_NOW,
+        "effective_timeout_ms": 1,
+    }
+    for missing_field in complete:
+        with pytest.raises(ValidationError, match="every grant field"):
+            Cycle2ReadDispatchGrant(
+                write_result=Cycle2DispatchFenceWriteResult.APPLIED,
+                **{
+                    field_name: value
+                    for field_name, value in complete.items()
+                    if field_name != missing_field
+                },
+            )
+    for write_result in (
+        Cycle2DispatchFenceWriteResult.ALREADY_APPLIED,
+        Cycle2DispatchFenceWriteResult.PROJECTION_CONFLICT,
+        Cycle2DispatchFenceWriteResult.NOT_APPLICABLE,
+    ):
+        with pytest.raises(ValidationError, match="null grant fields"):
+            Cycle2ReadDispatchGrant(
+                write_result=write_result,
+                **complete,
+            )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error"),
+    [
+        ("attempt_no", True, "valid integer"),
+        ("attempt_no", 0, "greater than or equal to 1"),
+        ("attempt_no", 3, "less than or equal to 2"),
+        ("effective_timeout_ms", True, "valid integer"),
+        ("effective_timeout_ms", 0, "greater than or equal to 1"),
+        ("effective_timeout_ms", 501, "less than or equal to 500"),
+        ("trusted_fenced_at", NON_UTC_NOW, "must use UTC"),
+    ],
+)
+def test_cycle2_read_dispatch_grant_rejects_ambiguous_or_untrusted_fields(
+    field_name: str,
+    invalid_value: object,
+    error: str,
+) -> None:
+    values = {
+        "write_result": Cycle2DispatchFenceWriteResult.APPLIED,
+        "tool_call_id": uuid4(),
+        "attempt_no": 1,
+        "trusted_fenced_at": UTC_NOW,
+        "effective_timeout_ms": 500,
+    }
+    values[field_name] = invalid_value
+    with pytest.raises(ValidationError, match=error):
+        Cycle2ReadDispatchGrant(**values)
+
+
+def test_cycle2_read_dispatch_grant_requires_exact_enum_and_uuid_identity() -> None:
+    values = {
+        "write_result": Cycle2DispatchFenceWriteResult.APPLIED,
+        "tool_call_id": uuid4(),
+        "attempt_no": 1,
+        "trusted_fenced_at": UTC_NOW,
+        "effective_timeout_ms": 500,
+    }
+    with pytest.raises(ValidationError):
+        Cycle2ReadDispatchGrant(
+            **{
+                **values,
+                "write_result": "APPLIED",
+            }
+        )
+    with pytest.raises(ValidationError):
+        Cycle2ReadDispatchGrant(
+            **{
+                **values,
+                "tool_call_id": str(uuid4()),
+            }
+        )
+
+
+def test_cycle2_initial_append_binds_created_closure_and_attempt_one() -> None:
+    closure = _c2_retry_recovery_closure(created=True)
+    append = _c2_initial_append_command(closure)
+    command = AppendInitialToolAttemptV2Command(
+        loaded_closure=closure,
+        attempt_append_command=append,
+    )
+    assert set(type(command).model_fields) == {
+        "loaded_closure",
+        "attempt_append_command",
+    }
+    assert command.attempt_append_command.expected_record == (
+        closure.tool_call_record
+    )
+    assert command.attempt_append_command.started_attempt.attempt_no == 1
+    assert "recovery_decision_record" not in type(command).model_fields
+
+    other = _c2_retry_recovery_closure(created=True)
+    with pytest.raises(ValidationError, match="trusted closure"):
+        AppendInitialToolAttemptV2Command(
+            loaded_closure=other,
+            attempt_append_command=append,
+        )
+    early_append = _c2_initial_append_command(
+        closure,
+        started_at=closure.tool_call_record.started_at,
+    )
+    with pytest.raises(ValidationError, match="trusted closure"):
+        AppendInitialToolAttemptV2Command(
+            loaded_closure=closure,
+            attempt_append_command=early_append,
+        )
+
+
+def test_cycle2_initial_wrapper_rejects_recovery_attempt_two() -> None:
+    closure = _c2_retry_recovery_closure()
+    second = ToolAttemptRecordV2(
+        tool_call_id=closure.tool_call_record.tool_call_id,
+        attempt_no=2,
+        started_at=closure.trusted_read_at,
+    )
+    running = _c2_project(
+        closure.tool_call_record,
+        attempts=(*closure.tool_call_record.attempts, second),
+        attempt_count=2,
+    )
+    append = AppendToolAttemptV2Command(
+        owner_scope=closure.owner_scope,
+        expected_record=closure.tool_call_record,
+        next_running_record=running,
+        started_attempt=second,
+    )
+    with pytest.raises(ValidationError, match="CREATED attempt-0"):
+        AppendInitialToolAttemptV2Command(
+            loaded_closure=closure,
+            attempt_append_command=append,
+        )
 
 
 def test_cycle2_created_recovery_is_parent_only_zero_attempt_terminal() -> None:

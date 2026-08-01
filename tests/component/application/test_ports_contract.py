@@ -22,15 +22,15 @@ from mini_agent.application.ports import (
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendInitialToolAttemptV2Command,
     AppendRecoveredToolAttemptV2Command,
-    AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
     Cycle2WriteResult,
     ContinuationInputBindingReadClosure,
     CreateInitialTaskGraphV2Command,
@@ -2082,7 +2082,7 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         "apply_order_candidate_selection_if_current",
         "load_initial_tool_call_v2_closure_for_owner",
         "insert_initial_tool_call_v2_if_current",
-        "append_tool_attempt_if_current",
+        "append_initial_tool_attempt_if_current",
         "finalize_tool_attempt_if_current",
         "load_tool_retry_recovery_closure_for_owner",
         "append_recovered_tool_attempt_if_current",
@@ -2132,11 +2132,11 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         },
     )
     _assert_signature(
-        Cycle2RuntimeRecordPort.append_tool_attempt_if_current,
+        Cycle2RuntimeRecordPort.append_initial_tool_attempt_if_current,
         parameters=("command",),
         type_hints={
-            "command": AppendToolAttemptV2Command,
-            "return": Cycle2DispatchFenceWriteResult,
+            "command": AppendInitialToolAttemptV2Command,
+            "return": Cycle2ReadDispatchGrant,
         },
     )
     _assert_signature(
@@ -2152,8 +2152,12 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         parameters=("command",),
         type_hints={
             "command": AppendRecoveredToolAttemptV2Command,
-            "return": Cycle2DispatchFenceWriteResult,
+            "return": Cycle2ReadDispatchGrant,
         },
+    )
+    assert not hasattr(
+        Cycle2RuntimeRecordPort,
+        "append_tool_attempt_if_current",
     )
     for method, command_type in (
         (
@@ -2369,12 +2373,30 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         assert required_term in normalized_doc
     dispatch_doc = " ".join(
         (
-            Cycle2RuntimeRecordPort.append_tool_attempt_if_current.__doc__
+            Cycle2RuntimeRecordPort
+            .append_initial_tool_attempt_if_current.__doc__
             or ""
         ).split()
     )
-    assert "Only ``APPLIED``" in dispatch_doc
-    assert "never grant dispatch" in dispatch_doc
+    for required_term in (
+        "Same-CAS",
+        "owner",
+        "active Run/link",
+        "current Task/RequestUnit",
+        "complete bindings/verified target",
+        "trusted server time",
+        "versioned Run-budget policy",
+        "same transaction",
+        "min(500, authoritative remaining Run budget)",
+        "1..500",
+        "APPLIED grant exact-bound",
+        "attempt_no=1",
+        "non-APPLIED grant has null authority fields",
+        "zero writes",
+        "zero dispatch",
+        "bare write enum grants no authority",
+    ):
+        assert required_term in dispatch_doc
     search_read_doc = " ".join(
         (
             Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner.__doc__
@@ -2474,11 +2496,23 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
     for required_term in (
         "Same-CAS",
         "re-read",
+        "owner",
+        "active Run/link",
+        "current Task/RequestUnit",
+        "complete bindings/verified target",
+        "trusted server time",
+        "versioned Run-budget policy",
         "recompute",
         "decision-child plus attempt-2 fence",
-        "Only APPLIED",
-        "zero-write",
-        "zero-dispatch",
+        "same transaction",
+        "min(500, authoritative remaining Run budget)",
+        "1..500",
+        "APPLIED grant exact-bound",
+        "attempt_no=2",
+        "non-APPLIED grant has null authority fields",
+        "zero writes",
+        "zero dispatch",
+        "old closure budget and bare write enum grant no authority",
     ):
         assert required_term in recovered_append_doc
     created_doc = " ".join(

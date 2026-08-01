@@ -9,15 +9,15 @@ from uuid import UUID
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendInitialToolAttemptV2Command,
     AppendRecoveredToolAttemptV2Command,
-    AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
     Cycle2WriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
@@ -513,14 +513,20 @@ class Cycle2RuntimeRecordPort(Protocol):
         """
         ...
 
-    async def append_tool_attempt_if_current(
+    async def append_initial_tool_attempt_if_current(
         self,
-        command: AppendToolAttemptV2Command,
-    ) -> Cycle2DispatchFenceWriteResult:
-        """Append one unfinished attempt under CAS before external dispatch.
+        command: AppendInitialToolAttemptV2Command,
+    ) -> Cycle2ReadDispatchGrant:
+        """Same-CAS revalidate current graph and append the attempt-1 fence.
 
-        Only ``APPLIED`` grants exactly one dispatch. Replay, conflict, and
-        not-applicable results never grant dispatch, including after recovery.
+        The transaction re-reads and exact-compares owner, active Run/link,
+        current Task/RequestUnit, complete bindings/verified target, trusted
+        server time, and versioned Run-budget policy. In that same transaction
+        it computes ``min(500, authoritative remaining Run budget)`` in the
+        strict ``1..500`` range. Only an APPLIED grant exact-bound to this
+        tool_call_id and attempt_no=1 authorizes one dispatch. Every non-APPLIED
+        grant has null authority fields, zero writes, and zero dispatch; the
+        loaded closure or bare write enum grants no authority.
         """
         ...
 
@@ -549,13 +555,18 @@ class Cycle2RuntimeRecordPort(Protocol):
     async def append_recovered_tool_attempt_if_current(
         self,
         command: AppendRecoveredToolAttemptV2Command,
-    ) -> Cycle2DispatchFenceWriteResult:
+    ) -> Cycle2ReadDispatchGrant:
         """Same-CAS re-read/recompute, decision-child plus attempt-2 fence.
 
-        The transaction re-reads owner/current Run, state, bindings, trusted
-        server time and authoritative budget policy, recomputes the decision,
-        and commits both records atomically. Only APPLIED grants one dispatch;
-        every other result is zero-write and zero-dispatch.
+        The transaction re-reads and exact-compares owner, active Run/link,
+        current Task/RequestUnit, complete bindings/verified target, trusted
+        server time, and versioned Run-budget policy, recomputes the decision,
+        and commits both records atomically. In that same transaction it
+        computes ``min(500, authoritative remaining Run budget)`` in the strict
+        ``1..500`` range. It returns that timeout only in an APPLIED grant
+        exact-bound to this tool_call_id and attempt_no=2. Every non-APPLIED
+        grant has null authority fields, zero writes, and zero dispatch; old
+        closure budget and bare write enum grant no authority.
         """
         ...
 
