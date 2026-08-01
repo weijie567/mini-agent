@@ -17,8 +17,9 @@
   tree `2e82f1b...`。第一次replacement 02-09 exact-head review发现initial fence
   current-state TOCTOU与recovered fence pre-CAS budget HIGH；head保持local/unpublished。
   PR #241 已裁决 `02-09R4/W4R2`，PR #242/#243 reviewed merge后形成真实
-  `B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；当前仅replacement
-  `02-09` 从该successor第二次重冻结并进入planning review。Phase 3–6 只保留 Coverage
+  `B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；PR #244/#245随后
+  reviewed完成replacement `02-09`并形成`B_C2_LEAVES = fc3a603b...` / tree
+  `01b33357...`。W4 exit三组回归`726/877/398 passed`；W5尚未开始。Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
@@ -29,7 +30,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / DISPATCH GRANT READY / SECOND 02-09 PLANNING）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_LEAVES / W4 COMPLETE / W5 NOT STARTED）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
@@ -45,8 +46,9 @@ Tool / Application contracts 与这些 W4 leaf contracts 均不构成四个 Case
 证据或 lifecycle 推进。`02-09` 的 recovery owner gap 已由 PR #231 规范化为
 `02-09R1/R2/R3` 前置链；三者已 reviewed merge并冻结`B_C2_02_09_READY`。第一次
 replacement 02-09实现未发布；PR #241追加`02-09R4` shared grant correction，PR
-#242/#243已reviewed完成R4。当前仅第二次重冻结的02-09 exact Plan进入review。四个
-Case继续保持`CONTRACT_DEFINED`，
+#242/#243已reviewed完成R4，PR #244/#245又reviewed完成second-refrozen 02-09。
+W4 exit三组回归全部通过并冻结`B_C2_LEAVES`；这些Component证据仍不构成Phase 2
+Case activation、Trajectory/E2E Result或完整E2E-01证据。四个Case继续保持`CONTRACT_DEFINED`，
 上方 checkbox 继续未勾选；当前没有 Phase 2 Eval artifact、Case activation、完整
 E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 
@@ -82,10 +84,10 @@ E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 |---|---:|---|---|
 | `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
-| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_DISPATCH_READY / SECOND_02-09_PLANNING` |
-| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_DISPATCH_READY / SECOND_02-09_PLANNING` |
-| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_DISPATCH_READY / SECOND_02-09_PLANNING` |
-| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_DISPATCH_READY / SECOND_02-09_PLANNING` |
+| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_LEAVES / W4_COMPLETE` |
+| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_LEAVES / W4_COMPLETE` |
+| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_LEAVES / W4_COMPLETE` |
+| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_LEAVES / W4_COMPLETE` |
 | `E2E02-01` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-02` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-03` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |

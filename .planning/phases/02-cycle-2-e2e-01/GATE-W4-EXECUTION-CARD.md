@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W4_02-06_13_08_AND_R1_R2_R3_R4_MERGED / FIRST_02-09_QUARANTINED / SECOND_02-09_PLAN_REVIEW`
+状态：`W4_COMPLETE / B_C2_LEAVES_FROZEN / FIRST_02-09_QUARANTINED / W5_NOT_STARTED`
 
 ## Exact input
 
@@ -77,6 +77,13 @@
   `B_C2_02_09_DISPATCH_READY = 09be05da8fd0e9c27de54d0413fef720e8b591df` /
   tree `e1c10c67836b13a59083dc13d3f740780ff0142c`与reviewed overlay tree相等；Case仍
   `CONTRACT_DEFINED`，full/migration/Runtime/Infrastructure/Eval lifecycle均未运行或推进。
+- second-refreeze planning PR #244 与 replacement implementation PR #245 已reviewed
+  merge；新的`r2` branch exact 4-file feature/latest-integration overlay review均
+  `PASS / 0 BLOCK / 0 HIGH`，focused `79 passed`、neighbor `1104 passed`、compile/diff
+  通过。真实`B_C2_READ_EXECUTOR`与W4 leaf successor为
+  `fc3a603b963ea54c597e00847ac816050bd007bf` / tree
+  `01b33357c15d16ee2c1dc15194254f86dd07252c`，与reviewed overlay tree相等；第一次
+  `aeaf29d4...` head继续local/unpublished/quarantined。
 
 ## Historical W4 preflight blocker and owner ruling
 
@@ -136,14 +143,14 @@ exact-file planning review `PASS`，并通过同一 planning PR 合并为 proven
   tree `e1c10c67836b13a59083dc13d3f740780ff0142c`
 - 02-09 replacement implementation branch
   `codex/e2e01-cycle2-read-executor-recovery-r2` 在 second-refreeze preflight 为 local / remote
-  `NOT_FOUND`；owned-file overlap仍为零
+  `NOT_FOUND`；其后只在独立Worktree实现并由PR #245 reviewed merge，owned-file overlap为零
 
 ```text
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
 Batch B: 02-08 Request understanding/routing — MERGED
 W4R: 02-09R1 + 02-09R2 + 02-09R3 — MERGED
 W4R2: 02-09R4 dispatch-grant contract — MERGED
-W4 resumed: second-refrozen 02-09 executor/recovery — PLAN REVIEW
+W4 resumed: second-refrozen 02-09 executor/recovery — MERGED
 ```
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
@@ -185,6 +192,19 @@ W4 allowlist overlap，立即停止。
 ## W4 exit
 
 原四个 reviewed implementation 中的 02-06/13/08、W4R三项、W4R2 R4 与最终
-second-refrozen 02-09 全部串行合并后才冻结 `B_C2_LEAVES`。只运行 W4
-integration-focused/neighbor checks 与 Phase 1 直接相关回归；不运行 canonical full、
-Phase 级全面深审、Phase 2 Harness/Eval Result，也不推进 Case lifecycle。
+second-refrozen 02-09 已全部串行合并，`B_C2_LEAVES`冻结为
+`fc3a603b963ea54c597e00847ac816050bd007bf` / tree
+`01b33357c15d16ee2c1dc15194254f86dd07252c`。在该exact tree上执行：
+
+- integration-focused：`726 passed`；
+- neighbor-only：`877 passed`；
+- Phase 1 direct regression：`398 passed`。
+
+```bash
+uv run pytest tests/component/evaluation/test_e2e01_artifact_consistency.py tests/component/evaluation/test_e2e01_scripted_model_provider.py tests/component/model/test_e2e01_scripted_scenario_catalog.py tests/component/application/test_read_tool_executor.py tests/component/application/test_restart_recovery_service.py tests/component/core/test_tool_system_contract.py tests/component/application/test_record_contracts.py tests/component/application/test_ports_contract.py -q
+uv run pytest tests/component/core/test_cycle2_trace_contract.py tests/component/core/test_candidate_selection_contract.py tests/component/core/test_cycle2_memory_contract.py tests/component/core/test_order_search_contract.py tests/component/core/test_shipment_contract.py tests/component/core/test_task_state_contract.py tests/component/core/test_control_gateway.py tests/component/evaluation/test_e2e01_graders.py -q
+uv run pytest tests/component/application/test_persistence_contract.py tests/component/core/test_request_understanding_contract.py tests/component/core/test_request_processing.py tests/component/evaluation/test_e2e01_versioned_artifact_loader.py -q
+```
+
+三组均为`PASS`，无失败。canonical full、Phase级全面深审、Phase 2 Harness/Eval
+Result与Case lifecycle均未运行或推进；四个Case继续为`CONTRACT_DEFINED`。W5未开始。
