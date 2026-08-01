@@ -2,7 +2,7 @@
 
 更新日期：2026-08-02
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / W6_02-11R_HISTORY_CORRECTION_APPROVED`
+状态：`NON_NORMATIVE / PLAN_APPROVED / W9_OWNER_CORRECTIONS_APPROVED`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -74,6 +74,19 @@ squash merge；`B_C2_PLAN_APPROVED =
 > successor 重冻结并回放 `02-11`。该 correction 不降低
 > `SupersededRunReadClosure` 或改变 OA-10 canonical 语义。
 >
+> W7/W8 已reviewed完成并分别冻结`B_C2_RUNTIME`与`B_C2_EVAL_MACHINERY`。
+> W9 `02-15`只读preflight随后确认三个跨owner BLOCK：active Spec只有fixture ref
+> 与静态digest而没有可认证seed payload；Application没有实现正常Cycle 2
+> `AgentRunHandler`、v2 Run / Message / ordinary Trace terminal contract；
+> Infrastructure没有这些normal writes / exact reader与三READ business-result
+> dispatch adapter。把这些逻辑或直写SQL塞进`bootstrap.py`会跨越Spec、Application、
+> Infrastructure ownership并形成第二套Runtime，违反§11.6。依据用户2026-08-02
+> “有问题按照你的建议走”的授权，W9在原wave内增加串行`02-15R0/R1/R2`，slot数
+> 从29调整为32、不新增wave label：R0只修active seed contract，R1只补Application
+> normal use-case / Port，R2只补Infrastructure implementation / typed seed；之后才从
+> 真实reviewed successors重冻结`02-15`。`http.py`现有trusted Session边界足够，
+> correction与02-15均不得无证据修改外部HTTP contract。
+>
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
 > 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
 > 才创建对应 feature branch / Worktree；Plan、artifact 或测试的存在不推进 Case
@@ -130,17 +143,17 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `W1-W5 + 02-07R + 02-10R + 02-07 COMPLETE / 02-11R OWNER CORRECTION APPROVED` |
-| Task Packets | `21 COMPLETE / 02-11R PLAN PENDING / 02-11 BLOCKED CHECKPOINT UNPUBLISHED` |
-| Proposed Plan / Packet slots / Waves | `29 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
+| Future GSD Plans | `W1-W8 COMPLETE / 02-15R0/R1/R2 OWNER CORRECTIONS APPROVED / 02-15 BLOCKED` |
+| Task Packets | `24 COMPLETE / 02-15R0/R1/R2 PLAN PENDING / 02-15 NOT REFROZEN` |
+| Proposed Plan / Packet slots / Waves | `32 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` + `02-15R0/R1/R2` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 78bce02c36ada33d6695d5a919d23b61bb8df21e` / tree `032e0c5edfb3c2ffc18f34192ae72858bc0cec85` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / d6fdcbb3cdd4e6bb41fb2ae0b1ff5b80629b4efb` / tree `8ab6f2aeab53bfae73edff219cab70623c437ebc` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W5 + 02-07R + 02-10R + 02-07 COMPLETE；02-11 blocked checkpoint CLEAN / UNPUBLISHED` |
-| Writer assignments | `Integrator 02-11R owner-ruling single writer ACTIVE；02-11 writer STOPPED` |
+| Integration / code feature branches / Worktrees | `W1..W8 COMPLETE；02-15R0/R1/R2与02-15尚未dispatch` |
+| Writer assignments | `Integrator W9 owner-ruling single writer ACTIVE；implementation writer 0` |
 | Execution concurrency | approved ceiling `2` writers；当前 implementation writer `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
@@ -238,14 +251,15 @@ Tech Lead / Integrator
 
 ## 5. Future Plan / Task Packet slots
 
-以下 29 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
+以下 32 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
 `02-02R/02-04R/02-05R` 是用户授权的 W4 前 correction set，
 `02-09R1/02-09R2/02-09R3` 是 02-09 preflight 触发的 recovery owner correction
 set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correction，
 `02-07R` 是 W6 preflight 触发的 Application Business Read Port owner correction，
 `02-10R` 是后续 Adapter preflight 触发的 Infrastructure physical search-authority
 correction，`02-11R` 是 02-11 实现验证触发的 immutable Task / RequestUnit
-pre-image history correction。
+pre-image history correction；`02-15R0/R1/R2` 是W9 preflight触发的seed owner、
+Application normal entry与Infrastructure normal evidence/dispatch corrections。
 `02-00` 是零功能代码的
 scoped-owner correction；其余 slot 覆盖实现、remediation、lifecycle 与
 post-activation verification。
@@ -695,6 +709,63 @@ post-activation verification。
   PII；derived `CONTRACT_DEFINED` batch 必须在 SUT / Provider / Trace / Grader /
   Result 前 fail closed；本 slot 不声称存在 Phase 2 lifecycle-valid Result。
 
+### `02-15R0` — Authenticated offline fixture seed contract
+
+- **Owner:** Cycle 2 scoped Spec owner / documentation single writer.
+- **Goal:** 把现有fixture ref升级为可实现、可认证、不可由Eval oracle反推的closed
+  offline seed contract；不修改artifact、loader、源码、测试或Case lifecycle。
+- **Proposed files:**
+  - `docs/implementation/e2e01-cycle2-implementation-spec.md`
+- **Depends on:** reviewed `B_C2_EVAL_MACHINERY`、W9 preflight BLOCK与用户
+  2026-08-02“有问题按照你的建议走”的授权。
+- **Acceptance:** 每个W9所需fixture ref拥有exact owner/session、trusted clock、
+  order/search/shipment或initial record graph payload与fault plan；未知、缺失、冲突
+  或跨owner seed零写fail closed；pair digest由解析后真实共同seed canonical
+  projection重算，不能由常量自证；script、expectation与grader predicate不得成为
+  seed、业务事实或fault authority。
+
+### `02-15R1` — Normal Cycle 2 Application entry and evidence contracts
+
+- **Owner:** Runtime Engineer / Application single writer.
+- **Goal:** 补全真正实现`AgentRunHandler`的normal Cycle 2 use-case，以及v2 Run、
+  USER/ASSISTANT Message、initial product-description graph、ordinary Trace与terminal
+  exact evidence的commands / Ports；复用既有reducers、Gateway、W7 step service与三
+  Business Read Ports，不把Composition或Infrastructure细节引入Application。
+- **Proposed files:**
+  - `src/mini_agent/application/records.py`
+  - `src/mini_agent/application/ports.py`
+  - `src/mini_agent/application/agent_run_service.py`
+  - `tests/component/application/test_record_contracts.py`
+  - `tests/component/application/test_ports_contract.py`
+  - `tests/component/application/test_agent_run_service.py`
+- **Depends on:** reviewed `02-15R0`真实successor与`B_C2_RUNTIME`。
+- **Acceptance:** message-only trusted command可形成normal v2 Run closure；
+  UNIQUE/MULTIPLE/ordinal/order-only/shipment/retry/obsolete routes只消费exact current
+  authority；normal terminal把Run/link/Task/Message/ordinary Trace/result在一个Port
+  command中原子闭合；wrong-owner、stale、partial、contradictory与OA-10路径零错误
+  出站；不实现DB、seed、HTTP、Harness或lifecycle。
+
+### `02-15R2` — Normal Cycle 2 Infrastructure and typed seed adapters
+
+- **Owner:** Infrastructure Engineer / PostgreSQL + offline Mock adapters single writer.
+- **Goal:** 实现R1 normal writes / owner-scoped exact reader、三READ business-result
+  dispatch adapter与R0 typed seed catalog；复用现有generic records/reference schema与
+  business tables，不以bootstrap SQL、Eval oracle或test helper替代生产边界。
+- **Proposed files:**
+  - `src/mini_agent/infrastructure/persistence/postgres.py`
+  - `src/mini_agent/infrastructure/cycle2_runtime.py`（proposed new）
+  - `src/mini_agent/infrastructure/cycle2_fixture_seed.py`（proposed new）
+  - `tests/integration/test_postgres_record_adapters.py`
+  - `tests/integration/test_agent_run_service_v2_persistence.py`
+  - `tests/integration/test_cycle2_runtime_adapter.py`（proposed new）
+  - `tests/integration/test_cycle2_fixture_seed.py`（proposed new）
+- **Depends on:** reviewed `02-15R1`真实successor与R0 seed contract。
+- **Acceptance:** normal v2 root/start/finalize/Trace写入和exact-Run reader使用同一
+  owner-scoped transaction closure；三READ dispatch把受控Business Port结果映射为
+  exact `ToolResult`，fault只来自authenticated seed plan；seed unknown/missing/
+  conflict/cross-owner零写；pair digest从真实seed重算；现有schema足够时不得新增
+  migration；不装配HTTP/Harness、不生成Eval Result或推进Case。
+
 ### `02-15` — Pre-activation Composition / HTTP execution seam
 
 - **Owner:** Tech Lead / Integrator.
@@ -704,15 +775,14 @@ post-activation verification。
   dispatch 或生成 Phase 2 Eval Result。
 - **Proposed files:**
   - `src/mini_agent/bootstrap.py`
-  - `src/mini_agent/api/http.py`（only if exact HTTP contract evidence requires）
   - `tests/integration/test_offline_composition_root.py`
-  - `tests/integration/test_http_session_adapter.py`
   - `tests/integration/test_e2e01_cycle2_execution_seam.py`（new）
-- **Depends on:** reviewed `02-07/11/12/14` barriers。
+- **Depends on:** reviewed `02-07/11/12/14/15R0/15R1/15R2`真实barriers。
 - **Acceptance:** direct non-Harness integration tests证明四个 Case 的真实入口能产生
   typed Run / record / Trace evidence；同一 RegistrySnapshot exact 包含三个 READ
   tools；Phase 1 Composition 回归通过；同时 Harness 对 Cycle 2
-  `CONTRACT_DEFINED` batch 仍在 SUT 前 fail closed，Phase 2 Result 数为零。
+  `CONTRACT_DEFINED` batch 仍在 SUT 前 fail closed，Phase 2 Result 数为零；现有
+  `http.py` trusted Session contract只作为imported regression，不在本slot修改。
 
 ### `02-16` — Coverage owner `APPROVED_FOR_EXECUTABLE` ruling
 
@@ -779,7 +849,7 @@ post-activation verification。
 | `W6` | `02-07R → 02-10R → 02-07 → 02-11R → 02-11` | 1 | 前四项依次补全 Application Port、search authority、business adapters 与 immutable record history；blocked 02-11 只能从真实 R successor 重冻结回放；形成 `B_C2_INFRA` |
 | `W7` | `02-12` | 1 | `B_C2_RUNTIME` |
 | `W8` | `02-14` | 1 | `B_C2_EVAL_MACHINERY`；Case 仍为 `CONTRACT_DEFINED` |
-| `W9` | `02-15` | 1 | `B_C2_EXECUTION_SEAM`；Case 仍为 `CONTRACT_DEFINED` |
+| `W9` | `02-15R0 → 02-15R1 → 02-15R2 → 02-15` | 1 | seed contract、Application normal entry与Infrastructure normal evidence/dispatch依次reviewed后重冻结Composition；形成`B_C2_EXECUTION_SEAM`；Case仍为`CONTRACT_DEFINED` |
 | `W10` | `02-16` | 1 | independent owner ruling `G_C2_APPROVED_FOR_EXECUTABLE` |
 | `W11` | `02-17` | 1 | atomic consumer sync；形成 `B_C2_EXECUTABLE` |
 | `W12` | `02-18` | 1 | `B_C2_VERTICAL` |
@@ -821,6 +891,12 @@ W7 Runtime mapper / Renderer
   ↓
 W8 Graders / Harness machinery; pre-dispatch fail closed
   ↓
+W9 seed contract owner correction
+  ↓
+W9 Application normal entry/evidence correction
+  ↓
+W9 Infrastructure normal evidence/dispatch/typed-seed correction
+  ↓
 W9 pre-activation Composition / HTTP execution seam
    (`CONTRACT_DEFINED`; no Eval Result)
   ↓
@@ -841,31 +917,31 @@ Task Packet freeze 前自动变为 `BLOCKED`。
 
 | Requirement | Slots |
 |---|---|
-| `R01` | `13,14,15,16,17,18` |
-| `R02` | `01,07,08,12,14,15,18` |
-| `R03` | `01,07,13,14,15,18` |
-| `R04` | `01,12,14,15,18` |
-| `R05` | `02,05,06,11` |
-| `R06` | `02,08,11,14` |
-| `R07` | `07,08,12,14` |
-| `R08` | `01,04,07,08,14` |
-| `R09` | `01,02,07,11,14` |
-| `R10` | `02,09,12,14` |
-| `R11` | `01,02,12,14` |
-| `R12` | `04,05,09,11,14` |
-| `R13` | `04,07,09,12,14` |
-| `R14` | `03,05,09,12,14` |
-| `R15` | `04,08,13,15,18` |
-| `R16` | `02,03,05,06,09,10,11,14` |
-| `R17` | `13,14,15,16,17,18` |
+| `R01` | `13,14,15R0,15R1,15R2,15,16,17,18` |
+| `R02` | `01,07,08,12,14,15R1,15R2,15,18` |
+| `R03` | `01,07,13,14,15R0,15R2,15,18` |
+| `R04` | `01,12,14,15R1,15R2,15,18` |
+| `R05` | `02,05,06,11,15R1,15R2` |
+| `R06` | `02,08,11,14,15R1,15R2` |
+| `R07` | `07,08,12,14,15R1,15R2` |
+| `R08` | `01,04,07,08,14,15R1,15R2` |
+| `R09` | `01,02,07,11,14,15R1,15R2` |
+| `R10` | `02,09,12,14,15R1,15R2` |
+| `R11` | `01,02,12,14,15R1,15R2` |
+| `R12` | `04,05,09,11,14,15R1,15R2` |
+| `R13` | `04,07,09,12,14,15R1` |
+| `R14` | `03,05,09,12,14,15R1` |
+| `R15` | `04,08,13,15R0,15R2,15,18` |
+| `R16` | `02,03,05,06,09,10,11,14,15R1,15R2` |
+| `R17` | `13,14,15R0,15R1,15R2,15,16,17,18` |
 | `R18` | `16,17,18` + post-execution quality gates |
 
 | Case | Slots |
 |---|---|
-| `E2E01-02` | `01,07,08,12,13,14,15,16,17,18` |
-| `E2E01-03` | `02,08,11,12,13,14,15,16,17,18` |
-| `E2E01-05` | `04,07,08,12,13,14,15,16,17,18` |
-| `E2E01-06` | `01,02,03,04,07,09,11,12,13,14,15,16,17,18` |
+| `E2E01-02` | `01,07,08,12,13,14,15R0,15R1,15R2,15,16,17,18` |
+| `E2E01-03` | `02,08,11,12,13,14,15R0,15R1,15R2,15,16,17,18` |
+| `E2E01-05` | `04,07,08,12,13,14,15R0,15R1,15R2,15,16,17,18` |
+| `E2E01-06` | `01,02,03,04,07,09,11,12,13,14,15R0,15R1,15R2,15,16,17,18` |
 
 | Frozen decision | Slots |
 |---|---|
@@ -1061,9 +1137,11 @@ closure 需要后续独立 exact Plan / Task Packet 和用户批准；其 eviden
 | unbounded retry / loop | HIGH | 500ms、max 2 attempts、run budget、no parallel ToolCall | `04,09,11,14` |
 | mixed active v1/v2 | CRITICAL | full prevalidation、atomic cutover、strict readers/writers/recovery | `03,05,06,10,11` |
 | obsolete Run overwrites new state / sends result | CRITICAL | conditional CAS、`SUPERSEDED`、null link result、no outbound/task write | `03,05,09,11,12,14` |
-| model / Eval fabricates business evidence | CRITICAL | deterministic projection/mapper、authenticated artifacts、real HTTP SUT | `12,13,14,15,18` |
-| `CONTRACT_DEFINED` Case dispatched或 artifact 自激活 | CRITICAL | Harness pre-dispatch fail closed；reviewed execution seam；独立 owner ruling；atomic lifecycle / manifest / loader sync | `13,14,15,16,17,18` |
-| read-only phase enables Action / side effect | CRITICAL | exact Registry 仅三个 `READ` tools；无 confirmation、ActionPolicy、idempotency claim/key、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery | `04,09R1,09R2,09R3,09R4,11,13,15,18` |
+| model / Eval fabricates business evidence | CRITICAL | deterministic projection/mapper、authenticated artifacts、typed seed、real HTTP SUT | `12,13,14,15R0,15R2,15,18` |
+| `CONTRACT_DEFINED` Case dispatched或 artifact 自激活 | CRITICAL | Harness pre-dispatch fail closed；reviewed execution seam；独立 owner ruling；atomic lifecycle / manifest / loader sync | `13,14,15R0,15R1,15R2,15,16,17,18` |
+| read-only phase enables Action / side effect | CRITICAL | exact Registry 仅三个 `READ` tools；无 confirmation、ActionPolicy、idempotency claim/key、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery | `04,09R1,09R2,09R3,09R4,11,13,15R1,15R2,15,18` |
+| fixture ref / static digest被误当成可信seed | CRITICAL | active Spec closed payload；typed seed loader；真实canonical projection重算digest；禁止script/expectation/grader反推 | `15R0,15R2,15` |
+| bootstrap直写DB或复制Application Runtime | CRITICAL | normal use-case/Port先由Application owner闭合，Infrastructure实现后Composition只装配 | `15R1,15R2,15` |
 | bare ToolCall CAS or stale budget grants dispatch | CRITICAL | initial/recovered writer same-CAS重验完整current graph与budget；只返回identity-bound `Cycle2ReadDispatchGrant`；裸enum/old closure无authority | `09R4,09` |
 | mutable current rows丢失 obsolete exact graph | CRITICAL | Task / RequestUnit pre-image按owner/identity/version不可变保存；与current replace同事务；迁移前缺失历史继续fail closed | `11R,11` |
 
@@ -1082,7 +1160,10 @@ barrier 与 release。
    wave label；Adapter preflight 确认的 physical 缺口经同日用户“有问题按建议走”
    授权由 Gate P2-A5 增加 `02-10R`，仍不增加 wave label；02-11 实现验证发现的
    OA-10 physical history 缺口又经同日用户授权由 Gate P2-A6 增加 `02-11R`，仍不
-   新增 wave label。当前冻结集合为 29 slots / 16 wave labels / max 2 writers。
+   新增 wave label。W9 preflight发现的seed、Application normal entry与Infrastructure
+   normal evidence/dispatch跨owner缺口又经同日用户授权由Gate P2-A7增加
+   `02-15R0/R1/R2`，仍不新增wave label。当前冻结集合为32 slots / 16 wave labels /
+   max 2 writers。
    后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
    contract change / review；不生成临时 replacement Plan。
@@ -1239,7 +1320,8 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
       指令经 Gate P2-A2 增加 `02-09R1/R2/R3` 与 `W4R`，又经 Gate P2-A3增加
       `02-09R4 / W4R2`；Gate P2-A4 又增加 `02-07R` 但不新增 wave
       label；Gate P2-A5 又增加 `02-10R` 但不新增 wave label；Gate P2-A6 又增加
-      `02-11R` 但不新增 wave label；当前冻结为 29 slots / 16 wave labels，
+      `02-11R` 但不新增 wave label；Gate P2-A7再增加`02-15R0/R1/R2`但不新增
+      wave label；当前冻结为32 slots / 16 wave labels，
       并发上限仍为 2。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
