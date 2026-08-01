@@ -72,18 +72,26 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommandV2,
+    Cycle2RetryRevalidation,
+    Cycle2ToolDispatchFacts,
     GateDecision,
     GateDecisionV2,
     GateDecisionValue,
     ModelVisibleToolsetArtifact,
+    SafeReasonCode,
     ToolAttemptRecord,
     ToolAttemptRecordV2,
     ToolCallRecord,
     ToolCallRecordV2,
     ToolCallStatus,
+    ToolRecoveryDecision,
+    ToolRecoveryDisposition,
+    ToolRetryRecoveryDecision,
     ToolRetryDecision,
     ToolEffect,
     ToolResultOutcome,
+    decide_cycle2_tool_recovery,
+    project_cycle2_budget_exhausted_recovery_terminal,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -4188,6 +4196,523 @@ class FinalizeToolAttemptV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class Cycle2RunBudgetPolicyEvidence(_StrictRuntimePrivateRecord):
+    """Versioned trusted configuration used to derive recovery Run budget."""
+
+    policy_version: NonEmptyString
+    run_time_budget_ms: Annotated[int, Field(strict=True, ge=1)]
+
+
+class ToolRetryRecoveryDecisionRecordV2(_StrictAuditOnlyRecord):
+    """Minimal audit-only logical child of one Cycle 2 ToolCall."""
+
+    recovery_decision_id: UUID
+    tool_call_id: UUID
+    last_attempt_no: Annotated[int, Field(strict=True, ge=1, le=2)]
+    decision: ToolRecoveryDecision
+    stable_reason_code: SafeReasonCode
+    candidate_next_attempt_no: Literal[2] | None = None
+    decided_at: datetime
+
+    @field_validator("decided_at")
+    @classmethod
+    def decided_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="recovery decision decided_at")
+
+    @model_validator(mode="after")
+    def decision_shape_is_closed(self) -> Self:
+        exact_shapes = {
+            ToolRecoveryDecision.APPEND_SECOND_ATTEMPT: (
+                "RETRY_REVALIDATED_CAS_REQUIRED",
+                2,
+            ),
+            ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT: (
+                "UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+                None,
+            ),
+            ToolRecoveryDecision.TERMINATE_RETRY_PATH: (None, None),
+        }
+        if self.decision not in exact_shapes:
+            raise ValueError("decision child does not contain an approved recovery")
+        expected_reason, expected_next = exact_shapes[self.decision]
+        if self.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH:
+            if self.stable_reason_code not in {
+                "RUN_BUDGET_EXHAUSTED",
+                "STATE_OR_BINDING_INVALIDATED",
+            }:
+                raise ValueError("terminal decision child has an unknown reason")
+        elif self.stable_reason_code != expected_reason:
+            raise ValueError("decision child reason contradicts Core decision")
+        if self.candidate_next_attempt_no != expected_next:
+            raise ValueError("decision child next attempt contradicts Core decision")
+        if (
+            self.decision
+            in {
+                ToolRecoveryDecision.APPEND_SECOND_ATTEMPT,
+                ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+            }
+            and self.last_attempt_no != 1
+        ):
+            raise ValueError("retry recovery decision must bind attempt 1")
+        return self
+
+
+class ToolRetryRecoveryReadClosureV2(_StrictRuntimePrivateRecord):
+    """Exact owner/current graph with trusted time and versioned budget policy."""
+
+    owner_scope: TrustedOwnerScope
+    active_run_record: AgentRunRecordV2
+    active_run_task_link_record: RunTaskLinkRecordV2
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    current_input_binding_records: Annotated[
+        tuple[InputBindingV2, ...],
+        Field(min_length=1),
+    ]
+    tool_call_record: ToolCallRecordV2
+    recovery_decision_records: Annotated[
+        tuple[ToolRetryRecoveryDecisionRecordV2, ...],
+        Field(max_length=1),
+    ]
+    trusted_read_at: datetime
+    run_budget_policy: Cycle2RunBudgetPolicyEvidence
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "active_run_record": AgentRunRecordV2,
+                "active_run_task_link_record": RunTaskLinkRecordV2,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+                "tool_call_record": ToolCallRecordV2,
+                "run_budget_policy": Cycle2RunBudgetPolicyEvidence,
+            },
+            tuple_model_fields={
+                "current_input_binding_records": InputBindingV2,
+                "recovery_decision_records": ToolRetryRecoveryDecisionRecordV2,
+            },
+        )
+
+    @field_validator("trusted_read_at")
+    @classmethod
+    def trusted_read_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="recovery trusted_read_at")
+
+    @model_validator(mode="after")
+    def recovery_graph_is_exact(self) -> Self:
+        run = self.active_run_record
+        link = self.active_run_task_link_record
+        task = self.current_task_record
+        unit = self.current_request_unit_record
+        tool_call = self.tool_call_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=task,
+            request_unit_record=unit,
+        )
+        _require_complete_current_input_bindings_v2(
+            request_unit=unit,
+            bindings=self.current_input_binding_records,
+            trusted_now=self.trusted_read_at,
+        )
+        if run.status is not AgentRunStatusV2.RUNNING:
+            raise ValueError("recovery requires the exact active RUNNING Run")
+        if (
+            link.run_id != run.run_id
+            or link.task_id != task.task_id
+            or link.base_task_state_version
+            != tool_call.validated_task_state_version
+            or link.result_task_state_version is not None
+        ):
+            raise ValueError("recovery RunTaskLink does not match active Tool state")
+        if (
+            not _owner_matches_private_scope(
+                self.owner_scope,
+                tool_call.private_owner_scope_ref,
+            )
+            or tool_call.run_id != run.run_id
+            or tool_call.task_id != task.task_id
+            or tool_call.request_unit_id != unit.request_unit_id
+            or tool_call.started_at < run.started_at
+        ):
+            raise ValueError("recovery ToolCall owner or identity mismatch")
+        created_recovery = (
+            tool_call.status is ToolCallStatus.CREATED
+            and tool_call.attempt_count == 0
+            and not tool_call.attempts
+        )
+        running_recovery = (
+            tool_call.status is ToolCallStatus.RUNNING
+            and tool_call.attempt_count in {1, 2}
+            and len(tool_call.attempts) == tool_call.attempt_count
+            and (
+                tool_call.attempts[-1].finished_at is None
+                or (
+                    tool_call.attempt_count == 1
+                    and tool_call.attempts[-1].retry_decision
+                    is ToolRetryDecision.RETRY_SCHEDULED
+                )
+            )
+        )
+        if not (created_recovery or running_recovery):
+            raise ValueError(
+                "recovery requires CREATED without attempt, an unfinished last "
+                "attempt, or scheduled attempt 1"
+            )
+        if self.recovery_decision_records:
+            raise ValueError("recovery decision child already exists")
+        attempt_evidence_times = ()
+        if tool_call.attempts:
+            last_attempt = tool_call.attempts[-1]
+            attempt_evidence_times = (
+                last_attempt.started_at,
+                *(
+                    ()
+                    if last_attempt.finished_at is None
+                    else (last_attempt.finished_at,)
+                ),
+            )
+        evidence_floor = max(
+            run.started_at,
+            task.updated_at,
+            unit.updated_at,
+            tool_call.started_at,
+            *(binding.updated_at for binding in self.current_input_binding_records),
+            *attempt_evidence_times,
+        )
+        if self.trusted_read_at < evidence_floor:
+            raise ValueError("trusted recovery time precedes current evidence")
+        return self
+
+    def remaining_run_time_budget_ms(self) -> int:
+        elapsed = self.trusted_read_at - self.active_run_record.started_at
+        elapsed_microseconds = (
+            (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000
+            + elapsed.microseconds
+        )
+        elapsed_milliseconds = (elapsed_microseconds + 999) // 1_000
+        return max(
+            0,
+            self.run_budget_policy.run_time_budget_ms - elapsed_milliseconds,
+        )
+
+    def derive_recovery_decision(self) -> ToolRetryRecoveryDecision:
+        exact_tool_call = ToolCallRecordV2.model_validate(
+            self.tool_call_record.model_dump(mode="python"),
+            strict=True,
+        )
+        parent = exact_tool_call.dispatch_facts()
+        current_binding_ids = {
+            binding.binding_id for binding in self.current_input_binding_records
+        }
+        current_argument_refs = tuple(
+            ref
+            for ref in parent.argument_binding_refs
+            if ref in current_binding_ids
+        )
+        if not current_argument_refs:
+            current_argument_refs = self.current_request_unit_record.input_binding_refs
+        current = Cycle2ToolDispatchFacts(
+            tool_call_id=parent.tool_call_id,
+            run_id=self.active_run_record.run_id,
+            private_owner_scope_ref=self.owner_scope.customer_id,
+            task_id=self.current_task_record.task_id,
+            request_unit_id=self.current_request_unit_record.request_unit_id,
+            validated_task_state_version=self.current_task_record.state_version,
+            argument_binding_refs=current_argument_refs,
+            verified_target_ref=parent.verified_target_ref,
+        )
+        revalidation = Cycle2RetryRevalidation(
+            parent_dispatch_facts=parent,
+            expected_dispatch_facts=parent,
+            current_dispatch_facts=current,
+            remaining_run_time_budget_ms=self.remaining_run_time_budget_ms(),
+        )
+        return decide_cycle2_tool_recovery(
+            tool_call=exact_tool_call,
+            revalidation=revalidation,
+            decided_at=self.trusted_read_at,
+        )
+
+
+def _recovery_decision_record_matches_loaded_closure(
+    *,
+    closure: ToolRetryRecoveryReadClosureV2,
+    record: ToolRetryRecoveryDecisionRecordV2,
+) -> bool:
+    expected = closure.derive_recovery_decision()
+    return (
+        record.tool_call_id == expected.tool_call_id
+        and record.last_attempt_no == expected.last_attempt_no
+        and record.decision is expected.decision
+        and record.stable_reason_code == expected.stable_reason_code
+        and record.candidate_next_attempt_no == expected.candidate_next_attempt_no
+        and record.decided_at == expected.decided_at
+    )
+
+
+def _recovery_parent_stable_and_attempts_unchanged(
+    expected: ToolCallRecordV2,
+    terminal: ToolCallRecordV2,
+) -> bool:
+    return (
+        _cycle2_tool_stable_fields_match(expected, terminal)
+        and terminal.attempt_count == expected.attempt_count
+        and terminal.attempts == expected.attempts
+    )
+
+
+class AppendRecoveredToolAttemptV2Command(_StrictRuntimePrivateRecord):
+    """Atomically append one decision child and the recovered attempt 2 fence."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    recovery_decision_record: ToolRetryRecoveryDecisionRecordV2
+    attempt_append_command: AppendToolAttemptV2Command
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "recovery_decision_record": ToolRetryRecoveryDecisionRecordV2,
+                "attempt_append_command": AppendToolAttemptV2Command,
+            },
+        )
+
+    @model_validator(mode="after")
+    def recovered_append_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        decision = self.recovery_decision_record
+        append = self.attempt_append_command
+        if (
+            not _recovery_decision_record_matches_loaded_closure(
+                closure=closure,
+                record=decision,
+            )
+            or decision.decision is not ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+        ):
+            raise ValueError("recovered append decision does not match trusted closure")
+        if (
+            append.owner_scope != closure.owner_scope
+            or append.expected_record != closure.tool_call_record
+            or append.started_attempt.attempt_no != 2
+            or append.started_attempt.started_at < decision.decided_at
+        ):
+            raise ValueError("recovered append fence does not match trusted decision")
+        return self
+
+
+class FinalizeCreatedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
+    """Atomically interrupt a CREATED ToolCall without child or dispatch."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    terminal_tool_call_record: ToolCallRecordV2
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "terminal_tool_call_record": ToolCallRecordV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def created_terminal_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        source = closure.tool_call_record
+        terminal = self.terminal_tool_call_record
+        decision = closure.derive_recovery_decision()
+        if (
+            source.status is not ToolCallStatus.CREATED
+            or source.attempt_count != 0
+            or source.attempts
+            or decision.decision
+            is not ToolRecoveryDecision.INTERRUPT_WITHOUT_ATTEMPT
+            or decision.stable_reason_code != "CREATED_WITHOUT_DISPATCH_FENCE"
+        ):
+            raise ValueError("created recovery does not match trusted Core decision")
+        if (
+            not _recovery_parent_stable_and_attempts_unchanged(source, terminal)
+            or terminal.status is not ToolCallStatus.INTERRUPTED
+            or terminal.finished_at != decision.decided_at
+            or terminal.interruption_reason != "PROCESS_RESTART_DETECTED"
+            or terminal.failure_code is not None
+            or terminal.timeout_phase is not None
+            or terminal.result_ref is not None
+            or terminal.recovery_disposition is not None
+            or terminal.recovery_decision_ref is not None
+        ):
+            raise ValueError("created recovery terminal must remain parent-only")
+        return self
+
+
+class FinalizeUnfinishedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
+    """Atomically append a decision child and terminate only the parent."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    recovery_decision_record: ToolRetryRecoveryDecisionRecordV2
+    terminal_tool_call_record: ToolCallRecordV2
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "recovery_decision_record": ToolRetryRecoveryDecisionRecordV2,
+                "terminal_tool_call_record": ToolCallRecordV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def unfinished_terminal_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        decision = self.recovery_decision_record
+        terminal = self.terminal_tool_call_record
+        if (
+            not _recovery_decision_record_matches_loaded_closure(
+                closure=closure,
+                record=decision,
+            )
+            or decision.decision
+            is not ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
+        ):
+            raise ValueError("unfinished recovery decision does not match closure")
+        if (
+            not _recovery_parent_stable_and_attempts_unchanged(
+                closure.tool_call_record,
+                terminal,
+            )
+            or terminal.status is not ToolCallStatus.INTERRUPTED
+            or terminal.finished_at != decision.decided_at
+            or terminal.interruption_reason != "PROCESS_RESTART_DETECTED"
+            or terminal.recovery_disposition
+            is not ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+            or terminal.recovery_decision_ref != decision.recovery_decision_id
+            or terminal.result_ref is not None
+        ):
+            raise ValueError("unfinished recovery terminal projection is not exact")
+        return self
+
+
+class FinalizeBudgetExhaustedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
+    """Atomically append RUN_BUDGET_EXHAUSTED and its exact parent terminal."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    recovery_decision_record: ToolRetryRecoveryDecisionRecordV2
+    terminal_tool_call_record: ToolCallRecordV2
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "recovery_decision_record": ToolRetryRecoveryDecisionRecordV2,
+                "terminal_tool_call_record": ToolCallRecordV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def budget_terminal_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        decision = self.recovery_decision_record
+        if (
+            not _recovery_decision_record_matches_loaded_closure(
+                closure=closure,
+                record=decision,
+            )
+            or decision.decision is not ToolRecoveryDecision.TERMINATE_RETRY_PATH
+            or decision.stable_reason_code != "RUN_BUDGET_EXHAUSTED"
+        ):
+            raise ValueError("budget recovery decision does not match trusted closure")
+        expected = project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=closure.tool_call_record,
+            recovery_decision=closure.derive_recovery_decision(),
+            recovery_decision_ref=decision.recovery_decision_id,
+        )
+        if self.terminal_tool_call_record != expected:
+            raise ValueError("budget recovery terminal projection is not exact")
+        return self
+
+
+class FinalizeStateInvalidatedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
+    """Atomically close ToolCall and compose the exact OA-10 no-result command."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    recovery_decision_record: ToolRetryRecoveryDecisionRecordV2
+    terminal_tool_call_record: ToolCallRecordV2
+    superseded_run_command: FinalizeSupersededRunV2Command
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "recovery_decision_record": ToolRetryRecoveryDecisionRecordV2,
+                "terminal_tool_call_record": ToolCallRecordV2,
+                "superseded_run_command": FinalizeSupersededRunV2Command,
+            },
+        )
+
+    @model_validator(mode="after")
+    def state_invalidation_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        decision = self.recovery_decision_record
+        terminal = self.terminal_tool_call_record
+        oa10 = self.superseded_run_command
+        if (
+            not _recovery_decision_record_matches_loaded_closure(
+                closure=closure,
+                record=decision,
+            )
+            or decision.decision is not ToolRecoveryDecision.TERMINATE_RETRY_PATH
+            or decision.stable_reason_code != "STATE_OR_BINDING_INVALIDATED"
+        ):
+            raise ValueError("state invalidation decision does not match closure")
+        if (
+            not _recovery_parent_stable_and_attempts_unchanged(
+                closure.tool_call_record,
+                terminal,
+            )
+            or terminal.status is not ToolCallStatus.INTERRUPTED
+            or terminal.finished_at != decision.decided_at
+            or terminal.interruption_reason != "STATE_OR_BINDING_INVALIDATED"
+            or terminal.recovery_disposition
+            is not ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+            or terminal.recovery_decision_ref != decision.recovery_decision_id
+            or terminal.result_ref is not None
+        ):
+            raise ValueError("state invalidation ToolCall terminal is not exact")
+        oa10_closure = oa10.loaded_closure
+        if (
+            oa10_closure.owner_scope != closure.owner_scope
+            or oa10_closure.expected_active_run_record
+            != closure.active_run_record
+            or oa10_closure.expected_active_link_record
+            != closure.active_run_task_link_record
+            or oa10_closure.current_task_record != closure.current_task_record
+            or oa10_closure.current_request_unit_record
+            != closure.current_request_unit_record
+            or oa10.superseded_run_record.completed_at != decision.decided_at
+        ):
+            raise ValueError("state invalidation must compose the exact OA-10 closure")
+        return self
+
+
 class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
     """Insert one fresh Shipment Observation after exact successful ToolCall."""
 
@@ -4877,6 +5402,9 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("OA-10 audit Trace cannot carry outbound or mutation refs")
         return self
+
+
+FinalizeStateInvalidatedToolRecoveryV2Command.model_rebuild()
 
 
 class TaskRecoveryAggregate(_StrictRuntimePrivateRecord):

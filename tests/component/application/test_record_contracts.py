@@ -23,6 +23,7 @@ from mini_agent.application.records import (
     ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
     Cycle2DispatchFenceWriteResult,
+    Cycle2RunBudgetPolicyEvidence,
     Cycle2WriteResult,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
@@ -46,9 +47,14 @@ from mini_agent.application.records import (
     EvalVersionManifest,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    AppendRecoveredToolAttemptV2Command,
+    FinalizeBudgetExhaustedToolRecoveryV2Command,
+    FinalizeCreatedToolRecoveryV2Command,
+    FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
+    FinalizeUnfinishedToolRecoveryV2Command,
     InterruptToolCallForRecoveryCommand,
     InitialToolCallV2ReadClosure,
     IssuedSelectedTargetRef,
@@ -76,6 +82,8 @@ from mini_agent.application.records import (
     SupersededRunReadClosure,
     SupersededRunInvalidationKind,
     ToolCallRecoveryAggregate,
+    ToolRetryRecoveryDecisionRecordV2,
+    ToolRetryRecoveryReadClosureV2,
     TransitionRunCommand,
     TrustedOwnerScope,
     build_order_candidate_selection_v2_command,
@@ -160,10 +168,13 @@ from mini_agent.core.tool_system import (
     ToolEffect,
     ToolResultOutcome,
     ToolRetryDecision,
+    ToolRecoveryDecision,
+    ToolRecoveryDisposition,
     ToolTimeoutPhase,
     build_cycle2_registry_snapshot,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
+    project_cycle2_budget_exhausted_recovery_terminal,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
@@ -10052,6 +10063,461 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
         no_result_link_record=initial_link,
         run_stopped_trace_record=trace,
     )
+
+
+def _c2_retry_recovery_closure(
+    *,
+    created: bool = False,
+    unfinished: bool = False,
+    timeout: bool = False,
+    budget_ms: int = 10_000,
+    current_state_version: int = 3,
+) -> ToolRetryRecoveryReadClosureV2:
+    owner = _owner_scope()
+    binding = _input_binding_v2()
+    task = _task(
+        state_version=current_state_version,
+        updated_at=UTC_NOW + timedelta(seconds=current_state_version - 3),
+    )
+    unit = _request_unit(
+        task_id=task.task_id,
+        state_version=current_state_version,
+        input_binding_refs=(binding.binding_id,),
+        updated_at=task.updated_at,
+    )
+    run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=uuid4(),
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=UTC_NOW,
+    )
+    tool_call_id = uuid4()
+    attempts = ()
+    if not created:
+        attempts = (
+            ToolAttemptRecordV2(
+                tool_call_id=tool_call_id,
+                attempt_no=1,
+                started_at=UTC_NOW,
+                **(
+                    {}
+                    if unfinished
+                    else {
+                        "finished_at": UTC_NOW + timedelta(milliseconds=1),
+                        "outcome": (
+                            ToolResultOutcome.TIMEOUT
+                            if timeout
+                            else ToolResultOutcome.SYSTEM_FAILURE
+                        ),
+                        "failure_code": (
+                            "TOOL_CALL_TIMEOUT"
+                            if timeout
+                            else "ORDER_SEARCH_TRANSIENT"
+                        ),
+                        "timeout_phase": (
+                            ToolTimeoutPhase.AFTER_DISPATCH if timeout else None
+                        ),
+                        "retry_decision": ToolRetryDecision.RETRY_SCHEDULED,
+                    }
+                ),
+            ),
+        )
+    tool_call = ToolCallRecordV2(
+        tool_call_id=tool_call_id,
+        run_id=run.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        gate_decision_id=uuid4(),
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref=owner.customer_id,
+        validated_task_state_version=3,
+        argument_binding_refs=(binding.binding_id,),
+        effect=ToolEffect.READ,
+        attempt_count=len(attempts),
+        attempts=attempts,
+        status=(ToolCallStatus.CREATED if created else ToolCallStatus.RUNNING),
+        started_at=UTC_NOW,
+    )
+    trusted_read_at = UTC_NOW + timedelta(seconds=current_state_version - 2)
+    return ToolRetryRecoveryReadClosureV2(
+        owner_scope=owner,
+        active_run_record=run,
+        active_run_task_link_record=RunTaskLinkRecordV2(
+            run_id=run.run_id,
+            task_id=task.task_id,
+            base_task_state_version=3,
+        ),
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(binding,),
+        tool_call_record=tool_call,
+        recovery_decision_records=(),
+        trusted_read_at=trusted_read_at,
+        run_budget_policy=Cycle2RunBudgetPolicyEvidence(
+            policy_version="cycle2-test-budget.v1",
+            run_time_budget_ms=budget_ms,
+        ),
+    )
+
+
+def _c2_recovery_decision_record(
+    closure: ToolRetryRecoveryReadClosureV2,
+) -> ToolRetryRecoveryDecisionRecordV2:
+    decision = closure.derive_recovery_decision()
+    return ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=uuid4(),
+        tool_call_id=decision.tool_call_id,
+        last_attempt_no=decision.last_attempt_no,
+        decision=decision.decision,
+        stable_reason_code=decision.stable_reason_code,
+        candidate_next_attempt_no=decision.candidate_next_attempt_no,
+        decided_at=decision.decided_at,
+    )
+
+
+def test_cycle2_created_recovery_is_parent_only_zero_attempt_terminal() -> None:
+    closure = _c2_retry_recovery_closure(created=True)
+    decision = closure.derive_recovery_decision()
+    assert decision.decision is ToolRecoveryDecision.INTERRUPT_WITHOUT_ATTEMPT
+    terminal = _c2_project(
+        closure.tool_call_record,
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=closure.trusted_read_at,
+        interruption_reason="PROCESS_RESTART_DETECTED",
+    )
+    command = FinalizeCreatedToolRecoveryV2Command(
+        loaded_closure=closure,
+        terminal_tool_call_record=terminal,
+    )
+    assert set(type(command).model_fields) == {
+        "loaded_closure",
+        "terminal_tool_call_record",
+    }
+    assert command.terminal_tool_call_record.attempt_count == 0
+    assert command.terminal_tool_call_record.attempts == ()
+    assert command.terminal_tool_call_record.result_ref is None
+    assert command.terminal_tool_call_record.recovery_disposition is None
+    assert command.terminal_tool_call_record.recovery_decision_ref is None
+    assert "recovery_decision_record" not in type(command).model_fields
+    assert "finalize_tool_call_command" not in type(command).model_fields
+
+    with pytest.raises(ValidationError, match="pre-dispatch interruption"):
+        ToolCallRecordV2(
+            **{
+                **terminal.model_dump(mode="python"),
+                "recovery_decision_ref": uuid4(),
+            }
+        )
+
+
+def test_cycle2_recovery_closure_derives_budget_and_exact_decision_child() -> None:
+    closure = _c2_retry_recovery_closure()
+    assert closure.remaining_run_time_budget_ms() == 9_000
+    decision = _c2_recovery_decision_record(closure)
+    assert decision.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+    assert decision.candidate_next_attempt_no == 2
+    assert set(ToolRetryRecoveryDecisionRecordV2.model_fields) == {
+        "recovery_decision_id",
+        "tool_call_id",
+        "last_attempt_no",
+        "decision",
+        "stable_reason_code",
+        "candidate_next_attempt_no",
+        "decided_at",
+    }
+    assert {
+        "remaining_run_time_budget_ms",
+        "customer_id",
+        "result_ref",
+        "payload",
+        "observation_ref",
+        "action_ref",
+    }.isdisjoint(ToolRetryRecoveryDecisionRecordV2.model_fields)
+
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in type(closure).model_fields
+    }
+    with pytest.raises(ValidationError, match="owner"):
+        ToolRetryRecoveryReadClosureV2(
+            **{
+                **values,
+                "tool_call_record": _c2_project(
+                    closure.tool_call_record,
+                    private_owner_scope_ref="customer-B",
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="run_time_budget_ms"):
+        Cycle2RunBudgetPolicyEvidence(
+            policy_version="cycle2-test-budget.v1",
+            run_time_budget_ms=0,
+        )
+
+
+def test_cycle2_recovered_append_is_one_atomic_decision_and_attempt_fence() -> None:
+    closure = _c2_retry_recovery_closure()
+    child = _c2_recovery_decision_record(closure)
+    second = ToolAttemptRecordV2(
+        tool_call_id=closure.tool_call_record.tool_call_id,
+        attempt_no=2,
+        started_at=closure.trusted_read_at,
+    )
+    next_record = _c2_project(
+        closure.tool_call_record,
+        attempts=(*closure.tool_call_record.attempts, second),
+        attempt_count=2,
+    )
+    append = AppendToolAttemptV2Command(
+        owner_scope=closure.owner_scope,
+        expected_record=closure.tool_call_record,
+        next_running_record=next_record,
+        started_attempt=second,
+    )
+    command = AppendRecoveredToolAttemptV2Command(
+        loaded_closure=closure,
+        recovery_decision_record=child,
+        attempt_append_command=append,
+    )
+    assert command.attempt_append_command.started_attempt.attempt_no == 2
+
+    with pytest.raises(ValidationError, match="decision"):
+        AppendRecoveredToolAttemptV2Command(
+            loaded_closure=closure,
+            recovery_decision_record=_c2_project(
+                child,
+                stable_reason_code="RUN_BUDGET_EXHAUSTED",
+            ),
+            attempt_append_command=append,
+        )
+
+
+def test_cycle2_unfinished_and_budget_recovery_terminal_commands_are_exact() -> None:
+    unfinished = _c2_retry_recovery_closure(unfinished=True)
+    unfinished_child = _c2_recovery_decision_record(unfinished)
+    unfinished_terminal = _c2_project(
+        unfinished.tool_call_record,
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=unfinished.trusted_read_at,
+        interruption_reason="PROCESS_RESTART_DETECTED",
+        recovery_disposition=(
+            ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+        ),
+        recovery_decision_ref=unfinished_child.recovery_decision_id,
+    )
+    FinalizeUnfinishedToolRecoveryV2Command(
+        loaded_closure=unfinished,
+        recovery_decision_record=unfinished_child,
+        terminal_tool_call_record=unfinished_terminal,
+    )
+    assert unfinished_terminal.attempts == unfinished.tool_call_record.attempts
+
+    exhausted = _c2_retry_recovery_closure(budget_ms=500)
+    exhausted_child = _c2_recovery_decision_record(exhausted)
+    terminal = project_cycle2_budget_exhausted_recovery_terminal(
+        tool_call=exhausted.tool_call_record,
+        recovery_decision=exhausted.derive_recovery_decision(),
+        recovery_decision_ref=exhausted_child.recovery_decision_id,
+    )
+    FinalizeBudgetExhaustedToolRecoveryV2Command(
+        loaded_closure=exhausted,
+        recovery_decision_record=exhausted_child,
+        terminal_tool_call_record=terminal,
+    )
+    assert terminal.attempts == exhausted.tool_call_record.attempts
+    assert terminal.result_ref is None
+
+    timed_out = _c2_retry_recovery_closure(timeout=True, budget_ms=500)
+    timeout_child = _c2_recovery_decision_record(timed_out)
+    timeout_terminal = project_cycle2_budget_exhausted_recovery_terminal(
+        tool_call=timed_out.tool_call_record,
+        recovery_decision=timed_out.derive_recovery_decision(),
+        recovery_decision_ref=timeout_child.recovery_decision_id,
+    )
+    FinalizeBudgetExhaustedToolRecoveryV2Command(
+        loaded_closure=timed_out,
+        recovery_decision_record=timeout_child,
+        terminal_tool_call_record=timeout_terminal,
+    )
+    assert timeout_terminal.status is ToolCallStatus.TIMED_OUT
+    assert timeout_terminal.failure_code == "TOOL_CALL_TIMEOUT"
+    assert timeout_terminal.timeout_phase is ToolTimeoutPhase.AFTER_DISPATCH
+
+
+def test_cycle2_state_invalidated_recovery_composes_exact_oa10_zero_result() -> None:
+    closure = _c2_retry_recovery_closure(current_state_version=4)
+    child = _c2_recovery_decision_record(closure)
+    source = closure.tool_call_record
+    terminal_tool = _c2_project(
+        source,
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=closure.trusted_read_at,
+        interruption_reason="STATE_OR_BINDING_INVALIDATED",
+        recovery_disposition=(
+            ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+        ),
+        recovery_decision_ref=child.recovery_decision_id,
+    )
+    current_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=closure.active_run_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=UTC_NOW + timedelta(seconds=1),
+    )
+    obsolete_task = _c2_project(
+        closure.current_task_record,
+        state_version=3,
+        updated_at=UTC_NOW,
+    )
+    obsolete_unit = _c2_project(
+        closure.current_request_unit_record,
+        state_version=3,
+        updated_at=UTC_NOW,
+    )
+    oa10_closure = SupersededRunReadClosure(
+        owner_scope=closure.owner_scope,
+        trusted_conversation_record=_conversation(
+            conversation_id=closure.active_run_record.conversation_id,
+            owner_customer_id=closure.owner_scope.customer_id,
+        ),
+        expected_active_run_record=closure.active_run_record,
+        expected_active_link_record=closure.active_run_task_link_record,
+        current_authoritative_run_record=current_run,
+        current_authoritative_link_record=RunTaskLinkRecordV2(
+            run_id=current_run.run_id,
+            task_id=closure.current_task_record.task_id,
+            base_task_state_version=4,
+        ),
+        current_task_record=closure.current_task_record,
+        current_request_unit_record=closure.current_request_unit_record,
+        obsolete_task_record=obsolete_task,
+        obsolete_request_unit_record=obsolete_unit,
+        trusted_current_evidence_at=closure.trusted_read_at,
+        invalidation_kind=SupersededRunInvalidationKind.TASK_VERSION_ADVANCED,
+    )
+    run_terminal = _c2_project(
+        closure.active_run_record,
+        status=AgentRunStatusV2.SUPERSEDED,
+        completed_at=closure.trusted_read_at,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    oa10 = FinalizeSupersededRunV2Command(
+        loaded_closure=oa10_closure,
+        superseded_run_record=run_terminal,
+        no_result_link_record=closure.active_run_task_link_record,
+        run_stopped_trace_record=TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=closure.trusted_read_at,
+            run_id=closure.active_run_record.run_id,
+            task_id=closure.current_task_record.task_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+        ),
+    )
+    command = FinalizeStateInvalidatedToolRecoveryV2Command(
+        loaded_closure=closure,
+        recovery_decision_record=child,
+        terminal_tool_call_record=terminal_tool,
+        superseded_run_command=oa10,
+    )
+    assert command.superseded_run_command.no_result_link_record == (
+        closure.active_run_task_link_record
+    )
+    assert {
+        "task_record",
+        "request_unit_record",
+        "message_record",
+        "agent_run_result",
+        "result_ref",
+    }.isdisjoint(FinalizeStateInvalidatedToolRecoveryV2Command.model_fields)
+
+
+def test_cycle2_recovery_closure_fails_closed_on_stale_partial_or_duplicate_graph() -> None:
+    closure = _c2_retry_recovery_closure()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in type(closure).model_fields
+    }
+    child = _c2_recovery_decision_record(closure)
+    variants = (
+        ({"recovery_decision_records": (child,)}, "already exists"),
+        (
+            {"trusted_read_at": closure.active_run_record.started_at},
+            "precedes current evidence",
+        ),
+        (
+            {
+                "active_run_task_link_record": _c2_project(
+                    closure.active_run_task_link_record,
+                    base_task_state_version=2,
+                )
+            },
+            "RunTaskLink",
+        ),
+        (
+            {
+                "current_input_binding_records": (),
+            },
+            "at least 1",
+        ),
+        (
+            {
+                "tool_call_record": _c2_project(
+                    closure.tool_call_record,
+                    run_id=uuid4(),
+                )
+            },
+            "identity",
+        ),
+    )
+    for change, error in variants:
+        with pytest.raises(ValidationError, match=error):
+            ToolRetryRecoveryReadClosureV2(**{**values, **change})
+
+    with pytest.raises(ValidationError, match="unknown reason"):
+        ToolRetryRecoveryDecisionRecordV2(
+            recovery_decision_id=uuid4(),
+            tool_call_id=closure.tool_call_record.tool_call_id,
+            last_attempt_no=1,
+            decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+            stable_reason_code="UNKNOWN_RECOVERY_REASON",
+            decided_at=closure.trusted_read_at,
+        )
+
+
+def test_cycle2_unfinished_attempt_2_recovery_never_grants_another_append() -> None:
+    closure = _c2_retry_recovery_closure()
+    first = closure.tool_call_record.attempts[0]
+    second = ToolAttemptRecordV2(
+        tool_call_id=closure.tool_call_record.tool_call_id,
+        attempt_no=2,
+        started_at=closure.trusted_read_at,
+    )
+    source = _c2_project(
+        closure.tool_call_record,
+        attempts=(first, second),
+        attempt_count=2,
+    )
+    second_closure = ToolRetryRecoveryReadClosureV2(
+        **{
+            **{
+                field_name: getattr(closure, field_name)
+                for field_name in type(closure).model_fields
+            },
+            "tool_call_record": source,
+        }
+    )
+    decision = second_closure.derive_recovery_decision()
+    assert decision.decision is ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
+    assert decision.last_attempt_no == 2
+    assert decision.candidate_next_attempt_no is None
 
 
 def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
