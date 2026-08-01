@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W6 02-10R PLANNING / 02-07+02-11 PAUSED`；真实 current integration `d05933238db26939e06421d148060c513a0aed6a` / tree `d37da0d30f2d76c7a572d1900ea6c50bb9a5db90`；PR #251/#252 reviewed完成`02-07R`并冻结`B_C2_BUSINESS_READ_PORTS`，PR #254 reviewed批准物理修正`02-10R`、slots `27→28`且不新增wave；原`02-07/02-11` Plans/Worktrees已暂停，须在真实`02-10R` successor后重冻结；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W6 02-10R COMPLETE / B_C2_SEARCH_AUTHORITY_PHYSICAL / ADAPTER PLANNING`；真实 current integration `64254f170ced8a71d58fd2f0b0d1adfaa8f275a5` / tree `ad332f6b862d34feec342c57e679d7234179e24e`；PR #255/#256 reviewed完成`02-10R`，focused `74 passed`、neighbor `85 passed`、migration/feature/overlay均PASS；`02-07/02-11`已从真实successor第二次重冻结并正在planning review，旧Worktrees保持clean/paused；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
