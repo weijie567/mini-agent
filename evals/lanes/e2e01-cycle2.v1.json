@@ -1,0 +1,72 @@
+{
+  "artifact_type": "EVAL_LANE_MANIFEST",
+  "artifact_id": "e2e01-cycle2-lanes",
+  "schema_version": "e2e01-cycle2-lane-schema-v1",
+  "lane_manifest_version": "e2e01-cycle2-lanes-v1",
+  "default_lane": "offline_gate",
+  "dataset_ref": {
+    "artifact_id": "e2e01-cycle2-cases",
+    "dataset_version": "e2e01-cycle2-dataset-v1",
+    "path": "evals/cases/e2e01-cycle2.v1.json"
+  },
+  "fixture_ref": {
+    "artifact_id": "e2e01-cycle2-fixture",
+    "fixture_version": "e2e01-cycle2-fixture-v1",
+    "path": "evals/fixtures/e2e01-cycle2.v1.json"
+  },
+  "model_script_catalog_ref": {
+    "artifact_id": "e2e01-cycle2-model-scripts",
+    "model_script_catalog_version": "e2e01-cycle2-model-scripts-v1",
+    "path": "evals/model_scripts/e2e01-cycle2.v1.json"
+  },
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-cycle2-version-manifest",
+    "path": "evals/manifests/e2e01-cycle2.v1.json"
+  },
+  "lanes": {
+    "lane": "offline_gate",
+    "provider_adapter": "ScriptedModelProvider",
+    "model_config_version": "scripted-model-provider-config-v1",
+    "deterministic": true,
+    "release_gate": true,
+    "network_access": "FORBIDDEN",
+    "credential_policy": {
+      "required_env": [],
+      "when_missing": "NOT_APPLICABLE"
+    },
+    "case_refs": [
+      "E2E01-02/unique-own-with-foreign-decoy",
+      "E2E01-02/no-match-safe-not-found",
+      "E2E01-03/multiple-minimum-summary",
+      "E2E01-03/current-second-selected",
+      "E2E01-03/expired-second-rejected",
+      "E2E01-03/cross-task-second-rejected",
+      "E2E01-05/order-only-no-shipment",
+      "E2E01-05/logistics-required-uses-shipment",
+      "E2E01-06/stale-refresh-success",
+      "E2E01-06/transient-once-then-success",
+      "E2E01-06/transient-exhausted-blocked",
+      "E2E01-06/deterministic-source-integrity-no-retry",
+      "E2E01-06/insufficient-promise-need-human",
+      "E2E01-06/no-shipment-need-human",
+      "T2-candidate-owner-mismatch-rejected",
+      "T2-candidate-superseded-rejected",
+      "T2-candidate-out-of-range-rejected",
+      "T2-candidate-zero-or-multiple-current-rejected",
+      "T2-assessment-delayed-boundary",
+      "T2-assessment-delivered-not-received-current-claim",
+      "T2-assessment-claim-corrected",
+      "T2-timeout-after-dispatch-then-success",
+      "T2-retry-finalize-before-second-fence-recovery",
+      "T2-retry-finalize-before-second-fence-state-invalidated",
+      "T2-retry-unfinished-attempt-restart-blocked",
+      "T2-refresh-returns-already-stale-blocked",
+      "T2-two-active-packages-integrity-blocked"
+    ],
+    "result_policy": {
+      "lifecycle_hold": "CONTRACT_DEFINED",
+      "sut_dispatch": "FORBIDDEN_UNTIL_LIFECYCLE_ACTIVATION",
+      "missing_case_result": "FAIL_COMMAND"
+    }
+  }
+}

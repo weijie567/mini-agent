@@ -31,13 +31,18 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingOutputV2,
 )
 from mini_agent.core.tool_system import ToolSpec, compute_model_visible_toolset_hash
+import mini_agent.evaluation.artifacts as artifact_module
 from mini_agent.evaluation.artifacts import (
     LoadedE2E01Artifacts,
     ModelScriptArtifact,
     load_e2e01_artifacts,
+    load_e2e01_cycle2_artifacts,
 )
 import mini_agent.evaluation.scripted_provider as scripted_provider_module
-from mini_agent.evaluation.scripted_provider import ScriptedModelProviderV2
+from mini_agent.evaluation.scripted_provider import (
+    Cycle2ScriptDirective,
+    ScriptedModelProviderV2,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -96,6 +101,17 @@ def _provider(script_ref: str) -> ScriptedModelProviderV2:
     )
     assert isinstance(provider, ModelProviderV2)
     return provider
+
+
+def _cycle2_provider(case_id: str) -> ScriptedModelProviderV2:
+    artifacts = load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:cycle2",
+    )
+    return ScriptedModelProviderV2(
+        artifacts.script_by_ref(f"script:{case_id}"),
+        script_execution_ref=SCRIPT_EXECUTION_REF,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,3 +603,108 @@ def test_scripted_provider_reads_no_credentials_and_opens_no_network(
     )
     assert type(output) is RequestUnderstandingOutputV2
     assert output.next_move_candidate.arguments == {"order_id": "O-9999"}
+
+
+def test_cycle2_provider_consumes_ordered_candidate_and_fault_directives() -> None:
+    provider = _cycle2_provider("E2E01-06/transient-once-then-success")
+
+    request = provider.take_cycle2_directive("REQUEST_UNDERSTANDING")
+    fault = provider.take_cycle2_directive("FAULT_DIRECTIVE")
+    control = provider.take_cycle2_directive("CONTROL_CANDIDATE")
+
+    assert request == Cycle2ScriptDirective(
+        purpose="REQUEST_UNDERSTANDING",
+        behavior="PROPOSE_GET_SHIPMENT",
+        candidate_arguments={"order_id": "O-1001"},
+        fault_ref=None,
+    )
+    assert control == Cycle2ScriptDirective(
+        purpose="CONTROL_CANDIDATE",
+        behavior="PROPOSE_SHIPMENT_ASSESSMENT",
+        candidate_arguments={},
+        fault_ref=None,
+    )
+    assert fault == Cycle2ScriptDirective(
+        purpose="FAULT_DIRECTIVE",
+        behavior="INJECT_TOOL_FAULT",
+        candidate_arguments={},
+        fault_ref="fault:get-shipment:transient-once-v1",
+    )
+    provider.assert_exhausted()
+
+
+def test_cycle2_provider_purpose_cursor_fails_closed() -> None:
+    provider = _cycle2_provider("E2E01-03/current-second-selected")
+
+    with pytest.raises(ProviderProtocolError):
+        provider.take_cycle2_directive("CONTROL_CANDIDATE")
+
+
+def test_cycle2_provider_reachable_state_excludes_oracles_and_business_truth() -> None:
+    provider = _cycle2_provider(
+        "T2-assessment-delivered-not-received-current-claim"
+    )
+    reachable = _reachable_state(provider)
+
+    assert {
+        "expected_control_result",
+        "case_refs",
+        "required_events",
+        "forbidden_events",
+        "state_assertions",
+        "disclosure_assertions",
+        "critical_failure_refs",
+        "trace_events",
+        "business_evidence",
+        "grader_result",
+        "customer_id",
+        "owner_customer_id",
+    }.isdisjoint(reachable.field_names)
+    assert {
+        "DELIVERED_NOT_RECEIVED",
+        "COMPLETED",
+        "GOAL_COMPLETED",
+        "SHIPMENT_RENDERER_WHITELIST_EXACT",
+    }.isdisjoint(reachable.string_values)
+
+
+def test_cycle2_provider_rejects_unknown_directive_fields_and_behaviors() -> None:
+    script = ModelScriptArtifact(
+        model_script_ref="script:test:invalid-cycle2",
+        case_refs=("test:invalid-cycle2",),
+        steps=(
+            {
+                "purpose": "CONTROL_CANDIDATE",
+                "behavior": "FABRICATE_EVIDENCE",
+                "business_evidence": {"status": "DELIVERED"},
+            },
+        ),
+        expected_control_result={"authority": "NONE"},
+    )
+
+    with pytest.raises(artifact_module.ArtifactContractError):
+        ScriptedModelProviderV2(
+            script,
+            script_execution_ref=SCRIPT_EXECUTION_REF,
+        )
+
+    private_candidate = ModelScriptArtifact(
+        model_script_ref="script:test:private-cycle2",
+        case_refs=("test:private-cycle2",),
+        steps=(
+            {
+                "purpose": "REQUEST_UNDERSTANDING",
+                "behavior": "PROPOSE_GET_SHIPMENT",
+                "candidate_arguments": {
+                    "order_id": "O-1001",
+                    "customer_id": "customer-A",
+                },
+            },
+        ),
+        expected_control_result={"authority": "NONE"},
+    )
+    with pytest.raises(artifact_module.ArtifactContractError):
+        ScriptedModelProviderV2(
+            private_candidate,
+            script_execution_ref=SCRIPT_EXECUTION_REF,
+        )

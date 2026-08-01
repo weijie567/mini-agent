@@ -10,6 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CASES_PATH = REPO_ROOT / "evals/cases/e2e01-thin-slice.v1.json"
 SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-thin-slice.v1.json"
 LANES_PATH = REPO_ROOT / "evals/lanes/e2e01-thin-slice.v1.json"
+CYCLE2_CASES_PATH = REPO_ROOT / "evals/cases/e2e01-cycle2.v1.json"
+CYCLE2_SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-cycle2.v1.json"
 
 EXPECTED_FAULT_STOP_REASON = {
     "INJECT_NEXT_MOVE_ARGUMENT_SUBSTITUTION": "GATE_REJECTED",
@@ -59,6 +61,11 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _script_by_ref() -> dict[str, dict[str, Any]]:
     catalog = _load_json(SCRIPTS_PATH)
+    return {scenario["model_script_ref"]: scenario for scenario in catalog["scenarios"]}
+
+
+def _cycle2_script_by_ref() -> dict[str, dict[str, Any]]:
+    catalog = _load_json(CYCLE2_SCRIPTS_PATH)
     return {scenario["model_script_ref"]: scenario for scenario in catalog["scenarios"]}
 
 
@@ -450,3 +457,110 @@ def test_lane_case_selection_keeps_fault_injection_off_real_provider() -> None:
         for case_ref in offline_case_refs
         if "SEC-" in case_ref or "FAULT-" in case_ref
     }.isdisjoint(qwen_case_refs)
+
+
+def test_cycle2_scenario_catalog_is_one_script_per_case_in_exact_order() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    catalog = _load_json(CYCLE2_SCRIPTS_PATH)
+    case_ids = [case["case_id"] for case in dataset["cases"]]
+    scripts = catalog["scenarios"]
+
+    assert len(scripts) == 27
+    assert [script["model_script_ref"] for script in scripts] == [
+        f"script:{case_id}" for case_id in case_ids
+    ]
+    assert [script["case_refs"] for script in scripts] == [
+        [case_id] for case_id in case_ids
+    ]
+    assert catalog["provider"] == "ScriptedModelProvider"
+    assert catalog["network_access"] == "FORBIDDEN"
+    assert catalog["credential_inputs"] == []
+
+
+def test_cycle2_scenarios_only_encode_candidate_or_fault_directives() -> None:
+    allowed_purposes = {
+        "REQUEST_UNDERSTANDING",
+        "CONTROL_CANDIDATE",
+        "FAULT_DIRECTIVE",
+    }
+    allowed_behaviors = {
+        "PROPOSE_SEARCH_ORDERS",
+        "PROPOSE_CANDIDATE_SELECTION",
+        "PROPOSE_GET_ORDER",
+        "PROPOSE_GET_SHIPMENT",
+        "PROPOSE_ORDER_SUMMARY",
+        "PROPOSE_CANDIDATE_QUESTION",
+        "PROPOSE_SHIPMENT_ASSESSMENT",
+        "PROPOSE_FIXED_RESPONSE",
+        "INJECT_TOOL_FAULT",
+        "INJECT_RUNTIME_RECOVERY_FAULT",
+    }
+    forbidden_step_fields = {
+        "customer_id",
+        "owner_customer_id",
+        "business_evidence",
+        "trace_events",
+        "grader_result",
+        "expected_user_outcome",
+        "expected_stop_reason",
+        "assessment_result",
+        "tool_result",
+        "observation",
+    }
+
+    for scenario in _cycle2_script_by_ref().values():
+        assert scenario["expected_control_result"] == {
+            "authority": "NONE",
+            "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY",
+        }
+        assert scenario["steps"]
+        for step in scenario["steps"]:
+            assert step["purpose"] in allowed_purposes
+            assert step["behavior"] in allowed_behaviors
+            assert forbidden_step_fields.isdisjoint(step)
+            assert set(step) <= {
+                "purpose",
+                "behavior",
+                "candidate_arguments",
+                "fault_ref",
+            }
+
+
+def test_cycle2_fault_injection_is_not_encoded_as_business_truth() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    scripts = _cycle2_script_by_ref()
+
+    for case in dataset["cases"]:
+        script = scripts[f"script:{case['case_id']}"]
+        fault = case["input"].get("fault_injection")
+        fault_steps = [
+            step for step in script["steps"] if step["purpose"] == "FAULT_DIRECTIVE"
+        ]
+        if fault is None:
+            assert fault_steps == []
+            continue
+        assert len(fault_steps) == 1
+        assert fault_steps[0]["fault_ref"] == fault["fault_ref"]
+        assert fault_steps[0]["behavior"] in {
+            "INJECT_TOOL_FAULT",
+            "INJECT_RUNTIME_RECOVERY_FAULT",
+        }
+
+
+def test_cycle2_pair_uses_the_same_registered_tools_with_goal_specific_path() -> None:
+    scripts = _cycle2_script_by_ref()
+    order_only = scripts["script:E2E01-05/order-only-no-shipment"]
+    logistics = scripts["script:E2E01-05/logistics-required-uses-shipment"]
+
+    assert [step["behavior"] for step in order_only["steps"]] == [
+        "PROPOSE_GET_ORDER",
+        "PROPOSE_ORDER_SUMMARY",
+    ]
+    assert [step["behavior"] for step in logistics["steps"]] == [
+        "PROPOSE_GET_ORDER",
+        "PROPOSE_GET_SHIPMENT",
+        "PROPOSE_SHIPMENT_ASSESSMENT",
+    ]
+    assert order_only["steps"][0]["candidate_arguments"] == (
+        logistics["steps"][0]["candidate_arguments"]
+    )

@@ -1,0 +1,63 @@
+{
+  "artifact_type": "EVAL_VERSION_MANIFEST",
+  "artifact_id": "e2e01-cycle2-version-manifest",
+  "schema_version": "e2e01-cycle2-version-manifest-schema-v1",
+  "manifest_version": "e2e01-cycle2-version-manifest-v1",
+  "created_from_base_sha": "5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de",
+  "versions": {
+    "fixture_version": "e2e01-cycle2-fixture-v1",
+    "dataset_version": "e2e01-cycle2-dataset-v1",
+    "model_config_version": "scripted-model-provider-config-v1",
+    "prompt_version": "e2e01-cycle2-prompt-v1",
+    "tool_registry_version": "e2e01-cycle2-tools-v1",
+    "corpus_version": null,
+    "model_script_catalog_version": "e2e01-cycle2-model-scripts-v1",
+    "lane_manifest_version": "e2e01-cycle2-lanes-v1",
+    "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
+  },
+  "runtime_version_binding": {
+    "required_at_eval_run": true,
+    "source": "SOURCE_REVISION_OR_BUILD_ID",
+    "artifact_placeholder": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
+  },
+  "hash_algorithm": "SHA-256",
+  "artifacts": [
+    {
+      "artifact_id": "e2e01-cycle2-fixture",
+      "path": "evals/fixtures/e2e01-cycle2.v1.json",
+      "version_field": "fixture_version",
+      "version": "e2e01-cycle2-fixture-v1",
+      "sha256": "8264549476f84ace67bc0def471155beeafef8b9f7ee8e3ae214bf398381f8c2"
+    },
+    {
+      "artifact_id": "e2e01-cycle2-cases",
+      "path": "evals/cases/e2e01-cycle2.v1.json",
+      "version_field": "dataset_version",
+      "version": "e2e01-cycle2-dataset-v1",
+      "sha256": "ff683a18ca252c3e119447e2d0031c1d1b9344e80731adf61b1797d0a9d6032c"
+    },
+    {
+      "artifact_id": "e2e01-cycle2-model-scripts",
+      "path": "evals/model_scripts/e2e01-cycle2.v1.json",
+      "version_field": "model_script_catalog_version",
+      "version": "e2e01-cycle2-model-scripts-v1",
+      "sha256": "a5c434d0455fb1becdbc569d1f5e2d2d2b1a628474b9e2dd286e4fefa41f5820"
+    },
+    {
+      "artifact_id": "e2e01-cycle2-lanes",
+      "path": "evals/lanes/e2e01-cycle2.v1.json",
+      "version_field": "lane_manifest_version",
+      "version": "e2e01-cycle2-lanes-v1",
+      "sha256": "12bfa958525603a13d4e2428c054cec1a48be17fb66c074b38e962a2c593fcb4"
+    }
+  ],
+  "default_offline_artifact_refs": [
+    "e2e01-cycle2-fixture",
+    "e2e01-cycle2-cases",
+    "e2e01-cycle2-model-scripts",
+    "e2e01-cycle2-lanes"
+  ],
+  "case_lifecycle_status": "CONTRACT_DEFINED",
+  "eval_result_artifacts_created": false,
+  "baseline_result_artifacts_created": false
+}

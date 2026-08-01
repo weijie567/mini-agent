@@ -1,0 +1,55 @@
+{
+  "artifact_type": "E2E_FIXTURE_CATALOG",
+  "artifact_id": "e2e01-cycle2-fixture",
+  "schema_version": "e2e01-cycle2-fixture-schema-v1",
+  "fixture_version": "e2e01-cycle2-fixture-v1",
+  "classification": "SYNTHETIC_DETERMINISTIC",
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-cycle2-version-manifest",
+    "path": "evals/manifests/e2e01-cycle2.v1.json"
+  },
+  "consumers": [
+    "OFFLINE_GATE"
+  ],
+  "fixtures": [
+    {"fixture_ref": "session:alice", "fixture_kind": "TRUSTED_SESSION", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-search-unique-owner-a-with-foreign-decoy-v1", "fixture_kind": "ORDER_SEARCH_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-search-no-match-owner-a-v1", "fixture_kind": "ORDER_SEARCH_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-search-multiple-owner-a-v1", "fixture_kind": "ORDER_SEARCH_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-current-candidate-set-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-order-targets-owner-a-v1", "fixture_kind": "ORDER_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-expired-candidate-set-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-candidate-set-other-task-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-verified-order-target-o1001-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-dynamic-tool-pair-owner-a-v1", "fixture_kind": "TOOLSET_PAIR_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-stale-shipment-observation-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-refresh-stalled-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-current-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-missing-promise-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-order-zero-active-package-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-candidate-owner-mismatch-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-superseded-candidate-set-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-zero-or-multiple-current-candidate-set-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-delayed-boundary-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-delivered-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-corrected-not-received-claim-owner-a-v1", "fixture_kind": "TASK_STATE_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-retry-scheduled-obsolete-run-owner-a-v1", "fixture_kind": "RUN_RECOVERY_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-shipment-refresh-born-stale-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"},
+    {"fixture_ref": "fx-two-active-packages-owner-a-v1", "fixture_kind": "SHIPMENT_SETUP", "owner_scope": "customer-A"}
+  ],
+  "pair_manifests": [
+    {
+      "pair_id": "PAIR-E2E01-05-V1",
+      "pair_fixture_ref": "fx-dynamic-tool-pair-owner-a-v1",
+      "pair_manifest_schema": "dynamic-tool-selection-pair.p0.v1",
+      "registry_snapshot_digest": "242ecc99f4886e490d45ed90ba22ba4532178b7f15473d632fef464d58d0cb7e",
+      "model_visible_toolset_hash": "035f5af9b8a6c4f99e06e12ed7ce236e3b1caaa00452d8778da96516ebd3272f",
+      "provider_mapping_digest": "79f33f3a4cf2c38e182cac13b24fd13d25d5f4a7d94890322df757051fa928dd",
+      "owner_order_initial_state_digest": "617044627393c3e10a1def6f294bd62375b0204b999284cb85a0a0e1df0dcfae",
+      "allowed_input_goals": [
+        "ORDER_ONLY",
+        "LOGISTICS_REQUIRED"
+      ]
+    }
+  ]
+}
