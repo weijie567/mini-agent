@@ -160,7 +160,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W3R_02_02R_PLANNING_REVIEW / W4_BLOCKED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W3R_02_04R_PLANNING_REVIEW / W4_BLOCKED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -182,9 +182,10 @@ PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
 `B_C2_TOOL = f9a2a75...`。PR #218/#219 完成 W3 02-05 并冻结
 `B_C2_APP_CONTRACT = 86d1b835...`；旧 `ecfad7e...` head 保持 quarantined。PR #221
-已 reviewed merge 并形成真实 `B_C2_W3R_RULING = ed61f4d...`；当前从该 barrier
-签发 `02-02R`，其 reviewed merge 后签发
-`02-04R/02-05R`。三者形成 `B_C2_W4_READY` 后，重新冻结
+已 reviewed merge 并形成真实 `B_C2_W3R_RULING = ed61f4d...`。02-02R PR #222/#223
+又形成 `B_C2_INPUT_BINDING_V2 = 5efd8fa...`；当前从该 barrier 签发 `02-04R`。
+只读 preflight 已确认 `02-05R` 必须 exact import Tool v2 type，因此改为从 reviewed
+`02-04R` successor 单独冻结，不再与其同 base 并行。三者形成 `B_C2_W4_READY` 后，重新冻结
 `02-06/08/09/13`；每份全新 planning review `PASS`/merge 前不创建对应 implementation
 branch。旧 02-06 Plan 仅保留为历史 planning artifact。
 
@@ -244,6 +245,11 @@ B_C2_W3R_RULING
 = ed61f4d4da9c75386aa96857a5e77e06de4c4804
 = tree 02c06f70459cf9593946c599a2de33d1c5a15a91
 = PR #221 reviewed owner-ruling merge successor and exact 02-02R product base
+
+B_C2_INPUT_BINDING_V2
+= 5efd8fabc5c7af5100e10535e983c424e3fd7ad4
+= tree 5a5b3081bb816f5b276b53de9922173290c9f9ca
+= PR #223 reviewed 02-02R merge successor and exact 02-04R product base
 
 B_C2_W4_READY
 = OPEN; only the actual reviewed serial-merge successor of 02-02R/02-04R/02-05R
@@ -335,7 +341,7 @@ implementation Packet 必须等 W3R 完成后固定到真实 `B_C2_W4_READY`。�
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 6/22 | `02-00..05 complete；B_C2_W3R_RULING frozen；02-02R planning review；functional implementation 5/21；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 7/22 | `02-00..05 + 02-02R complete；B_C2_INPUT_BINDING_V2 frozen；02-04R planning review；functional implementation 6/21；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
