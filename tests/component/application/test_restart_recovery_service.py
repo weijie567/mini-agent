@@ -1,38 +1,61 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 
 from mini_agent.application.records import (
+    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
+    Cycle2RunBudgetPolicyEvidence,
+    Cycle2WriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
+    SupersededRunInvalidationKind,
+    SupersededRunReadClosure,
     TaskRecoveryAggregate,
     ToolCallRecoveryAggregate,
+    ToolRetryRecoveryReadClosureV2,
+    TrustedOwnerScope,
 )
 from mini_agent.application.restart_recovery_service import (
+    Cycle2ToolRestartRecoveryService,
     RestartRecoveryService,
 )
+from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_understanding import InputAuthority
 from mini_agent.core.task_state import (
+    InputBindingV2,
+    InputValidationStatus,
     RequestUnitRecord,
     TaskRecord,
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
+    Cycle2ToolName,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
     ToolEffect,
+    ToolRecoveryDisposition,
+    ToolResultOutcome,
+    ToolRetryDecision,
 )
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
+    AgentRunRecordV2,
     AgentRunStatus,
+    AgentRunStatusV2,
     StopReason,
+    StopReasonV2,
+    TraceEventV2,
     TraceEventType,
 )
 
@@ -345,3 +368,444 @@ def test_recovery_service_surface_cannot_resume_replay_or_append_trace() -> None
             "append_trace_event",
         )
     )
+
+
+class Cycle2RecoveryPortSpy:
+    def __init__(
+        self,
+        closure: ToolRetryRecoveryReadClosureV2,
+        *,
+        fence_result: Cycle2DispatchFenceWriteResult = (
+            Cycle2DispatchFenceWriteResult.APPLIED
+        ),
+        grant_mutation: str | None = None,
+        effective_timeout_ms: int = 89,
+        write_result: Cycle2WriteResult = Cycle2WriteResult.APPLIED,
+        oa10_closure: SupersededRunReadClosure | None = None,
+    ) -> None:
+        self.closure = closure
+        self.fence_result = fence_result
+        self.grant_mutation = grant_mutation
+        self.effective_timeout_ms = effective_timeout_ms
+        self.write_result = write_result
+        self.oa10_closure = oa10_closure
+        self.commands: list[object] = []
+        self.oa10_loads: list[dict[str, object]] = []
+
+    async def load_tool_retry_recovery_closure_for_owner(self, **_kwargs):
+        return self.closure
+
+    async def append_recovered_tool_attempt_if_current(self, command):
+        self.commands.append(command)
+        if self.fence_result is not Cycle2DispatchFenceWriteResult.APPLIED:
+            return Cycle2ReadDispatchGrant(write_result=self.fence_result)
+        append = command.attempt_append_command
+        attempt = append.started_attempt
+        tool_call_id = append.expected_record.tool_call_id
+        attempt_no = attempt.attempt_no
+        trusted_fenced_at = attempt.started_at
+        if self.grant_mutation == "tool_call_id":
+            tool_call_id = uuid4()
+        elif self.grant_mutation == "attempt_no":
+            attempt_no = 1
+        elif self.grant_mutation == "trusted_fenced_at":
+            trusted_fenced_at = attempt.started_at - timedelta(microseconds=1)
+        return Cycle2ReadDispatchGrant(
+            write_result=self.fence_result,
+            tool_call_id=tool_call_id,
+            attempt_no=attempt_no,
+            trusted_fenced_at=trusted_fenced_at,
+            effective_timeout_ms=self.effective_timeout_ms,
+        )
+
+    async def finalize_created_tool_recovery_if_current(self, command):
+        self.commands.append(command)
+        return self.write_result
+
+    async def finalize_unfinished_tool_recovery_if_current(self, command):
+        self.commands.append(command)
+        return self.write_result
+
+    async def finalize_budget_exhausted_tool_recovery_if_current(self, command):
+        self.commands.append(command)
+        return self.write_result
+
+    async def load_superseded_run_closure_for_owner(self, **kwargs):
+        self.oa10_loads.append(kwargs)
+        return self.oa10_closure
+
+    async def finalize_state_invalidated_tool_recovery_if_current(self, command):
+        self.commands.append(command)
+        return self.write_result
+
+
+def _cycle2_recovery_closure(
+    *,
+    created: bool = False,
+    unfinished: bool = False,
+    budget_ms: int = 10_000,
+    current_state_version: int = 3,
+) -> ToolRetryRecoveryReadClosureV2:
+    owner = TrustedOwnerScope.from_customer_context(
+        CustomerContext(
+            subject_ref="subject-A",
+            customer_id="customer-A",
+            auth_scopes=frozenset({"orders:read"}),
+            authenticated_at=NOW,
+            session_ref_hash="safe-session-A",
+        )
+    )
+    binding = InputBindingV2(
+        binding_id=uuid4(),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(uuid4(),),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    task = TaskRecord(
+        task_id=uuid4(),
+        owner_customer_id=owner.customer_id,
+        status=TaskStatus.ACTIVE,
+        state_version=current_state_version,
+        created_at=NOW,
+        updated_at=NOW + timedelta(seconds=current_state_version - 3),
+    )
+    unit = RequestUnitRecord(
+        request_unit_id=uuid4(),
+        task_id=task.task_id,
+        goal_text="查询订单",
+        goal_source_refs=(uuid4(),),
+        input_binding_refs=(binding.binding_id,),
+        status=task.status,
+        state_version=current_state_version,
+        created_at=NOW,
+        updated_at=task.updated_at,
+    )
+    run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=uuid4(),
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=NOW,
+    )
+    tool_call_id = uuid4()
+    attempts = ()
+    if not created:
+        attempts = (
+            ToolAttemptRecordV2(
+                tool_call_id=tool_call_id,
+                attempt_no=1,
+                started_at=NOW,
+                **(
+                    {}
+                    if unfinished
+                    else {
+                        "finished_at": NOW,
+                        "outcome": ToolResultOutcome.SYSTEM_FAILURE,
+                        "failure_code": "ORDER_SEARCH_TRANSIENT",
+                        "retry_decision": ToolRetryDecision.RETRY_SCHEDULED,
+                    }
+                ),
+            ),
+        )
+    tool = ToolCallRecordV2(
+        tool_call_id=tool_call_id,
+        run_id=run.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        gate_decision_id=uuid4(),
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref=owner.customer_id,
+        validated_task_state_version=3,
+        argument_binding_refs=(binding.binding_id,),
+        effect=ToolEffect.READ,
+        attempt_count=len(attempts),
+        attempts=attempts,
+        status=ToolCallStatus.CREATED if created else ToolCallStatus.RUNNING,
+        started_at=NOW,
+    )
+    return ToolRetryRecoveryReadClosureV2(
+        owner_scope=owner,
+        active_run_record=run,
+        active_run_task_link_record=RunTaskLinkRecordV2(
+            run_id=run.run_id,
+            task_id=task.task_id,
+            base_task_state_version=3,
+        ),
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(binding,),
+        tool_call_record=tool,
+        recovery_decision_records=(),
+        trusted_read_at=NOW + timedelta(seconds=current_state_version - 2),
+        run_budget_policy=Cycle2RunBudgetPolicyEvidence(
+            policy_version="cycle2-test-budget.v1",
+            run_time_budget_ms=budget_ms,
+        ),
+    )
+
+
+def _oa10_closure(
+    closure: ToolRetryRecoveryReadClosureV2,
+    *,
+    replacement_run_id: UUID,
+) -> SupersededRunReadClosure:
+    current_task = closure.current_task_record
+    current_unit = closure.current_request_unit_record
+    replacement_run = AgentRunRecordV2(
+        run_id=replacement_run_id,
+        conversation_id=closure.active_run_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=NOW + timedelta(seconds=1),
+    )
+    obsolete_task = TaskRecord.model_validate(
+        {
+            **current_task.model_dump(mode="python"),
+            "state_version": 3,
+            "updated_at": NOW,
+        },
+        strict=True,
+    )
+    obsolete_unit = RequestUnitRecord.model_validate(
+        {
+            **current_unit.model_dump(mode="python"),
+            "state_version": 3,
+            "updated_at": NOW,
+        },
+        strict=True,
+    )
+    return SupersededRunReadClosure(
+        owner_scope=closure.owner_scope,
+        trusted_conversation_record=ConversationRecord(
+            schema_version="conversation_record.p0.v1",
+            conversation_id=closure.active_run_record.conversation_id,
+            owner_customer_id=closure.owner_scope.customer_id,
+            created_at=NOW,
+        ),
+        expected_active_run_record=closure.active_run_record,
+        expected_active_link_record=closure.active_run_task_link_record,
+        current_authoritative_run_record=replacement_run,
+        current_authoritative_link_record=RunTaskLinkRecordV2(
+            run_id=replacement_run_id,
+            task_id=current_task.task_id,
+            base_task_state_version=current_task.state_version,
+        ),
+        current_task_record=current_task,
+        current_request_unit_record=current_unit,
+        obsolete_task_record=obsolete_task,
+        obsolete_request_unit_record=obsolete_unit,
+        trusted_current_evidence_at=closure.trusted_read_at,
+        invalidation_kind=SupersededRunInvalidationKind.TASK_VERSION_ADVANCED,
+    )
+
+
+@pytest.mark.parametrize("created,unfinished", [(True, False), (False, True)])
+def test_cycle2_created_and_unfinished_recovery_never_grant_dispatch(
+    created: bool,
+    unfinished: bool,
+) -> None:
+    closure = _cycle2_recovery_closure(created=created, unfinished=unfinished)
+    port = Cycle2RecoveryPortSpy(closure)
+    service = Cycle2ToolRestartRecoveryService(
+        runtime_record_port=port,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal, attempt, result = asyncio.run(
+        service.recover_tool_call(
+            owner_scope=closure.owner_scope,
+            tool_call_id=closure.tool_call_record.tool_call_id,
+        )
+    )
+
+    assert result is Cycle2WriteResult.APPLIED
+    assert attempt is None
+    assert terminal.status is ToolCallStatus.INTERRUPTED
+    assert terminal.attempts == closure.tool_call_record.attempts
+    if created:
+        assert terminal.attempt_count == 0
+        assert terminal.recovery_decision_ref is None
+        assert not hasattr(port.commands[0], "recovery_decision_record")
+    else:
+        assert terminal.recovery_disposition is (
+            ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+        )
+
+
+def test_cycle2_recovered_append_returns_only_exact_applied_dispatch_grant() -> None:
+    closure = _cycle2_recovery_closure()
+    for fence_result in Cycle2DispatchFenceWriteResult:
+        port = Cycle2RecoveryPortSpy(closure, fence_result=fence_result)
+        service = Cycle2ToolRestartRecoveryService(
+            runtime_record_port=port,
+            uuid_factory=UuidSequence(),
+        )
+
+        record, attempt, grant = asyncio.run(
+            service.recover_tool_call(
+                owner_scope=closure.owner_scope,
+                tool_call_id=closure.tool_call_record.tool_call_id,
+            )
+        )
+
+        assert type(grant) is Cycle2ReadDispatchGrant
+        assert grant.write_result is fence_result
+        if fence_result is Cycle2DispatchFenceWriteResult.APPLIED:
+            assert attempt is not None and attempt.attempt_no == 2
+            assert record.attempts[0] == closure.tool_call_record.attempts[0]
+            assert grant.tool_call_id == record.tool_call_id
+            assert grant.attempt_no == attempt.attempt_no
+            assert grant.trusted_fenced_at == attempt.started_at
+            assert grant.effective_timeout_ms == 89
+        else:
+            assert attempt is None
+            assert record == closure.tool_call_record
+            assert grant.tool_call_id is None
+            assert grant.effective_timeout_ms is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["tool_call_id", "attempt_no", "trusted_fenced_at"],
+)
+def test_cycle2_malformed_applied_recovery_grant_has_no_dispatch_authority(
+    mutation: str,
+) -> None:
+    closure = _cycle2_recovery_closure()
+    port = Cycle2RecoveryPortSpy(closure, grant_mutation=mutation)
+    service = Cycle2ToolRestartRecoveryService(
+        runtime_record_port=port,
+        uuid_factory=UuidSequence(),
+    )
+
+    record, attempt, grant = asyncio.run(
+        service.recover_tool_call(
+            owner_scope=closure.owner_scope,
+            tool_call_id=closure.tool_call_record.tool_call_id,
+        )
+    )
+
+    assert record == closure.tool_call_record
+    assert attempt is None
+    assert type(grant) is Cycle2ReadDispatchGrant
+    assert grant.write_result is Cycle2DispatchFenceWriteResult.APPLIED
+    assert len(port.commands) == 1
+
+
+def test_cycle2_budget_exhaustion_preserves_attempt_one_and_has_no_result() -> None:
+    closure = _cycle2_recovery_closure(budget_ms=500)
+    port = Cycle2RecoveryPortSpy(closure)
+    service = Cycle2ToolRestartRecoveryService(
+        runtime_record_port=port,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal, attempt, result = asyncio.run(
+        service.recover_tool_call(
+            owner_scope=closure.owner_scope,
+            tool_call_id=closure.tool_call_record.tool_call_id,
+        )
+    )
+
+    assert result is Cycle2WriteResult.APPLIED
+    assert attempt is None
+    assert terminal.attempts == closure.tool_call_record.attempts
+    assert terminal.status is ToolCallStatus.FAILED
+    assert terminal.result_ref is None
+    assert terminal.recovery_disposition is (
+        ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+    )
+
+
+def test_cycle2_state_invalidation_composes_exact_oa10_no_result_closure() -> None:
+    closure = _cycle2_recovery_closure(current_state_version=4)
+    replacement_run_id = uuid4()
+    oa10_closure = _oa10_closure(closure, replacement_run_id=replacement_run_id)
+    port = Cycle2RecoveryPortSpy(closure, oa10_closure=oa10_closure)
+    service = Cycle2ToolRestartRecoveryService(
+        runtime_record_port=port,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal, attempt, result = asyncio.run(
+        service.recover_tool_call(
+            owner_scope=closure.owner_scope,
+            tool_call_id=closure.tool_call_record.tool_call_id,
+            replacement_run_id=replacement_run_id,
+        )
+    )
+
+    assert result is Cycle2WriteResult.APPLIED
+    assert attempt is None
+    assert terminal.status is ToolCallStatus.INTERRUPTED
+    assert terminal.result_ref is None
+    assert terminal.attempts == closure.tool_call_record.attempts
+    assert terminal.recovery_disposition is (
+        ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+    )
+    assert port.oa10_loads == [
+        {
+            "owner_scope": closure.owner_scope,
+            "obsolete_run_id": closure.active_run_record.run_id,
+            "replacement_run_id": replacement_run_id,
+            "request_unit_id": closure.current_request_unit_record.request_unit_id,
+        }
+    ]
+    command = port.commands[0]
+    oa10 = command.superseded_run_command
+    assert oa10.superseded_run_record.status is AgentRunStatusV2.SUPERSEDED
+    assert oa10.superseded_run_record.stop_reason is (
+        StopReasonV2.STATE_OR_BINDING_INVALIDATED
+    )
+    assert oa10.no_result_link_record.result_task_state_version is None
+    assert oa10.run_stopped_trace_record == TraceEventV2.model_validate(
+        oa10.run_stopped_trace_record.model_dump(mode="python"),
+        strict=True,
+    )
+    assert {
+        "task_record",
+        "request_unit_record",
+        "message_record",
+        "agent_run_result",
+        "result_ref",
+    }.isdisjoint(type(command).model_fields)
+
+
+@pytest.mark.parametrize(
+    "write_result",
+    [
+        Cycle2WriteResult.ALREADY_APPLIED,
+        Cycle2WriteResult.PROJECTION_CONFLICT,
+        Cycle2WriteResult.NOT_APPLICABLE,
+    ],
+)
+def test_cycle2_non_applied_terminal_recovery_returns_source_and_stops(
+    write_result: Cycle2WriteResult,
+) -> None:
+    closure = _cycle2_recovery_closure(created=True)
+    port = Cycle2RecoveryPortSpy(closure, write_result=write_result)
+    service = Cycle2ToolRestartRecoveryService(
+        runtime_record_port=port,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned, attempt, result = asyncio.run(
+        service.recover_tool_call(
+            owner_scope=closure.owner_scope,
+            tool_call_id=closure.tool_call_record.tool_call_id,
+        )
+    )
+
+    assert returned == closure.tool_call_record
+    assert attempt is None
+    assert result is write_result
+    assert len(port.commands) == 1
+    assert port.oa10_loads == []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -14,16 +14,28 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
-from mini_agent.application.ports import GetOrderPort, RuntimeRecordPort
+from mini_agent.application.ports import (
+    Cycle2RuntimeRecordPort,
+    GetOrderPort,
+    RuntimeRecordPort,
+)
 from mini_agent.application.records import (
+    AppendInitialToolAttemptV2Command,
+    AppendToolAttemptV2Command,
     ConditionalWriteResult,
+    CreateToolCallV2Command,
+    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
+    Cycle2WriteResult,
     CreateToolCallCommand,
     DispatchToolCallCommand,
     FinalizeToolCallCommand,
+    FinalizeToolAttemptV2Command,
     InsertOnlyWriteResult,
     ObservationWriteResult,
     SaveObservationCommand,
     ToolDispatchFenceWriteResult,
+    ToolRetryRecoveryReadClosureV2,
     TrustedOwnerScope,
 )
 from mini_agent.core.common import RuntimePrivateModel
@@ -41,13 +53,21 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
+    Cycle2RetryRevalidation,
+    Cycle2ToolDispatchFacts,
     ExecutionPolicy,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
     ToolEffect,
     ToolResultOutcome,
+    ToolResult,
+    ToolRetryDecision,
     ToolTimeoutPhase,
+    decide_cycle2_tool_retry,
+    project_cycle2_tool_terminal,
 )
 from mini_agent.core.trace import TraceEvent, TraceEventType
 
@@ -663,3 +683,320 @@ class ReadToolExecutor:
                         f"{type(trace_error).__name__}"
                     )
             raise
+
+
+Cycle2ReadHandler = Callable[
+    [ToolCallRecordV2, ToolAttemptRecordV2, int],
+    Awaitable[ToolResult],
+]
+
+
+def _project_cycle2_tool_call(
+    record: ToolCallRecordV2,
+    **updates: object,
+) -> ToolCallRecordV2:
+    values = record.model_dump(mode="python")
+    values.update(updates)
+    return ToolCallRecordV2.model_validate(values, strict=True)
+
+
+def _grant_exactly_authorizes_attempt(
+    grant: object,
+    *,
+    tool_call_id: UUID,
+    attempt: ToolAttemptRecordV2,
+) -> bool:
+    return (
+        type(grant) is Cycle2ReadDispatchGrant
+        and grant.write_result is Cycle2DispatchFenceWriteResult.APPLIED
+        and grant.tool_call_id == tool_call_id
+        and grant.attempt_no == attempt.attempt_no
+        and grant.trusted_fenced_at is not None
+        and grant.trusted_fenced_at >= attempt.started_at
+        and grant.effective_timeout_ms is not None
+    )
+
+
+class Cycle2ReadToolExecutor:
+    """Execute inactive Cycle 2 Reads only behind reviewed durable grants."""
+
+    def __init__(
+        self,
+        *,
+        runtime_record_port: Cycle2RuntimeRecordPort,
+        handler: Cycle2ReadHandler,
+        uuid_factory: Callable[[], UUID],
+    ) -> None:
+        self._runtime_record_port = runtime_record_port
+        self._handler = handler
+        self._uuid_factory = uuid_factory
+
+    async def execute(
+        self,
+        *,
+        create_command: CreateToolCallV2Command,
+    ) -> ToolCallRecordV2:
+        if type(create_command) is not CreateToolCallV2Command:
+            raise ReadToolExecutionError("exact live ToolCallV2 command required")
+        inserted = await (
+            self._runtime_record_port.insert_initial_tool_call_v2_if_current(
+                create_command
+            )
+        )
+        if inserted is not Cycle2WriteResult.APPLIED:
+            return create_command.created_record
+        return await self._execute_created(
+            owner_scope=create_command.loaded_closure.owner_scope,
+            created_record=create_command.created_record,
+        )
+
+    async def _load_trusted_closure(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        expected_record: ToolCallRecordV2,
+    ) -> ToolRetryRecoveryReadClosureV2 | None:
+        closure = await (
+            self._runtime_record_port.load_tool_retry_recovery_closure_for_owner(
+                owner_scope=owner_scope,
+                tool_call_id=expected_record.tool_call_id,
+            )
+        )
+        if (
+            type(closure) is not ToolRetryRecoveryReadClosureV2
+            or closure.owner_scope != owner_scope
+            or closure.tool_call_record != expected_record
+        ):
+            return None
+        return closure
+
+    @staticmethod
+    def _retry_revalidation(
+        *,
+        closure: ToolRetryRecoveryReadClosureV2,
+        expected_record: ToolCallRecordV2,
+    ) -> Cycle2RetryRevalidation:
+        parent = expected_record.dispatch_facts()
+        current_binding_ids = {
+            binding.binding_id
+            for binding in closure.current_input_binding_records
+        }
+        current_argument_refs = tuple(
+            ref
+            for ref in parent.argument_binding_refs
+            if ref in current_binding_ids
+        )
+        if not current_argument_refs:
+            current_argument_refs = (
+                closure.current_request_unit_record.input_binding_refs
+            )
+        current = Cycle2ToolDispatchFacts(
+            tool_call_id=parent.tool_call_id,
+            run_id=closure.active_run_record.run_id,
+            private_owner_scope_ref=closure.owner_scope.customer_id,
+            task_id=closure.current_task_record.task_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+            validated_task_state_version=(
+                closure.current_task_record.state_version
+            ),
+            argument_binding_refs=current_argument_refs,
+            verified_target_ref=parent.verified_target_ref,
+        )
+        return Cycle2RetryRevalidation(
+            parent_dispatch_facts=parent,
+            expected_dispatch_facts=parent,
+            current_dispatch_facts=current,
+            remaining_run_time_budget_ms=(
+                closure.remaining_run_time_budget_ms()
+            ),
+        )
+
+    async def _execute_created(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        created_record: ToolCallRecordV2,
+    ) -> ToolCallRecordV2:
+        if (
+            type(owner_scope) is not TrustedOwnerScope
+            or type(created_record) is not ToolCallRecordV2
+            or created_record.status is not ToolCallStatus.CREATED
+            or created_record.attempt_count != 0
+            or created_record.attempts
+        ):
+            raise ReadToolExecutionError("clean owner-scoped CREATED ToolCallV2 required")
+        closure = await self._load_trusted_closure(
+            owner_scope=owner_scope,
+            expected_record=created_record,
+        )
+        if closure is None:
+            return created_record
+        attempt = ToolAttemptRecordV2(
+            tool_call_id=created_record.tool_call_id,
+            attempt_no=1,
+            started_at=closure.trusted_read_at,
+        )
+        running = _project_cycle2_tool_call(
+            created_record,
+            status=ToolCallStatus.RUNNING,
+            attempts=(attempt,),
+            attempt_count=1,
+        )
+        grant = await (
+            self._runtime_record_port.append_initial_tool_attempt_if_current(
+                AppendInitialToolAttemptV2Command(
+                    loaded_closure=closure,
+                    attempt_append_command=AppendToolAttemptV2Command(
+                        owner_scope=owner_scope,
+                        expected_record=created_record,
+                        next_running_record=running,
+                        started_attempt=attempt,
+                    ),
+                )
+            )
+        )
+        if not _grant_exactly_authorizes_attempt(
+            grant,
+            tool_call_id=created_record.tool_call_id,
+            attempt=attempt,
+        ):
+            return created_record
+        return await self._dispatch_started_attempt(
+            owner_scope=owner_scope,
+            running_record=running,
+            started_attempt=attempt,
+            effective_timeout_ms=grant.effective_timeout_ms,
+        )
+
+    async def _dispatch_started_attempt(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        running_record: ToolCallRecordV2,
+        started_attempt: ToolAttemptRecordV2,
+        effective_timeout_ms: int,
+    ) -> ToolCallRecordV2:
+        timeout_phase: ToolTimeoutPhase | None = None
+        try:
+            async with asyncio.timeout(effective_timeout_ms / 1000):
+                result = await self._handler(
+                    running_record,
+                    started_attempt,
+                    effective_timeout_ms,
+                )
+        except TimeoutError:
+            outcome = ToolResultOutcome.TIMEOUT
+            failure_code = "TOOL_CALL_TIMEOUT"
+            timeout_phase = ToolTimeoutPhase.AFTER_DISPATCH
+            finished_at = None
+        else:
+            if (
+                type(result) is not ToolResult
+                or result.tool_call_id != running_record.tool_call_id
+                or result.canonical_tool_name
+                != running_record.canonical_tool_name.value
+                or result.outcome is ToolResultOutcome.RESULT_UNKNOWN
+                or result.completed_at < started_attempt.started_at
+            ):
+                raise ReadToolExecutionError("invalid Cycle 2 handler result")
+            outcome = result.outcome
+            failure_code = result.error_code
+            finished_at = result.completed_at
+            if outcome is ToolResultOutcome.TIMEOUT:
+                timeout_phase = ToolTimeoutPhase.AFTER_DISPATCH
+
+        closure = await self._load_trusted_closure(
+            owner_scope=owner_scope,
+            expected_record=running_record,
+        )
+        if closure is None:
+            return running_record
+        revalidation = self._retry_revalidation(
+            closure=closure,
+            expected_record=running_record,
+        )
+        if finished_at is None:
+            finished_at = closure.trusted_read_at
+        retry = decide_cycle2_tool_retry(
+            canonical_tool_name=running_record.canonical_tool_name,
+            attempt_no=started_attempt.attempt_no,
+            outcome=outcome,
+            failure_code=failure_code,
+            revalidation=revalidation,
+        )
+        finalized = ToolAttemptRecordV2(
+            tool_call_id=started_attempt.tool_call_id,
+            attempt_no=started_attempt.attempt_no,
+            started_at=started_attempt.started_at,
+            finished_at=finished_at,
+            outcome=outcome,
+            failure_code=failure_code,
+            timeout_phase=timeout_phase,
+            retry_decision=retry,
+        )
+        if retry is ToolRetryDecision.RETRY_SCHEDULED:
+            next_record = _project_cycle2_tool_call(
+                running_record,
+                attempts=(*running_record.attempts[:-1], finalized),
+            )
+        else:
+            terminal = project_cycle2_tool_terminal(
+                finalized,
+                canonical_tool_name=running_record.canonical_tool_name,
+            )
+            next_record = _project_cycle2_tool_call(
+                running_record,
+                attempts=(*running_record.attempts[:-1], finalized),
+                status=terminal.status,
+                finished_at=terminal.finished_at,
+                failure_code=terminal.failure_code,
+                timeout_phase=terminal.timeout_phase,
+                interruption_reason=terminal.interruption_reason,
+                result_ref=(
+                    self._uuid_factory()
+                    if terminal.status is ToolCallStatus.SUCCEEDED
+                    else None
+                ),
+            )
+        finalized_result = await (
+            self._runtime_record_port.finalize_tool_attempt_if_current(
+                FinalizeToolAttemptV2Command(
+                    owner_scope=owner_scope,
+                    expected_running_record=running_record,
+                    finalized_attempt=finalized,
+                    next_record=next_record,
+                )
+            )
+        )
+        if finalized_result is not Cycle2WriteResult.APPLIED:
+            return running_record
+        if retry is not ToolRetryDecision.RETRY_SCHEDULED:
+            return next_record
+
+        from mini_agent.application.restart_recovery_service import (
+            Cycle2ToolRestartRecoveryService,
+        )
+
+        recovery = Cycle2ToolRestartRecoveryService(
+            runtime_record_port=self._runtime_record_port,
+            uuid_factory=self._uuid_factory,
+        )
+        recovered, second, grant = await recovery.recover_tool_call(
+            owner_scope=owner_scope,
+            tool_call_id=next_record.tool_call_id,
+        )
+        if (
+            second is None
+            or not _grant_exactly_authorizes_attempt(
+                grant,
+                tool_call_id=next_record.tool_call_id,
+                attempt=second,
+            )
+        ):
+            return recovered
+        return await self._dispatch_started_attempt(
+            owner_scope=owner_scope,
+            running_record=recovered,
+            started_attempt=second,
+            effective_timeout_ms=grant.effective_timeout_ms,
+        )
