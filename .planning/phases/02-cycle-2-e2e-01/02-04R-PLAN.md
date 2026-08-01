@@ -20,7 +20,7 @@ user_setup: []
 must_haves:
   truths:
     - "v1 GateDecision / AuthorizedToolCommand 与 Phase 1 direct get_order 行为保持兼容；新增 v2 类型和 Gateway 路径在 cutover 前 inactive。"
-    - "argument_binding_refs 只含 current RequestUnit InputBindingV2 refs；verified target 使用独立 strict opaque ref，并在 GateDecisionV2 → AuthorizedToolCommandV2 → ToolCallRecordV2 精确复制。"
+    - "argument_binding_refs 只含 current RequestUnit InputBindingV2 refs；verified target 使用独立 UUID logical identity，并在 GateDecisionV2 → AuthorizedToolCommandV2 → ToolCallRecordV2 精确复制。"
     - "selected get_order、direct get_order、get_shipment 与 search_orders 四条路径不可混用、fallback 或从摘要/订单号反推 target。"
     - "Gateway 唯一 Claim 名为 shipment_not_received，保持 strict bool Claim，不成为 target、Observation 或工具参数。"
   artifacts:
@@ -43,9 +43,12 @@ must_haves:
 
 在 Tool owner 与 Control Gateway 中实现 inactive v2 target/binding 分域，修复旧 Cycle 2
 helper 把 target 混入 `argument_binding_refs`、只允许 direct `get_order`、以及旧 Claim
-名的问题。`selected_target_ref` 已由 Task State owner 定义为 strict opaque string；本
-Packet 统一 Gateway/Gate/Command/ToolCall v2 内存 identity 为同一 non-empty/no-whitespace
-string，才能无损 exact-copy，不把它临时编码成 UUID。v1 records、active codec、Runtime
+名的问题。现有 Gateway/Gate/Command/ToolCall v2 identity 已使用 UUID；本 Packet 保持
+该 logical type，使 Application neighbor 与既有 inactive ToolCallV2 shape 兼容。
+Task State `selected_target_ref: StrictOpaqueRef` 只作为持久化文本边界：02-05R 必须生成
+新的 UUID，并保存其 canonical lowercase text，且满足 `str(UUID(text)) == text` 无损
+round-trip；禁止从 `owner_scoped_order_target_ref`、摘要或 payload 哈希推导 target。
+v1 records、active codec、Runtime
 dispatch、Application CAS 与 migration 均不切换。本 Packet 只闭合 Gate→Command 与
 ToolCallV2 target type/dispatch facts；三者 durable insert/CAS exact-copy 由依赖本
 successor 的 02-05R Application command/Port 拥有。
@@ -130,7 +133,7 @@ dependencies:
   - PR #223 reviewed feature/overlay PASS and merge tree equals reviewed overlay tree
   - InputBindingV2 and convert_input_binding_v1_to_v2 are inactive Core contracts; active codec remains p0.v1
   - 02-05R exact-type dependency is unresolved at this base and must wait for this Packet's reviewed successor
-contract_changes: NONE — implement the active W3R owner ruling; strict opaque target identity resolves existing inactive UUID/string implementation drift without changing canonical ref semantics.
+contract_changes: NONE — implement the active W3R owner ruling; keep the existing UUID logical target and require only its lossless canonical text at the SelectionRecord persistence boundary.
 security_impact: HIGH / TARGET AUTHORIZATION — reject mixed refs, stale/foreign/wrong-target closure, public/model target authority, coercion, target inference and rejected-Gate target retention.
 eval_impact: COMPONENT ONLY — add deterministic Tool/Gateway vectors; create no Eval artifact, Case activation, Result or lifecycle transition.
 review_profile:
@@ -139,7 +142,7 @@ review_profile:
   targeted_risk_checks:
     - v1 GateDecision/AuthorizedToolCommand and direct get_order compatibility
     - Gate-to-Command exact target propagation and ToolCallV2 target-type compatibility
-    - strict opaque target identity with no UUID/string lossy bridge
+    - UUID logical target with canonical lowercase text round-trip at SelectionRecord boundary
     - direct versus selected get_order non-fallback
     - get_shipment binding/target separation
     - shipment_not_received strict Claim vocabulary
@@ -162,7 +165,7 @@ required_checks:
   - exact base/tree, required blobs, branch/worktree absence, clean state and branch protection preflight PASS
   - changed files equal the exact four-file allowlist; no Application, persistence, migration, Runtime, Eval, docs/planning or Graphify changes
   - v1 GateDecision and AuthorizedToolCommand model fields/behavior remain compatible; direct Phase 1 get_order remains order-id binding plus null target
-  - additive GateDecisionV2 and AuthorizedToolCommandV2 use an independent strict opaque verified_target_ref and reject target inside argument_binding_refs
+  - additive GateDecisionV2 and AuthorizedToolCommandV2 use an independent UUID verified_target_ref and reject target inside argument_binding_refs
   - exact GateDecision v1-to-v2 conversion requires exact validated v1 input, preserves every v1 field and sets target only to null
   - rejected GateDecisionV2 always stores null target and cannot produce AuthorizedToolCommandV2; accepted search/direct paths also keep target null
   - accepted selected get_order uses exactly one current candidate_ordinal InputBindingV2 ref, one exact current non-null target, matching order_id and result Task/RU version
@@ -172,7 +175,7 @@ required_checks:
   - search_orders uses one product_description binding and null target; shipment_not_received is strict bool Claim, not tool argument/target/fact; not_received_claim rejects
   - Cycle2 progress identity carries target separately, so binding refs stay pure while different targets are distinguishable
   - accepted GateDecisionV2 to AuthorizedToolCommandV2 copies gate/tool/arguments/binding refs/version/target exactly; model cannot supply target
-  - ToolCallRecordV2 and Cycle2 dispatch facts use the same strict opaque target type; v1 shape and inactive status remain unchanged; durable three-way insert remains 02-05R-owned
+  - ToolCallRecordV2 and Cycle2 dispatch facts retain the same UUID target type; existing Application neighbor fixtures stay compatible; durable three-way insert and canonical SelectionRecord text are 02-05R-owned
   - raw constructed/subclass/coerced/extra values fail closed with no tool_call_id, command or Handler dispatch
   - focused/neighbor/compile/diff checks PASS; canonical full accurately NOT RUN
   - independent final exact-head review PASS with 0 BLOCK/HIGH; MEDIUM fixed or accepted with evidence; LOW/INFO recorded
@@ -200,9 +203,10 @@ stale/foreign/mixed/coerced negative vectors。旧测试中把 target 塞进 bin
 
 ### Task 2 — GREEN：additive Tool v2 contract
 
-新增 GateDecisionV2、AuthorizedToolCommandV2 和 exact v1 Gate conversion；把现有 inactive
-ToolCallRecordV2/dispatch facts target 类型与 SelectionRecord 的 strict opaque ref 对齐。
-v1 classes 不修改，不增加 active codec 或 Handler route。
+新增 GateDecisionV2、AuthorizedToolCommandV2 和 exact v1 Gate conversion；保持现有
+inactive ToolCallRecordV2/dispatch facts UUID target。SelectionRecord textual UUID 的
+生成/round-trip validation 明确留给 02-05R。v1 classes 不修改，不增加 active codec 或
+Handler route。
 
 ### Task 3 — GREEN：Gateway selected-target 与 hardening
 
@@ -223,7 +227,7 @@ AND planning review verdict == PASS
 ```
 
 任一条件不成立即 `BLOCK`；不得扩大 allowlist、在 Application 复制 Tool owner 类型、
-临时 UUID 编码 opaque target、或让 02-05R 绕过本 Packet successor。
+从 owner ref/摘要推导 UUID、接受非 canonical textual UUID、或让 02-05R 绕过本 Packet successor。
 
 ## Handoff
 

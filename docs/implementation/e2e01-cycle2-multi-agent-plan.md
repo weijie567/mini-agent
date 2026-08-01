@@ -326,8 +326,10 @@ post-activation verification。
   `argument_binding_refs=[ordinal_input_binding_ref]` + 独立
   `verified_target_ref=selected_target_ref`、current result version 和匹配 `order_id`；
   direct/selected 两路径不可混用或 fallback；get_shipment 同样分离 binding/target；
-  `verified_target_ref` 与 SelectionRecord 的 `selected_target_ref` 使用同一 strict
-  opaque string identity，不做 UUID/string 临时编码；v1 Gate/Command shape 不变；
+  `verified_target_ref` 使用既有 UUID logical identity；SelectionRecord 的
+  `selected_target_ref` 只保存其 canonical lowercase UUID text，并要求
+  `str(UUID(text)) == text` exact round-trip。不得从 owner-scoped ref、摘要或 payload
+  哈希推导 target；v1 Gate/Command shape 不变；
   拒绝 stale/wrong-owner/wrong-target；只使用 `shipment_not_received`。
 
 ### `02-05R` — Continuation binding and atomic ordinal-selection writer
