@@ -1,6 +1,6 @@
 # Gate W8｜Graders and offline Harness machinery execution card
 
-状态：`B_C2_RUNTIME_CONFIRMED / 02-14_PLANNING_REVIEW`
+状态：`COMPLETE / B_C2_EVAL_MACHINERY_CONFIRMED`
 
 ## Exact input
 
@@ -39,6 +39,8 @@ lifecycle hold绕过、exact base/tree/blob/protection不相等，立即停止�
 
 ## Current gate
 
-`02-14` 只在exact Plan与本Card获得independent `PASS`并通过planning PR合并后可
-dispatch。feature必须保持四文件边界、latest-tree复验与bounded review；Cases全程
-保持`CONTRACT_DEFINED`。
+PR #266/#267 已reviewed完成planning/implementation；focused `765 passed`、neighbor
+`262 passed`，compile/diff/containment与bounded exact-head review均PASS。真实
+`B_C2_EVAL_MACHINERY = d6fdcbb3cdd4e6bb41fb2ae0b1ff5b80629b4efb` / tree
+`8ab6f2aeab53bfae73edff219cab70623c437ebc`。W8未运行full、未dispatch Phase 2
+execution chain、未生成Result；Cases保持`CONTRACT_DEFINED`。
