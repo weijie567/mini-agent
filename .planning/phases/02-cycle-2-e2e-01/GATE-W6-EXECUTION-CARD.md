@@ -1,6 +1,6 @@
 # Gate W6｜Adapter and PostgreSQL records execution card
 
-状态：`02-07_COMPLETE / B_C2_BUSINESS_ADAPTERS / 02-11R_PLANNING_REVIEW`
+状态：`02-11R_COMPLETE / B_C2_RECORD_HISTORY_PHYSICAL / 02-11_REFREEZE_REVIEW`
 
 ## Exact input
 
@@ -16,8 +16,12 @@
   tree `342616a59c06a601871e2733126673e6d0c3baf2` 保持 clean、unpublished；focused
   `109 passed`、neighbor `1340 passed`、compile/diff PASS，但 non-null-base OA-10 因
   缺少 exact historical Task / RequestUnit pre-image 而 fail closed。
-- User ruling：2026-08-02 授权有问题按建议修复后继续 W6–W9；PR #259 reviewed
-  批准 `02-11R`，slots `29`、
+- `02-11R` planning PR #260 与 implementation PR #261 已reviewed merge；真实
+  `B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc567417a416804e8fd5413f108451c1c32` /
+  tree `8e4a9392424f7bf1f3c007d74f9a54c257414e5b`。focused `92 passed`、neighbor
+  `459 passed`、migration head/compile/diff均PASS；初审append-only HIGH已由DB级
+  UPDATE/DELETE/TRUNCATE拒绝与复审关闭。
+- User ruling：2026-08-02 授权有问题按建议修复后继续 W6–W9；slots `29`、
   wave labels `16`、max writers `2`。
 - Case lifecycle：`E2E01-02/03/05/06 = CONTRACT_DEFINED`。
 - 02-11 checkpoint 不得发布或直接作为 feature head；必须在真实 `02-11R`
@@ -26,10 +30,8 @@
 ## Ordered dispatch
 
 ```text
-review and merge exact 02-11R Plan
-→ implement/review/overlay/merge 02-11R three-file physical correction
-→ freeze B_C2_RECORD_HISTORY_PHYSICAL
-→ refreeze/replay 02-11 five-file checkpoint on the real successor
+review and merge exact third-refrozen 02-11 Plan
+→ replay 02-11 five-file checkpoint on B_C2_RECORD_HISTORY_PHYSICAL successor
 → independent bounded feature + latest-overlay reviews and serial merge
 → run exactly one W6-exit canonical full
 → freeze B_C2_INFRA
@@ -37,12 +39,10 @@ review and merge exact 02-11R Plan
 
 ## Review profiles
 
-- `02-11R`：`TARGETED_MIGRATION`；只涉及 revision 0006、ORM history model 与
-  migration tests；不实现 Adapter。
 - `02-11`：`TARGETED_POSTGRES_RECORDS`；只涉及 records/recovery/atomicity，并在
   current replace 同事务写 pre-image、按 owner/identity/version exact read。
 - 每次 reviewer 最长 30 秒；超时即中止，不允许无界 history/test 扫描。
-- canonical full：只在 `02-11R` 与 replayed `02-11` reviewed merge 后、W6 exit
+- canonical full：只在 replayed `02-11` reviewed merge 后、W6 exit
   运行唯一一次。
 
 ## Stop conditions
@@ -55,7 +55,7 @@ exact base/tree/blob/barrier 不相等，立即停止并裁决。
 
 ## Current gate
 
-`02-11R` 只在本 exact Plan 获得 independent exact-file `PASS` 并通过 planning PR
-合并后可 dispatch。`02-11` 只在 reviewed `B_C2_RECORD_HISTORY_PHYSICAL` 真实
-successor 上重冻结回放；blocked checkpoint 只作 source patch reference。Cases、
-Harness/Result 与 canonical full 在此前均不得推进。
+`02-11` 只在本 third-refrozen exact Plan 获得 independent exact-file `PASS` 并通过
+planning PR合并后可从 reviewed `B_C2_RECORD_HISTORY_PHYSICAL` 真实 successor 回放；
+blocked checkpoint只作source patch reference。Cases、Harness/Result 与canonical full
+在此前均不得推进。

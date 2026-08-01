@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / 02-07 COMPLETE / B_C2_BUSINESS_ADAPTERS / 02-11R PLANNING`；真实 current integration `096fa25a98632d38c3a38e64a6c9ad57f864e0e0` / tree `db7599249ffe25f8ca9a483fbe5c8e9845dd9eaa`；PR #257/#258 reviewed完成`02-07`并形成`B_C2_BUSINESS_ADAPTERS = 78bce02c...` / tree `032e0c5e...`，focused `28 passed`、neighbor `392 passed`；02-11 targeted验证确认OA-10 immutable history physical BLOCK，checkpoint保持unpublished/fail closed；PR #259 reviewed批准`02-11R`与29 slots，当前冻结其exact Plan；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / 02-11R COMPLETE / B_C2_RECORD_HISTORY_PHYSICAL / 02-11 REPLAY PLANNING`；真实 current integration `5d408fc567417a416804e8fd5413f108451c1c32` / tree `8e4a9392424f7bf1f3c007d74f9a54c257414e5b`；PR #260/#261 reviewed完成`02-11R`，focused `92 passed`、neighbor `459 passed`、append-only HIGH已由DB级mutation rejection关闭；02-11 checkpoint保持unpublished/fail closed，当前第三次重冻结exact Plan；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
