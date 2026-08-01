@@ -19,6 +19,8 @@ from mini_agent.core.control_gateway import (
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
+    Cycle2InitialAcceptedTaskGraphV2,
+    Cycle2InitialRequestDecisionV2,
     Cycle2ContinuationBindingDecision,
     Cycle2OrdinalSelectionPreparation,
     InitialAcceptedTaskGraphV2,
@@ -36,9 +38,12 @@ from mini_agent.core.request_processing import (
     reduce_cycle2_continuation_candidate,
     route_cycle2_continuation_next_move,
     route_cycle2_selected_next_move,
+    validate_and_reduce_cycle2_initial_request_v2,
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
@@ -6294,3 +6299,211 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
             context_manifest_id=uuid4(),
             trusted_now=NOW,
         )
+
+
+def _cycle2_initial_request_output_v2(
+    *,
+    message_ref: UUID,
+    source_ref: UUID | None = None,
+    source_quote: str = "最近买的 轻量　跑鞋",
+    candidate_value: object = " 轻量　跑鞋 ",
+    argument_value: object = "轻量 跑鞋",
+) -> Cycle2InitialRequestUnderstandingOutputV2:
+    return Cycle2InitialRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-initial.p0.v1",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="查找最近购买的轻量跑鞋订单",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=(
+            Cycle2InitialTaskDeltaCandidateV2(
+                candidate_id=uuid4(),
+                operation=TaskDeltaOperation.ADD_GOAL,
+                goal_patch="查找最近购买的轻量跑鞋订单",
+                input_candidates=(
+                    Cycle2InputCandidate(
+                        name="product_description",
+                        candidate_value=candidate_value,
+                        source_ref=source_ref or message_ref,
+                        source_quote=source_quote,
+                        confidence=0.98,
+                    ),
+                ),
+                confidence=0.97,
+            ),
+        ),
+        next_move_candidate=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="search_orders",
+            arguments={"product_description": argument_value},
+            base_task_state_version=None,
+        ),
+    )
+
+
+def _reduce_cycle2_initial_v2(
+    *,
+    message: str = "帮我查最近买的 轻量　跑鞋",
+    output: Cycle2InitialRequestUnderstandingOutputV2 | None = None,
+    allocation: InitialTaskIdentityAllocationV2 | None = None,
+    next_move_candidate_ref: UUID | None = None,
+    customer_context: CustomerContext | None = None,
+    authoritative_messages: object | None = None,
+) -> Cycle2InitialRequestDecisionV2:
+    message_ref = output.message_ref if output is not None else uuid4()
+    actual_output = output or _cycle2_initial_request_output_v2(
+        message_ref=message_ref
+    )
+    candidate_ref = (
+        actual_output.task_delta_candidates[0].candidate_id
+        if actual_output.task_delta_candidates
+        else uuid4()
+    )
+    return validate_and_reduce_cycle2_initial_request_v2(
+        request_input=_request_input_v2(
+            message_ref=message_ref,
+            message=message,
+        ),
+        output=actual_output,
+        authoritative_messages=(
+            authoritative_messages
+            if authoritative_messages is not None
+            else {message_ref: message}
+        ),  # type: ignore[arg-type]
+        customer_context=customer_context or _customer_context(),
+        identity_allocation=(
+            allocation or _identity_allocation_v2(candidate_ref)
+        ),
+        next_move_candidate_ref=next_move_candidate_ref or uuid4(),
+        now=NOW,
+    )
+
+
+def test_cycle2_initial_reducer_builds_clean_product_claim_graph() -> None:
+    result = _reduce_cycle2_initial_v2()
+
+    assert type(result) is Cycle2InitialRequestDecisionV2
+    assert type(result.task_graph) is Cycle2InitialAcceptedTaskGraphV2
+    graph = result.task_graph
+    assert graph.input_binding.name == "product_description"
+    assert graph.input_binding.normalized_value == "轻量 跑鞋"
+    assert graph.input_binding.authority is InputAuthority.USER_CLAIM
+    assert graph.input_binding.validation_status is InputValidationStatus.ACCEPTED
+    assert graph.input_binding.confirmed_by_user is True
+    assert graph.input_binding.supersedes is None
+    assert graph.task.owner_customer_id == "customer-A"
+    assert graph.task.status is TaskStatus.ACTIVE
+    assert graph.task.state_version == 1
+    assert graph.task.last_outcome_ref is None
+    assert graph.request_unit.status is TaskStatus.ACTIVE
+    assert graph.request_unit.state_version == 1
+    assert graph.request_unit.observation_refs == ()
+    assert graph.request_unit.evidence_binding_refs == ()
+    assert graph.request_unit.pending_action_ref is None
+    assert graph.request_unit.result_refs == ()
+    assert graph.accepted_delta.base_task_state_version is None
+    assert graph.accepted_delta.result_task_state_version == 1
+    assert result.argument_binding_refs == (graph.input_binding.binding_id,)
+    assert result.proposed_base_task_state_version is None
+    assert result.validated_task_state_version == graph.task.state_version
+    assert result.next_move_candidate.requested_tool_name == "search_orders"
+    assert result.next_move_candidate.arguments == {
+        "product_description": "轻量 跑鞋"
+    }
+
+
+@pytest.mark.parametrize(
+    ("message", "source_quote"),
+    [
+        ("帮我查轻量跑鞋", "不存在的跑鞋"),
+        ("轻量跑鞋和轻量跑鞋", "轻量跑鞋"),
+        ("帮我查轻量　跑鞋", "轻量 跑鞋"),
+    ],
+)
+def test_cycle2_initial_reducer_rejects_wrong_or_nonunique_quote(
+    message: str,
+    source_quote: str,
+) -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_request_output_v2(
+        message_ref=message_ref,
+        source_quote=source_quote,
+        candidate_value="轻量跑鞋",
+        argument_value="轻量跑鞋",
+    )
+    with pytest.raises(RequestProcessingError):
+        _reduce_cycle2_initial_v2(message=message, output=output)
+
+
+def test_cycle2_initial_reducer_rejects_wrong_source_mapping_and_owner_time() -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    with pytest.raises(RequestProcessingError):
+        _reduce_cycle2_initial_v2(
+            output=output,
+            authoritative_messages={uuid4(): "帮我查最近买的 轻量　跑鞋"},
+        )
+
+    future_context = _customer_context().model_copy(
+        update={"authenticated_at": NOW + timedelta(seconds=1)}
+    )
+    with pytest.raises(RequestProcessingError):
+        _reduce_cycle2_initial_v2(
+            output=output,
+            customer_context=future_context,
+        )
+
+
+@pytest.mark.parametrize("collision", ["candidate", "message", "next_move"])
+def test_cycle2_initial_reducer_rejects_wrong_or_reused_identity(
+    collision: str,
+) -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    candidate_ref = output.task_delta_candidates[0].candidate_id
+    allocation = _identity_allocation_v2(candidate_ref)
+    next_move_ref = uuid4()
+    if collision == "candidate":
+        allocation = allocation.model_copy(update={"candidate_ref": uuid4()})
+    elif collision == "message":
+        allocation = allocation.model_copy(update={"binding_id": message_ref})
+    else:
+        next_move_ref = allocation.binding_id
+
+    with pytest.raises(RequestProcessingError):
+        _reduce_cycle2_initial_v2(
+            output=output,
+            allocation=allocation,
+            next_move_candidate_ref=next_move_ref,
+        )
+
+
+def test_cycle2_initial_reducer_rejects_phase1_output_and_bypassed_shape() -> None:
+    message_ref = uuid4()
+    phase1_output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(),
+    )
+    with pytest.raises(RequestProcessingError):
+        validate_and_reduce_cycle2_initial_request_v2(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message="帮我查最近买的轻量跑鞋",
+            ),
+            output=phase1_output,  # type: ignore[arg-type]
+            authoritative_messages={
+                message_ref: "帮我查最近买的轻量跑鞋"
+            },
+            customer_context=_customer_context(),
+            identity_allocation=_identity_allocation_v2(uuid4()),
+            next_move_candidate_ref=uuid4(),
+            now=NOW,
+        )
+
+    valid = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    bypassed = valid.model_copy(update={"task_delta_candidates": ()})
+    with pytest.raises(RequestProcessingError):
+        _reduce_cycle2_initial_v2(output=bypassed)

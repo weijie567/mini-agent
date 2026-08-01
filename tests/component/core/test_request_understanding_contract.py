@@ -4,6 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from mini_agent.core.request_understanding import (
+    Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
@@ -523,3 +525,157 @@ def test_cycle2_model_candidates_cannot_supply_private_authority(
                 forbidden_field: "attacker-selected",
             }
         )
+
+
+def _cycle2_initial_delta(
+    *,
+    message_ref: UUID,
+    name: str = "product_description",
+    value: object = "轻量 跑鞋",
+) -> Cycle2InitialTaskDeltaCandidateV2:
+    return Cycle2InitialTaskDeltaCandidateV2(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查找最近购买的轻量跑鞋订单",
+        input_candidates=(
+            Cycle2InputCandidate(
+                name=name,
+                candidate_value=value,
+                source_ref=message_ref,
+                source_quote="最近买的轻量 跑鞋",
+                confidence=0.98,
+            ),
+        ),
+        confidence=0.97,
+    )
+
+
+def _cycle2_initial_output(
+    *,
+    message_ref: UUID,
+    deltas: tuple[Cycle2InitialTaskDeltaCandidateV2, ...] | None = None,
+    next_move: NextMove | None = None,
+) -> Cycle2InitialRequestUnderstandingOutputV2:
+    return Cycle2InitialRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-initial.p0.v1",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="查找最近购买的轻量跑鞋订单",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=(
+            deltas
+            if deltas is not None
+            else (_cycle2_initial_delta(message_ref=message_ref),)
+        ),
+        next_move_candidate=(
+            next_move
+            if next_move is not None
+            else NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="search_orders",
+                arguments={"product_description": "轻量 跑鞋"},
+                base_task_state_version=None,
+            )
+        ),
+    )
+
+
+def test_cycle2_initial_output_is_distinct_closed_claim_only_surface() -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_output(message_ref=message_ref)
+
+    assert type(output) is Cycle2InitialRequestUnderstandingOutputV2
+    assert type(output.task_delta_candidates[0]) is Cycle2InitialTaskDeltaCandidateV2
+    assert output.task_delta_candidates[0].input_candidates[0].name == (
+        "product_description"
+    )
+    assert set(Cycle2InitialRequestUnderstandingOutputV2.model_fields) == {
+        "schema_version",
+        "message_ref",
+        "contextualization",
+        "task_delta_candidates",
+        "next_move_candidate",
+    }
+    assert {
+        "customer_id",
+        "owner_customer_id",
+        "verified_target_ref",
+        "observation_ref",
+        "order_id",
+    }.isdisjoint(type(output).model_fields)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("order_id", "O-4242"),
+        ("candidate_ordinal", 2),
+        ("shipment_not_received", True),
+    ],
+)
+def test_cycle2_initial_delta_rejects_continuation_only_candidates(
+    name: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        _cycle2_initial_delta(
+            message_ref=uuid4(),
+            name=name,
+            value=value,
+        )
+
+
+def test_cycle2_initial_output_rejects_zero_multiple_and_wrong_source() -> None:
+    message_ref = uuid4()
+    delta = _cycle2_initial_delta(message_ref=message_ref)
+    for deltas in ((), (delta, delta.model_copy(update={"candidate_id": uuid4()}))):
+        with pytest.raises(ValidationError):
+            _cycle2_initial_output(message_ref=message_ref, deltas=deltas)
+
+    with pytest.raises(ValidationError, match="current message"):
+        _cycle2_initial_output(
+            message_ref=message_ref,
+            deltas=(_cycle2_initial_delta(message_ref=uuid4()),),
+        )
+
+
+@pytest.mark.parametrize(
+    "next_move",
+    [
+        NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"product_description": "轻量 跑鞋"},
+        ),
+        NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="search_orders",
+            arguments={"product_description": " 轻量  跑鞋 "},
+        ),
+        NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="search_orders",
+            arguments={"product_description": "其他商品"},
+        ),
+        NextMove(kind=NextMoveKind.ASK_USER),
+    ],
+)
+def test_cycle2_initial_output_rejects_unbounded_next_move(
+    next_move: NextMove,
+) -> None:
+    with pytest.raises(ValidationError, match="search_orders|normalized"):
+        _cycle2_initial_output(
+            message_ref=uuid4(),
+            next_move=next_move,
+        )
+
+
+def test_cycle2_initial_types_reject_model_supplied_authority() -> None:
+    message_ref = uuid4()
+    payload = _cycle2_initial_output(message_ref=message_ref).model_dump()
+    payload["customer_id"] = "attacker"
+    with pytest.raises(ValidationError, match="extra"):
+        Cycle2InitialRequestUnderstandingOutputV2.model_validate(payload)

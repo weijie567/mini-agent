@@ -18,6 +18,7 @@ from .common import (
 from .identity import CustomerContext
 from .order_search import normalize_product_description
 from .request_understanding import (
+    Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     InputAuthority,
     InputSourceKind,
@@ -2485,6 +2486,270 @@ def revalidate_next_move_v2(
     if revalidated is None:
         raise RequestProcessingError("v2 NextMove revalidation failed")
     return revalidated
+
+
+class Cycle2InitialAcceptedTaskGraphV2(RuntimePrivateModel):
+    """Clean first-turn Task graph for one accepted product Claim."""
+
+    accepted_delta: AcceptedTaskDeltaV2
+    input_binding: InputBindingV2
+    task: TaskRecord
+    request_unit: RequestUnitRecord
+
+    @model_validator(mode="after")
+    def graph_is_one_clean_product_claim(self) -> Self:
+        child = self.accepted_delta
+        binding = self.input_binding
+        task = self.task
+        unit = self.request_unit
+        if (
+            not _is_exact_canonical_model_v2(child, AcceptedTaskDeltaV2)
+            or not _is_exact_canonical_model_v2(binding, InputBindingV2)
+            or not _is_exact_canonical_model_v2(task, TaskRecord)
+            or not _is_exact_canonical_model_v2(unit, RequestUnitRecord)
+        ):
+            raise ValueError("Cycle 2 initial graph requires canonical records")
+        identities = (
+            child.accepted_delta_id,
+            binding.binding_id,
+            task.task_id,
+            unit.request_unit_id,
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("Cycle 2 initial graph identities must be unique")
+        if (
+            child.operation is not TaskDeltaOperation.ADD_GOAL
+            or child.task_id != task.task_id
+            or child.base_task_state_version is not None
+            or child.result_task_state_version != 1
+            or child.input_binding_refs != (binding.binding_id,)
+            or binding.name != "product_description"
+            or type(binding.normalized_value) is not str
+            or binding.authority is not InputAuthority.USER_CLAIM
+            or binding.validation_status is not InputValidationStatus.ACCEPTED
+            or binding.confirmed_by_user is not True
+            or binding.source_refs != (child.message_ref,)
+            or binding.supersedes is not None
+        ):
+            raise ValueError("Cycle 2 initial graph Claim projection mismatch")
+        if (
+            task.status is not TaskStatus.ACTIVE
+            or task.state_version != 1
+            or task.last_outcome_ref is not None
+            or unit.task_id != task.task_id
+            or unit.goal_text != child.goal_text
+            or unit.goal_source_refs != (child.message_ref,)
+            or unit.input_binding_refs != (binding.binding_id,)
+            or unit.status is not TaskStatus.ACTIVE
+            or unit.state_version != 1
+            or unit.contextualization_ref is not None
+            or unit.constraint_refs
+            or unit.dependency_refs
+            or unit.open_questions
+            or unit.observation_refs
+            or unit.evidence_binding_refs
+            or unit.pending_action_ref is not None
+            or unit.result_refs
+        ):
+            raise ValueError("Cycle 2 initial Task and RequestUnit must be clean")
+        timestamps = {
+            child.accepted_at,
+            binding.created_at,
+            binding.updated_at,
+            task.created_at,
+            task.updated_at,
+            unit.created_at,
+            unit.updated_at,
+        }
+        if len(timestamps) != 1:
+            raise ValueError("Cycle 2 initial graph requires one trusted time")
+        return self
+
+
+class Cycle2InitialRequestDecisionV2(RuntimePrivateModel):
+    """Pure initial reduction plus bounded search_orders provenance."""
+
+    run_id: UUID
+    message_ref: UUID
+    task_graph: Cycle2InitialAcceptedTaskGraphV2
+    next_move_candidate_ref: UUID
+    next_move_candidate: NextMove
+    argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    proposed_base_task_state_version: Literal[None] = None
+    validated_task_state_version: Annotated[int, Field(strict=True, ge=1)]
+
+    @model_validator(mode="after")
+    def decision_is_exact_search_provenance(self) -> Self:
+        graph = self.task_graph
+        move = self.next_move_candidate
+        binding = graph.input_binding
+        arguments = move.arguments
+        argument = (
+            arguments.get("product_description")
+            if arguments is not None
+            else None
+        )
+        if (
+            not _is_exact_canonical_model_v2(
+                graph,
+                Cycle2InitialAcceptedTaskGraphV2,
+            )
+            or not _is_exact_canonical_model_v2(move, NextMove)
+            or self.message_ref != graph.accepted_delta.message_ref
+            or self.next_move_candidate_ref
+            in {
+                self.run_id,
+                self.message_ref,
+                graph.accepted_delta.candidate_ref,
+                graph.accepted_delta.accepted_delta_id,
+                graph.input_binding.binding_id,
+                graph.task.task_id,
+                graph.request_unit.request_unit_id,
+            }
+            or move.kind is not NextMoveKind.CALL_TOOL
+            or move.requested_tool_name != "search_orders"
+            or arguments is None
+            or set(arguments) != {"product_description"}
+            or type(argument) is not str
+            or argument != binding.normalized_value
+            or move.base_task_state_version is not None
+            or self.argument_binding_refs != (binding.binding_id,)
+            or self.proposed_base_task_state_version is not None
+            or self.validated_task_state_version != graph.task.state_version
+        ):
+            raise ValueError("Cycle 2 initial decision provenance mismatch")
+        return self
+
+
+def validate_and_reduce_cycle2_initial_request_v2(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: Cycle2InitialRequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    customer_context: CustomerContext,
+    identity_allocation: InitialTaskIdentityAllocationV2,
+    next_move_candidate_ref: UUID,
+    now: datetime,
+) -> Cycle2InitialRequestDecisionV2:
+    """Build a clean Claim-only graph; perform no Tool call or state write."""
+
+    try:
+        canonical_input = _canonical_request_input_v2(request_input)
+    except (RequestUnderstandingV2Error, TypeError, ValueError) as error:
+        raise _cycle2_routing_error() from error
+    if (
+        type(output) is not Cycle2InitialRequestUnderstandingOutputV2
+        or not _is_exact_canonical_model_v2(
+            output,
+            Cycle2InitialRequestUnderstandingOutputV2,
+        )
+        or type(identity_allocation) is not InitialTaskIdentityAllocationV2
+        or not _is_exact_canonical_model_v2(
+            identity_allocation,
+            InitialTaskIdentityAllocationV2,
+        )
+        or type(customer_context) is not CustomerContext
+        or not _is_exact_canonical_model_v2(customer_context, CustomerContext)
+        or type(next_move_candidate_ref) is not UUID
+        or canonical_input.message_ref != output.message_ref
+        or canonical_input.recent_message_refs
+        or canonical_input.pending_question is not None
+        or canonical_input.active_task_summaries
+        or canonical_input.focused_task_summary is not None
+        or canonical_input.pending_action_summaries
+    ):
+        raise _cycle2_routing_error()
+    try:
+        require_utc(now, field_name="now")
+    except (TypeError, ValueError) as error:
+        raise _cycle2_routing_error() from error
+    if customer_context.authenticated_at > now:
+        raise _cycle2_routing_error()
+
+    delta = output.task_delta_candidates[0]
+    candidate = delta.input_candidates[0]
+    _canonical_cycle2_request_and_candidate(
+        request_input=canonical_input,
+        candidate=candidate,
+        authoritative_messages=authoritative_messages,
+    )
+    allocation = identity_allocation
+    identities = (
+        canonical_input.run_id,
+        canonical_input.message_ref,
+        delta.candidate_id,
+        allocation.accepted_delta_id,
+        allocation.task_id,
+        allocation.request_unit_id,
+        allocation.binding_id,
+        next_move_candidate_ref,
+    )
+    if (
+        allocation.candidate_ref != delta.candidate_id
+        or len(identities) != len(set(identities))
+    ):
+        raise _cycle2_routing_error()
+    try:
+        normalized_product = normalize_product_description(
+            candidate.candidate_value
+        )
+        binding = InputBindingV2(
+            binding_id=allocation.binding_id,
+            name="product_description",
+            normalized_value=normalized_product,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(canonical_input.message_ref,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=now,
+            updated_at=now,
+        )
+        graph = Cycle2InitialAcceptedTaskGraphV2(
+            accepted_delta=AcceptedTaskDeltaV2(
+                accepted_delta_id=allocation.accepted_delta_id,
+                candidate_ref=delta.candidate_id,
+                message_ref=canonical_input.message_ref,
+                operation=TaskDeltaOperation.ADD_GOAL,
+                goal_text=delta.goal_patch,
+                input_binding_refs=(allocation.binding_id,),
+                accepted_at=now,
+                task_id=allocation.task_id,
+                base_task_state_version=None,
+                result_task_state_version=1,
+            ),
+            input_binding=binding,
+            task=TaskRecord(
+                task_id=allocation.task_id,
+                owner_customer_id=customer_context.customer_id,
+                status=TaskStatus.ACTIVE,
+                state_version=1,
+                created_at=now,
+                updated_at=now,
+            ),
+            request_unit=RequestUnitRecord(
+                request_unit_id=allocation.request_unit_id,
+                task_id=allocation.task_id,
+                goal_text=delta.goal_patch,
+                goal_source_refs=(canonical_input.message_ref,),
+                input_binding_refs=(allocation.binding_id,),
+                status=TaskStatus.ACTIVE,
+                state_version=1,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        return Cycle2InitialRequestDecisionV2(
+            run_id=canonical_input.run_id,
+            message_ref=canonical_input.message_ref,
+            task_graph=graph,
+            next_move_candidate_ref=next_move_candidate_ref,
+            next_move_candidate=output.next_move_candidate,
+            argument_binding_refs=(binding.binding_id,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=graph.task.state_version,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
 
 
 class Cycle2ContinuationBindingDecision(RuntimePrivateModel):
