@@ -2125,6 +2125,170 @@ exact message profiles：
 artifact 必须把 profile 展开为上方 exact `messages[]`；不得保存 profile 名替代
 消息数组，也不得由 model script 生成用户消息。
 
+#### 9.2.2 W9 pre-activation authenticated offline seed contract
+
+本节是 `02-15R0` 的 scoped additive contract。它只为 pre-activation direct
+HTTP execution seam 提供可实现的 Mock seed authority；不把 Case 推进为
+`EXECUTABLE`，不授权 Eval Harness dispatch，也不表示下列 payload 已写入数据库或
+已经产生 Eval Result。`evals/fixtures/e2e01-cycle2.v1.json` 中只有
+`fixture_ref / fixture_kind / owner_scope` 的条目仍只是 authenticated reference；
+reference 名称或 pair manifest 中的静态 digest **不等于**已解析 seed。
+
+##### Closed envelope 与 authority
+
+唯一允许的 seed envelope schema 为 `cycle2-offline-seed.p0.v1`：
+
+```text
+Cycle2OfflineSeedV1 {
+  seed_schema_version: literal "cycle2-offline-seed.p0.v1"
+  fixture_ref: exact non-empty artifact fixture_ref
+  fixture_kind: TRUSTED_SESSION | ORDER_SEARCH_SETUP | ORDER_SETUP |
+                SHIPMENT_SETUP | TASK_STATE_SETUP | TOOLSET_PAIR_SETUP |
+                RUN_RECOVERY_SETUP
+  owner_customer_id: exact non-empty trusted owner
+  trusted_clock_profile_ref: literal "clock:cycle2-w9-v1"
+  session_seeds: tuple[TrustedSessionSeedV1]
+  order_seeds: tuple[MockOrderSeedV1]
+  search_document_seeds: tuple[MockOrderSearchDocumentSeedV1]
+  shipment_seeds: tuple[MockShipmentSeedV1]
+  initial_record_graph: tuple[CanonicalRecordEnvelopeV1]
+  initial_record_references: tuple[CanonicalRecordReferenceV1]
+  fault_plan: Cycle2ReadFaultPlanV1 | null
+}
+```
+
+- envelope 是 `extra=forbid` 的 exact type；所有 tuple 按下表顺序保存，不能由 DB、
+  loader、Provider 或模型补默认值。UUID、UTC 时间、record code / schema version、
+  source field、关系和 current version 都是 payload，不允许生成式 authority。
+- `owner_customer_id` 只能来自 authenticated catalog；它必须与 artifact
+  `owner_scope`、session owner、每个 business row 和 record envelope owner 全部相等。
+  foreign-decoy row只能存在于显式 `foreign_control_rows` 检查输入，不进入 owner A 的
+  seed transaction、Runtime records、ModelVisibleContext、Trace或reply。
+- 一个 fixture 的全部 business rows、record envelopes与references在单事务内先完整
+  校验再写入。unknown ref、reference-only ref、missing/duplicate/conflicting row、
+  dangling reference、partial graph、mixed version或cross-owner projection全部在首个
+  write前 fail closed；retry不得把 partial seed 当作 current state。
+- `fault_plan` 是 closed attempt-indexed input：
+  `{"canonical_tool_name":"get_shipment","attempt_outcomes":[...]}`。
+  未显式列出的 fixture 精确为 `null / NONE`。fault authority只来自本catalog，不能
+  从 Case expected outcome、grader predicate、model script、Provider capture或最终
+  reply反推。
+- production bootstrap、credentialed lane与真实外部系统不得加载本schema；它仅属于
+  P0 offline Mock composition。
+
+##### Canonical primitive rows
+
+所有时间均为UTC RFC 3339秒精度；trusted clock固定为
+`2026-07-31T12:00:00Z`，search closed window因此为
+`2026-05-02T12:00:00Z..2026-07-31T12:00:00Z`。session只有：
+
+```text
+session:alice → owner_customer_id=customer-A
+```
+
+W9 catalog只允许下列 business fragments；`order_payload` 精确等于
+`OrderSummaryProjection` JSON，search row字段精确等于
+`MockOrderSearchDocumentModel`列，shipment payload精确等于受控
+`_ShipmentAuthorityPayload` shape：
+
+| Fragment | owner / identity | Exact safe/source payload |
+|---|---|---|
+| `ORDER-A-1001` | `customer-A / O-1001` | `status=SHIPPED`; line item `轻量跑鞋 ×1`; `ordered_at=2026-07-10T09:00:00Z`; `status_updated_at=2026-07-11T08:00:00Z` |
+| `ORDER-A-1002` | `customer-A / O-1002` | `status=PAID`; line item `复古跑鞋 ×1`; `ordered_at=2026-07-20T10:00:00Z`; `status_updated_at=2026-07-20T10:05:00Z` |
+| `ORDER-B-9001` | `customer-B / O-9001` | `status=SHIPPED`; line item `轻量跑鞋 ×1`; `ordered_at=2026-07-25T11:00:00Z`; `status_updated_at=2026-07-26T08:00:00Z`; foreign control only |
+| `SEARCH-A-1001` | `customer-A / O-1001 / line_ordinal=1` | `ordered_at=2026-07-10T09:00:00Z`; `order_number=O-1001`; `status=SHIPPED`; `product_name=轻量跑鞋`; `quantity=1`; `product_category=鞋`; `search_aliases=[跑鞋,鞋]` |
+| `SEARCH-A-1002` | `customer-A / O-1002 / line_ordinal=1` | `ordered_at=2026-07-20T10:00:00Z`; `order_number=O-1002`; `status=PAID`; `product_name=复古跑鞋`; `quantity=1`; `product_category=鞋`; `search_aliases=[跑鞋,鞋]` |
+| `SEARCH-B-9001` | `customer-B / O-9001 / line_ordinal=1` | 与`ORDER-B-9001`一致的foreign control row；不得写入customer-A transaction |
+| `SHIPMENT-A-1001-NORMAL` | `customer-A / O-1001 / PKG-1001` | `shipment_status=IN_TRANSIT`; `latest_event_code=IN_TRANSIT`; `latest_event_at=2026-07-31T09:00:00Z`; `promised_delivery_at=2026-08-02T18:00:00Z`; `delivered_at=null`; `observed_at=2026-07-31T09:05:00Z` |
+| `SHIPMENT-A-1001-STALLED` | 同一 owner/order/package；只可替换同fixture transaction中的NORMAL fragment | `shipment_status=IN_TRANSIT`; `latest_event_code=ARRIVED_AT_FACILITY`; `latest_event_at=2026-07-24T08:00:00Z`; `promised_delivery_at=2026-07-28T18:00:00Z`; `delivered_at=null`; `observed_at=2026-07-31T11:59:00Z` |
+
+aliases进入物理row前必须执行本文§4.1的NFKC / whitespace / casefold / unique-sort；
+表中顺序只是人类可读输入，持久化值为`["跑鞋","鞋"]`的canonical排序结果。
+Order / search parent关系必须是同一`(customer_id, order_id)`；Shipment关系必须是
+同一`(customer_id, order_id, package_id)`。Adapter仍负责从解析后的真实row计算
+order/search/shipment source version；catalog不得预填或覆盖这些hash。
+
+##### W9禁止预置Runtime record graph
+
+W9 dispatchable seed的`initial_record_graph`与`initial_record_references`必须精确为
+空tuple；因此完整serialized值分别是`[]`与`[]`，不存在由R2补齐的record field、
+UUID、source/ref或version。`TASK_STATE_SETUP / RUN_RECOVERY_SETUP` fixture refs在W9
+全部保持`REFERENCE_ONLY / NON_DISPATCHABLE`。Composition不得通过seed、直接SQL、
+test helper或Eval expectation预置Task、RequestUnit、InputBinding、CandidateSet、
+Observation、Assessment、Run、ToolCall、Trace、Message或result。
+
+需要existing Task state的direct flow必须由同一trusted Session经过先前真实HTTP
+turn产生，并从PostgreSQL exact current closure继续：多候选flow先执行search turn再
+执行ordinal turn；stale flow先在早期trusted clock执行一次物流turn产生当时fresh的
+Observation，再推进trusted clock与Mock Shipment source后执行refresh turn。这样每个
+Runtime record都是SUT evidence，而不是fixture作者制造的expected state。
+
+##### W9 dispatchable fixture catalog
+
+只有下列refs在W9 direct seam中可解析；artifact中的其他refs继续是
+`REFERENCE_ONLY / NON_DISPATCHABLE`，直到独立owner contract补全：
+
+| Fixture ref | Kind / owner | Exact fragment composition | Fault plan |
+|---|---|---|---|
+| `fx-search-unique-owner-a-with-foreign-decoy-v1` | `ORDER_SEARCH_SETUP / customer-A` | session alice + `ORDER-A-1001` + `SEARCH-A-1001` + exact empty record/reference tuples; `ORDER-B-9001/SEARCH-B-9001`仅在隔离foreign-control namespace预置并用于negative disclosure assertion | `NONE` |
+| `fx-search-multiple-owner-a-v1` | `ORDER_SEARCH_SETUP / customer-A` | session alice + `ORDER-A-1001/A-1002` + `SEARCH-A-1001/A-1002` + exact empty record/reference tuples | `NONE` |
+| `fx-dynamic-tool-pair-owner-a-v1` | `TOOLSET_PAIR_SETUP / customer-A` | session alice + `ORDER-A-1001` + `SEARCH-A-1001` + `SHIPMENT-A-1001-NORMAL` + exact empty record/reference tuples | `NONE` |
+| `fx-shipment-refresh-stalled-owner-a-v1` | `SHIPMENT_SETUP / customer-A` | `SHIPMENT-A-1001-STALLED` | `NONE` |
+| `fx-shipment-current-owner-a-v1` | `SHIPMENT_SETUP / customer-A` | `SHIPMENT-A-1001-NORMAL` | `NONE` unless composed with the next exact fault ref |
+| `fault:get-shipment:transient-once-v1` | fault ref, not a fixture row | no seed rows; `canonical_tool_name=get_shipment`; attempt 1=`SYSTEM_FAILURE/SHIPMENT_SERVICE_TRANSIENT/RETRY_SCHEDULED`; attempt 2 consumes the exact current Shipment business row | exact two-entry plan |
+
+同一direct test可按Case中已认证的`initial_state_fixture_refs[]`与
+`environment_fixture_refs[]`组合多个上表envelopes；组合前必须验证schema、owner、
+clock、logical identity与physical row不存在冲突，再执行一次全有或全无seed事务。
+fixture组合顺序不影响canonical projection；重复完全相同fragment可去重，重复但内容
+不同必须fail closed。
+
+W9 direct matrix对reference-only artifact fixture使用下列等价真实入口，不把该等价
+执行误报为对应Eval variant已经运行：
+
+| Direct flow | Runtime-created prerequisite |
+|---|---|
+| multiple → current second selected | 使用`fx-search-multiple-owner-a-v1`后先POST `MSG-SEARCH`，由SUT写current CandidateSet；同一session再POST `MSG-SECOND`，不得重新seed或search |
+| stale → refresh success | 使用`fx-dynamic-tool-pair-owner-a-v1`在trusted clock `2026-07-31T09:06:00Z`先POST `MSG-LOGISTICS`；随后clock推进至`12:00:00Z`并以`fx-shipment-refresh-stalled-owner-a-v1`原子替换Mock source，再POST同一物流目标 |
+| transient once → success | 使用`fx-dynamic-tool-pair-owner-a-v1`加exact fault ref，从同一新HTTP turn内完成get_order、attempt 1 transient与attempt 2 current Shipment success |
+
+上述direct flows只证明pre-activation execution seam；artifact中
+`fx-current-candidate-set-owner-a-v1`、`fx-stale-shipment-observation-owner-a-v1`、
+`fx-verified-order-target-o1001-owner-a-v1`等reference-only ref仍不可由W9 loader
+dispatch，Case lifecycle仍为`CONTRACT_DEFINED`。
+
+##### E2E01-05 real seed digest
+
+pair的`owner_order_initial_state_digest`不得由artifact中的两个相同字符串自证。
+W9必须从`fx-dynamic-tool-pair-owner-a-v1`成功解析后的共同projection构造：
+
+```json
+{
+  "digest_schema": "cycle2-owner-order-initial-state.p0.v1",
+  "owner_customer_id": "customer-A",
+  "session_refs": ["session:alice"],
+  "order_seeds": ["完整 ORDER-A-1001 canonical object"],
+  "search_document_seeds": ["完整 SEARCH-A-1001 canonical object"],
+  "shipment_seeds": ["完整 SHIPMENT-A-1001-NORMAL canonical object"],
+  "initial_record_graph": [],
+  "initial_record_references": []
+}
+```
+
+引号中的说明在真实projection中必须替换为完整typed object。canonical bytes精确为
+`json.dumps(value, ensure_ascii=false, allow_nan=false, sort_keys=true,
+separators=(",", ":")).encode("utf-8")`，digest为这些bytes的SHA-256 lower hex。
+projection必须排除`input_goal`、用户消息、Case ID、model script、expectations、
+grader predicates、Run/ToolCall/Trace/result和fault outcome；因此ORDER_ONLY与
+LOGISTICS_REQUIRED得到同一真实seed digest，唯一允许差异仍是§9.3.4的
+`input_goal`。
+
+当前`CONTRACT_DEFINED` artifact中的静态digest只作为待同步consumer值，不能授权
+W9写入或dispatch。W9 direct seam必须保存其实际重算值并证明pair两路相同；若它与
+当前artifact值不同，保持Case pre-dispatch fail closed，并把consumer同步留给
+reviewed `02-17` atomic lifecycle / manifest / loader Packet，不能在R0/R1/R2/02-15
+越权修改artifact。
+
 ### 9.3 四个逻辑 Case、14 个 required offline variants
 
 #### 9.3.1 Identity、scope、fixture 与 outcome
