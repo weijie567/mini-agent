@@ -11,16 +11,17 @@ from pydantic import BaseModel, Field, ValidationError
 import mini_agent.application.records as application_records_module
 from mini_agent.application.records import (
     AcceptedOrderSearchQueryBindingReadClosure,
-    AcceptedOrdinalBindingReadClosure,
     AgentRunCommand,
     AgentRunResult,
     AppendToolAttemptV2Command,
+    ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConversationRecord,
     ConversationTaskLinkRecord,
+    ContinuationInputBindingReadClosure,
     Cycle2DispatchFenceWriteResult,
     Cycle2WriteResult,
     CreateInitialTaskGraphV2Command,
@@ -29,6 +30,7 @@ from mini_agent.application.records import (
     CreateRunTaskLinkCommand,
     CreateTaskCommand,
     CreateToolCallCommand,
+    CreateToolCallV2Command,
     DispatchToolCallCommand,
     CriticalFailureCode,
     EvalExecutionFailurePhase,
@@ -48,6 +50,8 @@ from mini_agent.application.records import (
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
     InterruptToolCallForRecoveryCommand,
+    InitialToolCallV2ReadClosure,
+    IssuedSelectedTargetRef,
     MarkRunIncompleteForRecoveryCommand,
     MessageDirection,
     MessageRecord,
@@ -74,8 +78,20 @@ from mini_agent.application.records import (
     ToolCallRecoveryAggregate,
     TransitionRunCommand,
     TrustedOwnerScope,
+    build_order_candidate_selection_v2_command,
 )
 from mini_agent.core.common import ContractVisibility
+from mini_agent.core.control_gateway import (
+    Cycle2AcceptedBindingFacts,
+    Cycle2GatewayBudgetFacts,
+    Cycle2GatewayCandidate,
+    Cycle2GatewayLoadedClosure,
+    Cycle2GatewayProgressSnapshot,
+    Cycle2TargetObservationFacts,
+    Cycle2VerifiedOrderTargetFacts,
+    build_cycle2_authorized_tool_command,
+    evaluate_cycle2_control_gateway,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
@@ -113,6 +129,7 @@ from mini_agent.core.task_state import (
     DurableQueryContextualizationCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
+    InputBindingV2,
     InputValidationStatus,
     ORDER_SEARCH_OBSERVATION_RECORD_SCHEMA_VERSION,
     OrderCandidateSelectionRecord,
@@ -128,8 +145,10 @@ from mini_agent.core.task_state import (
     compute_order_candidate_set_version,
 )
 from mini_agent.core.tool_system import (
+    AuthorizedToolCommandV2,
     Cycle2ToolName,
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
@@ -142,6 +161,7 @@ from mini_agent.core.tool_system import (
     ToolResultOutcome,
     ToolRetryDecision,
     ToolTimeoutPhase,
+    build_cycle2_registry_snapshot,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -345,6 +365,23 @@ def _input_binding(**updates: object) -> InputBinding:
     }
     values.update(updates)
     return InputBinding(**values)
+
+
+def _input_binding_v2(**updates: object) -> InputBindingV2:
+    values: dict[str, object] = {
+        "binding_id": uuid4(),
+        "name": "order_id",
+        "normalized_value": "O-1001",
+        "authority": InputAuthority.USER_CLAIM,
+        "source_refs": (uuid4(),),
+        "validation_status": InputValidationStatus.ACCEPTED,
+        "confirmed_by_user": True,
+        "created_at": UTC_NOW,
+        "updated_at": UTC_NOW,
+        "supersedes": None,
+    }
+    values.update(updates)
+    return InputBindingV2(**values)
 
 
 def _task_transition(**updates: object) -> TaskStateTransition:
@@ -7480,16 +7517,23 @@ def _c2_tool_call(
     attempts: tuple[ToolAttemptRecordV2, ...] = (),
     finished_at: datetime | None = None,
     result_ref: UUID | None = None,
+    run_id: UUID | None = None,
+    model_call_id: UUID | None = None,
+    context_manifest_id: UUID | None = None,
+    gate_decision_id: UUID | None = None,
+    provider_tool_call_id: str | None = None,
+    started_at: datetime = UTC_NOW,
 ) -> ToolCallRecordV2:
     tool_call_id = attempts[0].tool_call_id if attempts else uuid4()
     return ToolCallRecordV2(
         tool_call_id=tool_call_id,
-        run_id=uuid4(),
+        run_id=run_id or uuid4(),
         task_id=task_id or uuid4(),
         request_unit_id=request_unit_id or uuid4(),
-        model_call_id=uuid4(),
-        context_manifest_id=uuid4(),
-        gate_decision_id=uuid4(),
+        model_call_id=model_call_id or uuid4(),
+        context_manifest_id=context_manifest_id or uuid4(),
+        gate_decision_id=gate_decision_id or uuid4(),
+        provider_tool_call_id=provider_tool_call_id,
         canonical_tool_name=name,
         tool_registry_version="e2e01-cycle2-tools.p0.v1",
         private_owner_scope_ref=owner,
@@ -7500,7 +7544,7 @@ def _c2_tool_call(
         attempt_count=len(attempts),
         attempts=attempts,
         status=status,
-        started_at=UTC_NOW,
+        started_at=started_at,
         finished_at=finished_at,
         result_ref=result_ref,
     )
@@ -8591,6 +8635,178 @@ def test_cycle2_commands_reject_constructed_trusted_owner_scope() -> None:
         )
 
 
+def _c2_continuation_command(
+    *,
+    name: str = "product_description",
+    normalized_value: object = "跑鞋",
+) -> ApplyContinuationInputBindingV2Command:
+    owner = _owner_scope()
+    conversation = _conversation(owner_customer_id=owner.customer_id)
+    task = _task(state_version=3)
+    existing = _input_binding_v2()
+    unit = _request_unit(
+        task_id=task.task_id,
+        state_version=3,
+        input_binding_refs=(existing.binding_id,),
+    )
+    message = _message(
+        conversation_id=conversation.conversation_id,
+        content="还是那双跑鞋",
+        received_at=UTC_NOW + timedelta(seconds=1),
+    )
+    trusted_now = UTC_NOW + timedelta(seconds=2)
+    closure = ContinuationInputBindingReadClosure(
+        owner_scope=owner,
+        trusted_conversation_record=conversation,
+        current_conversation_task_link_record=_conversation_task_link(
+            conversation_id=conversation.conversation_id,
+            task_id=task.task_id,
+        ),
+        saved_user_message_record=message,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(existing,),
+        trusted_now=trusted_now,
+    )
+    binding = _input_binding_v2(
+        name=name,
+        normalized_value=normalized_value,
+        source_refs=(message.message_id,),
+        created_at=trusted_now,
+        updated_at=trusted_now,
+    )
+    return ApplyContinuationInputBindingV2Command(
+        loaded_closure=closure,
+        new_input_binding_record=binding,
+        next_task_record=_c2_project(
+            task,
+            state_version=4,
+            updated_at=trusted_now,
+        ),
+        next_request_unit_record=_c2_project(
+            unit,
+            state_version=4,
+            updated_at=trusted_now,
+            input_binding_refs=(existing.binding_id, binding.binding_id),
+        ),
+    )
+
+
+def test_cycle2_continuation_binding_is_one_exact_nonordinal_cas() -> None:
+    command = _c2_continuation_command()
+    closure = command.loaded_closure
+    assert command.new_input_binding_record.source_refs == (
+        closure.saved_user_message_record.message_id,
+    )
+    assert command.next_task_record.state_version == 4
+    assert command.next_request_unit_record.state_version == 4
+    assert command.next_task_record.status is closure.current_task_record.status
+
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    ordinal = _input_binding_v2(
+        name="candidate_ordinal",
+        normalized_value=2,
+        source_refs=(closure.saved_user_message_record.message_id,),
+        created_at=closure.trusted_now,
+        updated_at=closure.trusted_now,
+    )
+    with pytest.raises(ValidationError, match="selection CAS"):
+        ApplyContinuationInputBindingV2Command(
+            **{**values, "new_input_binding_record": ordinal}
+        )
+    with pytest.raises(ValidationError, match="versions must close atomically"):
+        ApplyContinuationInputBindingV2Command(
+            **{
+                **values,
+                "next_request_unit_record": _c2_project(
+                    command.next_request_unit_record,
+                    state_version=5,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="non-authorized field"):
+        ApplyContinuationInputBindingV2Command(
+            **{
+                **values,
+                "next_request_unit_record": _c2_project(
+                    command.next_request_unit_record,
+                    goal_text="夹带目标改写",
+                ),
+            }
+        )
+
+
+def test_cycle2_continuation_supersedes_only_one_current_same_name_binding() -> None:
+    command = _c2_continuation_command()
+    closure = command.loaded_closure
+    existing = closure.current_input_binding_records[0]
+    trusted_now = closure.trusted_now
+    replacement = _input_binding_v2(
+        name="order_id",
+        normalized_value="O-2002",
+        source_refs=(closure.saved_user_message_record.message_id,),
+        created_at=trusted_now,
+        updated_at=trusted_now,
+        supersedes=existing.binding_id,
+    )
+    replaced = ApplyContinuationInputBindingV2Command(
+        loaded_closure=closure,
+        new_input_binding_record=replacement,
+        next_task_record=command.next_task_record,
+        next_request_unit_record=_c2_project(
+            command.next_request_unit_record,
+            input_binding_refs=(replacement.binding_id,),
+        ),
+    )
+    assert replaced.next_request_unit_record.input_binding_refs == (
+        replacement.binding_id,
+    )
+
+    with pytest.raises(ValidationError, match="supersedes"):
+        ApplyContinuationInputBindingV2Command(
+            loaded_closure=closure,
+            new_input_binding_record=_c2_project(
+                replacement,
+                supersedes=uuid4(),
+            ),
+            next_task_record=command.next_task_record,
+            next_request_unit_record=replaced.next_request_unit_record,
+        )
+
+
+def test_cycle2_continuation_read_closure_rejects_wrong_owner_and_message() -> None:
+    command = _c2_continuation_command()
+    closure = command.loaded_closure
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in type(closure).model_fields
+    }
+    with pytest.raises(ValidationError, match="owner/Conversation/Message"):
+        ContinuationInputBindingReadClosure(
+            **{
+                **values,
+                "saved_user_message_record": _c2_project(
+                    closure.saved_user_message_record,
+                    direction=MessageDirection.ASSISTANT,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="Task owner"):
+        ContinuationInputBindingReadClosure(
+            **{**values, "owner_scope": _owner_scope("customer-B")}
+        )
+    with pytest.raises(ValidationError, match="exactly match RequestUnit refs"):
+        ContinuationInputBindingReadClosure(
+            **{
+                **values,
+                "current_input_binding_records": (_input_binding_v2(),),
+            }
+        )
+
+
 def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> None:
     search_command, previous_search_command = (
         _c2_earlier_query_superseding_search_commands()
@@ -8606,7 +8822,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
     current_task = search_command.next_task_record
     current_unit = _c2_project(
         search_command.next_request_unit_record,
-        input_binding_refs=(query_ref, ordinal_ref),
+        input_binding_refs=(query_ref,),
     )
     request = OrderCandidateSelectionRequest(
         source_message_ref=uuid4(),
@@ -8619,17 +8835,6 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         conversation_id=conversation.conversation_id,
         content="第二个",
         received_at=observation.recorded_at + timedelta(seconds=1),
-    )
-    ordinal_binding = AcceptedOrdinalBindingReadClosure(
-        binding_ref=ordinal_ref,
-        normalized_ordinal=2,
-        private_owner_scope_ref=owner.customer_id,
-        conversation_id=conversation.conversation_id,
-        task_id=current_task.task_id,
-        request_unit_id=current_unit.request_unit_id,
-        task_state_version=current_task.state_version,
-        source_message_record=source_message,
-        accepted_at=source_message.received_at,
     )
     query_binding_seed = search_command.current_query_binding
     assert isinstance(
@@ -8671,7 +8876,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         current_candidate_set_record=candidate_set,
         search_observation_record=observation,
         selection_request=request,
-        ordinal_binding_closure=ordinal_binding,
+        saved_selection_message_record=source_message,
         current_query_binding=query_binding,
         pending_candidate_set_ref=candidate_set.candidate_set_id,
         current_query_binding_refs=(query_ref,),
@@ -8679,6 +8884,8 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         trusted_now=selected_at,
     )
     selected = candidate_set.ordered_candidates[1]
+    issued_selected_target = IssuedSelectedTargetRef.fresh()
+    selected_target_ref = issued_selected_target.selected_target_ref
     selection = OrderCandidateSelectionRecord(
         selection_id=uuid4(),
         private_owner_scope_ref=owner.customer_id,
@@ -8696,13 +8903,22 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         observation_candidate_ref=selected.observation_candidate_ref,
         candidate_source_version=selected.candidate_source_version,
         owner_scoped_order_target_ref="owner-order:2",
-        selected_target_ref="owner-order:2",
+        selected_target_ref=str(selected_target_ref),
         base_task_state_version=4,
         result_task_state_version=5,
         selected_at=selected_at,
     )
-    command = ApplyOrderCandidateSelectionV2Command(
+    command = build_order_candidate_selection_v2_command(
         loaded_closure=closure,
+        ordinal_input_binding_record=_input_binding_v2(
+            binding_id=ordinal_ref,
+            name="candidate_ordinal",
+            normalized_value=2,
+            source_refs=(request.source_message_ref,),
+            created_at=selected_at,
+            updated_at=selected_at,
+        ),
+        issued_selected_target=issued_selected_target,
         next_task_record=_c2_project(
             current_task,
             status=TaskStatus.ACTIVE,
@@ -8714,17 +8930,201 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
             status=TaskStatus.ACTIVE,
             state_version=5,
             updated_at=selection.selected_at,
+            input_binding_refs=(query_ref, ordinal_ref),
             open_questions=(),
         ),
         selection_record=selection,
         closed_pending_candidate_set_ref=candidate_set.candidate_set_id,
     )
     assert command.selection_record.owner_scoped_order_target_ref == "owner-order:2"
+    assert command.selection_record.selected_target_ref == str(selected_target_ref)
+    assert UUID(command.selection_record.selected_target_ref) == selected_target_ref
+    command.require_live_target_issuance()
 
     closure_values = {
         field_name: getattr(closure, field_name)
         for field_name in type(closure).model_fields
     }
+    with pytest.raises(ValidationError, match="pre-CAS ordinal ref"):
+        OrderCandidateSelectionReadClosure(
+            **{
+                **closure_values,
+                "current_request_unit_record": _c2_project(
+                    current_unit,
+                    input_binding_refs=(query_ref, ordinal_ref),
+                ),
+            }
+        )
+    command_values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+
+    digest = sha256(
+        closure.resolved_owner_scoped_order_target_ref.encode("utf-8")
+    ).digest()
+    derived_bytes = bytearray(digest[:16])
+    derived_bytes[6] = (derived_bytes[6] & 0x0F) | 0x40
+    derived_bytes[8] = (derived_bytes[8] & 0x3F) | 0x80
+    derived_target_ref = UUID(bytes=bytes(derived_bytes))
+    derived_selection = _c2_project(
+        selection,
+        selected_target_ref=str(derived_target_ref),
+    )
+    for absent_module_attribute in (
+        "_ISSUED_SELECTED_TARGET_FACTORY_TOKEN",
+        "_ORDER_SELECTION_COMMAND_FACTORY_TOKEN",
+        "_ISSUED_SELECTED_TARGET_REFS",
+        "_build_order_selection_target_issuer",
+    ):
+        assert not hasattr(
+            application_records_module,
+            absent_module_attribute,
+        )
+    guessed_contexts = (
+        {},
+        {"issued_selected_target_factory_token": object()},
+        {"issued_selected_target_factory_context": object()},
+        {"order_selection_command_factory_context": object()},
+    )
+    for guessed_context in guessed_contexts:
+        with pytest.raises(ValidationError, match="created by fresh"):
+            IssuedSelectedTargetRef.model_validate(
+                {"selected_target_ref": derived_target_ref},
+                strict=True,
+                context=guessed_context,
+            )
+        with pytest.raises(ValidationError, match="Application factory"):
+            ApplyOrderCandidateSelectionV2Command.model_validate(
+                command_values,
+                strict=True,
+                context=guessed_context,
+            )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            application_records_module,
+            "uuid4",
+            lambda: derived_target_ref,
+        )
+        closure_issued_target = IssuedSelectedTargetRef.fresh()
+    assert closure_issued_target.selected_target_ref != derived_target_ref
+    closure_issued_command = build_order_candidate_selection_v2_command(
+        **{
+            **command_values,
+            "issued_selected_target": closure_issued_target,
+            "selection_record": _c2_project(
+                selection,
+                selected_target_ref=str(
+                    closure_issued_target.selected_target_ref
+                ),
+            ),
+        }
+    )
+    closure_issued_command.require_live_target_issuance()
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "issued_selected_target": closure_issued_target,
+                "selection_record": closure_issued_command.selection_record,
+            }
+        )
+
+    with pytest.raises(ValidationError, match="Application factory"):
+        ApplyOrderCandidateSelectionV2Command(
+            **{
+                **command_values,
+                "issued_selected_target": (
+                    IssuedSelectedTargetRef.model_construct(
+                        selected_target_ref=derived_target_ref
+                    )
+                ),
+                "selection_record": derived_selection,
+            }
+        )
+    forged_issued_target = IssuedSelectedTargetRef.model_construct(
+        selected_target_ref=derived_target_ref
+    )
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "issued_selected_target": forged_issued_target,
+                "selection_record": derived_selection,
+            }
+        )
+
+    with pytest.raises(ValidationError, match="created by fresh"):
+        IssuedSelectedTargetRef.model_validate(
+            issued_selected_target.model_dump(mode="python"),
+            strict=True,
+        )
+    with pytest.raises(ValidationError, match="created by fresh"):
+        IssuedSelectedTargetRef(
+            selected_target_ref=derived_target_ref,
+        )
+    inert_issued_targets = (
+        issued_selected_target.model_copy(),
+        issued_selected_target.model_copy(deep=True),
+        IssuedSelectedTargetRef.model_construct(
+            selected_target_ref=selected_target_ref
+        ),
+        pickle.loads(pickle.dumps(issued_selected_target)),
+    )
+    for inert_issued_target in inert_issued_targets:
+        with pytest.raises(ValidationError, match="fresh Application issuance"):
+            build_order_candidate_selection_v2_command(
+                **{
+                    **command_values,
+                    "issued_selected_target": inert_issued_target,
+                }
+            )
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(**command_values)
+
+    with pytest.raises(ValidationError, match="Application factory"):
+        ApplyOrderCandidateSelectionV2Command.model_validate(
+            command.model_dump(mode="python"),
+            strict=True,
+        )
+    inert_commands = (
+        command.model_copy(),
+        command.model_copy(deep=True),
+        ApplyOrderCandidateSelectionV2Command.model_construct(**command_values),
+        pickle.loads(pickle.dumps(command)),
+    )
+    for inert_command in inert_commands:
+        with pytest.raises(ValueError, match="lacks fresh Application"):
+            inert_command.require_live_target_issuance()
+    command.require_live_target_issuance()
+
+    with pytest.raises(ValidationError, match="append exactly"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "next_request_unit_record": _c2_project(
+                    command.next_request_unit_record,
+                    input_binding_refs=(query_ref,),
+                ),
+            }
+        )
+    version_five_target = UUID(int=selected_target_ref.int, version=5)
+    with pytest.raises(ValidationError, match="fresh independent canonical UUID"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "issued_selected_target": (
+                    IssuedSelectedTargetRef.model_construct(
+                        selected_target_ref=version_five_target
+                    )
+                ),
+                "selection_record": _c2_project(
+                    selection,
+                    selected_target_ref=str(version_five_target),
+                ),
+            }
+        )
     with pytest.raises(ValidationError, match="Conversation/Run closure"):
         OrderCandidateSelectionReadClosure(
             **{
@@ -8740,21 +9140,11 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         source_message,
         received_at=candidate_set.created_at - timedelta(seconds=1),
     )
-    early_ordinal = AcceptedOrdinalBindingReadClosure(
-        **{
-            **{
-                field_name: getattr(ordinal_binding, field_name)
-                for field_name in AcceptedOrdinalBindingReadClosure.model_fields
-            },
-            "source_message_record": early_message,
-            "accepted_at": early_message.received_at,
-        }
-    )
-    with pytest.raises(ValidationError, match="ordinal InputBinding closure"):
+    with pytest.raises(ValidationError, match="selection Message"):
         OrderCandidateSelectionReadClosure(
             **{
                 **closure_values,
-                "ordinal_binding_closure": early_ordinal,
+                "saved_selection_message_record": early_message,
             }
         )
 
@@ -8776,8 +9166,10 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         selected_at=closure.trusted_now + timedelta(seconds=1),
     )
     with pytest.raises(ValidationError, match="trusted transaction time"):
-        ApplyOrderCandidateSelectionV2Command(
+        build_order_candidate_selection_v2_command(
             loaded_closure=closure,
+            ordinal_input_binding_record=command.ordinal_input_binding_record,
+            issued_selected_target=issued_selected_target,
             next_task_record=_c2_project(
                 current_task,
                 status=TaskStatus.ACTIVE,
@@ -8789,6 +9181,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
                 status=TaskStatus.ACTIVE,
                 state_version=5,
                 updated_at=late_selection.selected_at,
+                input_binding_refs=(query_ref, ordinal_ref),
                 open_questions=(),
             ),
             selection_record=late_selection,
@@ -8829,18 +9222,6 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
                     closure.current_run_task_link_record,
                     base_task_state_version=5,
                 ),
-                "ordinal_binding_closure": AcceptedOrdinalBindingReadClosure(
-                    **{
-                        **{
-                            field_name: getattr(
-                                closure.ordinal_binding_closure,
-                                field_name,
-                            )
-                            for field_name in AcceptedOrdinalBindingReadClosure.model_fields
-                        },
-                        "task_state_version": 5,
-                    }
-                ),
                 "current_query_binding": AcceptedOrderSearchQueryBindingReadClosure(
                     **{
                         **{
@@ -8855,6 +9236,282 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
                 ),
                 }
             )
+
+
+def _c2_initial_tool_call_command(
+    tool_name: Cycle2ToolName = Cycle2ToolName.GET_ORDER,
+) -> CreateToolCallV2Command:
+    owner = _owner_scope()
+    task = TaskRecord.model_validate(_task(state_version=3).model_dump())
+    binding = _input_binding_v2()
+    unit = RequestUnitRecord.model_validate(
+        _request_unit(
+            task_id=task.task_id,
+            state_version=3,
+            input_binding_refs=(binding.binding_id,),
+        ).model_dump()
+    )
+    run_id = uuid4()
+    model_call_id = uuid4()
+    context_manifest_id = uuid4()
+    target_ref = uuid4() if tool_name is Cycle2ToolName.GET_SHIPMENT else None
+    source_observation_ref = uuid4()
+    source_observation_version = "order-observation-v1"
+    if target_ref is not None:
+        unit = RequestUnitRecord.model_validate(
+            _c2_project(
+                unit,
+                observation_refs=(source_observation_ref,),
+            ).model_dump()
+        )
+    snapshot = build_cycle2_registry_snapshot()
+    manifest = ContextManifest(
+        context_manifest_id=context_manifest_id,
+        run_id=run_id,
+        model_call_id=model_call_id,
+        tool_registry_version=snapshot.tool_registry_version,
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        selected_message_refs=binding.source_refs,
+        task_state_ref_and_version=None,
+        observation_refs_and_versions=(
+            (
+                VersionedRecordRef(
+                    record_ref=source_observation_ref,
+                    version=source_observation_version,
+                ),
+            )
+            if target_ref is not None
+            else ()
+        ),
+        evidence_refs_and_versions=(),
+        action_record_refs=(),
+        redaction_policy_version="redaction-v1",
+        truncation_decisions=(),
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=UTC_NOW,
+    )
+    candidate = Cycle2GatewayCandidate(
+        run_id=run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+        requested_provider_tool_name=tool_name.value,
+        candidate_arguments={"order_id": "O-1001"},
+        proposed_base_task_state_version=None,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(binding.binding_id,),
+        verified_target_ref=target_ref,
+    )
+    loaded = Cycle2GatewayLoadedClosure(
+        customer_context=CustomerContext.model_validate(
+            _customer_context().model_dump()
+        ),
+        private_owner_scope_ref=owner.customer_id,
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(
+            Cycle2AcceptedBindingFacts(
+                binding_id=binding.binding_id,
+                private_owner_scope_ref=owner.customer_id,
+                owner_customer_id=owner.customer_id,
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                name="order_id",
+                normalized_value="O-1001",
+                authority=InputAuthority.USER_CLAIM,
+                validation_status="ACCEPTED",
+                confirmed_by_user=True,
+                source_refs=binding.source_refs,
+                superseded_by=None,
+            ),
+        ),
+        current_verified_order_targets=(
+            (
+                Cycle2VerifiedOrderTargetFacts(
+                    verified_target_ref=target_ref,
+                    private_owner_scope_ref=owner.customer_id,
+                    owner_customer_id=owner.customer_id,
+                    task_id=task.task_id,
+                    request_unit_id=unit.request_unit_id,
+                    task_state_version=task.state_version,
+                    order_id="O-1001",
+                    source_observation_ref=source_observation_ref,
+                    source_observation_version=source_observation_version,
+                    input_binding_refs=(binding.binding_id,),
+                    superseded_by=None,
+                ),
+            )
+            if target_ref is not None
+            else ()
+        ),
+        current_target_observations=(
+            (
+                Cycle2TargetObservationFacts(
+                    observation_ref=source_observation_ref,
+                    observation_version=source_observation_version,
+                    private_owner_scope_ref=owner.customer_id,
+                    owner_customer_id=owner.customer_id,
+                    task_id=task.task_id,
+                    request_unit_id=unit.request_unit_id,
+                    task_state_version=task.state_version,
+                    verified_target_ref=target_ref,
+                    input_binding_refs=(binding.binding_id,),
+                    superseded_by=None,
+                ),
+            )
+            if target_ref is not None
+            else ()
+        ),
+        registry_snapshot=snapshot,
+        context_manifest=manifest,
+        budget=Cycle2GatewayBudgetFacts(
+            run_id=run_id,
+            context_manifest_id=context_manifest_id,
+            tool_registry_version=snapshot.tool_registry_version,
+            model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+            closure_complete=True,
+            tool_calls_used=0,
+            max_tool_calls=3,
+            active_tool_calls=0,
+            accepted_parallel_tool_calls=0,
+            remaining_run_time_budget_ms=1500,
+        ),
+        progress_snapshot=Cycle2GatewayProgressSnapshot(
+            run_id=run_id,
+            context_manifest_id=context_manifest_id,
+            tool_registry_version=snapshot.tool_registry_version,
+            model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+            task_state_version=task.state_version,
+            history_complete=True,
+            prior_tool_steps=(),
+        ),
+    )
+    trusted_read_at = UTC_NOW + timedelta(seconds=1)
+    gate = evaluate_cycle2_control_gateway(
+        candidate=candidate,
+        loaded_closure=loaded,
+        gate_decision_id=uuid4(),
+        provider_tool_call_id="provider-cycle2-call",
+        decided_at=trusted_read_at,
+    )
+    authorized = build_cycle2_authorized_tool_command(
+        gate_decision=gate,
+        candidate=candidate,
+        registry_snapshot_ref=snapshot.tool_registry_version,
+        trusted_context_ref="cycle2-context-ref",
+    )
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=owner,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(binding,),
+        trusted_read_at=trusted_read_at,
+    )
+    created = _c2_tool_call(
+        name=tool_name,
+        owner=owner.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(binding.binding_id,),
+        verified_target_ref=target_ref,
+        run_id=run_id,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+        gate_decision_id=gate.gate_decision_id,
+        provider_tool_call_id=gate.provider_tool_call_id,
+        started_at=trusted_read_at,
+    )
+    return CreateToolCallV2Command(
+        loaded_closure=closure,
+        gateway_candidate=candidate,
+        gate_decision=gate,
+        authorized_tool_command=authorized,
+        created_record=created,
+    )
+
+
+def test_cycle2_initial_tool_call_requires_live_gateway_authorization_graph() -> None:
+    command = _c2_initial_tool_call_command()
+    assert command.gate_decision.decision is GateDecisionValue.ACCEPT
+    assert isinstance(command.authorized_tool_command, AuthorizedToolCommandV2)
+    assert command.gate_decision.decided_at <= command.created_record.started_at
+    assert command.created_record.started_at == command.loaded_closure.trusted_read_at
+
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    for inert_gate in (
+        GateDecisionV2.model_validate(command.gate_decision.model_dump(), strict=True),
+        command.gate_decision.model_copy(),
+    ):
+        with pytest.raises(ValidationError, match="live public Gateway authorization"):
+            CreateToolCallV2Command(**{**values, "gate_decision": inert_gate})
+    with pytest.raises(ValidationError, match="authorization graph"):
+        CreateToolCallV2Command(
+            **{
+                **values,
+                "created_record": _c2_project(
+                    command.created_record,
+                    argument_binding_refs=(uuid4(),),
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="clean CREATED"):
+        CreateToolCallV2Command(
+            **{
+                **values,
+                "created_record": _c2_project(
+                    command.created_record,
+                    started_at=command.created_record.started_at
+                    + timedelta(seconds=1),
+                ),
+            }
+        )
+
+
+def test_cycle2_initial_tool_call_closes_selected_target_and_exact_registry() -> None:
+    command = _c2_initial_tool_call_command(Cycle2ToolName.GET_SHIPMENT)
+    target = command.gate_decision.verified_target_ref
+    assert target is not None
+    assert command.gateway_candidate.verified_target_ref == target
+    assert command.authorized_tool_command.verified_target_ref == target
+    assert command.created_record.verified_target_ref == target
+    assert command.authorized_tool_command.registry_snapshot_ref == (
+        command.created_record.tool_registry_version
+    )
+
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    for replacement in (None, uuid4()):
+        with pytest.raises(ValidationError, match="authorization graph"):
+            CreateToolCallV2Command(
+                **{
+                    **values,
+                    "created_record": _c2_project(
+                        command.created_record,
+                        verified_target_ref=replacement,
+                    ),
+                }
+            )
+    with pytest.raises(ValidationError, match="stale or belongs"):
+        CreateToolCallV2Command(
+            **{
+                **values,
+                "authorized_tool_command": _c2_project(
+                    command.authorized_tool_command,
+                    registry_snapshot_ref="wrong-registry",
+                ),
+            }
+        )
+    raw_created = command.created_record.model_copy(update={"attempt_count": True})
+    with pytest.raises(ValidationError, match="recursively canonical"):
+        CreateToolCallV2Command(**{**values, "created_record": raw_created})
 
 
 def test_cycle2_tool_attempt_fences_preserve_append_only_evidence() -> None:

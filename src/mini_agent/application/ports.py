@@ -10,6 +10,7 @@ from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     AppendToolAttemptV2Command,
+    ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
@@ -19,9 +20,11 @@ from mini_agent.application.records import (
     Cycle2WriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
+    ContinuationInputBindingReadClosure,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
+    CreateToolCallV2Command,
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
@@ -31,6 +34,7 @@ from mini_agent.application.records import (
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
     InsertOnlyWriteResult,
+    InitialToolCallV2ReadClosure,
     MessageRecord,
     NonEmptyString,
     ObservationWriteResult,
@@ -382,6 +386,38 @@ class Cycle2RuntimeRecordPort(Protocol):
     business-fact authority, or user-visible result authority.
     """
 
+    async def load_continuation_input_binding_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        message_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_now: datetime,
+    ) -> ContinuationInputBindingReadClosure | None:
+        """Load one complete current existing-Task USER-message closure.
+
+        ``None`` keeps absent and unauthorized graphs indistinguishable. The
+        owner-scoped reader returns every current InputBindingV2 for the
+        RequestUnit; dangling, duplicate, mixed-version, wrong-direction, or
+        wrong-message graphs fail closed before a write command can form.
+        """
+        ...
+
+    async def apply_continuation_input_binding_if_current(
+        self,
+        command: ApplyContinuationInputBindingV2Command,
+    ) -> Cycle2WriteResult:
+        """CAS one non-ordinal binding plus Task/RequestUnit v-to-v+1.
+
+        The same transaction re-reads the exact closure and either commits the
+        new binding, current RequestUnit refs, and both versions together or
+        commits nothing. Every non-APPLIED result means zero writes. This
+        method never accepts ``candidate_ordinal`` and grants no dispatch.
+        """
+        ...
+
     async def load_order_search_current_closure_for_owner(
         self,
         *,
@@ -432,7 +468,43 @@ class Cycle2RuntimeRecordPort(Protocol):
         self,
         command: ApplyOrderCandidateSelectionV2Command,
     ) -> Cycle2WriteResult:
-        """CAS SelectionRecord, selected target, and pending-question closure."""
+        """Commit ordinal binding and the complete selection effect in one CAS.
+
+        The adapter must call ``command.require_live_target_issuance()``
+        immediately before its in-transaction re-read; copied, deserialized,
+        reconstructed, or replay-bound commands fail closed with zero writes.
+        APPLIED atomically inserts InputBindingV2 and SelectionRecord, appends
+        the RequestUnit binding ref, records the independent UUID target,
+        closes the exact pending question, and advances Task/RequestUnit once.
+        Every non-APPLIED result means zero writes across the full graph.
+        """
+        ...
+
+    async def load_initial_tool_call_v2_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+    ) -> InitialToolCallV2ReadClosure | None:
+        """Load the exact current Task/RequestUnit/InputBindingV2 closure.
+
+        ``None`` represents absent and unauthorized identically. Any dangling,
+        duplicate, mixed-version, stale, or partial selected graph fails closed.
+        """
+        ...
+
+    async def insert_initial_tool_call_v2_if_current(
+        self,
+        command: CreateToolCallV2Command,
+    ) -> Cycle2WriteResult:
+        """Conditionally insert one clean CREATED ToolCallV2, never dispatch.
+
+        The transaction re-reads the exact current closure and enforces one
+        ToolCall per Gate. Only APPLIED inserts; every other result means zero
+        writes and grants no Handler or external Tool dispatch authority.
+        """
         ...
 
     async def append_tool_attempt_if_current(

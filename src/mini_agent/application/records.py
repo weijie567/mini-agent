@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Annotated, Literal, Self, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import (
     BaseModel,
@@ -25,6 +25,10 @@ from mini_agent.core.common import (
     RuntimePrivateModel,
     UserVisibleModel,
     require_utc,
+)
+from mini_agent.core.control_gateway import (
+    Cycle2GatewayCandidate,
+    build_cycle2_authorized_tool_command,
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
@@ -54,6 +58,7 @@ from mini_agent.core.task_state import (
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
+    InputBindingV2,
     InputValidationStatus,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
@@ -66,7 +71,9 @@ from mini_agent.core.task_state import (
     TaskStatus,
 )
 from mini_agent.core.tool_system import (
+    AuthorizedToolCommandV2,
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
@@ -2538,6 +2545,192 @@ class Cycle2DispatchFenceWriteResult(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+def _require_complete_current_input_bindings_v2(
+    *,
+    request_unit: RequestUnitRecord,
+    bindings: tuple[InputBindingV2, ...],
+    trusted_now: datetime,
+) -> None:
+    binding_ids = tuple(binding.binding_id for binding in bindings)
+    if (
+        len(binding_ids) != len(set(binding_ids))
+        or binding_ids != request_unit.input_binding_refs
+    ):
+        raise ValueError(
+            "current InputBindingV2 records must exactly match RequestUnit refs"
+        )
+    if any(
+        len(binding.source_refs) != len(set(binding.source_refs))
+        or binding.created_at > trusted_now
+        or binding.updated_at > trusted_now
+        for binding in bindings
+    ):
+        raise ValueError("current InputBindingV2 record is not canonical and current")
+
+
+def _is_canonical_uuid_text(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return str(parsed) == value
+
+
+class ContinuationInputBindingReadClosure(_StrictRuntimePrivateRecord):
+    """Owner-reader snapshot for one existing-Task USER continuation."""
+
+    owner_scope: TrustedOwnerScope
+    trusted_conversation_record: ConversationRecord
+    current_conversation_task_link_record: ConversationTaskLinkRecord
+    saved_user_message_record: MessageRecord
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    current_input_binding_records: Annotated[
+        tuple[InputBindingV2, ...],
+        Field(min_length=1),
+    ]
+    trusted_now: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "trusted_conversation_record": ConversationRecord,
+                "current_conversation_task_link_record": (
+                    ConversationTaskLinkRecord
+                ),
+                "saved_user_message_record": MessageRecord,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+            },
+            tuple_model_fields={
+                "current_input_binding_records": InputBindingV2,
+            },
+        )
+
+    @field_validator("trusted_now")
+    @classmethod
+    def trusted_now_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="trusted_now")
+
+    @model_validator(mode="after")
+    def continuation_graph_is_exact_and_current(self) -> Self:
+        conversation = self.trusted_conversation_record
+        link = self.current_conversation_task_link_record
+        message = self.saved_user_message_record
+        task = self.current_task_record
+        unit = self.current_request_unit_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=task,
+            request_unit_record=unit,
+        )
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or link.conversation_id != conversation.conversation_id
+            or link.task_id != task.task_id
+            or link.ended_at is not None
+            or message.conversation_id != conversation.conversation_id
+            or message.direction is not MessageDirection.USER
+            or message.received_at < conversation.created_at
+            or message.received_at > self.trusted_now
+            or task.updated_at > self.trusted_now
+            or unit.updated_at > self.trusted_now
+        ):
+            raise ValueError("continuation owner/Conversation/Message closure mismatch")
+        _require_complete_current_input_bindings_v2(
+            request_unit=unit,
+            bindings=self.current_input_binding_records,
+            trusted_now=self.trusted_now,
+        )
+        names = tuple(binding.name for binding in self.current_input_binding_records)
+        if len(names) != len(set(names)):
+            raise ValueError("continuation requires unique current binding names")
+        return self
+
+
+class ApplyContinuationInputBindingV2Command(_StrictRuntimePrivateRecord):
+    """CAS one non-ordinal binding and Task/RequestUnit version advance."""
+
+    loaded_closure: ContinuationInputBindingReadClosure
+    new_input_binding_record: InputBindingV2
+    next_task_record: TaskRecord
+    next_request_unit_record: RequestUnitRecord
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ContinuationInputBindingReadClosure,
+                "new_input_binding_record": InputBindingV2,
+                "next_task_record": TaskRecord,
+                "next_request_unit_record": RequestUnitRecord,
+            },
+        )
+
+    @model_validator(mode="after")
+    def continuation_effect_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        current_task = closure.current_task_record
+        current_unit = closure.current_request_unit_record
+        binding = self.new_input_binding_record
+        if binding.name == "candidate_ordinal":
+            raise ValueError("candidate_ordinal requires the selection CAS")
+        if binding.binding_id in current_unit.input_binding_refs:
+            raise ValueError("continuation binding identity must be new")
+        if binding.source_refs != (closure.saved_user_message_record.message_id,):
+            raise ValueError("continuation binding must cite the exact USER Message")
+        if (
+            binding.created_at != closure.trusted_now
+            or binding.updated_at != closure.trusted_now
+        ):
+            raise ValueError("continuation binding must use trusted transaction time")
+
+        same_name = tuple(
+            current
+            for current in closure.current_input_binding_records
+            if current.name == binding.name
+        )
+        if len(same_name) > 1:
+            raise ValueError("continuation binding name is not uniquely current")
+        expected_supersedes = same_name[0].binding_id if same_name else None
+        if binding.supersedes != expected_supersedes:
+            raise ValueError("continuation supersedes must identify one current binding")
+        expected_refs = (
+            tuple(
+                binding.binding_id if ref == expected_supersedes else ref
+                for ref in current_unit.input_binding_refs
+            )
+            if expected_supersedes is not None
+            else (*current_unit.input_binding_refs, binding.binding_id)
+        )
+        if self.next_request_unit_record.input_binding_refs != expected_refs:
+            raise ValueError("continuation must replace only its same-name binding ref")
+
+        _task_pair_advances_once(
+            expected_task_record=current_task,
+            next_task_record=self.next_task_record,
+            expected_request_unit_record=current_unit,
+            next_request_unit_record=self.next_request_unit_record,
+            result_state_version=current_task.state_version + 1,
+            changed_at=closure.trusted_now,
+            allowed_request_unit_delta_fields=frozenset({"input_binding_refs"}),
+        )
+        if (
+            self.next_task_record.status is not current_task.status
+            or self.next_request_unit_record.status is not current_unit.status
+        ):
+            raise ValueError("ordinary continuation cannot change Task status")
+        return self
+
+
 class AcceptedOrderSearchQueryBindingReadClosure(_StrictRuntimePrivateRecord):
     """Exact owner-reader projection of one still-current search query Claim."""
 
@@ -3017,7 +3210,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
 
 
 class AcceptedOrdinalBindingReadClosure(_StrictRuntimePrivateRecord):
-    """Exact owner-reader projection of one current accepted ordinal Claim."""
+    """Exact owner-reader projection of an already committed ordinal Claim."""
 
     binding_ref: UUID
     binding_name: Literal["candidate_ordinal"] = "candidate_ordinal"
@@ -3072,7 +3265,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
     current_candidate_set_record: OrderCandidateSetRecord
     search_observation_record: SearchOrdersObservation
     selection_request: OrderCandidateSelectionRequest
-    ordinal_binding_closure: AcceptedOrdinalBindingReadClosure
+    saved_selection_message_record: MessageRecord
     current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
     pending_candidate_set_ref: UUID
     current_query_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
@@ -3096,7 +3289,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 "current_candidate_set_record": OrderCandidateSetRecord,
                 "search_observation_record": SearchOrdersObservation,
                 "selection_request": OrderCandidateSelectionRequest,
-                "ordinal_binding_closure": AcceptedOrdinalBindingReadClosure,
+                "saved_selection_message_record": MessageRecord,
                 "current_query_binding": (
                     AcceptedOrderSearchQueryBindingReadClosure
                 ),
@@ -3119,7 +3312,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         conversation = self.trusted_conversation_record
         run = self.current_run_record
         run_link = self.current_run_task_link_record
-        binding = self.ordinal_binding_closure
+        message = self.saved_selection_message_record
         query_binding = self.current_query_binding
         _task_and_request_unit_form_current_pair(
             owner_scope=self.owner_scope,
@@ -3143,20 +3336,16 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             raise ValueError("ordinal selection Conversation/Run closure mismatch")
         request = self.selection_request
         if (
-            binding.binding_ref != request.ordinal_input_binding_ref
-            or binding.normalized_ordinal != request.ordinal
-            or binding.source_message_record.message_id != request.source_message_ref
-            or binding.private_owner_scope_ref != self.owner_scope.customer_id
-            or binding.conversation_id != conversation.conversation_id
-            or binding.task_id != task.task_id
-            or binding.request_unit_id != unit.request_unit_id
-            or binding.task_state_version != task.state_version
-            or binding.binding_ref not in unit.input_binding_refs
-            or binding.source_message_record.received_at < candidate_set.created_at
-            or binding.accepted_at < candidate_set.created_at
-            or binding.accepted_at > self.trusted_now
+            message.message_id != request.source_message_ref
+            or message.direction is not MessageDirection.USER
+            or message.conversation_id != conversation.conversation_id
+            or message.received_at < candidate_set.created_at
+            or message.received_at > run.started_at
+            or message.received_at > self.trusted_now
+            or request.ordinal_input_binding_ref in unit.input_binding_refs
+            or request.ordinal_input_binding_ref in self.current_query_binding_refs
         ):
-            raise ValueError("ordinal InputBinding closure mismatch")
+            raise ValueError("selection Message or pre-CAS ordinal ref mismatch")
         if (
             len(self.current_query_binding_refs) != 1
             or self.current_query_binding_refs
@@ -3212,8 +3401,9 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 or existing.base_task_state_version != task.state_version
                 or existing.result_task_state_version != task.state_version + 1
                 or existing.source_message_ref
-                != binding.source_message_record.message_id
-                or existing.ordinal_input_binding_ref != binding.binding_ref
+                != message.message_id
+                or existing.ordinal_input_binding_ref
+                != request.ordinal_input_binding_ref
                 or existing.selected_at < candidate_set.created_at
                 or existing.selected_at >= candidate_set.valid_until
                 or existing.selected_at > self.trusted_now
@@ -3221,8 +3411,9 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 or len(matching_targets) != 1
                 or matching_targets[0].owner_scoped_order_ref
                 != existing.owner_scoped_order_target_ref
+                or not _is_canonical_uuid_text(existing.selected_target_ref)
                 or existing.selected_target_ref
-                != existing.owner_scoped_order_target_ref
+                == existing.owner_scoped_order_target_ref
             ):
                 raise ValueError("existing selection record graph mismatch")
         validate_candidate_selection_closure(
@@ -3252,36 +3443,101 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         return self.trusted_conversation_record.conversation_id
 
 
+class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
+    """One Application-issued UUID capability for one selection command."""
+
+    selected_target_ref: UUID
+
+    @model_validator(mode="before")
+    @classmethod
+    def target_is_issued_in_process(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if not _issued_selected_target_context_is_live(info.context):
+            raise ValueError(
+                "IssuedSelectedTargetRef must be created by fresh()"
+            )
+        return value
+
+    @field_validator("selected_target_ref")
+    @classmethod
+    def target_is_uuid4(cls, value: UUID) -> UUID:
+        if value.version != 4:
+            raise ValueError("issued selected target must be UUIDv4")
+        return value
+
+    @classmethod
+    def fresh(cls) -> Self:
+        """Generate a fresh target internally; callers cannot supply entropy."""
+
+        return _issue_selected_target_ref()
+
+
 class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
     """CAS one exact ordinal selection and its Task/RequestUnit effect."""
 
     loaded_closure: OrderCandidateSelectionReadClosure
+    ordinal_input_binding_record: InputBindingV2
+    issued_selected_target: IssuedSelectedTargetRef
     next_task_record: TaskRecord
     next_request_unit_record: RequestUnitRecord
     selection_record: OrderCandidateSelectionRecord
     closed_pending_candidate_set_ref: UUID
 
+    def require_live_target_issuance(self) -> None:
+        """Reject a command not returned by the live Application factory."""
+
+        _require_live_order_candidate_selection_v2_command(self)
+
+    @property
+    def selected_target_ref(self) -> UUID:
+        return self.issued_selected_target.selected_target_ref
+
     @model_validator(mode="before")
     @classmethod
-    def nested_records_are_exact(cls, value: object) -> object:
-        return _require_exact_cycle2_inputs(
-            value,
-            model_fields={
-                "loaded_closure": OrderCandidateSelectionReadClosure,
-                "next_task_record": TaskRecord,
-                "next_request_unit_record": RequestUnitRecord,
-                "selection_record": OrderCandidateSelectionRecord,
-            },
-        )
+    def nested_records_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if not _order_selection_command_context_is_live(info.context):
+            raise ValueError(
+                "selection command must be created by the Application factory"
+            )
+        if not isinstance(value, Mapping):
+            raise ValueError("selection command requires a mapping")
+        issued_target = value.get("issued_selected_target")
+        if type(issued_target) is not IssuedSelectedTargetRef:
+            raise ValueError(
+                "issued_selected_target must be an exact live issuance"
+            )
+        canonical = dict(value)
+        for field_name, expected_type in {
+            "loaded_closure": OrderCandidateSelectionReadClosure,
+            "ordinal_input_binding_record": InputBindingV2,
+            "next_task_record": TaskRecord,
+            "next_request_unit_record": RequestUnitRecord,
+            "selection_record": OrderCandidateSelectionRecord,
+        }.items():
+            canonical[field_name] = _require_exact_cycle2_model(
+                value.get(field_name),
+                expected_type,
+                field_name=field_name,
+            )
+        canonical["issued_selected_target"] = issued_target
+        return canonical
 
     @model_validator(mode="after")
-    def selection_effect_is_exact(self) -> Self:
+    def selection_effect_is_exact(self, info: ValidationInfo) -> Self:
         closure = self.loaded_closure
         current_task = closure.current_task_record
         current_unit = closure.current_request_unit_record
         candidate_set = closure.current_candidate_set_record
         observation = closure.search_observation_record
         request = closure.selection_request
+        ordinal_binding = self.ordinal_input_binding_record
         selection = self.selection_record
 
         decision = validate_candidate_selection_closure(
@@ -3320,7 +3576,7 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             "owner_scoped_order_target_ref": (
                 closure.resolved_owner_scoped_order_target_ref
             ),
-            "selected_target_ref": closure.resolved_owner_scoped_order_target_ref,
+            "selected_target_ref": str(self.selected_target_ref),
             "base_task_state_version": current_task.state_version,
         }
         if any(
@@ -3332,6 +3588,47 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             raise ValueError("selection must close the exact pending CandidateSet")
         if selection.selected_at != closure.trusted_now:
             raise ValueError("selection timestamp must equal trusted transaction time")
+        if (
+            self.selected_target_ref.version != 4
+            or not _is_canonical_uuid_text(selection.selected_target_ref)
+            or selection.selected_target_ref
+            == closure.resolved_owner_scoped_order_target_ref
+            or self.selected_target_ref
+            in {
+                request.ordinal_input_binding_ref,
+                request.source_message_ref,
+                candidate_set.candidate_set_id,
+                observation.observation_id,
+                decision.observation_candidate_ref,
+                selection.selection_id,
+                current_task.task_id,
+                current_unit.request_unit_id,
+            }
+        ):
+            raise ValueError(
+                "selected target must be a fresh independent canonical UUID"
+            )
+        if (
+            ordinal_binding.binding_id != request.ordinal_input_binding_ref
+            or ordinal_binding.name != "candidate_ordinal"
+            or type(ordinal_binding.normalized_value) is not int
+            or ordinal_binding.normalized_value != request.ordinal
+            or ordinal_binding.source_refs
+            != (closure.saved_selection_message_record.message_id,)
+            or ordinal_binding.created_at != closure.trusted_now
+            or ordinal_binding.updated_at != closure.trusted_now
+            or ordinal_binding.supersedes is not None
+            or ordinal_binding.binding_id in current_unit.input_binding_refs
+        ):
+            raise ValueError(
+                "selection must create one exact new ordinal InputBindingV2"
+            )
+        expected_next_refs = (
+            *current_unit.input_binding_refs,
+            ordinal_binding.binding_id,
+        )
+        if self.next_request_unit_record.input_binding_refs != expected_next_refs:
+            raise ValueError("selection must append exactly the ordinal binding ref")
         _task_pair_advances_once(
             expected_task_record=current_task,
             next_task_record=self.next_task_record,
@@ -3339,7 +3636,9 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             next_request_unit_record=self.next_request_unit_record,
             result_state_version=selection.result_task_state_version,
             changed_at=selection.selected_at,
-            allowed_request_unit_delta_fields=frozenset({"open_questions"}),
+            allowed_request_unit_delta_fields=frozenset(
+                {"input_binding_refs", "open_questions"}
+            ),
         )
         if self.next_task_record.status is not TaskStatus.ACTIVE:
             raise ValueError("successful selection must reactivate Task")
@@ -3348,6 +3647,382 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             or self.next_request_unit_record.open_questions
         ):
             raise ValueError("successful selection must close pending question")
+        if not _order_selection_command_context_is_live(info.context, self):
+            raise ValueError(
+                "selection command must retain its Application factory context"
+            )
+        _bind_issued_selected_target_to_command(
+            self.issued_selected_target,
+            self,
+        )
+        return self
+
+
+def _build_order_selection_target_issuer() -> tuple[Any, ...]:
+    """Keep UUID issuance, factory tokens, and provenance state in closure."""
+
+    generate_uuid4 = uuid4
+    issue_factory_token = object()
+    command_factory_token = object()
+    active_command_contexts: dict[int, object] = {}
+    active_command_candidates: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command],
+            int,
+        ],
+    ] = {}
+    issue_registry: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[IssuedSelectedTargetRef],
+            UUID,
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command]
+            | None,
+            str | None,
+        ],
+    ] = {}
+
+    def issue_context_is_live(context: object) -> bool:
+        return (
+            type(context) is dict
+            and context.get("issued_selected_target_factory_context")
+            is issue_factory_token
+        )
+
+    def command_context_is_live(
+        context: object,
+        candidate: object | None = None,
+    ) -> bool:
+        context_is_live = (
+            type(context) is dict
+            and active_command_contexts.get(id(context)) is context
+            and context.get("order_selection_command_factory_context")
+            is command_factory_token
+        )
+        if not context_is_live:
+            return False
+        if candidate is None:
+            return True
+        if type(candidate) is not ApplyOrderCandidateSelectionV2Command:
+            return False
+        active_command_candidates[id(candidate)] = (
+            weakref.ref(candidate),
+            id(context),
+        )
+        return True
+
+    def issue_selected_target_ref() -> IssuedSelectedTargetRef:
+        issued_target = IssuedSelectedTargetRef.model_validate(
+            {"selected_target_ref": generate_uuid4()},
+            strict=True,
+            context={
+                "issued_selected_target_factory_context": issue_factory_token
+            },
+        )
+        issued_id = id(issued_target)
+
+        def discard_if_same(
+            expired: weakref.ReferenceType[IssuedSelectedTargetRef],
+            *,
+            registered_id: int = issued_id,
+        ) -> None:
+            registered = issue_registry.get(registered_id)
+            if registered is not None and registered[0] is expired:
+                issue_registry.pop(registered_id, None)
+
+        issue_registry[issued_id] = (
+            weakref.ref(issued_target, discard_if_same),
+            issued_target.selected_target_ref,
+            None,
+            None,
+        )
+        return issued_target
+
+    def bind_issued_target_to_command(
+        issued_target: IssuedSelectedTargetRef,
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> None:
+        registered = issue_registry.get(id(issued_target))
+        candidate = active_command_candidates.pop(id(command), None)
+        if (
+            candidate is None
+            or candidate[0]() is not command
+            or active_command_contexts.get(candidate[1]) is None
+            or type(issued_target) is not IssuedSelectedTargetRef
+            or type(command) is not ApplyOrderCandidateSelectionV2Command
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is not None
+            or registered[3] is not None
+        ):
+            raise ValueError(
+                "selected target requires one fresh Application issuance"
+            )
+        issue_registry[id(issued_target)] = (
+            registered[0],
+            registered[1],
+            weakref.ref(command),
+            command.model_dump_json(),
+        )
+
+    def require_live_command(
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> None:
+        if type(command) is not ApplyOrderCandidateSelectionV2Command:
+            raise ValueError(
+                "selection command lacks fresh Application target issuance"
+            )
+        issued_target = command.issued_selected_target
+        registered = issue_registry.get(id(issued_target))
+        if (
+            type(issued_target) is not IssuedSelectedTargetRef
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is None
+            or registered[2]() is not command
+            or registered[3] != command.model_dump_json()
+        ):
+            raise ValueError(
+                "selection command lacks fresh Application target issuance"
+            )
+
+    def build_command(
+        *,
+        loaded_closure: OrderCandidateSelectionReadClosure,
+        ordinal_input_binding_record: InputBindingV2,
+        issued_selected_target: IssuedSelectedTargetRef,
+        next_task_record: TaskRecord,
+        next_request_unit_record: RequestUnitRecord,
+        selection_record: OrderCandidateSelectionRecord,
+        closed_pending_candidate_set_ref: UUID,
+    ) -> ApplyOrderCandidateSelectionV2Command:
+        """Bind one fresh Application target to one exact selection command."""
+
+        context = {
+            "order_selection_command_factory_context": command_factory_token
+        }
+        context_id = id(context)
+        active_command_contexts[context_id] = context
+        try:
+            return ApplyOrderCandidateSelectionV2Command.model_validate(
+                {
+                    "loaded_closure": loaded_closure,
+                    "ordinal_input_binding_record": (
+                        ordinal_input_binding_record
+                    ),
+                    "issued_selected_target": issued_selected_target,
+                    "next_task_record": next_task_record,
+                    "next_request_unit_record": next_request_unit_record,
+                    "selection_record": selection_record,
+                    "closed_pending_candidate_set_ref": (
+                        closed_pending_candidate_set_ref
+                    ),
+                },
+                strict=True,
+                context=context,
+            )
+        finally:
+            if active_command_contexts.get(context_id) is context:
+                active_command_contexts.pop(context_id, None)
+
+    return (
+        issue_selected_target_ref,
+        issue_context_is_live,
+        command_context_is_live,
+        bind_issued_target_to_command,
+        require_live_command,
+        build_command,
+    )
+
+
+(
+    _issue_selected_target_ref,
+    _issued_selected_target_context_is_live,
+    _order_selection_command_context_is_live,
+    _bind_issued_selected_target_to_command,
+    _require_live_order_candidate_selection_v2_command,
+    build_order_candidate_selection_v2_command,
+) = _build_order_selection_target_issuer()
+del _build_order_selection_target_issuer
+
+
+class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):
+    """Exact current owner/Task/RequestUnit/InputBinding snapshot for insert."""
+
+    owner_scope: TrustedOwnerScope
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    current_input_binding_records: Annotated[
+        tuple[InputBindingV2, ...],
+        Field(min_length=1),
+    ]
+    trusted_read_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+            },
+            tuple_model_fields={
+                "current_input_binding_records": InputBindingV2,
+            },
+        )
+
+    @field_validator("trusted_read_at")
+    @classmethod
+    def trusted_read_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="trusted_read_at")
+
+    @model_validator(mode="after")
+    def current_graph_is_exact(self) -> Self:
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=self.current_task_record,
+            request_unit_record=self.current_request_unit_record,
+        )
+        if (
+            self.current_task_record.updated_at > self.trusted_read_at
+            or self.current_request_unit_record.updated_at > self.trusted_read_at
+        ):
+            raise ValueError("initial ToolCall read cannot precede current state")
+        _require_complete_current_input_bindings_v2(
+            request_unit=self.current_request_unit_record,
+            bindings=self.current_input_binding_records,
+            trusted_now=self.trusted_read_at,
+        )
+        return self
+
+
+class CreateToolCallV2Command(_StrictRuntimePrivateRecord):
+    """Conditionally insert one clean CREATED v2 ToolCall authorization graph."""
+
+    loaded_closure: InitialToolCallV2ReadClosure
+    gateway_candidate: Cycle2GatewayCandidate
+    gate_decision: GateDecisionV2
+    authorized_tool_command: AuthorizedToolCommandV2
+    created_record: ToolCallRecordV2
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact_and_gate_is_live(
+        cls,
+        value: object,
+    ) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("initial ToolCall v2 contract requires a mapping")
+        gate = value.get("gate_decision")
+        if type(gate) is not GateDecisionV2:
+            raise ValueError("gate_decision must be an exact live GateDecisionV2")
+        canonical = dict(value)
+        for field_name, expected_type in {
+            "loaded_closure": InitialToolCallV2ReadClosure,
+            "gateway_candidate": Cycle2GatewayCandidate,
+            "authorized_tool_command": AuthorizedToolCommandV2,
+            "created_record": ToolCallRecordV2,
+        }.items():
+            canonical[field_name] = _require_exact_cycle2_model(
+                value.get(field_name),
+                expected_type,
+                field_name=field_name,
+            )
+        canonical["gate_decision"] = gate
+        return canonical
+
+    @model_validator(mode="after")
+    def initial_tool_call_graph_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        task = closure.current_task_record
+        unit = closure.current_request_unit_record
+        candidate = self.gateway_candidate
+        gate = self.gate_decision
+        authorized = self.authorized_tool_command
+        created = self.created_record
+        try:
+            reproved = build_cycle2_authorized_tool_command(
+                gate_decision=gate,
+                candidate=candidate,
+                registry_snapshot_ref=authorized.registry_snapshot_ref,
+                trusted_context_ref=authorized.trusted_context_ref,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "initial ToolCall requires live public Gateway authorization"
+            ) from exc
+        if (
+            type(reproved) is not AuthorizedToolCommandV2
+            or reproved.model_dump() != authorized.model_dump()
+        ):
+            raise ValueError("authorized Tool command does not match sealed Gate")
+
+        binding_ids = tuple(
+            binding.binding_id for binding in closure.current_input_binding_records
+        )
+        if (
+            len(authorized.argument_binding_refs)
+            != len(set(authorized.argument_binding_refs))
+            or not set(authorized.argument_binding_refs).issubset(binding_ids)
+            or authorized.verified_target_ref in authorized.argument_binding_refs
+        ):
+            raise ValueError("Tool authorization refs do not resolve in current bindings")
+        exact_fields = {
+            "run_id": candidate.run_id,
+            "task_id": task.task_id,
+            "request_unit_id": unit.request_unit_id,
+            "model_call_id": gate.model_call_id,
+            "context_manifest_id": gate.context_manifest_id,
+            "gate_decision_id": gate.gate_decision_id,
+            "provider_tool_call_id": gate.provider_tool_call_id,
+            "canonical_tool_name": authorized.canonical_tool_name,
+            "private_owner_scope_ref": closure.owner_scope.customer_id,
+            "validated_task_state_version": task.state_version,
+            "argument_binding_refs": authorized.argument_binding_refs,
+            "verified_target_ref": authorized.verified_target_ref,
+        }
+        if any(
+            getattr(created, field_name) != expected
+            for field_name, expected in exact_fields.items()
+        ):
+            raise ValueError("ToolCallRecordV2 does not close the authorization graph")
+        if (
+            candidate.task_id != task.task_id
+            or candidate.request_unit_id != unit.request_unit_id
+            or candidate.validated_task_state_version != task.state_version
+            or gate.validated_task_state_version != task.state_version
+            or candidate.argument_binding_refs != authorized.argument_binding_refs
+            or candidate.verified_target_ref != authorized.verified_target_ref
+            or authorized.registry_snapshot_ref
+            != created.tool_registry_version
+        ):
+            raise ValueError("Gateway candidate is stale or belongs to another state")
+        if (
+            created.status is not ToolCallStatus.CREATED
+            or created.effect is not ToolEffect.READ
+            or created.attempt_count != 0
+            or created.attempts
+            or created.started_at != closure.trusted_read_at
+            or gate.decided_at > created.started_at
+            or any(
+                value is not None
+                for value in (
+                    created.finished_at,
+                    created.failure_code,
+                    created.timeout_phase,
+                    created.interruption_reason,
+                    created.result_ref,
+                    created.recovery_disposition,
+                    created.recovery_decision_ref,
+                )
+            )
+        ):
+            raise ValueError("initial ToolCallV2 must be a clean CREATED projection")
         return self
 
 
