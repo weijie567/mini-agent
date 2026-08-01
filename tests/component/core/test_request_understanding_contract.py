@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from mini_agent.core.request_understanding import (
+    Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
     InputSourceKind,
@@ -421,3 +422,104 @@ def test_v2_output_rejects_long_input_quote_and_non_null_base_version() -> None:
     )
     with pytest.raises(ValidationError, match="null base"):
         _output_v2(message_ref=message_ref, next_move=positive_base)
+
+
+@pytest.mark.parametrize(
+    ("name", "candidate_value"),
+    [
+        ("product_description", "轻量 跑鞋"),
+        ("candidate_ordinal", 2),
+        ("shipment_not_received", True),
+        ("shipment_not_received", False),
+    ],
+)
+def test_cycle2_input_candidate_has_exact_claim_only_surface(
+    name: str,
+    candidate_value: object,
+) -> None:
+    message_ref = uuid4()
+    candidate = Cycle2InputCandidate(
+        name=name,
+        candidate_value=candidate_value,
+        source_ref=message_ref,
+        source_quote="当前用户消息中的原文",
+        confidence=0.98,
+    )
+
+    assert tuple(Cycle2InputCandidate.model_fields) == (
+        "name",
+        "candidate_value",
+        "source_ref",
+        "source_quote",
+        "confidence",
+    )
+    assert candidate.source_ref == message_ref
+    assert {
+        "customer_id",
+        "private_owner_scope_ref",
+        "owner_scoped_order_ref",
+        "selected_target_ref",
+        "verified_target_ref",
+        "candidate_set_ref",
+        "candidate_set_version",
+        "observation_ref",
+        "authority",
+    }.isdisjoint(type(candidate).model_fields)
+
+
+@pytest.mark.parametrize(
+    ("name", "candidate_value"),
+    [
+        ("product_description", 2),
+        ("product_description", True),
+        ("candidate_ordinal", True),
+        ("candidate_ordinal", "2"),
+        ("candidate_ordinal", 0),
+        ("candidate_ordinal", 6),
+        ("shipment_not_received", 1),
+        ("shipment_not_received", "true"),
+    ],
+)
+def test_cycle2_input_candidate_rejects_name_value_coercion(
+    name: str,
+    candidate_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        Cycle2InputCandidate(
+            name=name,
+            candidate_value=candidate_value,
+            source_ref=uuid4(),
+            source_quote="当前用户消息中的原文",
+            confidence=0.98,
+        )
+
+
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        "private_owner_scope_ref",
+        "owner_scoped_order_ref",
+        "selected_target_ref",
+        "verified_target_ref",
+        "candidate_set_ref",
+        "candidate_set_version",
+        "search_observation_ref",
+        "observation_candidate_ref",
+        "argument_binding_refs",
+        "authority",
+    ],
+)
+def test_cycle2_model_candidates_cannot_supply_private_authority(
+    forbidden_field: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Cycle2InputCandidate.model_validate(
+            {
+                "name": "candidate_ordinal",
+                "candidate_value": 2,
+                "source_ref": uuid4(),
+                "source_quote": "第二个",
+                "confidence": 0.98,
+                forbidden_field: "attacker-selected",
+            }
+        )

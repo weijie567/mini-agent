@@ -11,6 +11,9 @@ from uuid import UUID
 from pydantic import (
     Field,
     JsonValue,
+    StrictBool,
+    StrictInt,
+    StrictStr,
     field_serializer,
     field_validator,
     model_validator,
@@ -22,6 +25,7 @@ from .common import (
     freeze_json_value,
     thaw_json_value,
 )
+from .order_search import normalize_product_description
 from .tool_system import (
     ToolSpec,
     ToolsetHash,
@@ -173,13 +177,40 @@ class NextMove(ModelVisibleModel):
         return self
 
 
-from pydantic import StrictStr
-
-
 BoundedSourceQuoteV2 = Annotated[
     StrictStr,
     Field(min_length=1, max_length=128),
 ]
+
+
+class Cycle2InputCandidate(ModelVisibleModel):
+    """Inactive model Claim with no owner, target, or Observation authority."""
+
+    name: Literal[
+        "product_description",
+        "candidate_ordinal",
+        "shipment_not_received",
+    ]
+    candidate_value: StrictStr | StrictInt | StrictBool
+    source_ref: UUID
+    source_quote: BoundedSourceQuoteV2
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def name_value_pair_is_exact(self) -> Self:
+        value = self.candidate_value
+        if self.name == "product_description":
+            if type(value) is not str:
+                raise ValueError("product_description must be a strict string")
+            normalize_product_description(value)
+        elif self.name == "candidate_ordinal":
+            if type(value) is not int or not 1 <= value <= 5:
+                raise ValueError(
+                    "candidate_ordinal must be a strict integer from 1 to 5"
+                )
+        elif type(value) is not bool:
+            raise ValueError("shipment_not_received must be a strict boolean")
+        return self
 
 
 class ReferenceSourceKindV2(StrEnum):
