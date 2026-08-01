@@ -43,8 +43,12 @@ W6 preflight的Application Port owner缺口已经用户授权为`02-07R`；PR #2
 `B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree `c598651b...`。Adapter preflight
 随后确认 search authority物理层缺口；PR #254 reviewed批准`02-10R`、slots
 `27→28`且不新增wave。PR #255/#256已reviewed完成并冻结
-`B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`；当前审核从
-该真实successor第二次重冻结的`02-07/02-11` exact Plans。
+`B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`。PR #257/#258
+随后reviewed完成second-refreeze与`02-07`，形成`B_C2_BUSINESS_ADAPTERS =
+78bce02c...` / tree `032e0c5e...`。`02-11` targeted验证确认OA-10 exact old
+Task/RequestUnit graph缺少物理承载；checkpoint保持unpublished/fail closed。PR #259
+reviewed批准`02-11R` immutable history correction、slots `28→29`且不新增wave，
+当前冻结其exact Plan。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -180,7 +184,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_SEARCH_AUTHORITY_PHYSICAL / W6_ADAPTER_PLANNING / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_BUSINESS_ADAPTERS / W6_HISTORY_CORRECTION_PLANNING / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -200,7 +204,9 @@ Plans:
 ruling 中把 `02-09R1/R2/R3` 加入前置修复链；PR #241又把`02-09R4/W4R2`
 加入dispatch-grant修复链。W6 preflight又经用户授权与PR #250增加
 `02-07R`，不新增wave label。Adapter preflight确认既有物理承载缺口后，用户又批准
-`02-10R`且PR #254 reviewed merge；当前目标为28 slots / 16 wave labels，最大并发仍为`2`。
+`02-10R`且PR #254 reviewed merge。02-11 targeted验证确认OA-10 history physical
+BLOCK后，PR #259又批准`02-11R`且不新增wave；当前目标为29 slots / 16 wave labels，
+最大并发仍为`2`。
 `02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
@@ -222,8 +228,9 @@ successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passe
 base/head仍不得复用；W5 `02-10`已reviewed完成并冻结`B_C2_PHYSICAL`。
 PR #250已批准W6 `02-07R` owner correction；PR #251/#252已reviewed完成R并形成
 `B_C2_BUSINESS_READ_PORTS`。PR #254随后批准`02-10R` physical correction与28 slots；
-PR #255/#256已reviewed完成并冻结`B_C2_SEARCH_AUTHORITY_PHYSICAL`。当前审核从其
-真实successor第二次重冻结的`02-07/02-11` exact Plans。
+PR #255/#256已reviewed完成并冻结`B_C2_SEARCH_AUTHORITY_PHYSICAL`。PR #257/#258
+又reviewed完成`02-07`并冻结`B_C2_BUSINESS_ADAPTERS`；PR #259批准`02-11R`与
+29 slots。当前审核correction exact Plan，02-11 blocked checkpoint不发布。
 
 **Branch mapping**:
 
@@ -367,6 +374,16 @@ B_C2_SEARCH_AUTHORITY_PHYSICAL
 = 64254f170ced8a71d58fd2f0b0d1adfaa8f275a5
 = tree ad332f6b862d34feec342c57e679d7234179e24e
 = PR #255/#256 reviewed 02-10R planning/implementation successor; 74/85 targeted tests passed
+
+B_C2_BUSINESS_ADAPTERS
+= 78bce02c36ada33d6695d5a919d23b61bb8df21e
+= tree 032e0c5edfb3c2ffc18f34192ae72858bc0cec85
+= PR #257/#258 reviewed refreeze/02-07 successor; 28/392 targeted tests passed
+
+W6_02_11R_OWNER_RULING
+= 096fa25a98632d38c3a38e64a6c9ad57f864e0e0
+= tree db7599249ffe25f8ca9a483fbe5c8e9845dd9eaa
+= PR #259 reviewed owner ruling; 02-11R authorized; 29 slots / 16 wave labels
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -380,8 +397,10 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 完成`02-07R`并冻结`B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree
 `c598651b...`。PR #254 reviewed owner ruling形成`d0593323...` / tree `d37da0d3...`，
 批准`02-10R`与28 slots。PR #255/#256已reviewed完成并形成真实
-`B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`；`02-07/02-11`
-已第二次重冻结，仍须planning review/merge后才能dispatch。旧 `B_C2_APP_CONTRACT`、
+`B_C2_SEARCH_AUTHORITY_PHYSICAL = 64254f17...` / tree `ad332f6b...`；PR #257/#258
+已reviewed完成`02-07`并形成`B_C2_BUSINESS_ADAPTERS`。PR #259又批准`02-11R`
+与29 slots；当前只能dispatch该correction，02-11必须等真实history successor后
+重冻结回放。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -461,7 +480,7 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 20/28 | `W1-W5 + 02-07R + 02-10R complete；B_C2_SEARCH_AUTHORITY_PHYSICAL frozen；02-07/02-11 planning review；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 21/29 | `W1-W5 + 02-07R + 02-10R + 02-07 complete；B_C2_BUSINESS_ADAPTERS frozen；02-11R planning；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
