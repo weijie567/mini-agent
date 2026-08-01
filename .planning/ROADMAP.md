@@ -321,7 +321,7 @@ control head 可以由逐个 reviewed planning PR 串行推进，但不得替换
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 5/19 | `02-00/01/02/03/04 complete；B_C2_TOOL frozen；W2 full 2499 passed；02-05 Plan/Packet candidate in fresh-review gate；functional implementation 4/18；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 6/19 | `02-00..05 complete；B_C2_APP_CONTRACT frozen；W3 durable review evidence recorded；02-06 Plan/Packet candidate in fresh-review gate；functional implementation 5/18；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
