@@ -51,8 +51,9 @@ reviewed批准`02-11R` immutable history correction、slots `28→29`且不新�
 PR #260/#261已reviewed完成并冻结`B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc5...` /
 tree `8e4a9392...`。PR #262/#263又reviewed完成`02-11`并形成`B_C2_INFRA =
 6217b221...` / tree `7de3e6db...`；W6 full为`2840 passed`。PR #264/#265随后
-reviewed完成W7并冻结`B_C2_RUNTIME = d02b8f2e...` / tree `8bd3ba88...`。当前只从
-真实Runtime barrier冻结W8 `02-14` exact Plan。
+reviewed完成W7并冻结`B_C2_RUNTIME = d02b8f2e...` / tree `8bd3ba88...`。PR #266/#267
+又完成W8并冻结`B_C2_EVAL_MACHINERY = d6fdcbb3...` / tree `8ab6f2ae...`。PR #268/#269
+批准W9 `02-15R0/R1/R2` corrections与32 slots / 16 wave labels；当前只冻结R0。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -188,7 +189,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_RUNTIME / W8_EVAL_MACHINERY_PLANNING / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_EVAL_MACHINERY / W9_R0_SEED_CONTRACT_PLANNING / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -236,7 +237,8 @@ PR #255/#256已reviewed完成并冻结`B_C2_SEARCH_AUTHORITY_PHYSICAL`。PR #257
 又reviewed完成`02-07`并冻结`B_C2_BUSINESS_ADAPTERS`；PR #259批准`02-11R`与
 29 slots；PR #260/#261已reviewed完成并冻结`B_C2_RECORD_HISTORY_PHYSICAL`。PR
 #262/#263又完成`02-11`并冻结`B_C2_INFRA`；PR #264/#265随后reviewed完成W7
-`02-12`并冻结`B_C2_RUNTIME`；当前审核W8 `02-14` exact Plan，blocked checkpoint不发布。
+`02-12`并冻结`B_C2_RUNTIME`；PR #266/#267又完成W8并冻结`B_C2_EVAL_MACHINERY`。
+PR #268/#269批准W9 correction链；当前审核`02-15R0` exact Plan，R1/R2/02-15未冻结。
 
 **Branch mapping**:
 
@@ -405,6 +407,11 @@ B_C2_RUNTIME
 = d02b8f2e43431b1f8f6a615b13f4e792ea250bde
 = tree 8bd3ba88a8ae4bfdd0a16e3e0ad0e82c739f6a84
 = PR #264/#265 reviewed 02-12 planning/implementation successor; 85/1346 tests passed
+
+B_C2_EVAL_MACHINERY
+= d6fdcbb3cdd4e6bb41fb2ae0b1ff5b80629b4efb
+= tree 8ab6f2aeab53bfae73edff219cab70623c437ebc
+= PR #266/#267 reviewed 02-14 planning/implementation successor; 765/262 tests passed
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -422,7 +429,9 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 已reviewed完成`02-07`并形成`B_C2_BUSINESS_ADAPTERS`。PR #259又批准`02-11R`
 与29 slots；PR #260/#261已reviewed形成真实history successor，PR #262/#263已在
 其上完成02-11并冻结`B_C2_INFRA`。PR #264/#265又完成W7并冻结真实
-`B_C2_RUNTIME`；当前只能从该barrier冻结W8。旧 `B_C2_APP_CONTRACT`、
+`B_C2_RUNTIME`；PR #266/#267又冻结`B_C2_EVAL_MACHINERY`，PR #268/#269批准
+`02-15R0/R1/R2`。当前只能从真实Eval machinery/current owner-ruling successor冻结
+R0；旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -502,7 +511,7 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 24/29 | `W1-W7 complete；B_C2_RUNTIME frozen；02-14 planning；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
+| 2. 完成 E2E-01 | 25/32 | `W1-W8 complete；B_C2_EVAL_MACHINERY frozen；02-15R0 planning；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
