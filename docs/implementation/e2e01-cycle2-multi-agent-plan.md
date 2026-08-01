@@ -17,14 +17,16 @@ squash merge；`B_C2_PLAN_APPROVED =
 > 回滚顺序；不拥有产品、架构、业务、Tool、Memory、Eval 或 Case lifecycle 语义。
 >
 > 本文不是任一 implementation Task Packet。本文已通过独立 exact-head review、
-> 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 现按真实 dependency barrier
-> 分批准备“一份 GSD Plan + 一个 exact Task Packet”。首份
-> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 只是 Gate
-> P2-B proposal，尚未获批或执行。
+> 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 按真实 dependency barrier
+> 分批准备“一份 GSD Plan + 一个 exact Task Packet”。历史首份
+> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 与 W1–W3
+> `02-01..05` 均已 reviewed merge；当前从 exact `B_C2_APP_CONTRACT` 逐个冻结 W4
+> `02-06/08/09/13`。
 >
-> 在用户进一步批准当前可签发 Task Packet、对应 Wave、initial exact
-> implementation base 与执行上限前，不创建 `integration/e2e01-cycle2`、任何
-> 代码 feature branch / Worktree、migration、测试、Eval artifact 或功能代码。
+> `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
+> 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
+> 才创建对应 feature branch / Worktree；Plan、artifact 或测试的存在不推进 Case
+> lifecycle。
 
 ## 1. Authority and scope
 
