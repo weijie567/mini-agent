@@ -28,8 +28,10 @@ InputBinding / atomic ordinal selection / selected-target Gateway 缺口；用�
 `02-06/13/08` 已由 PR #229/#230/#232 reviewed 串行 merge，当前真实 integration
 为 `B_C2_RU_ROUTING = d0f37e2d...` / tree `252a092b...`。`02-09` preflight 又
 暴露 recovery owner gap；PR #231 owner ruling 已把修复链固定为
-`02-09R1/R2/R3`。原 `02-09` 保持 clean、blocked；当前只从真实 integration
-重冻结 `02-09R1`，后续 Packet 的 SHA 必须逐个等待前驱 merge。Phase 3–6
+`02-09R1/R2/R3`。R1 planning/implementation PR #233/#234 已 reviewed merge为
+`B_C2_RECOVERY_CORE = fe627a5d...` / tree `42767c85...`。原 `02-09` 保持
+clean、blocked；当前只从该真实 R1 successor重冻结 `02-09R2`，后续 Packet 的 SHA
+必须逐个等待前驱 merge。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
@@ -164,7 +166,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_RU_ROUTING / 02-09R1_PLAN_REVIEW / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_RECOVERY_CORE / 02-09R2_PLAN_REVIEW / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -194,9 +196,9 @@ implementation PR #225 已 reviewed merge，形成
 planning PR #226 与 implementation PR #227 reviewed merge 后形成
 `B_C2_W4_READY = 5f2fa6d...` / tree `174fbebc...`。W4 planning PR #228 与
 implementation PR #229/#230/#232 已形成 `B_C2_CODEC`、`B_C2_EVAL_BUNDLE`、
-`B_C2_RU_ROUTING`。PR #231 的 owner ruling 关闭 `02-09` preflight owner gap；原
-Packet 被显式阻断，当前只重冻结 `02-09R1`，不得预填 `02-09R2/R3` 或后续
-`02-09` 的 base/head。
+`B_C2_RU_ROUTING`。PR #231 的 owner ruling 关闭 `02-09` preflight owner gap；
+R1 PR #233/#234 已形成 `B_C2_RECOVERY_CORE`。原 Packet 被显式阻断，当前只重冻结
+`02-09R2`，不得预填 `02-09R3` 或后续 `02-09` 的 base/head。
 
 **Branch mapping**:
 
@@ -290,6 +292,11 @@ B_C2_RU_ROUTING
 = d0f37e2d064689bfe1ba708db57b015ee8d2af29
 = tree 252a092b962327471facbf34b163536fc4d41ea3
 = PR #232 reviewed 02-08 merge successor and exact 02-09R1 product base
+
+B_C2_RECOVERY_CORE
+= fe627a5d81d909e096e9e60773fcca03b51f84be
+= tree 42767c8535dbc05837ab9dabeee2c1432813e0fb
+= PR #234 reviewed 02-09R1 merge successor and exact 02-09R2 product base
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -297,7 +304,7 @@ B_C2_RU_ROUTING
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
 `ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05`、W3R 与 W4
-`02-06/13/08` 已依次完成。`02-09R1` 固定到真实 `B_C2_RU_ROUTING`；R2、R3 与
+`02-06/13/08` 与 R1 已依次完成。`02-09R2` 固定到真实 `B_C2_RECOVERY_CORE`；R3 与
 重冻结后的 02-09 只能使用各自真实前驱 successor。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
@@ -378,7 +385,7 @@ B_C2_RU_ROUTING
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 12/25 | `W1-W3R + W4 02-06/13/08 complete；B_C2_RU_ROUTING frozen；02-09 blocked；02-09R1 exact Plan review；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 13/25 | `W1-W3R + W4 02-06/13/08 + 02-09R1 complete；B_C2_RECOVERY_CORE frozen；02-09 blocked；02-09R2 exact Plan review；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |

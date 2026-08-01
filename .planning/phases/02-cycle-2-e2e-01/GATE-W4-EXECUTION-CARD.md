@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W4_BATCH_A_AND_02_08_MERGED / 02-09_BLOCKED / 02-09R1_PLAN_REVIEW`
+状态：`W4_BATCH_A_AND_02_08_AND_R1_MERGED / 02-09_BLOCKED / 02-09R2_PLAN_REVIEW`
 
 ## Exact input
 
@@ -44,6 +44,10 @@
   tree `bef2ce71b1a7f45ef99fbffd0ae16d29163a6692`。02-08 PR #232 再 merge 为
   `B_C2_RU_ROUTING = d0f37e2d064689bfe1ba708db57b015ee8d2af29` / tree
   `252a092b962327471facbf34b163536fc4d41ea3`，与 reviewed overlay tree 相等。
+- 02-09R1 planning PR #233 与 implementation PR #234 已 reviewed merge 为
+  `B_C2_RECOVERY_CORE = fe627a5d81d909e096e9e60773fcca03b51f84be` / tree
+  `42767c8535dbc05837ab9dabeee2c1432813e0fb`，与 reviewed overlay tree相等；
+  focused `144 passed`、neighbor `558 passed`、compile/diff通过，full未运行。
 
 ## Historical W4 preflight blocker and owner ruling
 
@@ -102,7 +106,7 @@ exact-file planning review `PASS`，并通过同一 planning PR 合并为 proven
 ```text
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
 Batch B: 02-08 Request understanding/routing — MERGED
-W4R: 02-09R1 -> 02-09R2 -> 02-09R3 — SERIAL PLAN/IMPLEMENT/REVIEW
+W4R: 02-09R1 — MERGED; 02-09R2 -> 02-09R3 — SERIAL PLAN/IMPLEMENT/REVIEW
 W4 resumed: refrozen 02-09 executor/recovery
 ```
 
