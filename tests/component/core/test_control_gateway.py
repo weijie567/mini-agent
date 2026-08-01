@@ -829,6 +829,49 @@ def test_cycle2_gateway_rejects_declared_nested_model_type_substitution() -> Non
         assert gate.reason_code is GateReasonCode.SCHEMA_INVALID
 
 
+def test_cycle2_gateway_rejects_raw_string_subclasses_before_reconstruction() -> None:
+    class StrSubclass(str):
+        pass
+
+    candidate, loaded = _cycle2_complete_gateway_model_graph()
+    variants = (
+        loaded.model_copy(
+            update={
+                "private_owner_scope_ref": StrSubclass(
+                    loaded.private_owner_scope_ref
+                )
+            }
+        ),
+        loaded.model_copy(
+            update={
+                "customer_context": loaded.customer_context.model_copy(
+                    update={
+                        "customer_id": StrSubclass(
+                            loaded.customer_context.customer_id
+                        )
+                    }
+                )
+            }
+        ),
+        loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(
+                    update={
+                        "tool_registry_version": StrSubclass(
+                            loaded.budget.tool_registry_version
+                        )
+                    }
+                )
+            }
+        ),
+    )
+
+    for malformed_loaded in variants:
+        gate = _evaluate_cycle2(candidate, malformed_loaded)
+        assert gate.decision is GateDecisionValue.REJECT
+        assert gate.reason_code is GateReasonCode.SCHEMA_INVALID
+
+
 @pytest.mark.parametrize(
     "tool_name",
     [Cycle2ToolName.GET_ORDER, Cycle2ToolName.GET_SHIPMENT],
@@ -863,6 +906,9 @@ def test_cycle2_gateway_rejects_duplicate_request_unit_binding_refs(
         "arguments-extra",
         "arguments-missing",
         "duplicate-binding-ref",
+        "unique-extra-binding-ref",
+        "current-semantic-padded",
+        "duplicate-semantic-distinct-ids",
     ],
 )
 def test_cycle2_gateway_reconciles_complete_progress_history(
@@ -893,7 +939,11 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
         )
     elif history_variant == "identity-collision":
         collision = prior_step.model_copy(
-            update={"validated_arguments": {"order_id": "O-9998"}}
+            update={
+                "canonical_tool_name": Cycle2ToolName.GET_SHIPMENT,
+                "validated_arguments": {"order_id": "O-1001"},
+                "argument_binding_refs": candidate.argument_binding_refs,
+            }
         )
         loaded = loaded.model_copy(
             update={
@@ -907,7 +957,7 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
         malformed = prior_step.model_copy(
             update={
                 "validated_arguments": {
-                    "order_id": "O-9999",
+                    "order_id": "O-1001",
                     "unexpected": "value",
                 }
             }
@@ -928,7 +978,7 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
                 )
             }
         )
-    else:
+    elif history_variant == "duplicate-binding-ref":
         binding_ref = prior_step.argument_binding_refs[0]
         malformed = prior_step.model_copy(
             update={"argument_binding_refs": (binding_ref, binding_ref)}
@@ -940,12 +990,66 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
                 )
             }
         )
+    elif history_variant == "unique-extra-binding-ref":
+        malformed = prior_step.model_copy(
+            update={
+                "argument_binding_refs": (
+                    *prior_step.argument_binding_refs,
+                    uuid4(),
+                )
+            }
+        )
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (malformed,)}
+                )
+            }
+        )
+    elif history_variant == "current-semantic-padded":
+        malformed = prior_step.model_copy(
+            update={
+                "tool_call_id": uuid4(),
+                "canonical_tool_name": Cycle2ToolName.GET_SHIPMENT,
+                "validated_arguments": {"order_id": "O-1001"},
+                "argument_binding_refs": (*candidate.argument_binding_refs, uuid4()),
+            }
+        )
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (malformed,)}
+                )
+            }
+        )
+    else:
+        duplicate = prior_step.model_copy(update={"tool_call_id": uuid4()})
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 2}),
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (prior_step, duplicate)}
+                ),
+            }
+        )
 
     gate = _evaluate_cycle2(candidate, loaded)
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.progress_valid is False
     assert gate.reason_code is GateReasonCode.NO_PROGRESS
+
+
+def test_cycle2_gateway_accepts_legitimate_distinct_progress_semantics() -> None:
+    candidate, loaded = _cycle2_complete_gateway_model_graph()
+    prior_step = loaded.progress_snapshot.prior_tool_steps[0]
+    assert prior_step.canonical_tool_name is Cycle2ToolName.GET_ORDER
+    assert candidate.requested_provider_tool_name == Cycle2ToolName.GET_SHIPMENT.value
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.progress_valid is True
 
 
 def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() -> None:
@@ -1625,7 +1729,7 @@ def _cycle2_complete_gateway_model_graph() -> tuple[
             loaded.registry_snapshot.model_visible_toolset_hash
         ),
         canonical_tool_name=Cycle2ToolName.GET_ORDER,
-        validated_arguments={"order_id": "O-9999"},
+        validated_arguments={"order_id": "O-1001"},
         task_state_version=candidate.validated_task_state_version,
         argument_binding_refs=(loaded.current_input_bindings[0].binding_id,),
     )

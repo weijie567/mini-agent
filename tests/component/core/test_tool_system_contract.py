@@ -1,6 +1,6 @@
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -2349,6 +2349,72 @@ def test_cycle2_direct_retry_raw_preflight_closes_complete_evidence_graph() -> N
         revalidation.model_copy(update={"remaining_run_time_budget_ms": 500.0}),
         vector="raw-float",
     )
+
+
+def test_cycle2_direct_retry_rejects_raw_scalar_subclasses_and_spoofed_code() -> None:
+    class IntSubclass(int):
+        pass
+
+    class StrSubclass(str):
+        pass
+
+    class UUIDSubclass(UUID):
+        pass
+
+    class FailureCodeSpoof:
+        def __hash__(self) -> int:
+            return hash("ORDER_SEARCH_TRANSIENT")
+
+        def __eq__(self, other: object) -> bool:
+            return other == "ORDER_SEARCH_TRANSIENT"
+
+    revalidation = _retry_revalidation()
+    parent = revalidation.parent_dispatch_facts
+    scalar_vectors = (
+        revalidation.model_copy(
+            update={"remaining_run_time_budget_ms": IntSubclass(500)}
+        ),
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+                "expected_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+                "current_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+            }
+        ),
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+                "expected_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+                "current_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+            }
+        ),
+    )
+    for index, malformed in enumerate(scalar_vectors):
+        _assert_direct_retry_evidence_rejected(
+            malformed,
+            vector=f"scalar-subclass:{index}",
+        )
+
+    with pytest.raises(TypeError, match="failure_code must be an exact string"):
+        decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+            attempt_no=1,
+            outcome=ToolResultOutcome.SYSTEM_FAILURE,
+            failure_code=FailureCodeSpoof(),
+            revalidation=revalidation,
+        )
 
 
 def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:

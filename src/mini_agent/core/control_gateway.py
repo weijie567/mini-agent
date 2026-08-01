@@ -833,22 +833,72 @@ def _cycle2_budget_valid(
     )
 
 
-def _cycle2_progress_step_is_canonical(step: Cycle2ToolProgressFact) -> bool:
-    """Close one durable step to its tool-specific normalized argument contract."""
+def _cycle2_progress_semantic_identity(
+    *,
+    tool_name: Cycle2ToolName,
+    arguments: Mapping[str, JsonValue],
+    argument_binding_refs: tuple[UUID, ...],
+    loaded: Cycle2GatewayLoadedClosure,
+    arguments_must_be_canonical: bool,
+) -> tuple[Cycle2ToolName, str, str, tuple[UUID, ...]] | None:
+    """Derive one exact tool/argument/controlled-reference progress identity."""
 
-    if len(step.argument_binding_refs) != len(set(step.argument_binding_refs)):
-        return False
+    if (
+        len(argument_binding_refs) != len(set(argument_binding_refs))
+        or not _cycle2_loaded_graph_complete(loaded)
+    ):
+        return None
     normalized = _cycle2_normalized_argument(
-        tool_name=step.canonical_tool_name,
-        arguments=step.validated_arguments,
+        tool_name=tool_name,
+        arguments=arguments,
     )
     if normalized is None:
-        return False
+        return None
     argument_name, argument_value = normalized
-    if set(step.validated_arguments) != {argument_name}:
-        return False
-    raw_value = step.validated_arguments.get(argument_name)
-    return type(raw_value) is str and raw_value == argument_value
+    if set(arguments) != {argument_name}:
+        return None
+    raw_value = arguments.get(argument_name)
+    if type(raw_value) is not str or (
+        arguments_must_be_canonical and raw_value != argument_value
+    ):
+        return None
+
+    matching_bindings = tuple(
+        binding
+        for binding in loaded.current_input_bindings
+        if binding.name == argument_name
+        and binding.normalized_value == argument_value
+    )
+    if len(matching_bindings) != 1:
+        return None
+    binding = matching_bindings[0]
+    if tool_name is Cycle2ToolName.SEARCH_ORDERS:
+        if binding.authority not in {
+            InputAuthority.USER_CLAIM,
+            InputAuthority.MODEL_INFERENCE,
+        }:
+            return None
+        canonical_refs = (binding.binding_id,)
+    elif tool_name is Cycle2ToolName.GET_ORDER:
+        if binding.authority is not InputAuthority.USER_CLAIM:
+            return None
+        canonical_refs = (binding.binding_id,)
+    else:
+        matching_targets = tuple(
+            target
+            for target in loaded.current_verified_order_targets
+            if target.order_id == argument_value
+            and binding.binding_id in target.input_binding_refs
+        )
+        if len(matching_targets) != 1:
+            return None
+        canonical_refs = (
+            binding.binding_id,
+            matching_targets[0].verified_target_ref,
+        )
+    if argument_binding_refs != canonical_refs:
+        return None
+    return tool_name, argument_name, argument_value, canonical_refs
 
 
 def _cycle2_progress_valid(
@@ -880,25 +930,35 @@ def _cycle2_progress_valid(
             and step.model_visible_toolset_hash
             == progress.model_visible_toolset_hash
             and step.task_state_version == progress.task_state_version
-            and _cycle2_progress_step_is_canonical(step)
             for step in progress.prior_tool_steps
         )
     ):
         return False
-    normalized = _cycle2_normalized_argument(
+    prior_semantic_identities = tuple(
+        _cycle2_progress_semantic_identity(
+            tool_name=step.canonical_tool_name,
+            arguments=step.validated_arguments,
+            argument_binding_refs=step.argument_binding_refs,
+            loaded=loaded,
+            arguments_must_be_canonical=True,
+        )
+        for step in prior_steps
+    )
+    if (
+        any(identity is None for identity in prior_semantic_identities)
+        or len(prior_semantic_identities) != len(set(prior_semantic_identities))
+    ):
+        return False
+    current_semantic_identity = _cycle2_progress_semantic_identity(
         tool_name=tool_name,
         arguments=candidate.candidate_arguments,
+        argument_binding_refs=candidate.argument_binding_refs,
+        loaded=loaded,
+        arguments_must_be_canonical=False,
     )
-    if normalized is None:
-        return False
-    argument_name, argument_value = normalized
-    validated_arguments = {argument_name: argument_value}
-    return not any(
-        step.canonical_tool_name is tool_name
-        and step.validated_arguments == validated_arguments
-        and step.task_state_version == candidate.validated_task_state_version
-        and step.argument_binding_refs == candidate.argument_binding_refs
-        for step in progress.prior_tool_steps
+    return (
+        current_semantic_identity is not None
+        and current_semantic_identity not in prior_semantic_identities
     )
 
 

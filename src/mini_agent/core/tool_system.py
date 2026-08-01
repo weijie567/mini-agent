@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence, Set as AbstractSet
 from copy import deepcopy
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum, StrEnum
 from types import UnionType
 from typing import Annotated, Any, Literal, Self, Union, get_args, get_origin
 from uuid import UUID
@@ -770,6 +770,8 @@ def _validate_cycle2_failure_shape(
     outcome: ToolResultOutcome,
     failure_code: str | None,
 ) -> None:
+    if failure_code is not None and type(failure_code) is not str:
+        raise TypeError("failure_code must be an exact string or None")
     if outcome is ToolResultOutcome.SUCCESS:
         if failure_code is not None:
             raise ValueError("SUCCESS cannot carry failure_code")
@@ -1925,6 +1927,11 @@ def _cycle2_raw_value_matches_annotation(
     arguments = get_args(annotation)
     if origin is Annotated:
         return _cycle2_raw_value_matches_annotation(value, arguments[0])
+    if origin is Literal:
+        return any(
+            type(value) is type(option) and value == option
+            for option in arguments
+        )
     if origin in {Union, UnionType}:
         return any(
             _cycle2_raw_value_matches_annotation(value, option)
@@ -1934,6 +1941,10 @@ def _cycle2_raw_value_matches_annotation(
         return type(value) is annotation
     if isinstance(value, BaseModel):
         return False
+    if annotation in {bool, int, float, str, bytes, datetime, UUID, type(None)}:
+        return type(value) is annotation
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return type(value) is annotation
 
     if origin is tuple:
         if type(value) is not tuple:
@@ -1950,6 +1961,8 @@ def _cycle2_raw_value_matches_annotation(
     if isinstance(origin, type) and issubclass(origin, Mapping):
         if not isinstance(value, Mapping):
             return False
+        if origin is dict and type(value) is not dict:
+            return False
         key_annotation, item_annotation = arguments or (Any, Any)
         return all(
             _cycle2_raw_value_matches_annotation(key, key_annotation)
@@ -1963,6 +1976,8 @@ def _cycle2_raw_value_matches_annotation(
         )
     if isinstance(origin, type) and issubclass(origin, AbstractSet):
         if not isinstance(value, AbstractSet):
+            return False
+        if origin in {set, frozenset} and type(value) is not origin:
             return False
         item_annotation = arguments[0] if arguments else Any
         return all(
