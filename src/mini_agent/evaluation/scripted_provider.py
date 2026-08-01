@@ -13,6 +13,7 @@ from mini_agent.application.records import (
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
 )
+from mini_agent.core.common import FrozenJsonDict, freeze_json_value
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     InputAuthority,
@@ -33,6 +34,20 @@ from mini_agent.evaluation.artifacts import (
 class RuntimeFaultDirective:
     behavior: Literal["ADVANCE_TASK_STATE_AFTER_REVALIDATION_BEFORE_GATE"]
     boundary: Literal["AFTER_REVALIDATION_BEFORE_GATE"]
+
+
+@dataclass(frozen=True, slots=True)
+class Cycle2ScriptDirective:
+    """A model candidate or fault directive, never SUT evidence or a result."""
+
+    purpose: Literal[
+        "REQUEST_UNDERSTANDING",
+        "CONTROL_CANDIDATE",
+        "FAULT_DIRECTIVE",
+    ]
+    behavior: str
+    candidate_arguments: FrozenJsonDict
+    fault_ref: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +117,9 @@ _RequestStep: TypeAlias = (
     | _UnknownToolStep
 )
 _PresentationStep: TypeAlias = _ValidPresentationStep | _PresentationFaultStep
-_ExecutableStep: TypeAlias = _RequestStep | _PresentationStep
+_ExecutableStep: TypeAlias = (
+    _RequestStep | _PresentationStep | Cycle2ScriptDirective
+)
 _REQUEST_STEP_TYPES = (
     _OrderLookupStep,
     _RequestProtocolFaultStep,
@@ -114,6 +131,42 @@ _REQUEST_STEP_TYPES = (
 _PRESENTATION_STEP_TYPES = (
     _ValidPresentationStep,
     _PresentationFaultStep,
+)
+_CYCLE2_BEHAVIORS = {
+    "REQUEST_UNDERSTANDING": frozenset(
+        {
+            "PROPOSE_SEARCH_ORDERS",
+            "PROPOSE_CANDIDATE_SELECTION",
+            "PROPOSE_GET_ORDER",
+            "PROPOSE_GET_SHIPMENT",
+        }
+    ),
+    "CONTROL_CANDIDATE": frozenset(
+        {
+            "PROPOSE_GET_ORDER",
+            "PROPOSE_ORDER_SUMMARY",
+            "PROPOSE_CANDIDATE_QUESTION",
+            "PROPOSE_SHIPMENT_ASSESSMENT",
+            "PROPOSE_FIXED_RESPONSE",
+        }
+    ),
+    "FAULT_DIRECTIVE": frozenset(
+        {
+            "INJECT_TOOL_FAULT",
+            "INJECT_RUNTIME_RECOVERY_FAULT",
+        }
+    ),
+}
+_CYCLE2_FAULT_REFS = frozenset(
+    {
+        "fault:get-shipment:transient-once-v1",
+        "fault:get-shipment:transient-always-v1",
+        "fault:get-shipment:source-integrity-v1",
+        "fault:get-shipment:timeout-after-dispatch-once-v1",
+        "fault:get-shipment:restart-after-retry-finalize-v1",
+        "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1",
+        "fault:get-shipment:restart-with-unfinished-attempt-v1",
+    }
 )
 
 
@@ -212,7 +265,10 @@ def _project_step(step: Mapping[str, object]) -> _ExecutableStep:
     behavior = step.get("behavior")
     if not isinstance(behavior, str) or not behavior:
         raise ArtifactContractError("script behavior is invalid")
-    if purpose == "REQUEST_UNDERSTANDING":
+    if (
+        purpose == "REQUEST_UNDERSTANDING"
+        and behavior not in _CYCLE2_BEHAVIORS["REQUEST_UNDERSTANDING"]
+    ):
         return _project_request_step(step, behavior)
     if purpose == "PRESENTATION":
         if behavior == "VALID_ORDER_SUMMARY_PLAN":
@@ -225,6 +281,58 @@ def _project_step(step: Mapping[str, object]) -> _ExecutableStep:
         }:
             return _PresentationFaultStep(behavior=behavior)
         raise ArtifactContractError("unknown scripted Presentation behavior")
+    if purpose in _CYCLE2_BEHAVIORS:
+        required_keys = {"purpose", "behavior", "candidate_arguments"}
+        allowed_keys = (
+            required_keys | {"fault_ref"}
+            if purpose == "FAULT_DIRECTIVE"
+            else required_keys
+        )
+        candidate_arguments = step.get("candidate_arguments")
+        if (
+            set(step) != allowed_keys
+            or behavior not in _CYCLE2_BEHAVIORS[purpose]
+            or not isinstance(candidate_arguments, Mapping)
+            or not all(isinstance(key, str) for key in candidate_arguments)
+        ):
+            raise ArtifactContractError("invalid Cycle 2 scripted directive")
+        fault_ref = step.get("fault_ref")
+        if purpose == "FAULT_DIRECTIVE":
+            if fault_ref not in _CYCLE2_FAULT_REFS or candidate_arguments:
+                raise ArtifactContractError("invalid Cycle 2 fault directive")
+        elif fault_ref is not None:
+            raise ArtifactContractError("Cycle 2 candidate cannot carry a fault")
+        if purpose == "REQUEST_UNDERSTANDING":
+            expected_arguments: Mapping[str, object]
+            if behavior == "PROPOSE_SEARCH_ORDERS":
+                expected_arguments = {"product_description": "鞋"}
+            elif behavior == "PROPOSE_CANDIDATE_SELECTION":
+                expected_arguments = {
+                    "candidate_ordinal": candidate_arguments.get(
+                        "candidate_ordinal"
+                    )
+                }
+                if expected_arguments["candidate_ordinal"] not in {2, 6}:
+                    raise ArtifactContractError(
+                        "invalid Cycle 2 ordinal candidate"
+                    )
+            else:
+                expected_arguments = {"order_id": "O-1001"}
+            if dict(candidate_arguments) != expected_arguments:
+                raise ArtifactContractError(
+                    "invalid Cycle 2 Request Understanding candidate"
+                )
+        elif purpose == "CONTROL_CANDIDATE" and candidate_arguments:
+            raise ArtifactContractError("Cycle 2 control candidate must be fact-free")
+        frozen_arguments = freeze_json_value(dict(candidate_arguments))
+        if not isinstance(frozen_arguments, FrozenJsonDict):
+            raise ArtifactContractError("Cycle 2 candidate arguments are invalid")
+        return Cycle2ScriptDirective(
+            purpose=purpose,
+            behavior=behavior,
+            candidate_arguments=frozen_arguments,
+            fault_ref=fault_ref,
+        )
     raise ArtifactContractError("unknown scripted model-call purpose")
 
 
@@ -369,6 +477,23 @@ class ScriptedModelProviderV2:
             return None
         self._runtime_fault_taken = True
         return self._runtime_fault
+
+    def take_cycle2_directive(
+        self,
+        purpose: Literal[
+            "REQUEST_UNDERSTANDING",
+            "CONTROL_CANDIDATE",
+            "FAULT_DIRECTIVE",
+        ],
+    ) -> Cycle2ScriptDirective:
+        """Consume the next exact Cycle 2 candidate/fault directive by purpose."""
+
+        if purpose not in _CYCLE2_BEHAVIORS:
+            raise TypeError("purpose must be a closed Cycle 2 directive purpose")
+        step = self._consume_step()
+        if not isinstance(step, Cycle2ScriptDirective) or step.purpose != purpose:
+            raise _fresh_protocol_error()
+        return step
 
     def assert_exhausted(self) -> None:
         if self._cursor != len(self._steps):

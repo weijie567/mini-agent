@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from inspect import getsource, signature
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from mini_agent.core.request_understanding import (
 )
 import mini_agent.evaluation.graders as graders_module
 import mini_agent.evaluation.harness as harness_module
+import mini_agent.evaluation.artifacts as artifacts_module
 import mini_agent.evaluation.scripted_provider as scripted_provider_module
 import mini_agent.infrastructure.model.qwen_responses as qwen_responses_module
 
@@ -31,6 +33,52 @@ SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-thin-slice.v1.json"
 LANES_PATH = REPO_ROOT / "evals/lanes/e2e01-thin-slice.v1.json"
 MANIFEST_PATH = REPO_ROOT / "evals/manifests/e2e01-thin-slice.v1.json"
 SPEC_PATH = REPO_ROOT / "docs/implementation/e2e01-thin-slice-implementation-spec.md"
+CYCLE2_FIXTURE_PATH = REPO_ROOT / "evals/fixtures/e2e01-cycle2.v1.json"
+CYCLE2_CASES_PATH = REPO_ROOT / "evals/cases/e2e01-cycle2.v1.json"
+CYCLE2_SCRIPTS_PATH = REPO_ROOT / "evals/model_scripts/e2e01-cycle2.v1.json"
+CYCLE2_LANES_PATH = REPO_ROOT / "evals/lanes/e2e01-cycle2.v1.json"
+CYCLE2_MANIFEST_PATH = REPO_ROOT / "evals/manifests/e2e01-cycle2.v1.json"
+
+CYCLE2_ARTIFACT_PATHS = (
+    CYCLE2_FIXTURE_PATH,
+    CYCLE2_CASES_PATH,
+    CYCLE2_SCRIPTS_PATH,
+    CYCLE2_LANES_PATH,
+    CYCLE2_MANIFEST_PATH,
+)
+
+CYCLE2_LONGITUDINAL_CASE_IDS = {
+    "E2E01-02/unique-own-with-foreign-decoy",
+    "E2E01-02/no-match-safe-not-found",
+    "E2E01-03/multiple-minimum-summary",
+    "E2E01-03/current-second-selected",
+    "E2E01-03/expired-second-rejected",
+    "E2E01-03/cross-task-second-rejected",
+    "E2E01-05/order-only-no-shipment",
+    "E2E01-05/logistics-required-uses-shipment",
+    "E2E01-06/stale-refresh-success",
+    "E2E01-06/transient-once-then-success",
+    "E2E01-06/transient-exhausted-blocked",
+    "E2E01-06/deterministic-source-integrity-no-retry",
+    "E2E01-06/insufficient-promise-need-human",
+    "E2E01-06/no-shipment-need-human",
+}
+
+CYCLE2_TRAJECTORY_CASE_IDS = {
+    "T2-candidate-owner-mismatch-rejected",
+    "T2-candidate-superseded-rejected",
+    "T2-candidate-out-of-range-rejected",
+    "T2-candidate-zero-or-multiple-current-rejected",
+    "T2-assessment-delayed-boundary",
+    "T2-assessment-delivered-not-received-current-claim",
+    "T2-assessment-claim-corrected",
+    "T2-timeout-after-dispatch-then-success",
+    "T2-retry-finalize-before-second-fence-recovery",
+    "T2-retry-finalize-before-second-fence-state-invalidated",
+    "T2-retry-unfinished-attempt-restart-blocked",
+    "T2-refresh-returns-already-stale-blocked",
+    "T2-two-active-packages-integrity-blocked",
+}
 
 ARTIFACT_PATHS = (
     FIXTURE_PATH,
@@ -274,6 +322,39 @@ def _load_json(path: Path) -> dict[str, Any]:
         loaded = json.load(artifact_file)
     assert isinstance(loaded, dict), f"{path} must contain one JSON object"
     return loaded
+
+
+def _copy_cycle2_artifacts(destination: Path) -> Path:
+    for source in CYCLE2_ARTIFACT_PATHS:
+        relative = source.relative_to(REPO_ROOT)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    return destination
+
+
+def _write_cycle2_json(path: Path, value: dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _reauthenticate_cycle2_artifact(
+    root: Path,
+    relative: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = root / CYCLE2_MANIFEST_PATH.relative_to(REPO_ROOT)
+    manifest = _load_json(manifest_path)
+    entry = next(item for item in manifest["artifacts"] if item["path"] == relative)
+    entry["sha256"] = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+    _write_cycle2_json(manifest_path, manifest)
+    monkeypatch.setattr(
+        artifacts_module,
+        "CYCLE2_EXPECTED_MANIFEST_SHA256",
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    )
 
 
 def _all_string_values(value: Any) -> list[str]:
@@ -1177,3 +1258,297 @@ def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None
         parameter.kind.name == "KEYWORD_ONLY"
         for parameter in mapper_signature.parameters.values()
     )
+
+
+def test_cycle2_bundle_has_exact_27_contract_defined_case_identities() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    cases = dataset["cases"]
+    case_ids = [case["case_id"] for case in cases]
+
+    assert len(case_ids) == 27
+    assert len(case_ids) == len(set(case_ids))
+    assert set(case_ids[:14]) == CYCLE2_LONGITUDINAL_CASE_IDS
+    assert set(case_ids[14:]) == CYCLE2_TRAJECTORY_CASE_IDS
+    assert {case["lifecycle_status"] for case in cases} == {"CONTRACT_DEFINED"}
+    assert all(case["title"] == case["case_id"] for case in cases)
+    assert all(case["requirement_refs"][0] == "EVAL-CASE" for case in cases)
+    assert all(
+        case["input"]["trusted_context_fixture_ref"] == "session:alice"
+        and case["input"]["model_script_refs"]
+        == [f"script:{case['case_id']}"]
+        for case in cases
+    )
+
+
+def test_cycle2_bundle_has_exact_pair_lane_and_bidirectional_closure() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    fixture = _load_json(CYCLE2_FIXTURE_PATH)
+    scripts = _load_json(CYCLE2_SCRIPTS_PATH)
+    lanes = _load_json(CYCLE2_LANES_PATH)
+    manifest = _load_json(CYCLE2_MANIFEST_PATH)
+    cases = dataset["cases"]
+    case_ids = [case["case_id"] for case in cases]
+
+    pair_cases = [case for case in cases if "pair_identity" in case]
+    assert [case["case_id"] for case in pair_cases] == [
+        "E2E01-05/order-only-no-shipment",
+        "E2E01-05/logistics-required-uses-shipment",
+    ]
+    shared_pair_fields = {
+        key: pair_cases[0]["pair_identity"][key]
+        for key in (
+            "pair_id",
+            "pair_fixture_ref",
+            "pair_manifest_schema",
+            "registry_snapshot_digest",
+            "model_visible_toolset_hash",
+            "provider_mapping_digest",
+            "owner_order_initial_state_digest",
+        )
+    }
+    assert shared_pair_fields["pair_id"] == "PAIR-E2E01-05-V1"
+    assert shared_pair_fields["pair_fixture_ref"] == (
+        "fx-dynamic-tool-pair-owner-a-v1"
+    )
+    assert all(
+        {
+            key: case["pair_identity"][key]
+            for key in shared_pair_fields
+        }
+        == shared_pair_fields
+        for case in pair_cases
+    )
+    assert {case["pair_identity"]["input_goal"] for case in pair_cases} == {
+        "ORDER_ONLY",
+        "LOGISTICS_REQUIRED",
+    }
+    pair_manifest = fixture["pair_manifests"]
+    assert pair_manifest == [
+        {
+            **shared_pair_fields,
+            "allowed_input_goals": ["ORDER_ONLY", "LOGISTICS_REQUIRED"],
+        }
+    ]
+
+    assert scripts["network_access"] == "FORBIDDEN"
+    assert scripts["credential_inputs"] == []
+    assert [script["case_refs"] for script in scripts["scenarios"]] == [
+        [case_id] for case_id in case_ids
+    ]
+    offline_lane = lanes["lanes"]
+    assert offline_lane["lane"] == "offline_gate"
+    assert offline_lane["provider_adapter"] == "ScriptedModelProvider"
+    assert offline_lane["network_access"] == "FORBIDDEN"
+    assert offline_lane["release_gate"] is True
+    assert offline_lane["case_refs"] == case_ids
+    assert manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
+    assert manifest["eval_result_artifacts_created"] is False
+    assert manifest["baseline_result_artifacts_created"] is False
+
+
+def test_cycle2_manifest_authenticates_exact_companion_bytes() -> None:
+    manifest = _load_json(CYCLE2_MANIFEST_PATH)
+    entries = manifest["artifacts"]
+    assert [entry["path"] for entry in entries] == [
+        "evals/fixtures/e2e01-cycle2.v1.json",
+        "evals/cases/e2e01-cycle2.v1.json",
+        "evals/model_scripts/e2e01-cycle2.v1.json",
+        "evals/lanes/e2e01-cycle2.v1.json",
+    ]
+    assert manifest["default_offline_artifact_refs"] == [
+        entry["artifact_id"] for entry in entries
+    ]
+    for entry in entries:
+        path = REPO_ROOT / entry["path"]
+        document = _load_json(path)
+        assert document["artifact_id"] == entry["artifact_id"]
+        assert document[entry["version_field"]] == entry["version"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]
+
+
+def test_cycle2_loader_authenticates_without_activating_cases() -> None:
+    bundle = artifacts_module.load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:cycle2",
+        runtime_version="runtime:cycle2",
+    )
+    assert bundle.candidate_version == "candidate:cycle2"
+    assert bundle.runtime_version == "runtime:cycle2"
+    assert len(bundle.cases) == 27
+    assert {case.lifecycle_status for case in bundle.cases} == {
+        "CONTRACT_DEFINED"
+    }
+    assert bundle.lane_by_name("offline_gate").case_refs == tuple(
+        case.case_id for case in bundle.cases
+    )
+    assert not hasattr(harness_module, "load_e2e01_cycle2_artifacts")
+
+
+def test_cycle2_predicates_use_closed_names_arity_and_symbols() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    signatures = {
+        "REQ_BINDING": 3,
+        "REQ_TOOL": 5,
+        "REQ_ATTEMPT": 6,
+        "REQ_UNFINISHED_ATTEMPT": 2,
+        "REQ_OBSERVATION": 4,
+        "REQ_CANDIDATE_SET": 4,
+        "REQ_SELECTION": 4,
+        "REQ_ASSESSMENT": 3,
+        "REQ_PAIR": 5,
+        "REQ_RECOVERY": 5,
+        "REQ_STOP": 2,
+        "REQ_RUN_NO_RESULT_CLOSURE": 4,
+    }
+    symbols = {
+        "$QUERY_BINDING_REF",
+        "$ORDINAL_BINDING_REF",
+        "$ORDER_BINDING_REF",
+        "$CLAIM_BINDING_REF",
+        "$TASK_VERSION_AT_GATE",
+        "$SEARCH_BASE_TASK_VERSION",
+        "$SEARCH_RESULT_TASK_VERSION",
+        "$SELECTION_EXPECTED_TASK_VERSION",
+        "$SELECTION_RESULT_TASK_VERSION",
+        "$SEARCH_OBSERVATION_REF",
+        "$SEARCH_SOURCE_VERSION",
+        "$CANDIDATE_REF_ORDINAL_2",
+        "$STALE_SHIPMENT_OBSERVATION_REF",
+        "$STALE_SHIPMENT_SOURCE_VERSION",
+        "$SHIPMENT_OBSERVATION_REF",
+        "$SHIPMENT_SOURCE_VERSION",
+        "$REGISTRY_SNAPSHOT_DIGEST",
+        "$MODEL_VISIBLE_TOOLSET_HASH",
+        "$PROVIDER_MAPPING_DIGEST",
+        "$OWNER_ORDER_INITIAL_STATE_DIGEST",
+    }
+    for case in dataset["cases"]:
+        expectations = case["expectations"]
+        for predicate in expectations["required_events"]:
+            match = re.fullmatch(r"([A-Z_]+)\(([^()]*)\)", predicate)
+            assert match is not None
+            name, operands = match.groups()
+            assert name in signatures
+            values = operands.split(",")
+            assert len(values) == signatures[name]
+            assert all(value == value.strip() and value for value in values)
+            assert {value for value in values if value.startswith("$")} <= symbols
+        assert all(
+            re.fullmatch(r"FORBID_[A-Z0-9_]+", predicate)
+            for predicate in expectations["forbidden_events"]
+        )
+
+
+def test_cycle2_bundle_has_no_action_or_result_artifact_content() -> None:
+    serialized = "\n".join(
+        path.read_text(encoding="utf-8") for path in CYCLE2_ARTIFACT_PATHS
+    )
+    assert "CONTRACT_DEFINED" in serialized
+    for forbidden in (
+        "EXECUTABLE",
+        "REGRESSION_GATE",
+        "create_refund",
+        "ActionLedger",
+        "ACTION_LEDGER",
+        "idempotency_key",
+        "confirmation_token",
+        "\"artifact_type\": \"EVAL_RESULT\"",
+        "grader_result",
+        "trace_events",
+        "business_evidence",
+    ):
+        assert forbidden not in serialized
+
+
+def test_cycle2_loader_fails_closed_on_missing_or_digest_drift(
+    tmp_path: Path,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path / "missing")
+    (root / "evals/fixtures/e2e01-cycle2.v1.json").unlink()
+    with pytest.raises(artifacts_module.ArtifactIntegrityError):
+        artifacts_module.load_e2e01_cycle2_artifacts(
+            root,
+            candidate_version="candidate:cycle2",
+        )
+
+    root = _copy_cycle2_artifacts(tmp_path / "drift")
+    (root / "evals/cases/e2e01-cycle2.v1.json").write_bytes(b"{not-json")
+    with pytest.raises(
+        artifacts_module.ArtifactIntegrityError,
+        match="exact-byte digest",
+    ):
+        artifacts_module.load_e2e01_cycle2_artifacts(
+            root,
+            candidate_version="candidate:cycle2",
+        )
+
+
+def test_cycle2_loader_fails_closed_on_extra_manifest_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    manifest_path = root / "evals/manifests/e2e01-cycle2.v1.json"
+    manifest = _load_json(manifest_path)
+    manifest["artifacts"].append(dict(manifest["artifacts"][0]))
+    _write_cycle2_json(manifest_path, manifest)
+    monkeypatch.setattr(
+        artifacts_module,
+        "CYCLE2_EXPECTED_MANIFEST_SHA256",
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    )
+
+    with pytest.raises(
+        artifacts_module.ArtifactContractError,
+        match="manifest artifact set",
+    ):
+        artifacts_module.load_e2e01_cycle2_artifacts(
+            root,
+            candidate_version="candidate:cycle2",
+        )
+
+
+def test_cycle2_loader_fails_closed_on_wrong_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    relative = "evals/lanes/e2e01-cycle2.v1.json"
+    lane_path = root / relative
+    lane = _load_json(lane_path)
+    lane["lanes"]["network_access"] = "OPTIONAL"
+    _write_cycle2_json(lane_path, lane)
+    _reauthenticate_cycle2_artifact(root, relative, monkeypatch)
+
+    with pytest.raises(
+        artifacts_module.ArtifactContractError,
+        match="offline lane",
+    ):
+        artifacts_module.load_e2e01_cycle2_artifacts(
+            root,
+            candidate_version="candidate:cycle2",
+        )
+
+
+def test_cycle2_loader_fails_closed_on_predicate_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    relative = "evals/cases/e2e01-cycle2.v1.json"
+    cases_path = root / relative
+    dataset = _load_json(cases_path)
+    dataset["cases"][0]["expectations"]["required_events"][1] = (
+        "REQ_TOOL(search_orders,1)"
+    )
+    _write_cycle2_json(cases_path, dataset)
+    _reauthenticate_cycle2_artifact(root, relative, monkeypatch)
+
+    with pytest.raises(
+        artifacts_module.ArtifactContractError,
+        match="predicate operands",
+    ):
+        artifacts_module.load_e2e01_cycle2_artifacts(
+            root,
+            candidate_version="candidate:cycle2",
+        )

@@ -1,0 +1,700 @@
+{
+  "artifact_type": "SCRIPTED_SCENARIO_CATALOG",
+  "artifact_id": "e2e01-cycle2-model-scripts",
+  "schema_version": "e2e01-cycle2-model-script-schema-v1",
+  "model_script_catalog_version": "e2e01-cycle2-model-scripts-v1",
+  "provider": "ScriptedModelProvider",
+  "network_access": "FORBIDDEN",
+  "credential_inputs": [],
+  "version_manifest_ref": {
+    "artifact_id": "e2e01-cycle2-version-manifest",
+    "path": "evals/manifests/e2e01-cycle2.v1.json"
+  },
+  "scenarios": [
+    {
+      "model_script_ref": "script:E2E01-02/unique-own-with-foreign-decoy",
+      "case_refs": [
+        "E2E01-02/unique-own-with-foreign-decoy"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_SEARCH_ORDERS",
+          "candidate_arguments": {
+            "product_description": "鞋"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_ORDER",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-02/no-match-safe-not-found",
+      "case_refs": [
+        "E2E01-02/no-match-safe-not-found"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_SEARCH_ORDERS",
+          "candidate_arguments": {
+            "product_description": "鞋"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-03/multiple-minimum-summary",
+      "case_refs": [
+        "E2E01-03/multiple-minimum-summary"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_SEARCH_ORDERS",
+          "candidate_arguments": {
+            "product_description": "鞋"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_CANDIDATE_QUESTION",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-03/current-second-selected",
+      "case_refs": [
+        "E2E01-03/current-second-selected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_ORDER",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-03/expired-second-rejected",
+      "case_refs": [
+        "E2E01-03/expired-second-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-03/cross-task-second-rejected",
+      "case_refs": [
+        "E2E01-03/cross-task-second-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-05/order-only-no-shipment",
+      "case_refs": [
+        "E2E01-05/order-only-no-shipment"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_ORDER",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_ORDER_SUMMARY",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-05/logistics-required-uses-shipment",
+      "case_refs": [
+        "E2E01-05/logistics-required-uses-shipment"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_ORDER",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/stale-refresh-success",
+      "case_refs": [
+        "E2E01-06/stale-refresh-success"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/transient-once-then-success",
+      "case_refs": [
+        "E2E01-06/transient-once-then-success"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_TOOL_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:transient-once-v1"
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/transient-exhausted-blocked",
+      "case_refs": [
+        "E2E01-06/transient-exhausted-blocked"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_TOOL_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:transient-always-v1"
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/deterministic-source-integrity-no-retry",
+      "case_refs": [
+        "E2E01-06/deterministic-source-integrity-no-retry"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_TOOL_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:source-integrity-v1"
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/insufficient-promise-need-human",
+      "case_refs": [
+        "E2E01-06/insufficient-promise-need-human"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:E2E01-06/no-shipment-need-human",
+      "case_refs": [
+        "E2E01-06/no-shipment-need-human"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-candidate-owner-mismatch-rejected",
+      "case_refs": [
+        "T2-candidate-owner-mismatch-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-candidate-superseded-rejected",
+      "case_refs": [
+        "T2-candidate-superseded-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-candidate-out-of-range-rejected",
+      "case_refs": [
+        "T2-candidate-out-of-range-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 6
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-candidate-zero-or-multiple-current-rejected",
+      "case_refs": [
+        "T2-candidate-zero-or-multiple-current-rejected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_CANDIDATE_SELECTION",
+          "candidate_arguments": {
+            "candidate_ordinal": 2
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-assessment-delayed-boundary",
+      "case_refs": [
+        "T2-assessment-delayed-boundary"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-assessment-delivered-not-received-current-claim",
+      "case_refs": [
+        "T2-assessment-delivered-not-received-current-claim"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-assessment-claim-corrected",
+      "case_refs": [
+        "T2-assessment-claim-corrected"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-timeout-after-dispatch-then-success",
+      "case_refs": [
+        "T2-timeout-after-dispatch-then-success"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_TOOL_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:timeout-after-dispatch-once-v1"
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-retry-finalize-before-second-fence-recovery",
+      "case_refs": [
+        "T2-retry-finalize-before-second-fence-recovery"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:restart-after-retry-finalize-v1"
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-retry-finalize-before-second-fence-state-invalidated",
+      "case_refs": [
+        "T2-retry-finalize-before-second-fence-state-invalidated"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1"
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-retry-unfinished-attempt-restart-blocked",
+      "case_refs": [
+        "T2-retry-unfinished-attempt-restart-blocked"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "FAULT_DIRECTIVE",
+          "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
+          "candidate_arguments": {},
+          "fault_ref": "fault:get-shipment:restart-with-unfinished-attempt-v1"
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-refresh-returns-already-stale-blocked",
+      "case_refs": [
+        "T2-refresh-returns-already-stale-blocked"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    },
+    {
+      "model_script_ref": "script:T2-two-active-packages-integrity-blocked",
+      "case_refs": [
+        "T2-two-active-packages-integrity-blocked"
+      ],
+      "steps": [
+        {
+          "purpose": "REQUEST_UNDERSTANDING",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {
+            "order_id": "O-1001"
+          }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_FIXED_RESPONSE",
+          "candidate_arguments": {}
+        }
+      ],
+      "expected_control_result": {
+        "authority": "NONE",
+        "sut_result_source": "DETERMINISTIC_RUNTIME_ONLY"
+      }
+    }
+  ]
+}
