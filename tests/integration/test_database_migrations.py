@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from mini_agent.application.persistence import (
     P0_RECORD_SCHEMA_VERSION_CATALOG,
     P0RecordCode,
 )
+from mini_agent.core.order import OrderStatus
 from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, AgentRunRecordV2
 from mini_agent.infrastructure.persistence import models as persistence_models
 from mini_agent.infrastructure.persistence.database import (
@@ -36,6 +38,7 @@ from mini_agent.infrastructure.persistence.models import (
     Base,
     MockOrderModel,
     MockOrderSearchDocumentModel,
+    MockOrderSearchSnapshotModel,
     MockShipmentModel,
     P0RecordModel,
     P0RecordReferenceModel,
@@ -58,6 +61,12 @@ _MIGRATION_REVISION = "20260728_0003"
 _PREVIOUS_MIGRATION_REVISION = "20260727_0002"
 _CYCLE2_MIGRATION_REVISION = "20260731_0004"
 _CYCLE2_PREVIOUS_MIGRATION_REVISION = _MIGRATION_REVISION
+_SEARCH_AUTHORITY_MIGRATION_REVISION = "20260802_0005"
+_SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION = _CYCLE2_MIGRATION_REVISION
+_SEARCH_AUTHORITY_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic/versions/20260802_0005_cycle2_search_authority_correction.py"
+)
 _CYCLE2_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "alembic/versions/20260731_0004_cycle2_records_v2.py"
@@ -76,6 +85,13 @@ _DOWNGRADE_BLOCKED_MESSAGE = (
 _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE = (
     "cannot downgrade cycle2 physical schema after v2-only evidence"
 )
+_SEARCH_AUTHORITY_UPGRADE_BLOCKED_MESSAGE = (
+    "cannot correct order search authority from invalid source rows"
+)
+_SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE = (
+    "cannot downgrade order search authority while durable evidence exists"
+)
+_ORDER_STATUS_VALUES = tuple(status.value for status in OrderStatus)
 _V1_CODE_VERSION_PAIRS = (
     ("agent_run_record", "agent_run_record.p0.v1"),
     ("context_manifest_record", "context_manifest_record.p0.v1"),
@@ -137,6 +153,97 @@ _ACTIVE_CODE_VERSION_PAIRS = tuple(
     for pair in _CYCLE2_CODE_VERSION_PAIRS
     if pair != _REQUEST_UNDERSTANDING_V1_PAIR
 )
+
+
+def _search_snapshot_payload(
+    *,
+    customer_id: str = "customer-snapshot",
+    candidate_count: int = 1,
+    truncated: bool = False,
+) -> dict[str, object]:
+    return {
+        "source_version_schema": ("mock-order-search-snapshot-source-version.p0.v1"),
+        "owner_customer_id": customer_id,
+        "normalized_query": "轻量跑鞋",
+        "ordered_at_from": "2026-05-04T08:00:00.000000Z",
+        "ordered_at_to": "2026-08-02T08:00:00.000000Z",
+        "max_candidates": 5,
+        "matching_rule_version": "order-search-matching.p0.v1",
+        "ordered_candidates": [
+            {
+                "ordinal": ordinal,
+                "owner_scoped_order_ref": f"order-ref-{ordinal}",
+                "candidate_source_version": (
+                    "mock-order-search-candidate-source-version.p0.v1:sha256:"
+                    + f"{ordinal:064x}"
+                ),
+            }
+            for ordinal in range(1, candidate_count + 1)
+        ],
+        "truncated": truncated,
+    }
+
+
+def _insert_legacy_search_authority(
+    connection,
+    *,
+    customer_id: str,
+    order_id: str,
+    order_number: str | None = None,
+    order_payload: object | None = None,
+) -> None:
+    search_order_number = order_number or order_id
+    payload = (
+        {"order_number": order_id, "status": OrderStatus.SHIPPED.value}
+        if order_payload is None
+        else order_payload
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO mock_orders (customer_id, order_id, order_payload)
+            VALUES (:customer_id, :order_id, CAST(:order_payload AS jsonb))
+            """
+        ),
+        {
+            "customer_id": customer_id,
+            "order_id": order_id,
+            "order_payload": json.dumps(payload, separators=(",", ":")),
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO mock_order_search_documents (
+                customer_id,
+                order_id,
+                line_ordinal,
+                ordered_at,
+                order_number,
+                product_name,
+                quantity,
+                product_category,
+                search_aliases
+            ) VALUES (
+                :customer_id,
+                :order_id,
+                1,
+                :ordered_at,
+                :order_number,
+                'legacy search item',
+                1,
+                'legacy-category',
+                CAST('["legacy"]' AS jsonb)
+            )
+            """
+        ),
+        {
+            "customer_id": customer_id,
+            "order_id": order_id,
+            "ordered_at": datetime(2026, 7, 20, tzinfo=timezone.utc),
+            "order_number": search_order_number,
+        },
+    )
 
 
 def _module_literal(tree: ast.Module, name: str) -> object:
@@ -602,7 +709,7 @@ def test_request_understanding_v2_expand_is_single_linear_alembic_head() -> None
         )
     )
 
-    assert tuple(script.get_heads()) == (_CYCLE2_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
     revision = script.get_revision(_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREVIOUS_MIGRATION_REVISION
@@ -617,7 +724,40 @@ def test_cycle2_physical_revision_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_CYCLE2_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _CYCLE2_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_CYCLE2_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
+
+
+def test_search_authority_correction_is_single_linear_alembic_head() -> None:
+    assert _SEARCH_AUTHORITY_MIGRATION_PATH.is_file()
+    script = ScriptDirectory.from_config(
+        alembic_config(DEFAULT_LOCAL_TEST_DATABASE_URL, testing=True)
+    )
+
+    revision = script.get_revision(_SEARCH_AUTHORITY_MIGRATION_REVISION)
+    assert revision is not None
+    assert revision.down_revision == _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
+    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
+
+
+def test_search_authority_correction_source_is_self_contained_and_frozen() -> None:
+    source = _SEARCH_AUTHORITY_MIGRATION_PATH.read_text()
+    tree = ast.parse(source)
+
+    assert "mini_agent" not in source
+    assert _module_literal(tree, "revision") == _SEARCH_AUTHORITY_MIGRATION_REVISION
+    assert _module_literal(tree, "down_revision") == (
+        _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
+    )
+    assert _module_literal(tree, "branch_labels") is None
+    assert _module_literal(tree, "depends_on") is None
+    assert _module_literal(tree, "_ORDER_STATUS_VALUES") == _ORDER_STATUS_VALUES
+    assert _module_literal(tree, "_ORDER_STATUS_CHECK") == (
+        "status IN ('CREATED', 'PAID', 'FULFILLING', 'SHIPPED', "
+        "'DELIVERED', 'CANCELLED')"
+    )
+    assert _SEARCH_AUTHORITY_UPGRADE_BLOCKED_MESSAGE in source
+    assert _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE in source
+    assert "server_default" not in source
 
 
 def test_phase1_head_upgrade_converts_exact_v1_record_and_downgrades_losslessly(
@@ -739,7 +879,7 @@ def test_cycle2_downgrade_blocks_new_top_level_evidence_before_mutation(
 
         assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
         assert "must-not-leak-from-v2-only-evidence" not in str(captured.value)
-        assert _migration_revision(engine) == _CYCLE2_MIGRATION_REVISION
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
         assert _record_row(engine, record_id) == before
     finally:
         engine.dispose()
@@ -764,16 +904,606 @@ def test_empty_and_phase1_head_upgrade_paths_converge_to_exact_structure(
             phase1_config,
             _CYCLE2_PREVIOUS_MIGRATION_REVISION,
         )
-        command.upgrade(phase1_config, _CYCLE2_MIGRATION_REVISION)
+        command.upgrade(phase1_config, _SEARCH_AUTHORITY_MIGRATION_REVISION)
 
-        assert _migration_revision(empty_engine) == _CYCLE2_MIGRATION_REVISION
-        assert _migration_revision(phase1_engine) == _CYCLE2_MIGRATION_REVISION
+        assert _migration_revision(empty_engine) == (
+            _SEARCH_AUTHORITY_MIGRATION_REVISION
+        )
+        assert _migration_revision(phase1_engine) == (
+            _SEARCH_AUTHORITY_MIGRATION_REVISION
+        )
         assert _schema_structure(phase1_engine) == empty_structure
     finally:
         empty_engine.dispose()
         phase1_engine.dispose()
         postgres_namespace_factory.drop(empty_path)
         postgres_namespace_factory.drop(phase1_path)
+
+
+def test_search_authority_upgrade_backfills_status_and_preserves_order_payload_bytes(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("search-authority-backfill")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    payload = {
+        "order_number": "O-8101",
+        "status": OrderStatus.SHIPPED.value,
+        "line_items": [{"product_name": "legacy search item", "quantity": 1}],
+        "ordered_at": "2026-07-20T00:00:00Z",
+        "status_updated_at": "2026-07-21T00:00:00Z",
+    }
+    try:
+        command.downgrade(config, _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION)
+        with engine.begin() as connection:
+            _insert_legacy_search_authority(
+                connection,
+                customer_id="customer-backfill",
+                order_id="O-8101",
+                order_payload=payload,
+            )
+        with engine.connect() as connection:
+            before_bytes = connection.scalar(
+                text(
+                    "SELECT convert_to(order_payload::text, 'UTF8') "
+                    "FROM mock_orders WHERE customer_id = :customer_id "
+                    "AND order_id = :order_id"
+                ),
+                {"customer_id": "customer-backfill", "order_id": "O-8101"},
+            )
+
+        command.upgrade(config, _SEARCH_AUTHORITY_MIGRATION_REVISION)
+
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT status FROM mock_order_search_documents "
+                    "WHERE customer_id = :customer_id AND order_id = :order_id"
+                ),
+                {"customer_id": "customer-backfill", "order_id": "O-8101"},
+            ).one()
+            after_bytes = connection.scalar(
+                text(
+                    "SELECT convert_to(order_payload::text, 'UTF8') "
+                    "FROM mock_orders WHERE customer_id = :customer_id "
+                    "AND order_id = :order_id"
+                ),
+                {"customer_id": "customer-backfill", "order_id": "O-8101"},
+            )
+        assert row.status == OrderStatus.SHIPPED.value
+        assert after_bytes == before_bytes
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    ("order_payload", "search_order_number"),
+    (
+        ({"order_number": "O-8201"}, "O-8201"),
+        ({"order_number": "O-8201", "status": None}, "O-8201"),
+        ({"order_number": "O-8201", "status": 3}, "O-8201"),
+        ({"order_number": "O-8201", "status": "UNKNOWN"}, "O-8201"),
+        ({"order_number": "O-9999", "status": "SHIPPED"}, "O-8201"),
+        ({"order_number": "O-8201", "status": "SHIPPED"}, "O-9999"),
+        (["not-an-object"], "O-8201"),
+    ),
+)
+def test_search_authority_upgrade_rejects_invalid_source_atomically(
+    postgres_namespace_factory,
+    order_payload: object,
+    search_order_number: str,
+) -> None:
+    namespace = postgres_namespace_factory.create("search-authority-invalid-source")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        command.downgrade(config, _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION)
+        with engine.begin() as connection:
+            _insert_legacy_search_authority(
+                connection,
+                customer_id="customer-invalid",
+                order_id="O-8201",
+                order_number=search_order_number,
+                order_payload=order_payload,
+            )
+            original_payload = connection.scalar(
+                text(
+                    "SELECT order_payload FROM mock_orders "
+                    "WHERE customer_id = 'customer-invalid'"
+                )
+            )
+
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _SEARCH_AUTHORITY_MIGRATION_REVISION)
+
+        assert str(captured.value) == _SEARCH_AUTHORITY_UPGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == (
+            _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
+        )
+        inspector = inspect(engine)
+        assert "status" not in {
+            column["name"]
+            for column in inspector.get_columns("mock_order_search_documents")
+        }
+        assert "mock_order_search_snapshots" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT order_payload FROM mock_orders "
+                        "WHERE customer_id = 'customer-invalid'"
+                    )
+                )
+                == original_payload
+            )
+            assert (
+                connection.scalar(
+                    text("SELECT count(*) FROM mock_order_search_documents")
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_search_status_constraint_is_exact_closed_core_enum(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    ordered_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    try:
+        assert persistence_models._ORDER_STATUS_VALUES == _ORDER_STATUS_VALUES
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.insert().values(
+                    customer_id="customer-status",
+                    order_id="O-8301",
+                    order_payload={
+                        "order_number": "O-8301",
+                        "status": OrderStatus.CREATED.value,
+                    },
+                )
+            )
+            for ordinal, status in enumerate(_ORDER_STATUS_VALUES, start=1):
+                connection.execute(
+                    MockOrderSearchDocumentModel.__table__.insert().values(
+                        customer_id="customer-status",
+                        order_id="O-8301",
+                        line_ordinal=ordinal,
+                        ordered_at=ordered_at,
+                        order_number="O-8301",
+                        status=status,
+                        product_name=f"status-{status}",
+                        quantity=1,
+                        product_category="status-test",
+                        search_aliases=[],
+                    )
+                )
+
+        with engine.connect() as connection:
+            assert (
+                tuple(
+                    connection.scalars(
+                        select(MockOrderSearchDocumentModel.status).order_by(
+                            MockOrderSearchDocumentModel.line_ordinal
+                        )
+                    )
+                )
+                == _ORDER_STATUS_VALUES
+            )
+
+        for line_ordinal, invalid_status in ((10, None), (11, "UNKNOWN"), (12, 3)):
+            with pytest.raises(IntegrityError):
+                with engine.begin() as connection:
+                    connection.execute(
+                        MockOrderSearchDocumentModel.__table__.insert().values(
+                            customer_id="customer-status",
+                            order_id="O-8301",
+                            line_ordinal=line_ordinal,
+                            ordered_at=ordered_at,
+                            order_number="O-8301",
+                            status=invalid_status,
+                            product_name="invalid-status",
+                            quantity=1,
+                            product_category="status-test",
+                            search_aliases=[],
+                        )
+                    )
+    finally:
+        engine.dispose()
+
+
+def test_raw_search_snapshot_is_owner_scoped_and_canonical_shape_only(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    snapshot_ref = uuid4()
+    five_candidate_ref = uuid4()
+    observed_at = datetime(2026, 8, 2, 8, 0, tzinfo=timezone.utc)
+    payload = _search_snapshot_payload()
+    five_candidate_payload = _search_snapshot_payload(
+        candidate_count=5,
+        truncated=True,
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderSearchSnapshotModel.__table__.insert().values(
+                    snapshot_resource_ref=snapshot_ref,
+                    customer_id="customer-snapshot",
+                    observed_at=observed_at,
+                    snapshot_payload=payload,
+                )
+            )
+            connection.execute(
+                MockOrderSearchSnapshotModel.__table__.insert().values(
+                    snapshot_resource_ref=five_candidate_ref,
+                    customer_id="customer-snapshot",
+                    observed_at=observed_at,
+                    snapshot_payload=five_candidate_payload,
+                )
+            )
+
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(MockOrderSearchSnapshotModel.snapshot_payload).where(
+                        MockOrderSearchSnapshotModel.customer_id == "customer-snapshot",
+                        MockOrderSearchSnapshotModel.snapshot_resource_ref
+                        == snapshot_ref,
+                    )
+                )
+                == payload
+            )
+            assert (
+                connection.scalar(
+                    select(MockOrderSearchSnapshotModel.snapshot_resource_ref).where(
+                        MockOrderSearchSnapshotModel.customer_id == "customer-foreign",
+                        MockOrderSearchSnapshotModel.snapshot_resource_ref
+                        == snapshot_ref,
+                    )
+                )
+                is None
+            )
+            assert (
+                connection.scalar(
+                    select(func.count()).select_from(MockOrderSearchSnapshotModel)
+                )
+                == 2
+            )
+
+        invalid_payloads: list[dict[str, object]] = []
+        extra_top_level = _search_snapshot_payload()
+        extra_top_level["private_raw"] = "forbidden"
+        invalid_payloads.append(extra_top_level)
+        wrong_owner = _search_snapshot_payload(customer_id="customer-foreign")
+        invalid_payloads.append(wrong_owner)
+        truncated_too_early = _search_snapshot_payload(truncated=True)
+        invalid_payloads.append(truncated_too_early)
+        float_max_candidates = _search_snapshot_payload()
+        float_max_candidates["max_candidates"] = 5.0
+        invalid_payloads.append(float_max_candidates)
+        for candidate_update in (
+            {"ordinal": 2},
+            {"owner_scoped_order_ref": ""},
+            {"candidate_source_version": "invalid-token"},
+            {"extra": "forbidden"},
+        ):
+            nested_invalid = _search_snapshot_payload()
+            candidate = nested_invalid["ordered_candidates"][0]
+            assert isinstance(candidate, dict)
+            candidate.update(candidate_update)
+            invalid_payloads.append(nested_invalid)
+        float_ordinal = _search_snapshot_payload()
+        candidate = float_ordinal["ordered_candidates"][0]
+        assert isinstance(candidate, dict)
+        candidate["ordinal"] = 1.0
+        invalid_payloads.append(float_ordinal)
+        second_ordinal_drift = _search_snapshot_payload(
+            candidate_count=5,
+            truncated=True,
+        )
+        candidate = second_ordinal_drift["ordered_candidates"][1]
+        assert isinstance(candidate, dict)
+        candidate["ordinal"] = 3
+        invalid_payloads.append(second_ordinal_drift)
+        non_object_candidate = _search_snapshot_payload()
+        candidates = non_object_candidate["ordered_candidates"]
+        assert isinstance(candidates, list)
+        candidates[0] = "not-an-object"
+        invalid_payloads.append(non_object_candidate)
+        missing_candidate_key = _search_snapshot_payload()
+        candidate = missing_candidate_key["ordered_candidates"][0]
+        assert isinstance(candidate, dict)
+        candidate.pop("candidate_source_version")
+        invalid_payloads.append(missing_candidate_key)
+
+        for invalid_payload in invalid_payloads:
+            with pytest.raises(IntegrityError):
+                with engine.begin() as connection:
+                    connection.execute(
+                        MockOrderSearchSnapshotModel.__table__.insert().values(
+                            snapshot_resource_ref=uuid4(),
+                            customer_id="customer-snapshot",
+                            observed_at=observed_at,
+                            snapshot_payload=invalid_payload,
+                        )
+                    )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    MockOrderSearchSnapshotModel.__table__.insert().values(
+                        snapshot_resource_ref=snapshot_ref,
+                        customer_id="customer-snapshot",
+                        observed_at=observed_at,
+                        snapshot_payload=payload,
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("evidence_kind", ("search-document", "raw-snapshot"))
+def test_search_authority_downgrade_blocks_durable_evidence_before_mutation(
+    postgres_namespace_factory,
+    evidence_kind: str,
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"search-authority-downgrade-{evidence_kind}"
+    )
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    marker = f"must-not-leak-{evidence_kind}"
+    try:
+        with engine.begin() as connection:
+            if evidence_kind == "search-document":
+                connection.execute(
+                    MockOrderModel.__table__.insert().values(
+                        customer_id="customer-downgrade",
+                        order_id="O-8401",
+                        order_payload={
+                            "order_number": "O-8401",
+                            "status": OrderStatus.SHIPPED.value,
+                        },
+                    )
+                )
+                connection.execute(
+                    MockOrderSearchDocumentModel.__table__.insert().values(
+                        customer_id="customer-downgrade",
+                        order_id="O-8401",
+                        line_ordinal=1,
+                        ordered_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                        order_number="O-8401",
+                        status=OrderStatus.SHIPPED.value,
+                        product_name=marker,
+                        quantity=1,
+                        product_category="downgrade-test",
+                        search_aliases=[],
+                    )
+                )
+            else:
+                connection.execute(
+                    MockOrderSearchSnapshotModel.__table__.insert().values(
+                        snapshot_resource_ref=uuid4(),
+                        customer_id="customer-snapshot",
+                        observed_at=datetime(2026, 8, 2, 8, 0, tzinfo=timezone.utc),
+                        snapshot_payload=_search_snapshot_payload(),
+                    )
+                )
+
+        with pytest.raises(RuntimeError) as captured:
+            command.downgrade(
+                config,
+                _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION,
+            )
+
+        assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
+        assert marker not in str(captured.value)
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        inspector = inspect(engine)
+        assert "mock_order_search_snapshots" in inspector.get_table_names()
+        assert "status" in {
+            column["name"]
+            for column in inspector.get_columns("mock_order_search_documents")
+        }
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_empty_search_authority_downgrade_is_reversible_and_preserves_orders(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("search-authority-empty-downgrade")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.insert().values(
+                    customer_id="customer-order-only",
+                    order_id="O-8501",
+                    order_payload={"order_number": "O-8501", "status": "PAID"},
+                )
+            )
+
+        command.downgrade(config, _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION)
+
+        inspector = inspect(engine)
+        assert "mock_order_search_snapshots" not in inspector.get_table_names()
+        assert "status" not in {
+            column["name"]
+            for column in inspector.get_columns("mock_order_search_documents")
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM mock_orders "
+                        "WHERE customer_id = 'customer-order-only'"
+                    )
+                )
+                == 1
+            )
+
+        command.upgrade(config, _SEARCH_AUTHORITY_MIGRATION_REVISION)
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_search_authority_downgrade_lock_blocks_snapshot_dml(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("search-authority-lock-contract")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    barrier_connection = engine.connect()
+    barrier_transaction = barrier_connection.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    downgrade_future = None
+    try:
+        assert (
+            barrier_connection.scalar(
+                text("SELECT count(*) FROM mock_order_search_snapshots")
+            )
+            == 0
+        )
+        downgrade_future = executor.submit(
+            command.downgrade,
+            config,
+            _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION,
+        )
+        _wait_for_real_downgrade_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name="mock_order_search_snapshots",
+        )
+
+        _assert_lock_timeout(
+            engine,
+            MockOrderSearchSnapshotModel.__table__.insert().values(
+                snapshot_resource_ref=uuid4(),
+                customer_id="customer-lock",
+                observed_at=datetime(2026, 8, 2, 8, 0, tzinfo=timezone.utc),
+                snapshot_payload=_search_snapshot_payload(customer_id="customer-lock"),
+            ),
+        )
+        _assert_lock_timeout(
+            engine,
+            MockOrderSearchSnapshotModel.__table__.update().values(
+                observed_at=datetime(2026, 8, 2, 8, 1, tzinfo=timezone.utc)
+            ),
+        )
+    finally:
+        barrier_transaction.rollback()
+        barrier_connection.close()
+        executor.shutdown(wait=True)
+
+    try:
+        assert downgrade_future is not None
+        assert downgrade_future.result(timeout=10) is None
+        assert _migration_revision(engine) == (
+            _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
+        )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_search_authority_downgrade_waits_for_prior_snapshot_then_fails_bounded(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("search-authority-prior-snapshot")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    marker = "must-not-leak-prior-search-snapshot"
+    writer_connection = engine.connect()
+    writer_transaction = writer_connection.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    downgrade_future = None
+    snapshot_ref = uuid4()
+    try:
+        payload = _search_snapshot_payload()
+        payload["normalized_query"] = marker
+        writer_connection.execute(
+            MockOrderSearchSnapshotModel.__table__.insert().values(
+                snapshot_resource_ref=snapshot_ref,
+                customer_id="customer-snapshot",
+                observed_at=datetime(2026, 8, 2, 8, 0, tzinfo=timezone.utc),
+                snapshot_payload=payload,
+            )
+        )
+
+        downgrade_future = executor.submit(
+            command.downgrade,
+            config,
+            _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION,
+        )
+        _wait_for_pending_table_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name="mock_order_search_snapshots",
+            mode="ShareRowExclusiveLock",
+        )
+
+        writer_transaction.commit()
+        writer_connection.close()
+        writer_transaction = None
+        writer_connection = None
+
+        with pytest.raises(RuntimeError) as captured:
+            downgrade_future.result(timeout=10)
+        assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
+        assert marker not in str(captured.value)
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(MockOrderSearchSnapshotModel.snapshot_resource_ref).where(
+                        MockOrderSearchSnapshotModel.snapshot_resource_ref
+                        == snapshot_ref
+                    )
+                )
+                == snapshot_ref
+            )
+    finally:
+        if writer_transaction is not None:
+            writer_transaction.rollback()
+        if writer_connection is not None:
+            writer_connection.close()
+        executor.shutdown(wait=True)
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
 
 
 def _extension_schema(database_url: str) -> str | None:
@@ -932,6 +1662,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         assert set(inspector.get_table_names()) == {
             "alembic_version",
             "mock_order_search_documents",
+            "mock_order_search_snapshots",
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
@@ -939,6 +1670,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         }
         assert set(Base.metadata.tables) == {
             "mock_order_search_documents",
+            "mock_order_search_snapshots",
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
@@ -950,6 +1682,9 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         assert MockOrderSearchDocumentModel.__tablename__ == (
             "mock_order_search_documents"
         )
+        assert MockOrderSearchSnapshotModel.__tablename__ == (
+            "mock_order_search_snapshots"
+        )
         assert MockShipmentModel.__tablename__ == "mock_shipments"
 
         with engine.connect() as connection:
@@ -958,7 +1693,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == (_CYCLE2_MIGRATION_REVISION)
+            ) == (_SEARCH_AUTHORITY_MIGRATION_REVISION)
     finally:
         engine.dispose()
 
@@ -1163,11 +1898,33 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "line_ordinal",
             "ordered_at",
             "order_number",
+            "status",
             "product_name",
             "quantity",
             "product_category",
             "search_aliases",
         }
+        assert {
+            column["name"]
+            for column in inspector.get_columns("mock_order_search_snapshots")
+        } == {
+            "snapshot_resource_ref",
+            "customer_id",
+            "observed_at",
+            "snapshot_payload",
+        }
+        search_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("mock_order_search_documents")
+        }
+        snapshot_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("mock_order_search_snapshots")
+        }
+        assert search_columns["status"]["nullable"] is False
+        assert search_columns["status"]["default"] is None
+        assert snapshot_columns["snapshot_resource_ref"]["nullable"] is False
+        assert snapshot_columns["snapshot_resource_ref"]["default"] is None
         assert {
             column["name"] for column in inspector.get_columns("mock_shipments")
         } == {
@@ -1255,6 +2012,9 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
         assert inspector.get_pk_constraint("mock_order_search_documents")[
             "constrained_columns"
         ] == ["customer_id", "order_id", "line_ordinal"]
+        assert inspector.get_pk_constraint("mock_order_search_snapshots")[
+            "constrained_columns"
+        ] == ["snapshot_resource_ref"]
         assert inspector.get_pk_constraint("mock_shipments")["constrained_columns"] == [
             "customer_id",
             "order_id",
@@ -1273,6 +2033,7 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
         ]
         assert search_foreign_keys[0]["options"] == {"ondelete": "CASCADE"}
         assert shipment_foreign_keys[0]["options"] == {"ondelete": "CASCADE"}
+        assert inspector.get_foreign_keys("mock_order_search_snapshots") == []
         assert {
             item["name"]
             for item in inspector.get_check_constraints("mock_order_search_documents")
@@ -1280,6 +2041,14 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "ck_mock_order_search_documents_line_ordinal_positive",
             "ck_mock_order_search_documents_quantity_positive",
             "ck_mock_order_search_documents_search_aliases_array",
+            "ck_mock_order_search_documents_status_closed",
+        }
+        assert {
+            item["name"]
+            for item in inspector.get_check_constraints("mock_order_search_snapshots")
+        } == {
+            "ck_mock_order_search_snapshots_candidates_closed",
+            "ck_mock_order_search_snapshots_payload_closed",
         }
         assert {
             item["name"] for item in inspector.get_check_constraints("mock_shipments")
@@ -1289,6 +2058,11 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             for item in inspector.get_indexes("mock_order_search_documents")
             if not item.get("duplicates_constraint")
         } == {"ix_mock_order_search_documents_owner_window"}
+        assert {
+            item["name"]
+            for item in inspector.get_indexes("mock_order_search_snapshots")
+            if not item.get("duplicates_constraint")
+        } == {"ix_mock_order_search_snapshots_owner_ref"}
         assert {
             item["name"]
             for item in inspector.get_indexes("mock_shipments")
@@ -1319,6 +2093,7 @@ def test_cycle2_mock_tables_enforce_owner_order_shape_and_allow_two_packages(
                     line_ordinal=1,
                     ordered_at=ordered_at,
                     order_number="O-1001",
+                    status=OrderStatus.SHIPPED.value,
                     product_name="轻量跑鞋",
                     quantity=1,
                     product_category="running-shoes",
@@ -1363,6 +2138,7 @@ def test_cycle2_mock_tables_enforce_owner_order_shape_and_allow_two_packages(
                             order_id="O-1001",
                             ordered_at=ordered_at,
                             order_number="O-1001",
+                            status=OrderStatus.SHIPPED.value,
                             product_name="invalid",
                             product_category="invalid",
                             **values,
@@ -1713,18 +2489,6 @@ def test_cycle2_downgrade_locks_both_evidence_tables_against_all_dml(
                     parameters=parameters,
                 )
 
-            assert (
-                ddl_barrier_connection.scalar(
-                    text("SELECT count(*) FROM mock_order_search_documents")
-                )
-                == 0
-            )
-            assert (
-                ddl_barrier_connection.scalar(
-                    text("SELECT count(*) FROM mock_shipments")
-                )
-                == 0
-            )
         finally:
             ddl_barrier_transaction.rollback()
             ddl_barrier_connection.close()
@@ -1799,6 +2563,7 @@ def test_cycle2_downgrade_waits_for_prior_evidence_insert_then_fails_bounded(
                         tzinfo=timezone.utc,
                     ),
                     order_number="O-7002",
+                    status=OrderStatus.SHIPPED.value,
                     product_name=marker,
                     quantity=1,
                     product_category="migration-lock-test",
@@ -1834,9 +2599,14 @@ def test_cycle2_downgrade_waits_for_prior_evidence_insert_then_fails_bounded(
 
         with pytest.raises(RuntimeError) as captured:
             downgrade_future.result(timeout=10)
-        assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
+        expected_message = (
+            _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
+            if evidence_table == "mock_order_search_documents"
+            else _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
+        )
+        assert str(captured.value) == expected_message
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _CYCLE2_MIGRATION_REVISION
+        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
         assert evidence_table in inspect(engine).get_table_names()
         with engine.connect() as connection:
             assert (
@@ -1985,6 +2755,7 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
         assert set(inspector.get_table_names()) == {
             "alembic_version",
             "mock_order_search_documents",
+            "mock_order_search_snapshots",
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
@@ -1993,7 +2764,7 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == _CYCLE2_MIGRATION_REVISION
+                == _SEARCH_AUTHORITY_MIGRATION_REVISION
             )
     finally:
         engine.dispose()

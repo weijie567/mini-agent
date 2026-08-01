@@ -27,6 +27,109 @@ def _sql_values(values: tuple[str, ...]) -> str:
 
 
 _RECORD_CODES = tuple(code.value for code in P0RecordCode)
+_ORDER_STATUS_VALUES = (
+    "CREATED",
+    "PAID",
+    "FULFILLING",
+    "SHIPPED",
+    "DELIVERED",
+    "CANCELLED",
+)
+_ORDER_STATUS_CHECK = "status IN (" + _sql_values(_ORDER_STATUS_VALUES) + ")"
+_SEARCH_SNAPSHOT_PAYLOAD_CHECK = """
+jsonb_typeof(snapshot_payload) = 'object'
+AND snapshot_payload ?& ARRAY[
+    'source_version_schema',
+    'owner_customer_id',
+    'normalized_query',
+    'ordered_at_from',
+    'ordered_at_to',
+    'max_candidates',
+    'matching_rule_version',
+    'ordered_candidates',
+    'truncated'
+]
+AND (
+    snapshot_payload - ARRAY[
+        'source_version_schema',
+        'owner_customer_id',
+        'normalized_query',
+        'ordered_at_from',
+        'ordered_at_to',
+        'max_candidates',
+        'matching_rule_version',
+        'ordered_candidates',
+        'truncated'
+    ]::text[]
+) = '{}'::jsonb
+AND jsonb_typeof(snapshot_payload -> 'source_version_schema') = 'string'
+AND snapshot_payload ->> 'source_version_schema' =
+    'mock-order-search-snapshot-source-version.p0.v1'
+AND jsonb_typeof(snapshot_payload -> 'owner_customer_id') = 'string'
+AND snapshot_payload ->> 'owner_customer_id' = customer_id
+AND jsonb_typeof(snapshot_payload -> 'normalized_query') = 'string'
+AND length(snapshot_payload ->> 'normalized_query') BETWEEN 1 AND 80
+AND jsonb_typeof(snapshot_payload -> 'ordered_at_from') = 'string'
+AND snapshot_payload ->> 'ordered_at_from' ~
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$'
+AND jsonb_typeof(snapshot_payload -> 'ordered_at_to') = 'string'
+AND snapshot_payload ->> 'ordered_at_to' ~
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$'
+AND snapshot_payload ->> 'ordered_at_from' <=
+    snapshot_payload ->> 'ordered_at_to'
+AND (
+    (snapshot_payload ->> 'ordered_at_to')::timestamptz
+    - (snapshot_payload ->> 'ordered_at_from')::timestamptz
+) = INTERVAL '90 days'
+AND jsonb_typeof(snapshot_payload -> 'max_candidates') = 'number'
+AND snapshot_payload ->> 'max_candidates' = '5'
+AND jsonb_typeof(snapshot_payload -> 'matching_rule_version') = 'string'
+AND snapshot_payload ->> 'matching_rule_version' =
+    'order-search-matching.p0.v1'
+AND jsonb_typeof(snapshot_payload -> 'ordered_candidates') = 'array'
+AND jsonb_array_length(snapshot_payload -> 'ordered_candidates') BETWEEN 1 AND 5
+AND jsonb_typeof(snapshot_payload -> 'truncated') = 'boolean'
+AND (
+    snapshot_payload -> 'truncated' = 'false'::jsonb
+    OR jsonb_array_length(snapshot_payload -> 'ordered_candidates') = 5
+)
+"""
+
+
+def _search_snapshot_candidate_check(index: int) -> str:
+    candidate = f"(snapshot_payload -> 'ordered_candidates' -> {index})"
+    return f"""
+(
+    jsonb_array_length(snapshot_payload -> 'ordered_candidates') <= {index}
+    OR (
+        jsonb_typeof({candidate}) = 'object'
+        AND {candidate} ?& ARRAY[
+            'ordinal',
+            'owner_scoped_order_ref',
+            'candidate_source_version'
+        ]
+        AND (
+            {candidate} - ARRAY[
+                'ordinal',
+                'owner_scoped_order_ref',
+                'candidate_source_version'
+            ]::text[]
+        ) = '{{}}'::jsonb
+        AND jsonb_typeof({candidate} -> 'ordinal') = 'number'
+        AND {candidate} ->> 'ordinal' = '{index + 1}'
+        AND jsonb_typeof({candidate} -> 'owner_scoped_order_ref') = 'string'
+        AND length({candidate} ->> 'owner_scoped_order_ref') > 0
+        AND jsonb_typeof({candidate} -> 'candidate_source_version') = 'string'
+        AND {candidate} ->> 'candidate_source_version' ~
+            '^mock-order-search-candidate-source-version\\.p0\\.v1:sha256:[0-9a-f]{{64}}$'
+    )
+)
+"""
+
+
+_SEARCH_SNAPSHOT_CANDIDATES_CHECK = " AND ".join(
+    _search_snapshot_candidate_check(index) for index in range(5)
+)
 _PHYSICAL_CODE_VERSION_PAIRS = (
     ("agent_run_record", "agent_run_record.p0.v1"),
     ("context_manifest_record", "context_manifest_record.p0.v1"),
@@ -274,6 +377,10 @@ class MockOrderSearchDocumentModel(Base):
             "jsonb_typeof(search_aliases) = 'array'",
             name="ck_mock_order_search_documents_search_aliases_array",
         ),
+        CheckConstraint(
+            _ORDER_STATUS_CHECK,
+            name="ck_mock_order_search_documents_status_closed",
+        ),
         Index(
             "ix_mock_order_search_documents_owner_window",
             "customer_id",
@@ -292,10 +399,42 @@ class MockOrderSearchDocumentModel(Base):
         nullable=False,
     )
     order_number: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
     product_name: Mapped[str] = mapped_column(String, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     product_category: Mapped[str] = mapped_column(String, nullable=False)
     search_aliases: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+
+
+class MockOrderSearchSnapshotModel(Base):
+    __tablename__ = "mock_order_search_snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("snapshot_resource_ref"),
+        CheckConstraint(
+            _SEARCH_SNAPSHOT_PAYLOAD_CHECK,
+            name="ck_mock_order_search_snapshots_payload_closed",
+        ),
+        CheckConstraint(
+            _SEARCH_SNAPSHOT_CANDIDATES_CHECK,
+            name="ck_mock_order_search_snapshots_candidates_closed",
+        ),
+        Index(
+            "ix_mock_order_search_snapshots_owner_ref",
+            "customer_id",
+            "snapshot_resource_ref",
+        ),
+    )
+
+    snapshot_resource_ref: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    customer_id: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    snapshot_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
 class MockShipmentModel(Base):
