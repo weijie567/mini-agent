@@ -13,8 +13,14 @@ from pydantic import ValidationError
 import mini_agent.core.request_processing as request_processing_module
 import mini_agent.core.request_understanding as request_understanding_module
 import mini_agent.core.task_state as task_state_module
+from mini_agent.core.control_gateway import (
+    Cycle2GatewayCandidate,
+    Cycle2VerifiedOrderTargetFacts,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_processing import (
+    Cycle2ContinuationBindingDecision,
+    Cycle2OrdinalSelectionPreparation,
     InitialAcceptedTaskGraphV2,
     InitialRequestNoTaskDecisionV2,
     InitialRequestRoutableTaskGraphDecisionV2,
@@ -25,10 +31,15 @@ from mini_agent.core.request_processing import (
     RequestUnderstandingV2Error,
     RevalidatedNextMove,
     build_request_understanding_closure_v2,
+    prepare_cycle2_ordinal_selection,
     revalidate_next_move_v2,
+    reduce_cycle2_continuation_candidate,
+    route_cycle2_continuation_next_move,
+    route_cycle2_selected_next_move,
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
     InputSourceKind,
@@ -50,9 +61,17 @@ from mini_agent.core.task_state import (
     CandidateValidationDecision,
     CandidateValidationRecordV2,
     InputValidationStatus,
+    InputBindingV2,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSetEntry,
+    OrderCandidateSetOutcome,
+    OrderCandidateSetRecord,
+    RequestUnitRecord,
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
     TaskStatus,
+    TaskRecord,
+    compute_order_candidate_set_version,
 )
 from mini_agent.core.tool_system import (
     compute_model_visible_toolset_hash,
@@ -5458,3 +5477,820 @@ def test_request_understanding_core_absence_oracle_rejects_dynamic_bypasses() ->
             safe_source,
             filename="safe_source.py",
         ), safe_source
+
+
+C2_SEARCH_SOURCE_VERSION = (
+    "mock-order-search-snapshot-source-version.p0.v1:sha256:" + "a" * 64
+)
+C2_CANDIDATE_SOURCE_VERSIONS = (
+    "mock-order-search-candidate-source-version.p0.v1:sha256:" + "1" * 64,
+    "mock-order-search-candidate-source-version.p0.v1:sha256:" + "2" * 64,
+)
+
+
+def _cycle2_input_candidate(
+    *,
+    message_ref: UUID,
+    name: str,
+    value: object,
+    quote: str,
+) -> Cycle2InputCandidate:
+    return Cycle2InputCandidate(
+        name=name,
+        candidate_value=value,
+        source_ref=message_ref,
+        source_quote=quote,
+        confidence=0.99,
+    )
+
+
+def _cycle2_binding(
+    *,
+    name: str = "order_id",
+    value: object = "O-1001",
+    binding_id: UUID | None = None,
+    source_ref: UUID | None = None,
+    created_at: datetime = NOW - timedelta(minutes=20),
+) -> InputBindingV2:
+    return InputBindingV2(
+        binding_id=binding_id or uuid4(),
+        name=name,
+        normalized_value=value,
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(source_ref or uuid4(),),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _cycle2_current_task_graph(
+    *,
+    binding: InputBindingV2,
+    status: TaskStatus = TaskStatus.ACTIVE,
+    state_version: int = 4,
+    owner: str = "customer-A",
+    task_id: UUID | None = None,
+    request_unit_id: UUID | None = None,
+    open_questions: tuple[str, ...] = (),
+) -> tuple[TaskRecord, RequestUnitRecord]:
+    actual_task_id = task_id or uuid4()
+    task = TaskRecord(
+        task_id=actual_task_id,
+        owner_customer_id=owner,
+        status=status,
+        state_version=state_version,
+        created_at=NOW - timedelta(hours=1),
+        updated_at=NOW - timedelta(minutes=10),
+    )
+    unit = RequestUnitRecord(
+        request_unit_id=request_unit_id or uuid4(),
+        task_id=actual_task_id,
+        goal_text="查找跑鞋订单并处理配送问题",
+        goal_source_refs=(uuid4(),),
+        input_binding_refs=(binding.binding_id,),
+        open_questions=open_questions,
+        status=status,
+        state_version=state_version,
+        created_at=NOW - timedelta(hours=1),
+        updated_at=NOW - timedelta(minutes=10),
+    )
+    return task, unit
+
+
+def _cycle2_candidate_set(
+    *,
+    task: TaskRecord,
+    unit: RequestUnitRecord,
+    query_binding: InputBindingV2,
+    conversation_id: UUID,
+    **overrides: object,
+) -> OrderCandidateSetRecord:
+    entries = (
+        OrderCandidateSetEntry(
+            ordinal=1,
+            observation_candidate_ref=uuid4(),
+            candidate_source_version=C2_CANDIDATE_SOURCE_VERSIONS[0],
+        ),
+        OrderCandidateSetEntry(
+            ordinal=2,
+            observation_candidate_ref=uuid4(),
+            candidate_source_version=C2_CANDIDATE_SOURCE_VERSIONS[1],
+        ),
+    )
+    values: dict[str, object] = {
+        "candidate_set_id": uuid4(),
+        "private_owner_scope_ref": task.owner_customer_id,
+        "conversation_id": conversation_id,
+        "task_id": task.task_id,
+        "request_unit_id": unit.request_unit_id,
+        "outcome": OrderCandidateSetOutcome.MULTIPLE,
+        "base_task_state_version": task.state_version - 1,
+        "result_task_state_version": task.state_version,
+        "selection_expected_task_state_version": task.state_version,
+        "query_binding_refs": (query_binding.binding_id,),
+        "source_tool_call_id": uuid4(),
+        "search_observation_ref": uuid4(),
+        "search_observation_record_schema_version": (
+            "order_search_observation_record.p0.v1"
+        ),
+        "search_observation_source_version": C2_SEARCH_SOURCE_VERSION,
+        "ordered_candidates": entries,
+        "created_at": NOW - timedelta(minutes=10),
+        "valid_until": NOW + timedelta(minutes=5),
+        "supersedes_candidate_set_ref": None,
+    }
+    values.update(overrides)
+    values["candidate_set_version"] = compute_order_candidate_set_version(
+        **{
+            key: value
+            for key, value in values.items()
+            if key != "candidate_set_version"
+        }
+    )
+    return OrderCandidateSetRecord.model_validate(values)
+
+
+def _advance_cycle2_graph_with_binding(
+    *,
+    task: TaskRecord,
+    unit: RequestUnitRecord,
+    binding: InputBindingV2,
+    status: TaskStatus | None = None,
+    close_questions: bool = False,
+) -> tuple[TaskRecord, RequestUnitRecord]:
+    next_status = status or task.status
+    next_task = task.model_copy(
+        update={
+            "status": next_status,
+            "state_version": task.state_version + 1,
+            "updated_at": NOW,
+        }
+    )
+    next_unit = unit.model_copy(
+        update={
+            "input_binding_refs": (*unit.input_binding_refs, binding.binding_id),
+            "open_questions": () if close_questions else unit.open_questions,
+            "status": next_status,
+            "state_version": unit.state_version + 1,
+            "updated_at": NOW,
+        }
+    )
+    return next_task, next_unit
+
+
+def test_cycle2_ordinary_continuation_builds_current_message_claims_only() -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="帮我找轻量 跑鞋",
+        run_id=uuid4(),
+    )
+    initial_binding = _cycle2_binding()
+    task, unit = _cycle2_current_task_graph(binding=initial_binding)
+    product = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="product_description",
+        value="轻量 跑鞋",
+        quote="轻量 跑鞋",
+    )
+
+    decision = reduce_cycle2_continuation_candidate(
+        request_input=request_input,
+        candidate=product,
+        authoritative_messages={message_ref: request_input.original_query},
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(initial_binding,),
+        binding_id=uuid4(),
+        now=NOW,
+    )
+
+    assert isinstance(decision, Cycle2ContinuationBindingDecision)
+    assert decision.base_task_state_version == task.state_version
+    assert decision.result_task_state_version == task.state_version + 1
+    assert decision.input_binding.name == "product_description"
+    assert decision.input_binding.normalized_value == "轻量 跑鞋"
+    assert decision.input_binding.source_refs == (message_ref,)
+    assert decision.input_binding.authority is InputAuthority.USER_CLAIM
+    assert "verified_target_ref" not in type(decision.input_binding).model_fields
+    assert "observation_ref" not in type(decision.input_binding).model_fields
+
+    next_task, next_unit = _advance_cycle2_graph_with_binding(
+        task=task,
+        unit=unit,
+        binding=decision.input_binding,
+    )
+    routed = route_cycle2_continuation_next_move(
+        request_input=request_input,
+        decision=decision,
+        next_move=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="search_orders",
+            arguments={"product_description": "轻量 跑鞋"},
+            base_task_state_version=next_task.state_version,
+        ),
+        customer_context=_customer_context(),
+        current_task=next_task,
+        current_request_unit=next_unit,
+        current_input_bindings=(initial_binding, decision.input_binding),
+        verified_target=None,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        trusted_now=NOW,
+    )
+    assert routed.requested_provider_tool_name == "search_orders"
+    assert routed.argument_binding_refs == (decision.input_binding.binding_id,)
+    assert routed.verified_target_ref is None
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_continuation_next_move(
+            request_input=_request_input_v2(
+                message_ref=uuid4(),
+                message=request_input.original_query,
+                run_id=request_input.run_id,
+            ),
+            decision=decision,
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="search_orders",
+                arguments={"product_description": "轻量 跑鞋"},
+                base_task_state_version=next_task.state_version,
+            ),
+            customer_context=_customer_context(),
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(initial_binding, decision.input_binding),
+            verified_target=None,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+    claim_message_ref = uuid4()
+    claim_request_input = _request_input_v2(
+        message_ref=claim_message_ref,
+        message="物流显示签收，但我还没收到",
+    )
+    not_received = _cycle2_input_candidate(
+        message_ref=claim_message_ref,
+        name="shipment_not_received",
+        value=True,
+        quote="还没收到",
+    )
+    claim = reduce_cycle2_continuation_candidate(
+        request_input=claim_request_input,
+        candidate=not_received,
+        authoritative_messages={
+            claim_message_ref: claim_request_input.original_query
+        },
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(initial_binding,),
+        binding_id=uuid4(),
+        now=NOW,
+    )
+    assert claim.input_binding.name == "shipment_not_received"
+    assert type(claim.input_binding.normalized_value) is bool
+
+
+def test_cycle2_ordinary_continuation_rejects_ordinal_and_noncurrent_source() -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="第二个",
+    )
+    initial_binding = _cycle2_binding(
+        name="product_description",
+        value="跑鞋",
+    )
+    task, unit = _cycle2_current_task_graph(binding=initial_binding)
+    ordinal = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="candidate_ordinal",
+        value=2,
+        quote="第二个",
+    )
+    arguments = {
+        "request_input": request_input,
+        "candidate": ordinal,
+        "authoritative_messages": {message_ref: "第二个"},
+        "customer_context": _customer_context(),
+        "current_task": task,
+        "current_request_unit": unit,
+        "current_input_bindings": (initial_binding,),
+        "binding_id": uuid4(),
+        "now": NOW,
+    }
+
+    with pytest.raises(RequestProcessingError):
+        reduce_cycle2_continuation_candidate(**arguments)
+
+    wrong_source = ordinal.model_copy(update={"source_ref": uuid4()})
+    with pytest.raises(RequestProcessingError):
+        reduce_cycle2_continuation_candidate(
+            **{**arguments, "candidate": wrong_source}
+        )
+
+
+def _cycle2_ordinal_case() -> dict[str, object]:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="第二个",
+        run_id=uuid4(),
+    )
+    query_binding = _cycle2_binding(
+        name="product_description",
+        value="跑鞋",
+    )
+    task, unit = _cycle2_current_task_graph(
+        binding=query_binding,
+        status=TaskStatus.WAITING_USER,
+        open_questions=("请选择一个订单候选",),
+    )
+    conversation_id = uuid4()
+    candidate_set = _cycle2_candidate_set(
+        task=task,
+        unit=unit,
+        query_binding=query_binding,
+        conversation_id=conversation_id,
+    )
+    unit = unit.model_copy(
+        update={"observation_refs": (candidate_set.search_observation_ref,)}
+    )
+    candidate = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="candidate_ordinal",
+        value=2,
+        quote="第二个",
+    )
+    return {
+        "request_input": request_input,
+        "candidate": candidate,
+        "authoritative_messages": {message_ref: "第二个"},
+        "customer_context": _customer_context(),
+        "current_conversation_id": conversation_id,
+        "current_task": task,
+        "current_request_unit": unit,
+        "current_input_bindings": (query_binding,),
+        "current_candidate_sets": (candidate_set,),
+        "pending_candidate_set_ref": candidate_set.candidate_set_id,
+        "superseded_candidate_set_refs": (),
+        "existing_selection_records": (),
+        "binding_id": uuid4(),
+        "now": NOW,
+    }
+
+
+def test_cycle2_ordinal_preparation_requires_current_candidate_capability() -> None:
+    arguments = _cycle2_ordinal_case()
+    preparation = prepare_cycle2_ordinal_selection(**arguments)
+
+    assert isinstance(preparation, Cycle2OrdinalSelectionPreparation)
+    assert preparation.ordinal_input_binding.name == "candidate_ordinal"
+    assert type(preparation.ordinal_input_binding.normalized_value) is int
+    assert preparation.ordinal_input_binding.source_refs == (
+        arguments["request_input"].message_ref,
+    )
+    assert preparation.selection_request.source_message_ref == (
+        arguments["request_input"].message_ref
+    )
+    assert preparation.selection_request.ordinal_input_binding_ref == (
+        preparation.ordinal_input_binding.binding_id
+    )
+    assert "candidate_set_ref" not in type(preparation).model_fields
+    assert "verified_target_ref" not in type(preparation).model_fields
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "zero-set",
+        "multiple-sets",
+        "expired",
+        "superseded",
+        "wrong-owner",
+        "wrong-task",
+        "wrong-version",
+        "missing-pending",
+        "wrong-pending",
+        "missing-question",
+        "wrong-query-binding",
+        "wrong-message",
+        "unique-outcome",
+        "consumed",
+    ],
+)
+def test_cycle2_ordinal_preparation_fails_closed_for_stale_graphs(
+    variant: str,
+) -> None:
+    arguments = _cycle2_ordinal_case()
+    candidate_set = arguments["current_candidate_sets"][0]
+    task = arguments["current_task"]
+    unit = arguments["current_request_unit"]
+
+    if variant == "zero-set":
+        arguments["current_candidate_sets"] = ()
+    elif variant == "multiple-sets":
+        arguments["current_candidate_sets"] = (candidate_set, candidate_set)
+    elif variant == "expired":
+        arguments["now"] = candidate_set.valid_until
+    elif variant == "superseded":
+        arguments["superseded_candidate_set_refs"] = (
+            candidate_set.candidate_set_id,
+        )
+    elif variant == "wrong-owner":
+        arguments["customer_context"] = _customer_context("customer-B")
+    elif variant == "wrong-task":
+        arguments["current_task"] = task.model_copy(update={"task_id": uuid4()})
+    elif variant == "wrong-version":
+        arguments["current_task"] = task.model_copy(update={"state_version": 5})
+        arguments["current_request_unit"] = unit.model_copy(
+            update={"state_version": 5}
+        )
+    elif variant == "missing-pending":
+        arguments["pending_candidate_set_ref"] = None
+    elif variant == "wrong-pending":
+        arguments["pending_candidate_set_ref"] = uuid4()
+    elif variant == "missing-question":
+        arguments["current_request_unit"] = unit.model_copy(
+            update={"open_questions": ()}
+        )
+    elif variant == "wrong-query-binding":
+        arguments["current_input_bindings"] = (
+            _cycle2_binding(name="product_description", value="其他"),
+        )
+    elif variant == "wrong-message":
+        arguments["candidate"] = arguments["candidate"].model_copy(
+            update={"source_ref": uuid4()}
+        )
+    elif variant == "unique-outcome":
+        entry = candidate_set.ordered_candidates[0]
+        unique = _cycle2_candidate_set(
+            task=task,
+            unit=unit,
+            query_binding=arguments["current_input_bindings"][0],
+            conversation_id=arguments["current_conversation_id"],
+            outcome=OrderCandidateSetOutcome.UNIQUE,
+            ordered_candidates=(entry,),
+            selection_expected_task_state_version=None,
+        )
+        arguments["current_candidate_sets"] = (unique,)
+        arguments["pending_candidate_set_ref"] = unique.candidate_set_id
+    else:
+        preparation = prepare_cycle2_ordinal_selection(**arguments)
+        arguments["existing_selection_records"] = (
+            _cycle2_selection_record(
+                preparation=preparation,
+                candidate_set=candidate_set,
+            ),
+        )
+
+    with pytest.raises(RequestProcessingError):
+        prepare_cycle2_ordinal_selection(**arguments)
+
+
+def _cycle2_selection_record(
+    *,
+    preparation: Cycle2OrdinalSelectionPreparation,
+    candidate_set: OrderCandidateSetRecord,
+) -> OrderCandidateSelectionRecord:
+    ordinal = preparation.ordinal_input_binding.normalized_value
+    selected = candidate_set.ordered_candidates[ordinal - 1]
+    return OrderCandidateSelectionRecord(
+        selection_id=uuid4(),
+        private_owner_scope_ref=candidate_set.private_owner_scope_ref,
+        conversation_id=candidate_set.conversation_id,
+        task_id=candidate_set.task_id,
+        request_unit_id=candidate_set.request_unit_id,
+        source_message_ref=preparation.selection_request.source_message_ref,
+        ordinal_input_binding_ref=(
+            preparation.ordinal_input_binding.binding_id
+        ),
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        search_observation_ref=candidate_set.search_observation_ref,
+        search_observation_record_schema_version=(
+            candidate_set.search_observation_record_schema_version
+        ),
+        observation_candidate_ref=selected.observation_candidate_ref,
+        candidate_source_version=selected.candidate_source_version,
+        owner_scoped_order_target_ref="owner-order:2",
+        selected_target_ref=str(uuid4()),
+        base_task_state_version=preparation.base_task_state_version,
+        result_task_state_version=preparation.result_task_state_version,
+        selected_at=NOW,
+    )
+
+
+def test_cycle2_selected_route_derives_target_only_from_committed_selection() -> None:
+    arguments = _cycle2_ordinal_case()
+    preparation = prepare_cycle2_ordinal_selection(**arguments)
+    candidate_set = arguments["current_candidate_sets"][0]
+    selection = _cycle2_selection_record(
+        preparation=preparation,
+        candidate_set=candidate_set,
+    )
+    next_task, next_unit = _advance_cycle2_graph_with_binding(
+        task=arguments["current_task"],
+        unit=arguments["current_request_unit"],
+        binding=preparation.ordinal_input_binding,
+        status=TaskStatus.ACTIVE,
+        close_questions=True,
+    )
+    selected_target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=UUID(selection.selected_target_ref),
+        private_owner_scope_ref=candidate_set.private_owner_scope_ref,
+        owner_customer_id=next_task.owner_customer_id,
+        task_id=next_task.task_id,
+        request_unit_id=next_unit.request_unit_id,
+        task_state_version=next_task.state_version,
+        order_id="O-1002",
+        source_observation_ref=candidate_set.search_observation_ref,
+        source_observation_version=candidate_set.search_observation_source_version,
+        input_binding_refs=(preparation.ordinal_input_binding.binding_id,),
+    )
+    candidate = route_cycle2_selected_next_move(
+        request_input=arguments["request_input"],
+        next_move=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-1002"},
+            base_task_state_version=selection.result_task_state_version,
+        ),
+        customer_context=arguments["customer_context"],
+        current_conversation_id=arguments["current_conversation_id"],
+        current_task=next_task,
+        current_request_unit=next_unit,
+        current_input_bindings=(
+            *arguments["current_input_bindings"],
+            preparation.ordinal_input_binding,
+        ),
+        candidate_set=candidate_set,
+        selection_record=selection,
+        verified_target=selected_target,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        trusted_now=NOW,
+    )
+
+    assert isinstance(candidate, Cycle2GatewayCandidate)
+    assert candidate.argument_binding_refs == (
+        preparation.ordinal_input_binding.binding_id,
+    )
+    assert candidate.verified_target_ref == UUID(selection.selected_target_ref)
+    assert candidate.validated_task_state_version == selection.result_task_state_version
+    assert (
+        candidate.proposed_base_task_state_version
+        == selection.result_task_state_version
+    )
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_selected_next_move(
+            request_input=arguments["request_input"],
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="get_order",
+                arguments={
+                    "order_id": "O-1002",
+                    "candidate_set_ref": str(candidate_set.candidate_set_id),
+                },
+                base_task_state_version=selection.result_task_state_version,
+            ),
+            customer_context=arguments["customer_context"],
+            current_conversation_id=arguments["current_conversation_id"],
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(
+                *arguments["current_input_bindings"],
+                preparation.ordinal_input_binding,
+            ),
+            candidate_set=candidate_set,
+            selection_record=selection,
+            verified_target=selected_target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_selected_next_move(
+            request_input=arguments["request_input"],
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="get_order",
+                arguments={"order_id": "O-1002"},
+                base_task_state_version=selection.result_task_state_version,
+            ),
+            customer_context=arguments["customer_context"],
+            current_conversation_id=arguments["current_conversation_id"],
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(
+                *arguments["current_input_bindings"],
+                preparation.ordinal_input_binding,
+            ),
+            candidate_set=candidate_set,
+            selection_record=selection.model_copy(
+                update={"selected_at": NOW + timedelta(seconds=1)}
+            ),
+            verified_target=selected_target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+    for update in (
+        {"verified_target_ref": uuid4()},
+        {"task_state_version": selection.base_task_state_version},
+        {"input_binding_refs": (arguments["current_input_bindings"][0].binding_id,)},
+        {"source_observation_ref": uuid4()},
+        {"source_observation_version": "wrong-search-source-version"},
+        {"owner_customer_id": "customer-B"},
+        {"task_id": uuid4()},
+    ):
+        with pytest.raises(RequestProcessingError):
+            route_cycle2_selected_next_move(
+                request_input=arguments["request_input"],
+                next_move=NextMove(
+                    kind=NextMoveKind.CALL_TOOL,
+                    requested_tool_name="get_order",
+                    arguments={"order_id": "O-1002"},
+                    base_task_state_version=selection.result_task_state_version,
+                ),
+                customer_context=arguments["customer_context"],
+                current_conversation_id=arguments["current_conversation_id"],
+                current_task=next_task,
+                current_request_unit=next_unit,
+                current_input_bindings=(
+                    *arguments["current_input_bindings"],
+                    preparation.ordinal_input_binding,
+                ),
+                candidate_set=candidate_set,
+                selection_record=selection,
+                verified_target=selected_target.model_copy(update=update),
+                model_call_id=uuid4(),
+                context_manifest_id=uuid4(),
+                trusted_now=NOW,
+            )
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_selected_next_move(
+            request_input=arguments["request_input"],
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="get_order",
+                arguments={"order_id": "O-1002"},
+                base_task_state_version=selection.base_task_state_version,
+            ),
+            customer_context=arguments["customer_context"],
+            current_conversation_id=arguments["current_conversation_id"],
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(
+                *arguments["current_input_bindings"],
+                preparation.ordinal_input_binding,
+            ),
+            candidate_set=candidate_set,
+            selection_record=selection,
+            verified_target=selected_target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_selected_next_move(
+            request_input=arguments["request_input"],
+            next_move=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="get_order",
+                arguments={"order_id": "O-1002"},
+                base_task_state_version=selection.result_task_state_version,
+            ),
+            customer_context=arguments["customer_context"],
+            current_conversation_id=arguments["current_conversation_id"],
+            current_task=next_task.model_copy(
+                update={"state_version": selection.base_task_state_version}
+            ),
+            current_request_unit=next_unit.model_copy(
+                update={"state_version": selection.base_task_state_version}
+            ),
+            current_input_bindings=(
+                *arguments["current_input_bindings"],
+                preparation.ordinal_input_binding,
+            ),
+            candidate_set=candidate_set,
+            selection_record=selection,
+            verified_target=selected_target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+
+def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="还没收到",
+        run_id=uuid4(),
+    )
+    order_binding = _cycle2_binding()
+    task, unit = _cycle2_current_task_graph(binding=order_binding)
+    claim_candidate = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="shipment_not_received",
+        value=True,
+        quote="还没收到",
+    )
+    decision = reduce_cycle2_continuation_candidate(
+        request_input=request_input,
+        candidate=claim_candidate,
+        authoritative_messages={message_ref: "还没收到"},
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(order_binding,),
+        binding_id=uuid4(),
+        now=NOW,
+    )
+    next_task, next_unit = _advance_cycle2_graph_with_binding(
+        task=task,
+        unit=unit,
+        binding=decision.input_binding,
+    )
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=next_task.owner_customer_id,
+        owner_customer_id=next_task.owner_customer_id,
+        task_id=next_task.task_id,
+        request_unit_id=next_unit.request_unit_id,
+        task_state_version=next_task.state_version,
+        order_id=order_binding.normalized_value,
+        source_observation_ref=uuid4(),
+        source_observation_version="order-observation-v1",
+        input_binding_refs=(order_binding.binding_id,),
+    )
+    next_unit = next_unit.model_copy(
+        update={"observation_refs": (target.source_observation_ref,)}
+    )
+    move = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_shipment",
+        arguments={"order_id": order_binding.normalized_value},
+        base_task_state_version=next_task.state_version,
+    )
+    routed = route_cycle2_continuation_next_move(
+        request_input=request_input,
+        decision=decision,
+        next_move=move,
+        customer_context=_customer_context(),
+        current_task=next_task,
+        current_request_unit=next_unit,
+        current_input_bindings=(order_binding, decision.input_binding),
+        verified_target=target,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        trusted_now=NOW,
+    )
+    assert routed.requested_provider_tool_name == "get_shipment"
+    assert routed.argument_binding_refs == (order_binding.binding_id,)
+    assert routed.verified_target_ref == target.verified_target_ref
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_continuation_next_move(
+            request_input=request_input,
+            decision=decision,
+            next_move=move,
+            customer_context=_customer_context(),
+            current_task=task,
+            current_request_unit=unit,
+            current_input_bindings=(order_binding,),
+            verified_target=target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
+
+    ordinal_preparation = prepare_cycle2_ordinal_selection(
+        **_cycle2_ordinal_case()
+    )
+    with pytest.raises((TypeError, RequestProcessingError)):
+        route_cycle2_continuation_next_move(
+            request_input=request_input,
+            decision=ordinal_preparation,
+            next_move=move,
+            customer_context=_customer_context(),
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(order_binding, decision.input_binding),
+            verified_target=target,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
