@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-04_planning_review_gate"
-status: "phase_2_w2_02_04_planning_review_gate"
-last_updated: "2026-07-31"
-last_activity: "2026-07-31 — PR #214/#215 reviewed merge关闭W1并冻结B_C2_CORE_123；02-04 exact Plan/Packet candidate已形成"
+current_plan: "02-05_planning_review_gate"
+status: "phase_2_w3_02_05_planning_review_gate"
+last_updated: "2026-08-01"
+last_activity: "2026-08-01 — PR #216/#217 reviewed merge关闭W2并冻结B_C2_TOOL；02-05 exact Plan/Packet candidate已形成"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 5
-  completed_plans: 4
-  percent: 21
+  total_plans: 6
+  completed_plans: 5
+  percent: 26
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -27,43 +27,44 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** W1 `02-01/02/03` 已 reviewed merge；PR #214 完成四状态文件
-alignment，PR #215 的 02-02 feature / overlay 均经全新任务审阅为 `PASS` 并 merge。
-当前产品 barrier 是 `B_C2_CORE_123 = 241cf6b...`。现在只审阅 W2 `02-04` exact
-Plan/Packet 与执行卡；planning `PASS`/merge 前不创建实现 branch/Worktree。
+**Current focus:** W1 `02-01/02/03` 与 W2 `02-04` 已 reviewed merge；PR #216 的
+planning provenance、PR #217 的 feature / overlay 均经全新任务审阅为 `PASS` 并
+merge。当前产品 barrier 是 `B_C2_TOOL = f9a2a75...`。现在只审阅 W3 `02-05`
+exact Plan/Packet 与执行卡；planning `PASS`/merge 前不创建实现 branch/Worktree，
+W3 reviewed merge 后停止。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-04_planning_review_gate
+Current Plan: 02-05_planning_review_gate
 Total Phases: 6
-Total Plans in Phase: 5
-Status: Phase 2 W2 / 02-04 planning review gate
-Last Activity: 2026-07-31
-Last Activity Description: PR #214 status alignment与PR #215 02-02 implementation/overlay均reviewed merge；`B_C2_CORE_123 = 241cf6b...`；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1 complete / W2 planning；Plan files 5/19、completed slots 4/19、functional implementation 3/18；1/6 phases
+Total Plans in Phase: 6
+Status: Phase 2 W3 / 02-05 planning review gate
+Last Activity: 2026-08-01
+Last Activity Description: PR #216 W2 planning与PR #217 02-04 implementation/overlay均reviewed merge；`B_C2_TOOL = f9a2a75...`；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1/W2 complete / W3 planning；Plan files 6/19、completed slots 5/19、functional implementation 4/18；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-02+02-03 COMPLETE / 02-04 PLANNING REVIEW`
-Status: `CONTRACT_ACTIVE / W1_COMPLETE / W2_02-04_PLANNING_REVIEW`
-Last activity: 2026-07-31 — PR #214/#215 reviewed merge关闭W1；02-04 exact Plan/Packet 与 Gate Card candidate已形成
-Progress: Phase 1 100% complete；Phase 2 W1 3/3 implementation Packet complete；W2 planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00+02-01+02-02+02-03+02-04 COMPLETE / 02-05 PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / W2_COMPLETE / W3_02-05_PLANNING_REVIEW`
+Last activity: 2026-08-01 — PR #216/#217 reviewed merge关闭W2；02-05 exact Plan/Packet 与 Gate Card candidate已形成
+Progress: Phase 1 100% complete；Phase 2 W1/W2 implementation Packet complete；W3 planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对本 six-file W2 `02-04` planning candidate 使用全新 Codex 任务独立审阅至
+1. 对本 six-file W3 `02-05` planning candidate 使用全新 Codex 任务独立审阅至
    `PASS`；只在 `0 BLOCK/HIGH`、每个 MEDIUM 已修复或有证据接受、LOW/INFO 已记录后
    合并 planning PR。
-2. 从 exact `B_C2_CORE_123 = 241cf6b83761f5d91da5de7719f26838e2626e26`
-   创建 02-04 四文件 feature branch/Worktree，运行 focused/neighbor/full gate。
+2. 从 exact `B_C2_TOOL = f9a2a75135ba63347e81e13f2b981cf550977875`
+   创建 02-05 四文件 feature branch/Worktree，运行 focused/neighbor/full gate。
 3. exact feature head 与 latest integration overlay 分别用全新任务 code review 至
-   `PASS`；串行 merge 并冻结 `B_C2_TOOL`。
-4. 然后按同一闭环签发/审阅/执行 W3 `02-05`；W3 review `PASS` 后停止。
+   `PASS`；串行 merge 并冻结 `B_C2_APP_CONTRACT`。
+4. W3 reviewed merge 后立即停止；不签发、规划或执行 W4。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
@@ -150,12 +151,16 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `PASS`；merge successor `241cf6b83761f5d91da5de7719f26838e2626e26`、tree
   `83fcbf90770ffdc30ef37e35e94169bcb9ead3b3`，full gate
   `2340 passed, 1 deselected, 12 warnings`。
-- `GATE / W2_02-04_PLANNING_REVIEW`: six-file Plan/Packet/Gate Card/status candidate
-  必须由全新任务 exact-file review 至 `PASS` 并 merge；此前不创建 W2 实现分支。
+- `CONFIRMED / B_C2_TOOL`: PR #216 planning 与 PR #217 feature/overlay review 均为
+  `PASS`；merge successor `f9a2a75135ba63347e81e13f2b981cf550977875`、tree
+  `59afeccec3705b7bae754c00b012f669a049a9ac`，full gate
+  `2499 passed, 1 deselected, 12 warnings`。
+- `GATE / W3_02-05_PLANNING_REVIEW`: six-file Plan/Packet/Gate Card/status candidate
+  必须由全新任务 exact-file review 至 `PASS` 并 merge；此前不创建 W3 实现分支。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: `B_C2_TOOL` 与 W3 `B_C2_APP_CONTRACT`；`E2E01-02/03/05/06` Case 仍为
+- `OPEN`: W3 `B_C2_APP_CONTRACT`；`E2E01-02/03/05/06` Case 仍为
   `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -164,6 +169,6 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 
 ## Session
 
-Last Date: 2026-07-31
-Stopped At: W2 02-04 exact planning review gate；implementation not started
-Resume File: [phases/02-cycle-2-e2e-01/02-04-PLAN.md](phases/02-cycle-2-e2e-01/02-04-PLAN.md)
+Last Date: 2026-08-01
+Stopped At: W3 02-05 exact planning review gate；implementation not started
+Resume File: [phases/02-cycle-2-e2e-01/02-05-PLAN.md](phases/02-cycle-2-e2e-01/02-05-PLAN.md)
