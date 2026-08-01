@@ -754,6 +754,7 @@ def test_cycle2_gate_and_command_are_additive_without_v1_shape_drift() -> None:
     assert set(GateDecisionV2.model_fields) == {
         *GateDecision.model_fields,
         "verified_target_ref",
+        "validated_arguments",
     }
     assert set(AuthorizedToolCommandV2.model_fields) == {
         *AuthorizedToolCommand.model_fields,
@@ -763,8 +764,11 @@ def test_cycle2_gate_and_command_are_additive_without_v1_shape_drift() -> None:
     gate_v1 = _accepted_gate_v1()
     converted = convert_gate_decision_v1_to_v2(gate_v1)
 
-    assert converted.model_dump(exclude={"verified_target_ref"}) == gate_v1.model_dump()
+    assert converted.model_dump(
+        exclude={"verified_target_ref", "validated_arguments"}
+    ) == gate_v1.model_dump()
     assert converted.verified_target_ref is None
+    assert converted.validated_arguments is None
     assert gate_v1.model_dump() == GateDecision.model_validate(
         gate_v1.model_dump(),
         strict=True,
@@ -805,6 +809,39 @@ def test_cycle2_gate_v1_conversion_is_exact_and_never_infers_target() -> None:
                 "verified_target_ref": uuid4(),
             },
             strict=True,
+        )
+
+
+def test_cycle2_gate_freezes_accepted_arguments_and_clears_rejections() -> None:
+    gate_v1 = _accepted_gate_v1()
+    source_arguments = {"order_id": "O-4242"}
+    accepted = GateDecisionV2(
+        **gate_v1.model_dump(),
+        verified_target_ref=None,
+        validated_arguments=source_arguments,
+    )
+    source_arguments["order_id"] = "O-9999"
+
+    assert accepted.model_dump(mode="json")["validated_arguments"] == {
+        "order_id": "O-4242"
+    }
+    with pytest.raises(ValidationError, match="cannot retain arguments"):
+        GateDecisionV2.model_validate(
+            {
+                **accepted.model_dump(),
+                "argument_binding_valid": False,
+                "decision": GateDecisionValue.REJECT,
+                "reason_code": GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+            },
+            strict=True,
+        )
+    with pytest.raises(ValidationError, match="cannot include"):
+        GateDecisionV2(
+            **gate_v1.model_dump(),
+            validated_arguments={
+                "order_id": "O-4242",
+                "customer_id": "attacker-selected",
+            },
         )
 
 

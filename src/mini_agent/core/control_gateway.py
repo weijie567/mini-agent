@@ -22,6 +22,7 @@ from pydantic import (
 from pydantic_core import PydanticSerializationError
 
 from .common import (
+    FrozenJsonDict,
     RuntimePrivateModel,
     find_trusted_argument_field,
     freeze_json_value,
@@ -1142,6 +1143,7 @@ def _cycle2_malformed_rejection(
         argument_binding_valid=False,
         argument_binding_refs=(),
         verified_target_ref=None,
+        validated_arguments=None,
         budget_valid=False,
         progress_valid=False,
         proposed_base_task_state_version=proposed_version,
@@ -1411,6 +1413,7 @@ def evaluate_cycle2_control_gateway(
         argument_binding_valid=argument_binding_valid,
         argument_binding_refs=gate_binding_refs,
         verified_target_ref=(candidate.verified_target_ref if accepted else None),
+        validated_arguments=(candidate.candidate_arguments if accepted else None),
         budget_valid=budget_valid,
         progress_valid=progress_valid,
         proposed_base_task_state_version=(
@@ -1439,6 +1442,10 @@ def build_cycle2_authorized_tool_command(
     if (
         type(gate_decision) is not GateDecisionV2
         or type(candidate) is not Cycle2GatewayCandidate
+        or (
+            gate_decision.validated_arguments is not None
+            and type(gate_decision.validated_arguments) is not FrozenJsonDict
+        )
         or not cycle2_pydantic_model_graph_is_raw_closed(
             gate_decision,
             candidate,
@@ -1459,6 +1466,7 @@ def build_cycle2_authorized_tool_command(
     if (
         gate_decision.decision is not GateDecisionValue.ACCEPT
         or gate_decision.resolved_canonical_tool_name is None
+        or gate_decision.validated_arguments is None
         or gate_decision.model_call_id != candidate.model_call_id
         or gate_decision.context_manifest_id != candidate.context_manifest_id
         or gate_decision.requested_provider_tool_name
@@ -1467,12 +1475,22 @@ def build_cycle2_authorized_tool_command(
         or gate_decision.validated_task_state_version
         != candidate.validated_task_state_version
         or gate_decision.verified_target_ref != candidate.verified_target_ref
+        or gate_decision.validated_arguments != candidate.candidate_arguments
     ):
         raise ValueError("Cycle 2 Gate and revalidated candidate do not match")
+    try:
+        tool_name = Cycle2ToolName(gate_decision.resolved_canonical_tool_name)
+    except ValueError as exc:
+        raise ValueError("Cycle 2 Gate has an invalid canonical Tool") from exc
+    if not _cycle2_schema_valid(
+        tool_name=tool_name,
+        arguments=gate_decision.validated_arguments,
+    ):
+        raise ValueError("Cycle 2 Gate has invalid validated arguments")
     return AuthorizedToolCommandV2(
         gate_decision_id=gate_decision.gate_decision_id,
         canonical_tool_name=gate_decision.resolved_canonical_tool_name,
-        validated_arguments=candidate.candidate_arguments,
+        validated_arguments=gate_decision.validated_arguments,
         argument_binding_refs=gate_decision.argument_binding_refs,
         validated_task_state_version=gate_decision.validated_task_state_version,
         registry_snapshot_ref=registry_snapshot_ref,

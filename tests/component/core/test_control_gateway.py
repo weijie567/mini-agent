@@ -794,8 +794,9 @@ def test_cycle2_accepted_gate_builds_exact_target_preserving_command(
     assert isinstance(command, AuthorizedToolCommandV2)
     assert command.gate_decision_id == gate.gate_decision_id
     assert command.canonical_tool_name == gate.resolved_canonical_tool_name
+    assert gate.validated_arguments == candidate.candidate_arguments
     assert command.model_dump(mode="json")["validated_arguments"] == dict(
-        candidate.candidate_arguments
+        gate.validated_arguments
     )
     assert command.argument_binding_refs == gate.argument_binding_refs
     assert command.validated_task_state_version == gate.validated_task_state_version
@@ -815,6 +816,7 @@ def test_cycle2_rejected_or_mismatched_gate_cannot_form_command() -> None:
     )
     assert rejected.decision is GateDecisionValue.REJECT
     assert rejected.verified_target_ref is None
+    assert rejected.validated_arguments is None
 
     with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
         build_cycle2_authorized_tool_command(
@@ -833,6 +835,78 @@ def test_cycle2_rejected_or_mismatched_gate_cannot_form_command() -> None:
             trusted_context_ref="cycle2-trusted-context-ref",
         )
 
+
+@pytest.mark.parametrize(
+    ("tool_name", "selected_get_order", "drifted_arguments"),
+    [
+        (Cycle2ToolName.GET_ORDER, True, {"order_id": "O-9999"}),
+        (
+            Cycle2ToolName.SEARCH_ORDERS,
+            False,
+            {"product_description": "另一双鞋"},
+        ),
+    ],
+)
+def test_cycle2_command_rejects_post_gate_argument_drift(
+    tool_name: Cycle2ToolName,
+    selected_get_order: bool,
+    drifted_arguments: dict[str, str],
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        tool_name,
+        selected_get_order=selected_get_order,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    gated_arguments = gate.model_dump(mode="json")["validated_arguments"]
+    drifted_candidate = candidate.model_copy(
+        update={"candidate_arguments": drifted_arguments}
+    )
+
+    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=gate,
+            candidate=drifted_candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+    assert gate.model_dump(mode="json")["validated_arguments"] == gated_arguments
+
+
+def test_cycle2_command_rejects_raw_constructed_gate_argument_replacement() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    raw_replacement = gate.model_copy(
+        update={"validated_arguments": {"order_id": "O-9999"}}
+    )
+    drifted_candidate = candidate.model_copy(
+        update={"candidate_arguments": {"order_id": "O-9999"}}
+    )
+
+    with pytest.raises(ValueError, match="exact typed inputs"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=raw_replacement,
+            candidate=drifted_candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+
+def test_cycle2_command_rejects_inert_gate_without_authorization_arguments() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
+    gate = _evaluate_cycle2(candidate, loaded)
+    inert_gate = gate.model_copy(update={"validated_arguments": None})
+
+    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=inert_gate,
+            candidate=candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
 
 @pytest.mark.parametrize(
     "drift",

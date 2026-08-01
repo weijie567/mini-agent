@@ -392,6 +392,42 @@ class GateDecisionV2(GateDecision):
     """Inactive Cycle 2 Gate shape with target/binding identity separation."""
 
     verified_target_ref: UUID | None = None
+    validated_arguments: Mapping[str, JsonValue] | None = None
+
+    @field_validator("validated_arguments", mode="before")
+    @classmethod
+    def validated_argument_input_is_native_json(
+        cls,
+        value: Any,
+    ) -> Any:
+        if value is None:
+            return None
+        return thaw_json_value(value)
+
+    @field_validator("validated_arguments")
+    @classmethod
+    def validated_arguments_are_frozen_and_untrusted_field_free(
+        cls,
+        value: Mapping[str, JsonValue] | None,
+    ) -> Mapping[str, JsonValue] | None:
+        if value is None:
+            return None
+        copied = deepcopy(value)
+        forbidden = find_trusted_argument_field(copied)
+        if forbidden is not None:
+            raise ValueError(
+                f"validated Gate arguments cannot include {forbidden!r}"
+            )
+        return freeze_json_value(copied)
+
+    @field_serializer("validated_arguments")
+    def serialize_validated_arguments(
+        self,
+        value: Mapping[str, JsonValue] | None,
+    ) -> dict[str, JsonValue] | None:
+        if value is None:
+            return None
+        return thaw_json_value(value)
 
     @field_validator("argument_binding_refs")
     @classmethod
@@ -414,6 +450,15 @@ class GateDecisionV2(GateDecision):
             and self.verified_target_ref is not None
         ):
             raise ValueError("rejected GateDecisionV2 cannot retain a target")
+        if (
+            self.decision is GateDecisionValue.REJECT
+            and self.validated_arguments is not None
+        ):
+            raise ValueError("rejected GateDecisionV2 cannot retain arguments")
+        if self.verified_target_ref is not None and self.validated_arguments is None:
+            raise ValueError(
+                "target-bearing GateDecisionV2 requires validated arguments"
+            )
         return self
 
 
@@ -426,6 +471,7 @@ def convert_gate_decision_v1_to_v2(decision: GateDecision) -> GateDecisionV2:
     return GateDecisionV2(
         **validated.model_dump(),
         verified_target_ref=None,
+        validated_arguments=None,
     )
 
 
