@@ -2553,6 +2553,43 @@ class Cycle2DispatchFenceWriteResult(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class Cycle2ReadDispatchGrant(_StrictRuntimePrivateRecord):
+    """One awaited READ-fence result; never a persistent or replayable record."""
+
+    write_result: Cycle2DispatchFenceWriteResult
+    tool_call_id: UUID | None = None
+    attempt_no: Annotated[int, Field(strict=True, ge=1, le=2)] | None = None
+    trusted_fenced_at: datetime | None = None
+    effective_timeout_ms: (
+        Annotated[int, Field(strict=True, ge=1, le=500)] | None
+    ) = None
+
+    @field_validator("trusted_fenced_at")
+    @classmethod
+    def trusted_fenced_at_is_utc(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        return require_utc(value, field_name="dispatch grant trusted_fenced_at")
+
+    @model_validator(mode="after")
+    def applied_matrix_is_closed(self) -> Self:
+        grant_fields = (
+            self.tool_call_id,
+            self.attempt_no,
+            self.trusted_fenced_at,
+            self.effective_timeout_ms,
+        )
+        if self.write_result is Cycle2DispatchFenceWriteResult.APPLIED:
+            if any(value is None for value in grant_fields):
+                raise ValueError("APPLIED dispatch grant requires every grant field")
+        elif any(value is not None for value in grant_fields):
+            raise ValueError("non-APPLIED dispatch grant requires null grant fields")
+        return self
+
+
 def _require_complete_current_input_bindings_v2(
     *,
     request_unit: RequestUnitRecord,
@@ -4464,6 +4501,44 @@ def _recovery_parent_stable_and_attempts_unchanged(
         and terminal.attempt_count == expected.attempt_count
         and terminal.attempts == expected.attempts
     )
+
+
+class AppendInitialToolAttemptV2Command(_StrictRuntimePrivateRecord):
+    """Bind an exact CREATED closure to the pure attempt-1 append projection."""
+
+    loaded_closure: ToolRetryRecoveryReadClosureV2
+    attempt_append_command: AppendToolAttemptV2Command
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ToolRetryRecoveryReadClosureV2,
+                "attempt_append_command": AppendToolAttemptV2Command,
+            },
+        )
+
+    @model_validator(mode="after")
+    def initial_append_is_exact(self) -> Self:
+        closure = self.loaded_closure
+        source = closure.tool_call_record
+        append = self.attempt_append_command
+        if (
+            source.status is not ToolCallStatus.CREATED
+            or source.attempt_count != 0
+            or source.attempts
+        ):
+            raise ValueError("initial append requires CREATED attempt-0 closure")
+        if (
+            append.owner_scope != closure.owner_scope
+            or append.expected_record != source
+            or append.started_attempt.attempt_no != 1
+            or append.started_attempt.started_at < closure.trusted_read_at
+        ):
+            raise ValueError("initial append does not match trusted closure")
+        return self
 
 
 class AppendRecoveredToolAttemptV2Command(_StrictRuntimePrivateRecord):
