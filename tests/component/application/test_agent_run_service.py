@@ -11,12 +11,20 @@ import mini_agent.application.agent_run_service as agent_run_service_module
 from mini_agent.application.agent_run_service import (
     AgentRunExecutionError,
     AgentRunService,
+    Cycle2AgentRunService,
 )
 from mini_agent.application.deterministic_renderer import (
     DeterministicRenderer,
     RendererInvariantError,
 )
 from mini_agent.application.read_tool_executor import ReadToolExecutor
+from mini_agent.application.run_result_mapper import (
+    Cycle2MapperSignal,
+    ImportedMapperReference,
+    MapperDisposition,
+    PHASE1_RESULT_MAPPER_CONTRACT,
+    RunResultMapper,
+)
 from mini_agent.application.records import (
     AgentRunCommand,
     ApplyTaskTransitionCommand,
@@ -31,7 +39,11 @@ from mini_agent.application.records import (
     ToolDispatchFenceWriteResult,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import TokenCounts
+from mini_agent.core.memory import (
+    ObservationVisibility,
+    OrderObservation,
+    TokenCounts,
+)
 from mini_agent.core.order import (
     GetOrderOutcome,
     GetOrderQuery,
@@ -2308,3 +2320,133 @@ def test_active_runtime_and_owned_double_expose_only_ru_v2_symbols() -> None:
         "CreateInitialTaskGraphV2Command",
         "create_initial_task_graph_v2_if_current",
     } <= runtime_symbols | owned_double_methods
+
+
+def test_cycle2_mapper_is_complete_disjoint_and_imports_phase1_by_reference() -> None:
+    mapper = RunResultMapper()
+
+    assert mapper.imported_contract == PHASE1_RESULT_MAPPER_CONTRACT
+    assert tuple(ref.value for ref in mapper.imported_references) == (
+        "P1-RM-ORDER-SUCCESS",
+        "P1-RM-GATE-REJECTED",
+        "P1-RM-ORDER-SERVICE-UNAVAILABLE",
+        "P1-RM-PROCESS-RESTART",
+    )
+    assert all(mapper.import_reference(ref) is ref for ref in ImportedMapperReference)
+    rows = tuple(mapper.map_cycle2(signal) for signal in Cycle2MapperSignal)
+    assert rows == mapper.delta_rows
+    assert len(rows) == len(Cycle2MapperSignal) == 21
+    assert len({row.row_id for row in rows}) == len(rows)
+    assert {"RM-17", "RM-I03"}.isdisjoint(row.row_id for row in rows)
+    assert {ref.value for ref in ImportedMapperReference}.isdisjoint(
+        row.row_id for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    ("signal", "row_id", "disposition"),
+    [
+        (Cycle2MapperSignal.SEARCH_MULTIPLE, "RM-02", MapperDisposition.EMIT),
+        (
+            Cycle2MapperSignal.INTERNAL_RETRY_AUTHORIZED,
+            "RM-07",
+            MapperDisposition.INTERNAL_RETRY,
+        ),
+        (
+            Cycle2MapperSignal.ORDINARY_OBSOLETE_RUN,
+            "RM-I01",
+            MapperDisposition.SUPPRESS_OBSOLETE_RUN,
+        ),
+        (
+            Cycle2MapperSignal.RETRY_RECOVERY_OBSOLETE_RUN,
+            "RM-I04",
+            MapperDisposition.SUPPRESS_OBSOLETE_RUN,
+        ),
+        (
+            Cycle2MapperSignal.CONTRADICTORY_INTERRUPTION_EVIDENCE,
+            "RM-I05",
+            MapperDisposition.NO_STATE_MUTATION,
+        ),
+    ],
+)
+def test_cycle2_mapper_uses_exact_discriminators_without_first_match(
+    signal: Cycle2MapperSignal,
+    row_id: str,
+    disposition: MapperDisposition,
+) -> None:
+    row = RunResultMapper().map_cycle2(signal)
+    assert row.row_id == row_id
+    assert row.disposition is disposition
+
+    with pytest.raises(ValueError, match="canonical"):
+        RunResultMapper().map_cycle2(signal.value)  # type: ignore[arg-type]
+
+
+def test_cycle2_order_only_completion_preserves_phase1_and_has_no_shipment_call() -> None:
+    service = Cycle2AgentRunService(
+        runtime_record_port=object(),  # type: ignore[arg-type]
+        deterministic_renderer=DeterministicRenderer(),
+        uuid_factory=uuid4,
+    )
+    observation = OrderObservation(
+        observation_id=uuid4(),
+        source_tool="get_order",
+        source_resource_ref="safe-order-ref",
+        source_version=SYNTHETIC_SOURCE_VERSION,
+        normalized_type="ORDER_SUMMARY",
+        normalized_value=OrderSummaryProjection(
+            order_number="O-1001",
+            status=OrderStatus.SHIPPED,
+            line_items=(
+                OrderLineSummary(product_name="轻量跑鞋", quantity=1),
+            ),
+            ordered_at=NOW,
+            status_updated_at=NOW,
+        ),
+        observed_at=NOW,
+        recorded_at=NOW,
+        visibility=ObservationVisibility.MODEL_VISIBLE,
+    )
+    plan = PresentationPlan(
+        template_id="ORDER_STATUS_SUMMARY_V1",
+        tone=PresentationTone.NEUTRAL,
+        opening_variant=OpeningVariant.DIRECT,
+        field_order=tuple(PresentationField),
+        closing_variant=ClosingVariant.NONE,
+    )
+
+    result = service.complete_order_only(
+        run_id=uuid4(), observation=observation, plan=plan
+    )
+
+    assert result.outcome is AgentOutcome.COMPLETED
+    assert "O-1001" in result.message
+    source = inspect.getsource(Cycle2AgentRunService.complete_order_only)
+    assert "get_shipment" not in source
+    assert "_runtime_record_port" not in source
+
+
+def test_cycle2_orchestration_source_keeps_selection_and_obsolete_fences_closed() -> None:
+    ordinal_source = inspect.getsource(
+        Cycle2AgentRunService.apply_ordinal_selection
+    )
+    obsolete_source = inspect.getsource(
+        Cycle2AgentRunService.finalize_obsolete_run
+    )
+    recovery_obsolete_source = inspect.getsource(
+        Cycle2AgentRunService.finalize_retry_recovery_obsolete
+    )
+
+    assert "apply_order_candidate_selection_if_current" in ordinal_source
+    assert "search_orders" not in ordinal_source
+    assert "apply_order_search_outcome" not in ordinal_source
+    assert "finalize_superseded_run_if_current" in obsolete_source
+    assert "map_cycle2_result" not in obsolete_source
+    assert "outbound_result" not in obsolete_source
+    assert "RETRY_RECOVERY_OBSOLETE_RUN" not in obsolete_source
+    assert (
+        "finalize_state_invalidated_tool_recovery_if_current"
+        in recovery_obsolete_source
+    )
+    assert "RETRY_RECOVERY_OBSOLETE_RUN" in recovery_obsolete_source
+    assert "outbound_result" not in recovery_obsolete_source
