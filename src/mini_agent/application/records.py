@@ -3443,19 +3443,6 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         return self.trusted_conversation_record.conversation_id
 
 
-_ISSUED_SELECTED_TARGET_FACTORY_TOKEN = object()
-_ORDER_SELECTION_COMMAND_FACTORY_TOKEN = object()
-_ISSUED_SELECTED_TARGET_REFS: dict[
-    int,
-    tuple[
-        weakref.ReferenceType["IssuedSelectedTargetRef"],
-        UUID,
-        weakref.ReferenceType["ApplyOrderCandidateSelectionV2Command"] | None,
-        str | None,
-    ],
-] = {}
-
-
 class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
     """One Application-issued UUID capability for one selection command."""
 
@@ -3468,10 +3455,7 @@ class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
         value: object,
         info: ValidationInfo,
     ) -> object:
-        if (
-            (info.context or {}).get("issued_selected_target_factory_token")
-            is not _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
-        ):
+        if not _issued_selected_target_context_is_live(info.context):
             raise ValueError(
                 "IssuedSelectedTargetRef must be created by fresh()"
             )
@@ -3488,38 +3472,7 @@ class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
     def fresh(cls) -> Self:
         """Generate a fresh target internally; callers cannot supply entropy."""
 
-        return cls.model_validate(
-            {"selected_target_ref": uuid4()},
-            context={
-                "issued_selected_target_factory_token": (
-                    _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
-                )
-            },
-        )
-
-    def model_post_init(self, context: Any, /) -> None:
-        if (
-            (context or {}).get("issued_selected_target_factory_token")
-            is not _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
-        ):
-            return
-        issued_id = id(self)
-
-        def discard_if_same(
-            expired: weakref.ReferenceType[IssuedSelectedTargetRef],
-            *,
-            registered_id: int = issued_id,
-        ) -> None:
-            registered = _ISSUED_SELECTED_TARGET_REFS.get(registered_id)
-            if registered is not None and registered[0] is expired:
-                _ISSUED_SELECTED_TARGET_REFS.pop(registered_id, None)
-
-        _ISSUED_SELECTED_TARGET_REFS[issued_id] = (
-            weakref.ref(self, discard_if_same),
-            self.selected_target_ref,
-            None,
-            None,
-        )
+        return _issue_selected_target_ref()
 
 
 class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
@@ -3549,10 +3502,7 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
         value: object,
         info: ValidationInfo,
     ) -> object:
-        if (
-            (info.context or {}).get("order_selection_command_factory_token")
-            is not _ORDER_SELECTION_COMMAND_FACTORY_TOKEN
-        ):
+        if not _order_selection_command_context_is_live(info.context):
             raise ValueError(
                 "selection command must be created by the Application factory"
             )
@@ -3580,7 +3530,7 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
         return canonical
 
     @model_validator(mode="after")
-    def selection_effect_is_exact(self) -> Self:
+    def selection_effect_is_exact(self, info: ValidationInfo) -> Self:
         closure = self.loaded_closure
         current_task = closure.current_task_record
         current_unit = closure.current_request_unit_record
@@ -3697,6 +3647,10 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             or self.next_request_unit_record.open_questions
         ):
             raise ValueError("successful selection must close pending question")
+        if not _order_selection_command_context_is_live(info.context, self):
+            raise ValueError(
+                "selection command must retain its Application factory context"
+            )
         _bind_issued_selected_target_to_command(
             self.issued_selected_target,
             self,
@@ -3704,84 +3658,195 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
-def _bind_issued_selected_target_to_command(
-    issued_target: IssuedSelectedTargetRef,
-    command: ApplyOrderCandidateSelectionV2Command,
-) -> None:
-    registered = _ISSUED_SELECTED_TARGET_REFS.get(id(issued_target))
-    if (
-        type(issued_target) is not IssuedSelectedTargetRef
-        or registered is None
-        or registered[0]() is not issued_target
-        or registered[1] != issued_target.selected_target_ref
-        or registered[2] is not None
-        or registered[3] is not None
-    ):
-        raise ValueError(
-            "selected target requires one fresh Application issuance"
-        )
-    _ISSUED_SELECTED_TARGET_REFS[id(issued_target)] = (
-        registered[0],
-        registered[1],
-        weakref.ref(command),
-        command.model_dump_json(),
-    )
+def _build_order_selection_target_issuer() -> tuple[Any, ...]:
+    """Keep UUID issuance, factory tokens, and provenance state in closure."""
 
+    generate_uuid4 = uuid4
+    issue_factory_token = object()
+    command_factory_token = object()
+    active_command_contexts: dict[int, object] = {}
+    active_command_candidates: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command],
+            int,
+        ],
+    ] = {}
+    issue_registry: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[IssuedSelectedTargetRef],
+            UUID,
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command]
+            | None,
+            str | None,
+        ],
+    ] = {}
 
-def _require_live_order_candidate_selection_v2_command(
-    command: ApplyOrderCandidateSelectionV2Command,
-) -> None:
-    if type(command) is not ApplyOrderCandidateSelectionV2Command:
-        raise ValueError(
-            "selection command lacks fresh Application target issuance"
-        )
-    issued_target = command.issued_selected_target
-    registered = _ISSUED_SELECTED_TARGET_REFS.get(id(issued_target))
-    if (
-        type(issued_target) is not IssuedSelectedTargetRef
-        or registered is None
-        or registered[0]() is not issued_target
-        or registered[1] != issued_target.selected_target_ref
-        or registered[2] is None
-        or registered[2]() is not command
-        or registered[3] != command.model_dump_json()
-    ):
-        raise ValueError(
-            "selection command lacks fresh Application target issuance"
+    def issue_context_is_live(context: object) -> bool:
+        return (
+            type(context) is dict
+            and context.get("issued_selected_target_factory_context")
+            is issue_factory_token
         )
 
+    def command_context_is_live(
+        context: object,
+        candidate: object | None = None,
+    ) -> bool:
+        context_is_live = (
+            type(context) is dict
+            and active_command_contexts.get(id(context)) is context
+            and context.get("order_selection_command_factory_context")
+            is command_factory_token
+        )
+        if not context_is_live:
+            return False
+        if candidate is None:
+            return True
+        if type(candidate) is not ApplyOrderCandidateSelectionV2Command:
+            return False
+        active_command_candidates[id(candidate)] = (
+            weakref.ref(candidate),
+            id(context),
+        )
+        return True
 
-def build_order_candidate_selection_v2_command(
-    *,
-    loaded_closure: OrderCandidateSelectionReadClosure,
-    ordinal_input_binding_record: InputBindingV2,
-    issued_selected_target: IssuedSelectedTargetRef,
-    next_task_record: TaskRecord,
-    next_request_unit_record: RequestUnitRecord,
-    selection_record: OrderCandidateSelectionRecord,
-    closed_pending_candidate_set_ref: UUID,
-) -> ApplyOrderCandidateSelectionV2Command:
-    """Bind one fresh Application target to one exact selection command."""
+    def issue_selected_target_ref() -> IssuedSelectedTargetRef:
+        issued_target = IssuedSelectedTargetRef.model_validate(
+            {"selected_target_ref": generate_uuid4()},
+            strict=True,
+            context={
+                "issued_selected_target_factory_context": issue_factory_token
+            },
+        )
+        issued_id = id(issued_target)
 
-    return ApplyOrderCandidateSelectionV2Command.model_validate(
-        {
-            "loaded_closure": loaded_closure,
-            "ordinal_input_binding_record": ordinal_input_binding_record,
-            "issued_selected_target": issued_selected_target,
-            "next_task_record": next_task_record,
-            "next_request_unit_record": next_request_unit_record,
-            "selection_record": selection_record,
-            "closed_pending_candidate_set_ref": (
-                closed_pending_candidate_set_ref
-            ),
-        },
-        strict=True,
-        context={
-            "order_selection_command_factory_token": (
-                _ORDER_SELECTION_COMMAND_FACTORY_TOKEN
+        def discard_if_same(
+            expired: weakref.ReferenceType[IssuedSelectedTargetRef],
+            *,
+            registered_id: int = issued_id,
+        ) -> None:
+            registered = issue_registry.get(registered_id)
+            if registered is not None and registered[0] is expired:
+                issue_registry.pop(registered_id, None)
+
+        issue_registry[issued_id] = (
+            weakref.ref(issued_target, discard_if_same),
+            issued_target.selected_target_ref,
+            None,
+            None,
+        )
+        return issued_target
+
+    def bind_issued_target_to_command(
+        issued_target: IssuedSelectedTargetRef,
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> None:
+        registered = issue_registry.get(id(issued_target))
+        candidate = active_command_candidates.pop(id(command), None)
+        if (
+            candidate is None
+            or candidate[0]() is not command
+            or active_command_contexts.get(candidate[1]) is None
+            or type(issued_target) is not IssuedSelectedTargetRef
+            or type(command) is not ApplyOrderCandidateSelectionV2Command
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is not None
+            or registered[3] is not None
+        ):
+            raise ValueError(
+                "selected target requires one fresh Application issuance"
             )
-        },
+        issue_registry[id(issued_target)] = (
+            registered[0],
+            registered[1],
+            weakref.ref(command),
+            command.model_dump_json(),
+        )
+
+    def require_live_command(
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> None:
+        if type(command) is not ApplyOrderCandidateSelectionV2Command:
+            raise ValueError(
+                "selection command lacks fresh Application target issuance"
+            )
+        issued_target = command.issued_selected_target
+        registered = issue_registry.get(id(issued_target))
+        if (
+            type(issued_target) is not IssuedSelectedTargetRef
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is None
+            or registered[2]() is not command
+            or registered[3] != command.model_dump_json()
+        ):
+            raise ValueError(
+                "selection command lacks fresh Application target issuance"
+            )
+
+    def build_command(
+        *,
+        loaded_closure: OrderCandidateSelectionReadClosure,
+        ordinal_input_binding_record: InputBindingV2,
+        issued_selected_target: IssuedSelectedTargetRef,
+        next_task_record: TaskRecord,
+        next_request_unit_record: RequestUnitRecord,
+        selection_record: OrderCandidateSelectionRecord,
+        closed_pending_candidate_set_ref: UUID,
+    ) -> ApplyOrderCandidateSelectionV2Command:
+        """Bind one fresh Application target to one exact selection command."""
+
+        context = {
+            "order_selection_command_factory_context": command_factory_token
+        }
+        context_id = id(context)
+        active_command_contexts[context_id] = context
+        try:
+            return ApplyOrderCandidateSelectionV2Command.model_validate(
+                {
+                    "loaded_closure": loaded_closure,
+                    "ordinal_input_binding_record": (
+                        ordinal_input_binding_record
+                    ),
+                    "issued_selected_target": issued_selected_target,
+                    "next_task_record": next_task_record,
+                    "next_request_unit_record": next_request_unit_record,
+                    "selection_record": selection_record,
+                    "closed_pending_candidate_set_ref": (
+                        closed_pending_candidate_set_ref
+                    ),
+                },
+                strict=True,
+                context=context,
+            )
+        finally:
+            if active_command_contexts.get(context_id) is context:
+                active_command_contexts.pop(context_id, None)
+
+    return (
+        issue_selected_target_ref,
+        issue_context_is_live,
+        command_context_is_live,
+        bind_issued_target_to_command,
+        require_live_command,
+        build_command,
     )
+
+
+(
+    _issue_selected_target_ref,
+    _issued_selected_target_context_is_live,
+    _order_selection_command_context_is_live,
+    _bind_issued_selected_target_to_command,
+    _require_live_order_candidate_selection_v2_command,
+    build_order_candidate_selection_v2_command,
+) = _build_order_selection_target_issuer()
+del _build_order_selection_target_issuer
 
 
 class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):

@@ -8971,6 +8971,66 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         selection,
         selected_target_ref=str(derived_target_ref),
     )
+    for absent_module_attribute in (
+        "_ISSUED_SELECTED_TARGET_FACTORY_TOKEN",
+        "_ORDER_SELECTION_COMMAND_FACTORY_TOKEN",
+        "_ISSUED_SELECTED_TARGET_REFS",
+        "_build_order_selection_target_issuer",
+    ):
+        assert not hasattr(
+            application_records_module,
+            absent_module_attribute,
+        )
+    guessed_contexts = (
+        {},
+        {"issued_selected_target_factory_token": object()},
+        {"issued_selected_target_factory_context": object()},
+        {"order_selection_command_factory_context": object()},
+    )
+    for guessed_context in guessed_contexts:
+        with pytest.raises(ValidationError, match="created by fresh"):
+            IssuedSelectedTargetRef.model_validate(
+                {"selected_target_ref": derived_target_ref},
+                strict=True,
+                context=guessed_context,
+            )
+        with pytest.raises(ValidationError, match="Application factory"):
+            ApplyOrderCandidateSelectionV2Command.model_validate(
+                command_values,
+                strict=True,
+                context=guessed_context,
+            )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            application_records_module,
+            "uuid4",
+            lambda: derived_target_ref,
+        )
+        closure_issued_target = IssuedSelectedTargetRef.fresh()
+    assert closure_issued_target.selected_target_ref != derived_target_ref
+    closure_issued_command = build_order_candidate_selection_v2_command(
+        **{
+            **command_values,
+            "issued_selected_target": closure_issued_target,
+            "selection_record": _c2_project(
+                selection,
+                selected_target_ref=str(
+                    closure_issued_target.selected_target_ref
+                ),
+            ),
+        }
+    )
+    closure_issued_command.require_live_target_issuance()
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "issued_selected_target": closure_issued_target,
+                "selection_record": closure_issued_command.selection_record,
+            }
+        )
+
     with pytest.raises(ValidationError, match="Application factory"):
         ApplyOrderCandidateSelectionV2Command(
             **{
