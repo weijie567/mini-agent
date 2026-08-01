@@ -66,6 +66,7 @@ from mini_agent.application.records import (
     TaskRecoveryAggregate,
     ShipmentAssessmentReadClosure,
     SupersededRunReadClosure,
+    SupersededRunInvalidationKind,
     ToolCallRecoveryAggregate,
     TransitionRunCommand,
     TrustedOwnerScope,
@@ -7638,6 +7639,112 @@ def _c2_search_graph() -> tuple[
     )
 
 
+def _c2_multiple_search_command() -> ApplyOrderSearchOutcomeV2Command:
+    owner, task, unit, source, observation, candidate_set, query_ref, _ = (
+        _c2_search_graph()
+    )
+    return ApplyOrderSearchOutcomeV2Command(
+        owner_scope=owner,
+        expected_task_record=task,
+        next_task_record=_c2_project(
+            task,
+            status=TaskStatus.WAITING_USER,
+            state_version=4,
+            updated_at=observation.recorded_at,
+        ),
+        expected_request_unit_record=unit,
+        next_request_unit_record=_c2_project(
+            unit,
+            status=TaskStatus.WAITING_USER,
+            state_version=4,
+            updated_at=observation.recorded_at,
+            open_questions=("请选择候选订单",),
+            observation_refs=(observation.observation_id,),
+        ),
+        source_tool_call_record=source,
+        search_observation_record=observation,
+        candidate_set_record=candidate_set,
+        current_query_binding_refs=(query_ref,),
+        pending_candidate_set_ref=candidate_set.candidate_set_id,
+    )
+
+
+def _c2_unique_search_command() -> ApplyOrderSearchOutcomeV2Command:
+    owner, task, unit, source, multiple, _, query_ref, _ = _c2_search_graph()
+    binding = multiple.candidate_target_bindings[0]
+    candidate = multiple.normalized_value.ordered_candidates[0]
+    observation = SearchOrdersObservation(
+        observation_id=uuid4(),
+        private_owner_scope=owner.customer_id,
+        source_tool="search_orders",
+        source_tool_call_id=source.tool_call_id,
+        source_resource_ref=multiple.source_resource_ref,
+        source_version=multiple.source_version,
+        candidate_target_bindings=(binding,),
+        normalized_type="ORDER_SEARCH_CANDIDATES",
+        normalized_value=SearchOrdersObservationValue(
+            ordered_candidates=(candidate,),
+            truncated=False,
+        ),
+        observed_at=multiple.observed_at,
+        recorded_at=multiple.recorded_at,
+        valid_until=multiple.valid_until,
+    )
+    candidate_values: dict[str, object] = {
+        "candidate_set_id": uuid4(),
+        "private_owner_scope_ref": owner.customer_id,
+        "conversation_id": uuid4(),
+        "task_id": task.task_id,
+        "request_unit_id": unit.request_unit_id,
+        "outcome": OrderCandidateSetOutcome.UNIQUE,
+        "base_task_state_version": 3,
+        "result_task_state_version": 4,
+        "selection_expected_task_state_version": None,
+        "query_binding_refs": (query_ref,),
+        "source_tool_call_id": source.tool_call_id,
+        "search_observation_ref": observation.observation_id,
+        "search_observation_record_schema_version": (
+            observation.record_schema_version
+        ),
+        "search_observation_source_version": observation.source_version,
+        "ordered_candidates": (
+            OrderCandidateSetEntry(
+                ordinal=1,
+                observation_candidate_ref=candidate.observation_candidate_ref,
+                candidate_source_version=candidate.candidate_source_version,
+            ),
+        ),
+        "created_at": observation.recorded_at,
+        "valid_until": observation.valid_until,
+        "supersedes_candidate_set_ref": None,
+    }
+    candidate_values["candidate_set_version"] = (
+        compute_order_candidate_set_version(**candidate_values)
+    )
+    candidate_set = OrderCandidateSetRecord.model_validate(candidate_values)
+    return ApplyOrderSearchOutcomeV2Command(
+        owner_scope=owner,
+        expected_task_record=task,
+        next_task_record=_c2_project(
+            task,
+            state_version=4,
+            updated_at=observation.recorded_at,
+        ),
+        expected_request_unit_record=unit,
+        next_request_unit_record=_c2_project(
+            unit,
+            state_version=4,
+            updated_at=observation.recorded_at,
+            observation_refs=(observation.observation_id,),
+        ),
+        source_tool_call_record=source,
+        search_observation_record=observation,
+        candidate_set_record=candidate_set,
+        current_query_binding_refs=(query_ref,),
+        resolved_owner_scoped_order_target_ref=binding.owner_scoped_order_ref,
+    )
+
+
 def test_cycle2_application_contracts_are_additive_strict_and_closed() -> None:
     assert RunTaskLinkRecordV2.model_fields["record_schema_version"].default == (
         "run_task_link_record.p0.v2"
@@ -7675,6 +7782,7 @@ def test_cycle2_search_outcome_closes_multiple_atomically() -> None:
         state_version=4,
         updated_at=observation.recorded_at,
         open_questions=("请选择候选订单",),
+        observation_refs=(observation.observation_id,),
     )
     command = ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
@@ -7703,6 +7811,150 @@ def test_cycle2_search_outcome_closes_multiple_atomically() -> None:
         )
 
 
+def test_cycle2_unique_search_closes_without_pending_question() -> None:
+    command = _c2_unique_search_command()
+
+    assert command.candidate_set_record.outcome is OrderCandidateSetOutcome.UNIQUE
+    assert command.next_task_record.status is TaskStatus.ACTIVE
+    assert command.next_request_unit_record.open_questions == ()
+    assert command.pending_candidate_set_ref is None
+
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    with pytest.raises(ValidationError, match="UNIQUE search"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "next_request_unit_record": _c2_project(
+                    command.next_request_unit_record,
+                    open_questions=("不得夹带的澄清",),
+                ),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("goal_text", "被夹带改写的目标"),
+        ("constraint_refs", (uuid4(),)),
+        ("dependency_refs", (uuid4(),)),
+        ("input_binding_refs", (uuid4(),)),
+        ("result_refs", (uuid4(),)),
+    ],
+)
+def test_cycle2_search_rejects_unauthorized_request_unit_drift(
+    field_name: str,
+    replacement: object,
+) -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name_: getattr(command, field_name_)
+        for field_name_ in type(command).model_fields
+    }
+    with pytest.raises(ValidationError, match="non-authorized field"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "next_request_unit_record": _c2_project(
+                    command.next_request_unit_record,
+                    **{field_name: replacement},
+                ),
+            }
+        )
+
+
+def test_cycle2_search_rejects_task_drift_and_time_rollback() -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    with pytest.raises(ValidationError, match="non-authorized field"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "next_task_record": _c2_project(
+                    command.next_task_record,
+                    last_outcome_ref=uuid4(),
+                ),
+            }
+        )
+    future_expected = _c2_project(
+        command.expected_task_record,
+        updated_at=command.search_observation_record.recorded_at
+        + timedelta(seconds=1),
+    )
+    with pytest.raises(ValidationError, match="cannot move backwards"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "expected_task_record": future_expected,
+                "next_task_record": _c2_project(
+                    command.next_task_record,
+                    created_at=future_expected.created_at,
+                ),
+            }
+        )
+
+
+def test_cycle2_search_requires_exact_tool_candidate_query_binding_closure() -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    wrong_binding_ref = next(
+        ref
+        for ref in command.expected_request_unit_record.input_binding_refs
+        if ref not in command.current_query_binding_refs
+    )
+    wrong_source = _c2_project(
+        command.source_tool_call_record,
+        argument_binding_refs=(wrong_binding_ref,),
+    )
+    with pytest.raises(ValidationError, match="query binding closure"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{**values, "source_tool_call_record": wrong_source}
+        )
+    with pytest.raises(ValidationError, match="query binding closure"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "current_query_binding_refs": (
+                    *command.current_query_binding_refs,
+                    wrong_binding_ref,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "source_tool_call_record": _c2_project(
+                    command.source_tool_call_record,
+                    validated_task_state_version=2,
+                ),
+            }
+        )
+
+
+def test_cycle2_commands_reject_constructed_trusted_owner_scope() -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    constructed = TrustedOwnerScope.model_construct(customer_id="customer-A")
+
+    with pytest.raises(ValidationError, match="lacks CustomerContext derivation"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{**values, "owner_scope": constructed}
+        )
+
+
 def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> None:
     owner, task, unit, _, observation, candidate_set, query_ref, ordinal_ref = (
         _c2_search_graph()
@@ -7719,6 +7971,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         state_version=4,
         updated_at=observation.recorded_at,
         open_questions=("请选择候选订单",),
+        observation_refs=(observation.observation_id,),
     )
     request = OrderCandidateSelectionRequest(
         source_message_ref=uuid4(),
@@ -7792,6 +8045,31 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
                 "trusted_now": observation.valid_until,
             }
         )
+    with pytest.raises(ValidationError, match="Task owner"):
+        OrderCandidateSelectionReadClosure(
+            **{**closure_values, "owner_scope": _owner_scope("customer-B")}
+        )
+    with pytest.raises(ValidationError, match="pending CandidateSet ref mismatch"):
+        OrderCandidateSelectionReadClosure(
+            **{**closure_values, "pending_candidate_set_ref": uuid4()}
+        )
+    with pytest.raises(ValidationError, match="reader result mismatch"):
+        OrderCandidateSelectionReadClosure(
+            **{
+                **closure_values,
+                "resolved_owner_scoped_order_target_ref": "owner-order:wrong",
+            }
+        )
+    version_five_task = _c2_project(current_task, state_version=5)
+    version_five_unit = _c2_project(current_unit, state_version=5)
+    with pytest.raises(ValidationError, match="expected Task version mismatch"):
+        OrderCandidateSelectionReadClosure(
+            **{
+                **closure_values,
+                "current_task_record": version_five_task,
+                "current_request_unit_record": version_five_unit,
+            }
+        )
 
 
 def test_cycle2_tool_attempt_fences_preserve_append_only_evidence() -> None:
@@ -7846,6 +8124,13 @@ def test_cycle2_tool_attempt_fences_preserve_append_only_evidence() -> None:
             expected_record=second_running,
             next_running_record=second_running,
             started_attempt=second,
+        )
+    with pytest.raises(ValidationError, match="owner scope mismatch"):
+        AppendToolAttemptV2Command(
+            owner_scope=_owner_scope("customer-B"),
+            expected_record=created,
+            next_running_record=running,
+            started_attempt=first,
         )
 
 
@@ -7951,6 +8236,40 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
             loaded_closure=closure,
             assessment_record=wrong,
         )
+    with pytest.raises(ValidationError, match="owner scope mismatch"):
+        SaveShipmentObservationV2Command(
+            owner_scope=_owner_scope("customer-B"),
+            source_tool_call_record=source,
+            observation_record=observation,
+            trusted_acceptance_now=observation.recorded_at,
+        )
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        SaveShipmentObservationV2Command(
+            owner_scope=owner,
+            source_tool_call_record=source,
+            observation_record=_c2_project(
+                observation,
+                source_tool_call_id=uuid4(),
+            ),
+            trusted_acceptance_now=observation.recorded_at,
+        )
+    with pytest.raises(ValidationError, match="fresh at acceptance"):
+        SaveShipmentObservationV2Command(
+            owner_scope=owner,
+            source_tool_call_record=source,
+            observation_record=observation,
+            trusted_acceptance_now=observation.valid_until,
+        )
+    with pytest.raises(ValidationError, match="Claim binding"):
+        ShipmentAssessmentReadClosure(
+            owner_scope=owner,
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_observation_record=observation,
+            verified_order_target_ref=observation.verified_order_target_ref,
+            trusted_assessed_at=assessed_at,
+            current_claim_binding_ref=uuid4(),
+        )
 
 
 def test_cycle2_oa10_is_exact_no_result_closure() -> None:
@@ -7968,13 +8287,38 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
         base_task_state_version=3,
         result_task_state_version=None,
     )
+    current_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=active.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=UTC_NOW + timedelta(seconds=1),
+    )
+    current_task = _task(
+        task_id=link.task_id,
+        state_version=4,
+        updated_at=UTC_NOW + timedelta(seconds=1),
+    )
     closure = SupersededRunReadClosure(
         owner_scope=owner,
         expected_active_run_record=active,
         expected_active_link_record=link,
-        request_unit_id=uuid4(),
-        current_task_state_version=4,
-        replacement_run_id=uuid4(),
+        current_authoritative_run_record=current_run,
+        current_authoritative_link_record=RunTaskLinkRecordV2(
+            run_id=current_run.run_id,
+            task_id=link.task_id,
+            base_task_state_version=4,
+            result_task_state_version=None,
+        ),
+        current_task_record=current_task,
+        current_request_unit_record=_request_unit(
+            task_id=link.task_id,
+            state_version=4,
+            updated_at=UTC_NOW + timedelta(seconds=1),
+        ),
+        invalidation_kind=(
+            SupersededRunInvalidationKind.TASK_VERSION_ADVANCED
+        ),
     )
     completed_at = UTC_NOW + timedelta(seconds=2)
     terminal = AgentRunRecordV2(
@@ -7991,7 +8335,7 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
         occurred_at=completed_at,
         run_id=active.run_id,
         task_id=link.task_id,
-        request_unit_id=closure.request_unit_id,
+        request_unit_id=closure.current_request_unit_record.request_unit_id,
         user_outcome=AgentOutcome.BLOCKED,
         stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
     )
@@ -8016,6 +8360,85 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
             superseded_run_record=terminal,
             no_result_link_record=link,
             run_stopped_trace_record=_c2_project(trace, message_ref=uuid4()),
+        )
+
+    closure_values = {
+        field_name: getattr(closure, field_name)
+        for field_name in type(closure).model_fields
+    }
+    same_version_task = _c2_project(
+        closure.current_task_record,
+        state_version=3,
+    )
+    same_version_unit = _c2_project(
+        closure.current_request_unit_record,
+        state_version=3,
+    )
+    with pytest.raises(ValidationError, match="advanced current Task version"):
+        SupersededRunReadClosure(
+            **{
+                **closure_values,
+                "current_task_record": same_version_task,
+                "current_request_unit_record": same_version_unit,
+                "current_authoritative_link_record": _c2_project(
+                    closure.current_authoritative_link_record,
+                    base_task_state_version=3,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="Task owner"):
+        SupersededRunReadClosure(
+            **{
+                **closure_values,
+                "current_task_record": _c2_project(
+                    closure.current_task_record,
+                    owner_customer_id="customer-B",
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="share Conversation"):
+        SupersededRunReadClosure(
+            **{
+                **closure_values,
+                "current_authoritative_run_record": _c2_project(
+                    closure.current_authoritative_run_record,
+                    conversation_id=uuid4(),
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="authoritative RunTaskLink"):
+        SupersededRunReadClosure(
+            **{
+                **closure_values,
+                "current_authoritative_link_record": _c2_project(
+                    closure.current_authoritative_link_record,
+                    task_id=uuid4(),
+                ),
+            }
+        )
+
+    invalidated_ref = uuid4()
+    binding_closure = SupersededRunReadClosure(
+        **{
+            **closure_values,
+            "invalidation_kind": (
+                SupersededRunInvalidationKind.BINDING_INVALIDATED
+            ),
+            "invalidated_binding_refs": (invalidated_ref,),
+        }
+    )
+    assert binding_closure.invalidated_binding_refs == (invalidated_ref,)
+    with pytest.raises(ValidationError, match="cannot remain current"):
+        SupersededRunReadClosure(
+            **{
+                **closure_values,
+                "invalidation_kind": (
+                    SupersededRunInvalidationKind.BINDING_INVALIDATED
+                ),
+                "invalidated_binding_refs": (
+                    closure.current_request_unit_record.input_binding_refs[0],
+                ),
+            }
         )
 
 
@@ -8051,6 +8474,7 @@ def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
                 state_version=4,
                 updated_at=observation.recorded_at,
                 open_questions=("请选择候选订单",),
+                observation_refs=(observation.observation_id,),
             ),
             source_tool_call_record=source,
             search_observation_record=observation,

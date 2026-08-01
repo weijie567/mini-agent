@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -108,6 +109,7 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
     """Minimum persistence scope derived by Application from trusted auth."""
 
     customer_id: NonEmptyString
+    _derivation_context: CustomerContext | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -132,6 +134,33 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
             {"customer_id": context.customer_id},
             context={"customer_context": context},
         )
+
+    def model_post_init(self, context: Any, /) -> None:
+        validation_context = context or {}
+        customer_context = validation_context.get("customer_context")
+        if (
+            type(customer_context) is CustomerContext
+            and customer_context.customer_id == self.customer_id
+        ):
+            self._derivation_context = customer_context
+
+    def require_trusted_derivation(self) -> None:
+        """Reject objects that bypassed the trusted CustomerContext factory."""
+
+        context = self._derivation_context
+        if type(context) is not CustomerContext:
+            raise ValueError("TrustedOwnerScope lacks CustomerContext derivation")
+        try:
+            rebuilt = CustomerContext.model_validate(
+                context.model_dump(mode="python"),
+                strict=True,
+            )
+        except ValidationError as error:
+            raise ValueError(
+                "TrustedOwnerScope CustomerContext must be canonical"
+            ) from error
+        if rebuilt != context or context.customer_id != self.customer_id:
+            raise ValueError("TrustedOwnerScope CustomerContext derivation mismatch")
 
 
 class AgentRunCommand(_StrictRuntimePrivateRecord):
@@ -659,13 +688,27 @@ def _strict_rebuild_request_understanding_record_v2(
 
 def _require_exact_trusted_owner_scope(value: object) -> TrustedOwnerScope:
     error_message = "TrustedOwnerScope must be an exact trusted projection"
-    projection = _canonical_model_field_projection(
-        value,
-        TrustedOwnerScope,
-        error_message=error_message,
-    )
-    if type(projection["customer_id"]) is not str:
+    if type(value) is not TrustedOwnerScope:
         raise ValueError(error_message)
+    try:
+        state = value.__dict__
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+    except (AttributeError, TypeError):
+        raise ValueError(error_message) from None
+    if (
+        type(state) is not dict
+        or set(state) != {"customer_id"}
+        or type(state.get("customer_id")) is not str
+        or type(fields_set) is not set
+        or fields_set != {"customer_id"}
+        or extra is not None
+    ):
+        raise ValueError(error_message)
+    try:
+        value.require_trusted_derivation()
+    except ValueError:
+        raise ValueError(error_message) from None
     return value
 
 
@@ -2287,6 +2330,7 @@ def _require_exact_cycle2_model(
     if type(value) is not expected_type:
         raise ValueError(f"{field_name} must be an exact {expected_type.__name__}")
     if expected_type is TrustedOwnerScope:
+        value.require_trusted_derivation()
         return
     try:
         if expected_type.__module__ == __name__:
@@ -2374,22 +2418,26 @@ def _task_pair_advances_once(
     next_request_unit_record: RequestUnitRecord,
     result_state_version: int,
     changed_at: datetime,
+    allowed_request_unit_delta_fields: frozenset[str],
 ) -> None:
-    if (
-        next_task_record.task_id != expected_task_record.task_id
-        or next_task_record.owner_customer_id
-        != expected_task_record.owner_customer_id
-        or next_task_record.created_at != expected_task_record.created_at
+    task_delta_fields = frozenset({"status", "state_version", "updated_at"})
+    if any(
+        getattr(next_task_record, field_name)
+        != getattr(expected_task_record, field_name)
+        for field_name in TaskRecord.model_fields
+        if field_name not in task_delta_fields
     ):
-        raise ValueError("Task transition cannot change stable identity")
-    if (
-        next_request_unit_record.request_unit_id
-        != expected_request_unit_record.request_unit_id
-        or next_request_unit_record.task_id != expected_request_unit_record.task_id
-        or next_request_unit_record.created_at
-        != expected_request_unit_record.created_at
+        raise ValueError("Task transition changed a non-authorized field")
+    unit_delta_fields = frozenset(
+        {"status", "state_version", "updated_at"}
+    ) | allowed_request_unit_delta_fields
+    if any(
+        getattr(next_request_unit_record, field_name)
+        != getattr(expected_request_unit_record, field_name)
+        for field_name in RequestUnitRecord.model_fields
+        if field_name not in unit_delta_fields
     ):
-        raise ValueError("RequestUnit transition cannot change stable identity")
+        raise ValueError("RequestUnit transition changed a non-authorized field")
     if result_state_version != expected_task_record.state_version + 1:
         raise ValueError("Cycle 2 Task effect must increment version exactly once")
     if (
@@ -2405,6 +2453,11 @@ def _task_pair_advances_once(
         or next_request_unit_record.updated_at != changed_at
     ):
         raise ValueError("Task and RequestUnit effect must share status and timestamp")
+    if (
+        changed_at < expected_task_record.updated_at
+        or changed_at < expected_request_unit_record.updated_at
+    ):
+        raise ValueError("Task effect timestamp cannot move backwards")
 
 
 class RunTaskLinkRecordV2(_StrictAuditOnlyRecord):
@@ -2507,6 +2560,11 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             request_unit_record=expected_unit,
         )
         if (
+            expected_task.status is not TaskStatus.ACTIVE
+            or expected_unit.open_questions
+        ):
+            raise ValueError("order search requires ACTIVE Task with no open question")
+        if (
             source.status is not ToolCallStatus.SUCCEEDED
             or source.effect is not ToolEffect.READ
             or source.canonical_tool_name.value != "search_orders"
@@ -2533,10 +2591,12 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             raise ValueError("search outcome source graph mismatch")
         if candidate_set.base_task_state_version != expected_task.state_version:
             raise ValueError("CandidateSet base version must equal current Task version")
-        if set(candidate_set.query_binding_refs) != set(
-            self.current_query_binding_refs
+        if not (
+            source.argument_binding_refs
+            == candidate_set.query_binding_refs
+            == self.current_query_binding_refs
         ):
-            raise ValueError("CandidateSet query binding closure mismatch")
+            raise ValueError("search ToolCall/query binding closure mismatch")
         if not set(self.current_query_binding_refs).issubset(
             expected_unit.input_binding_refs
         ):
@@ -2553,7 +2613,17 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             next_request_unit_record=next_unit,
             result_state_version=candidate_set.result_task_state_version,
             changed_at=observation.recorded_at,
+            allowed_request_unit_delta_fields=frozenset(
+                {"open_questions", "observation_refs"}
+            ),
         )
+        if next_unit.observation_refs != (
+            *expected_unit.observation_refs,
+            observation.observation_id,
+        ):
+            raise ValueError(
+                "search outcome must append exactly its Search Observation ref"
+            )
 
         previous = self.previous_candidate_set_record
         if candidate_set.supersedes_candidate_set_ref is None:
@@ -2574,7 +2644,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
                 self.pending_candidate_set_ref != candidate_set.candidate_set_id
                 or self.resolved_owner_scoped_order_target_ref is not None
                 or next_task.status is not TaskStatus.WAITING_USER
-                or not next_unit.open_questions
+                or len(next_unit.open_questions) != 1
             ):
                 raise ValueError(
                     "MULTIPLE search must atomically install pending clarification"
@@ -2583,6 +2653,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             if (
                 self.pending_candidate_set_ref is not None
                 or next_task.status is not TaskStatus.ACTIVE
+                or next_unit.open_questions
             ):
                 raise ValueError("UNIQUE search cannot install pending clarification")
             if self.resolved_owner_scoped_order_target_ref is None:
@@ -2763,10 +2834,14 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             next_request_unit_record=self.next_request_unit_record,
             result_state_version=selection.result_task_state_version,
             changed_at=selection.selected_at,
+            allowed_request_unit_delta_fields=frozenset({"open_questions"}),
         )
         if self.next_task_record.status is not TaskStatus.ACTIVE:
             raise ValueError("successful selection must reactivate Task")
-        if self.next_request_unit_record.open_questions:
+        if (
+            len(current_unit.open_questions) != 1
+            or self.next_request_unit_record.open_questions
+        ):
             raise ValueError("successful selection must close pending question")
         return self
 
@@ -3131,15 +3206,23 @@ class SaveShipmentAssessmentV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class SupersededRunInvalidationKind(StrEnum):
+    TASK_VERSION_ADVANCED = "TASK_VERSION_ADVANCED"
+    BINDING_INVALIDATED = "BINDING_INVALIDATED"
+
+
 class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
     """Exact owner-scoped no-result fence proving an active Run is obsolete."""
 
     owner_scope: TrustedOwnerScope
     expected_active_run_record: AgentRunRecordV2
     expected_active_link_record: RunTaskLinkRecordV2
-    request_unit_id: UUID
-    current_task_state_version: PositiveStateVersion
-    replacement_run_id: UUID
+    current_authoritative_run_record: AgentRunRecordV2
+    current_authoritative_link_record: RunTaskLinkRecordV2
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    invalidation_kind: SupersededRunInvalidationKind
+    invalidated_binding_refs: tuple[UUID, ...] = ()
 
     @model_validator(mode="before")
     @classmethod
@@ -3150,6 +3233,10 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
                 "owner_scope": TrustedOwnerScope,
                 "expected_active_run_record": AgentRunRecordV2,
                 "expected_active_link_record": RunTaskLinkRecordV2,
+                "current_authoritative_run_record": AgentRunRecordV2,
+                "current_authoritative_link_record": RunTaskLinkRecordV2,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
             },
         )
 
@@ -3157,12 +3244,66 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
     def obsolete_fence_is_closed(self) -> Self:
         run = self.expected_active_run_record
         link = self.expected_active_link_record
+        current_run = self.current_authoritative_run_record
+        current_link = self.current_authoritative_link_record
+        current_task = self.current_task_record
+        current_unit = self.current_request_unit_record
         if run.status not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}:
             raise ValueError("obsolete fence requires active v2 Run")
-        if link.run_id != run.run_id or link.result_task_state_version is not None:
+        if (
+            link.run_id != run.run_id
+            or link.result_task_state_version is not None
+            or link.base_task_state_version is None
+        ):
             raise ValueError("obsolete fence requires active no-result RunTaskLink")
-        if self.replacement_run_id == run.run_id:
-            raise ValueError("replacement Run must differ from obsolete Run")
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=current_task,
+            request_unit_record=current_unit,
+        )
+        if link.task_id != current_task.task_id:
+            raise ValueError("obsolete fence current Task does not match RunTaskLink")
+        if current_task.state_version <= link.base_task_state_version:
+            raise ValueError("obsolete fence requires an advanced current Task version")
+        if (
+            current_run.run_id == run.run_id
+            or current_run.status
+            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            or current_run.started_at < run.started_at
+        ):
+            raise ValueError("obsolete fence requires a newer authoritative active Run")
+        if (
+            current_link.run_id != current_run.run_id
+            or current_link.task_id != current_task.task_id
+            or current_link.base_task_state_version != current_task.state_version
+            or current_link.result_task_state_version is not None
+        ):
+            raise ValueError(
+                "authoritative RunTaskLink must match current Run and Task version"
+            )
+        if (
+            run.conversation_id is not None
+            and current_run.conversation_id != run.conversation_id
+        ):
+            raise ValueError("obsolete and authoritative Runs must share Conversation")
+        if len(self.invalidated_binding_refs) != len(
+            set(self.invalidated_binding_refs)
+        ):
+            raise ValueError("invalidated binding refs must be unique")
+        if self.invalidation_kind is SupersededRunInvalidationKind.TASK_VERSION_ADVANCED:
+            if self.invalidated_binding_refs:
+                raise ValueError(
+                    "Task-version invalidation cannot carry binding evidence"
+                )
+        else:
+            if not self.invalidated_binding_refs:
+                raise ValueError("binding invalidation requires exact binding refs")
+            if set(self.invalidated_binding_refs).intersection(
+                current_unit.input_binding_refs
+            ):
+                raise ValueError(
+                    "invalidated binding refs cannot remain current"
+                )
         return self
 
 
@@ -3218,7 +3359,8 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
             trace.event_type is not TraceEventType.RUN_STOPPED
             or trace.run_id != terminal.run_id
             or trace.task_id != terminal_link.task_id
-            or trace.request_unit_id != closure.request_unit_id
+            or trace.request_unit_id
+            != closure.current_request_unit_record.request_unit_id
             or trace.occurred_at != terminal.completed_at
             or trace.user_outcome is not AgentOutcome.BLOCKED
             or trace.stop_reason is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
