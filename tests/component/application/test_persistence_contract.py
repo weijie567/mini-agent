@@ -4059,7 +4059,10 @@ from mini_agent.core.task_state import (
     compute_order_candidate_set_version,
 )
 from mini_agent.core.tool_system import (
+    ExecutionPolicy,
+    RegistrySnapshot,
     ToolAttemptRecordV2,
+    ToolRegistration,
     build_cycle2_registry_snapshot,
 )
 
@@ -4327,6 +4330,52 @@ def test_tool_call_v2_attempt_is_strict_parent_versioned_child() -> None:
     assert mixed.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
 
 
+def _phase1_get_order_registry_snapshot() -> RegistrySnapshot:
+    return RegistrySnapshot.build(
+        tool_registry_version="e2e01-thin-tools-v1",
+        registrations=(
+            ToolRegistration(
+                tool_spec=get_order_tool_spec(),
+                provider_visible_name="get_order",
+                effect=ToolEffect.READ,
+                risk="LOW",
+                idempotency="READ_ONLY",
+                handler_ref="orders.get_order",
+                execution_policy=ExecutionPolicy(
+                    timeout_ms=500,
+                    max_attempts=1,
+                    interrupt_behavior="MARK_INTERRUPTED",
+                ),
+            ),
+        ),
+    )
+
+
+def _trusted_codec_owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
+    return TrustedOwnerScope.from_customer_context(
+        CustomerContext(
+            subject_ref=f"subject:{customer_id}",
+            customer_id=customer_id,
+            auth_scopes=frozenset({"orders:read"}),
+            authenticated_at=UTC_NOW,
+            session_ref_hash=f"session:{customer_id}",
+        )
+    )
+
+
+def _phase1_tool_owner_graph() -> dict[str, object]:
+    return {
+        "owner_scope": _trusted_codec_owner_scope(),
+        "source_task_record": _case(P0RecordCode.TASK_RECORD).record,
+        "source_request_unit_record": _case(
+            P0RecordCode.REQUEST_UNIT_RECORD
+        ).record,
+        "source_argument_binding_records": (
+            _case(P0RecordCode.INPUT_BINDING_RECORD).record,
+        ),
+    }
+
+
 def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
     input_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
     ready = persistence_module.classify_p0_conversion_readiness(
@@ -4334,6 +4383,7 @@ def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
         "input_binding_record.p0.v1",
         "input_binding_record.p0.v2",
         input_case.record,
+        active_schema_versions=("input_binding_record.p0.v1",),
         external_references=input_case.external_references,
     )
     assert ready.category is persistence_module.P0ConversionReadinessCategory.READY
@@ -4362,6 +4412,7 @@ def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
         "tool_call_record.p0.v1",
         "tool_call_record.p0.v2",
         tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
         source_logical_children=tool_case.logical_children,
     )
     assert (
@@ -4373,9 +4424,11 @@ def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
         "tool_call_record.p0.v1",
         "tool_call_record.p0.v2",
         tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
         source_logical_children=tool_case.logical_children,
-        private_owner_scope_ref="owner-scope:codec",
-        registry_snapshot=build_cycle2_registry_snapshot(),
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
     )
     assert (
         tool_ready.category
@@ -4398,6 +4451,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "gate_decision_record.p0.v1",
         "gate_decision_record.p0.v2",
         gate_case.record,
+        active_schema_versions=("gate_decision_record.p0.v1",),
     )
     assert gate.is_ready
     assert gate.target_record.verified_target_ref is None
@@ -4424,6 +4478,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "agent_run_record.p0.v1",
         "agent_run_record.p0.v2",
         incomplete,
+        active_schema_versions=("agent_run_record.p0.v1",),
     )
     assert run.is_ready
     assert run.target_record.status.value == "INCOMPLETE"
@@ -4442,6 +4497,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "agent_run_record.p0.v1",
         "agent_run_record.p0.v2",
         failed,
+        active_schema_versions=("agent_run_record.p0.v1",),
     )
     assert failed_run.is_ready
     assert failed_run.target_record.status.value == "FAILED"
@@ -4458,6 +4514,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "run_task_link_record.p0.v1",
         "run_task_link_record.p0.v2",
         active_link,
+        active_schema_versions=("run_task_link_record.p0.v1",),
     )
     assert link.is_ready
     assert link.target_record.result_task_state_version is None
@@ -4469,6 +4526,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "trace_event_record.p0.v1",
         "trace_event_record.p0.v2",
         trace_case.record,
+        active_schema_versions=("trace_event_record.p0.v1",),
     )
     assert trace.is_ready
     assert trace.target_record.model_dump(mode="json") == (
@@ -4481,6 +4539,7 @@ def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> No
         "input_binding_record.p0.v1",
         "input_binding_record.p0.v2",
         input_case.record,
+        active_schema_versions=("input_binding_record.p0.v1",),
         external_references=input_case.external_references,
     )
     public_pairs = (
@@ -4548,6 +4607,7 @@ def test_conversion_readiness_rejects_unknown_duplicate_and_ambiguous_graphs() -
         "gate_decision_record.p0.v1",
         "input_binding_record.p0.v2",
         input_case.record,
+        active_schema_versions=("gate_decision_record.p0.v1",),
     )
     assert (
         unknown.category
@@ -4560,12 +4620,14 @@ def test_conversion_readiness_rejects_unknown_duplicate_and_ambiguous_graphs() -
         "tool_call_record.p0.v1",
         "tool_call_record.p0.v2",
         tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
         source_logical_children=(
             tool_case.logical_children[0],
             tool_case.logical_children[0],
         ),
-        private_owner_scope_ref="owner-scope:codec",
-        registry_snapshot=build_cycle2_registry_snapshot(),
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
     )
     assert not duplicate.is_ready
     assert duplicate.target_record is None
@@ -4602,13 +4664,15 @@ def test_conversion_readiness_rejects_unknown_duplicate_and_ambiguous_graphs() -
         "tool_call_record.p0.v1",
         "tool_call_record.p0.v2",
         ambiguous_parent,
+        active_schema_versions=("tool_call_record.p0.v1",),
         source_logical_children=(attempt,),
-        private_owner_scope_ref="owner-scope:codec",
-        registry_snapshot=build_cycle2_registry_snapshot(),
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
     )
     assert (
         ambiguous.category
-        is persistence_module.P0ConversionReadinessCategory.AMBIGUOUS_CONVERSION
+        is persistence_module.P0ConversionReadinessCategory.CONTRADICTORY_GRAPH
     )
     assert ambiguous.target_record is None
 
@@ -4632,3 +4696,250 @@ def test_tool_call_v2_decode_rejects_child_parent_identity_tampering() -> None:
             correlation_ref=_uuid(699),
         )
     assert raised.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+
+def test_conversion_readiness_requires_explicit_exact_active_version_set() -> None:
+    import inspect
+
+    parameters = inspect.signature(
+        persistence_module.classify_p0_conversion_readiness
+    ).parameters
+    assert parameters["active_schema_versions"].default is inspect.Parameter.empty
+    assert parameters["active_schema_versions"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    input_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
+    with pytest.raises(TypeError):
+        persistence_module.classify_p0_conversion_readiness(
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "input_binding_record.p0.v1",
+            "input_binding_record.p0.v2",
+            input_case.record,
+            external_references=input_case.external_references,
+        )
+
+    invalid_sets = (
+        (),
+        ("input_binding_record.p0.v1", "input_binding_record.p0.v1"),
+        ("input_binding_record.p0.v1", "input_binding_record.p0.v2"),
+        ("gate_decision_record.p0.v1",),
+    )
+    for active_versions in invalid_sets:
+        result = persistence_module.classify_p0_conversion_readiness(
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "input_binding_record.p0.v1",
+            "input_binding_record.p0.v2",
+            input_case.record,
+            active_schema_versions=active_versions,
+            external_references=input_case.external_references,
+        )
+        assert (
+            result.category
+            is persistence_module.P0ConversionReadinessCategory.MIXED_ACTIVE_VERSION
+        )
+        assert result.target_record is None
+
+
+def test_tool_conversion_owner_and_registry_authority_are_not_free_inputs() -> None:
+    import inspect
+
+    parameters = inspect.signature(
+        persistence_module.classify_p0_conversion_readiness
+    ).parameters
+    assert "private_owner_scope_ref" not in parameters
+    assert "registry_snapshot" not in parameters
+
+    tool_case = _case(P0RecordCode.TOOL_CALL_RECORD)
+    with pytest.raises(TypeError):
+        persistence_module.classify_p0_conversion_readiness(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v1",
+            "tool_call_record.p0.v2",
+            tool_case.record,
+            active_schema_versions=("tool_call_record.p0.v1",),
+            source_logical_children=tool_case.logical_children,
+            private_owner_scope_ref="arbitrary-owner-a",
+            registry_snapshot=build_cycle2_registry_snapshot(),
+        )
+
+    owner_mismatch = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=tool_case.logical_children,
+        **{
+            **_phase1_tool_owner_graph(),
+            "owner_scope": _trusted_codec_owner_scope("customer-B"),
+        },
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        owner_mismatch.category
+        is persistence_module.P0ConversionReadinessCategory.CONTRADICTORY_GRAPH
+    )
+
+    forged_owner = TrustedOwnerScope.model_construct(customer_id="customer-A")
+    forged = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=tool_case.logical_children,
+        **{
+            **_phase1_tool_owner_graph(),
+            "owner_scope": forged_owner,
+        },
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        forged.category
+        is persistence_module.P0ConversionReadinessCategory.AUTHORITY_REQUIRED
+    )
+
+    wrong_source_snapshot = RegistrySnapshot.build(
+        tool_registry_version="not-the-source-version",
+        registrations=(
+            _phase1_get_order_registry_snapshot().canonical_registrations[0],
+        ),
+    )
+    registry_mismatch = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=tool_case.logical_children,
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=wrong_source_snapshot,
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        registry_mismatch.category
+        is persistence_module.P0ConversionReadinessCategory.CONTRADICTORY_GRAPH
+    )
+
+    canonical_registration = (
+        _phase1_get_order_registry_snapshot().canonical_registrations[0]
+    )
+    wrong_policy_registration = ToolRegistration(
+        **{
+            **canonical_registration.model_dump(),
+            "execution_policy": ExecutionPolicy(
+                timeout_ms=500,
+                max_attempts=2,
+                retryable_failure_codes=("TOOL_CALL_TIMEOUT",),
+                interrupt_behavior="MARK_INTERRUPTED",
+            ),
+        }
+    )
+    wrong_policy_snapshot = RegistrySnapshot.build(
+        tool_registry_version="e2e01-thin-tools-v1",
+        registrations=(wrong_policy_registration,),
+    )
+    policy_mismatch = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=tool_case.logical_children,
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=wrong_policy_snapshot,
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        policy_mismatch.category
+        is persistence_module.P0ConversionReadinessCategory.CONTRADICTORY_GRAPH
+    )
+
+
+def test_phase1_get_order_timeout_converts_to_exact_max_attempts_decision() -> None:
+    attempt = ToolAttemptRecord(
+        tool_call_id=_uuid(701),
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=UTC_NOW + timedelta(milliseconds=500),
+        outcome="TIMEOUT",
+        failure_code="TOOL_CALL_TIMEOUT",
+    )
+    parent = ToolCallRecord(
+        tool_call_id=attempt.tool_call_id,
+        run_id=_uuid(3),
+        task_id=_uuid(4),
+        request_unit_id=_uuid(5),
+        model_call_id=_uuid(20),
+        context_manifest_id=_uuid(14),
+        gate_decision_id=_uuid(11),
+        canonical_tool_name="get_order",
+        tool_registry_version="e2e01-thin-tools-v1",
+        validated_task_state_version=2,
+        argument_binding_refs=(_uuid(8),),
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        status=ToolCallStatus.TIMED_OUT,
+        started_at=UTC_NOW,
+        finished_at=attempt.finished_at,
+        failure_code="TOOL_CALL_TIMEOUT",
+        timeout_phase="AFTER_DISPATCH",
+    )
+    directly_converted = persistence_module._convert_tool_attempts_v1_to_v2(
+        parent,
+        (attempt,),
+        build_cycle2_registry_snapshot(),
+    )
+    assert directly_converted[0].retry_decision.value == "MAX_ATTEMPTS_REACHED"
+
+    result = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        parent,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=(attempt,),
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert result.is_ready
+    converted_attempt = result.target_logical_children[0]
+    assert converted_attempt.timeout_phase.value == "AFTER_DISPATCH"
+    assert converted_attempt.retry_decision.value == "MAX_ATTEMPTS_REACHED"
+
+    ambiguous_parent = parent.model_copy(
+        update={
+            "canonical_tool_name": "get_shipment",
+            "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
+        }
+    )
+    ambiguous_attempt = attempt.model_copy(
+        update={"tool_call_id": ambiguous_parent.tool_call_id}
+    )
+    with pytest.raises(LookupError):
+        persistence_module._convert_tool_attempts_v1_to_v2(
+            ambiguous_parent,
+            (ambiguous_attempt,),
+            build_cycle2_registry_snapshot(),
+        )
+
+    contradictory_attempt = attempt.model_copy(
+        update={"failure_code": "ORDER_SERVICE_UNAVAILABLE"}
+    )
+    contradictory = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        parent,
+        active_schema_versions=("tool_call_record.p0.v1",),
+        source_logical_children=(contradictory_attempt,),
+        **_phase1_tool_owner_graph(),
+        source_registry_snapshot=_phase1_get_order_registry_snapshot(),
+        target_registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        contradictory.category
+        is persistence_module.P0ConversionReadinessCategory.CONTRADICTORY_GRAPH
+    )

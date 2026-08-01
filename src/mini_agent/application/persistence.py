@@ -29,6 +29,7 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
     RUN_TASK_LINK_RECORD_V2_SCHEMA_VERSION,
+    TrustedOwnerScope,
 )
 from mini_agent.core.common import (
     ContractModel,
@@ -58,19 +59,23 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     Cycle2ToolName,
+    ExecutionPolicy,
     GateDecision,
     GateDecisionV2,
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     ModelVisibleToolsetArtifact,
     RegistrySnapshot,
+    ToolRegistration,
     ToolAttemptRecord,
     ToolAttemptRecordV2,
     ToolCallRecord,
     ToolCallRecordV2,
+    ToolEffect,
     ToolResultOutcome,
     ToolRetryDecision,
-    validate_cycle2_registry_snapshot,
     convert_gate_decision_v1_to_v2,
+    get_order_tool_spec,
+    validate_cycle2_registry_snapshot,
 )
 from mini_agent.core.trace import (
     AgentRunRecord,
@@ -3829,6 +3834,135 @@ def _convert_v1_model_with_shared_json_fields(
     )
 
 
+def _phase1_get_order_registry_snapshot() -> RegistrySnapshot:
+    return RegistrySnapshot.build(
+        tool_registry_version="e2e01-thin-tools-v1",
+        registrations=(
+            ToolRegistration(
+                tool_spec=get_order_tool_spec(),
+                provider_visible_name="get_order",
+                effect=ToolEffect.READ,
+                risk="LOW",
+                idempotency="READ_ONLY",
+                handler_ref="orders.get_order",
+                execution_policy=ExecutionPolicy(
+                    timeout_ms=500,
+                    max_attempts=1,
+                    interrupt_behavior="MARK_INTERRUPTED",
+                ),
+            ),
+        ),
+    )
+
+
+def _canonical_source_registry_authority(
+    source: ToolCallRecord,
+    source_registry_snapshot: RegistrySnapshot | None,
+) -> RegistrySnapshot:
+    if type(source_registry_snapshot) is not RegistrySnapshot:
+        raise PermissionError("exact source RegistrySnapshot is required")
+    try:
+        canonical = _strict_versioned_model(
+            source_registry_snapshot,
+            RegistrySnapshot,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+    except _IntegritySignal as error:
+        raise ValueError("source RegistrySnapshot is not canonical") from error
+    expected = _phase1_get_order_registry_snapshot()
+    if (
+        canonical != expected
+        or canonical.tool_registry_version != source.tool_registry_version
+        or source.canonical_tool_name != "get_order"
+    ):
+        raise ValueError("source RegistrySnapshot/version/tool/policy mismatch")
+    return canonical
+
+
+def _canonical_target_registry_authority(
+    target_registry_snapshot: RegistrySnapshot | None,
+) -> RegistrySnapshot:
+    if type(target_registry_snapshot) is not RegistrySnapshot:
+        raise PermissionError("exact target RegistrySnapshot is required")
+    try:
+        canonical = _strict_versioned_model(
+            target_registry_snapshot,
+            RegistrySnapshot,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        return validate_cycle2_registry_snapshot(canonical)
+    except (_IntegritySignal, TypeError, ValueError) as error:
+        raise ValueError("target RegistrySnapshot is not canonical") from error
+
+
+def _trusted_source_tool_owner(
+    source: ToolCallRecord,
+    *,
+    owner_scope: TrustedOwnerScope | None,
+    source_task_record: TaskRecord | None,
+    source_request_unit_record: RequestUnitRecord | None,
+    source_argument_binding_records: tuple[InputBinding, ...],
+) -> str:
+    if (
+        type(owner_scope) is not TrustedOwnerScope
+        or type(source_task_record) is not TaskRecord
+        or type(source_request_unit_record) is not RequestUnitRecord
+        or type(source_argument_binding_records) is not tuple
+        or not source_argument_binding_records
+    ):
+        raise PermissionError("complete trusted source owner graph is required")
+    try:
+        owner_scope.require_trusted_derivation()
+    except ValueError as error:
+        raise PermissionError("owner scope lacks trusted derivation") from error
+    if (
+        set(owner_scope.__dict__) != set(TrustedOwnerScope.model_fields)
+        or set(owner_scope.model_fields_set)
+        != set(TrustedOwnerScope.model_fields)
+    ):
+        raise PermissionError("owner scope runtime state is not exact")
+
+    try:
+        task = _strict_versioned_model(
+            source_task_record,
+            TaskRecord,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        request_unit = _strict_versioned_model(
+            source_request_unit_record,
+            RequestUnitRecord,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        bindings = tuple(
+            _strict_versioned_model(
+                binding,
+                InputBinding,
+                failure_category=(
+                    P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+                ),
+            )
+            for binding in source_argument_binding_records
+        )
+    except _IntegritySignal as error:
+        raise ValueError("source owner graph is not canonical") from error
+
+    binding_ids = tuple(binding.binding_id for binding in bindings)
+    if (
+        task.owner_customer_id != owner_scope.customer_id
+        or source.task_id != task.task_id
+        or source.request_unit_id != request_unit.request_unit_id
+        or request_unit.task_id != task.task_id
+        or source.validated_task_state_version != task.state_version
+        or source.validated_task_state_version != request_unit.state_version
+        or task.status is not request_unit.status
+        or binding_ids != source.argument_binding_refs
+        or binding_ids != request_unit.input_binding_refs
+        or len(binding_ids) != len(set(binding_ids))
+    ):
+        raise ValueError("source owner/Task/RequestUnit/binding graph mismatch")
+    return owner_scope.customer_id
+
+
 def _convert_tool_attempts_v1_to_v2(
     parent: ToolCallRecord,
     attempts: tuple[ToolAttemptRecord, ...],
@@ -3897,6 +4031,13 @@ def _convert_tool_attempts_v1_to_v2(
                 attempt.failure_code,
                 ToolRetryDecision.NOT_RETRYABLE,
             )
+        elif outcome is ToolResultOutcome.TIMEOUT:
+            if attempt.attempt_no >= policy.max_attempts:
+                retry_decision = ToolRetryDecision.MAX_ATTEMPTS_REACHED
+            else:
+                raise LookupError(
+                    "timeout retry decision is not uniquely reconstructable"
+                )
         elif attempt.failure_code not in retryable_codes:
             retry_decision = ToolRetryDecision.NOT_RETRYABLE
         elif attempt.attempt_no >= policy.max_attempts:
@@ -3925,14 +4066,27 @@ def _convert_tool_call_v1_to_v2(
     source: ToolCallRecord,
     children: tuple[ContractModel, ...],
     *,
-    private_owner_scope_ref: str | None,
-    registry_snapshot: RegistrySnapshot | None,
+    owner_scope: TrustedOwnerScope | None,
+    source_task_record: TaskRecord | None,
+    source_request_unit_record: RequestUnitRecord | None,
+    source_argument_binding_records: tuple[InputBinding, ...],
+    source_registry_snapshot: RegistrySnapshot | None,
+    target_registry_snapshot: RegistrySnapshot | None,
 ) -> tuple[ToolCallRecordV2, tuple[ToolAttemptRecordV2, ...]]:
-    if type(private_owner_scope_ref) is not str or not private_owner_scope_ref:
-        raise PermissionError("trusted owner scope is required")
-    if type(registry_snapshot) is not RegistrySnapshot:
-        raise PermissionError("exact RegistrySnapshot is required")
-    snapshot = validate_cycle2_registry_snapshot(registry_snapshot)
+    private_owner_scope_ref = _trusted_source_tool_owner(
+        source,
+        owner_scope=owner_scope,
+        source_task_record=source_task_record,
+        source_request_unit_record=source_request_unit_record,
+        source_argument_binding_records=source_argument_binding_records,
+    )
+    source_snapshot = _canonical_source_registry_authority(
+        source,
+        source_registry_snapshot,
+    )
+    target_snapshot = _canonical_target_registry_authority(
+        target_registry_snapshot,
+    )
     try:
         Cycle2ToolName(source.canonical_tool_name)
     except ValueError as error:
@@ -3952,7 +4106,7 @@ def _convert_tool_call_v1_to_v2(
     converted_attempts = _convert_tool_attempts_v1_to_v2(
         source,
         attempts,
-        snapshot,
+        source_snapshot,
     )
     source_data = source.model_dump(mode="json", warnings="error")
     payload = {
@@ -3962,7 +4116,7 @@ def _convert_tool_call_v1_to_v2(
     }
     payload.update(
         {
-            "tool_registry_version": snapshot.tool_registry_version,
+            "tool_registry_version": target_snapshot.tool_registry_version,
             "private_owner_scope_ref": private_owner_scope_ref,
             "verified_target_ref": None,
             "attempts": [
@@ -3991,11 +4145,15 @@ def classify_p0_conversion_readiness(
     target_schema_version: str,
     source_record: ContractModel,
     *,
+    active_schema_versions: tuple[str, ...],
     external_references: tuple[P0RecordReference, ...] = (),
     source_logical_children: tuple[ContractModel, ...] = (),
-    active_schema_versions: tuple[str, ...] | None = None,
-    private_owner_scope_ref: str | None = None,
-    registry_snapshot: RegistrySnapshot | None = None,
+    owner_scope: TrustedOwnerScope | None = None,
+    source_task_record: TaskRecord | None = None,
+    source_request_unit_record: RequestUnitRecord | None = None,
+    source_argument_binding_records: tuple[InputBinding, ...] = (),
+    source_registry_snapshot: RegistrySnapshot | None = None,
+    target_registry_snapshot: RegistrySnapshot | None = None,
 ) -> P0ConversionReadiness:
     """Classify one exact v1 graph for a future atomic migration, without I/O."""
 
@@ -4017,14 +4175,9 @@ def classify_p0_conversion_readiness(
             P0ConversionReadinessCategory.UNKNOWN_TARGET_VERSION,
             **base,
         )
-    observed_versions = (
-        (source_schema_version,)
-        if active_schema_versions is None
-        else active_schema_versions
-    )
     if (
-        type(observed_versions) is not tuple
-        or observed_versions != (source_schema_version,)
+        type(active_schema_versions) is not tuple
+        or active_schema_versions != (source_schema_version,)
     ):
         return _conversion_result(
             P0ConversionReadinessCategory.MIXED_ACTIVE_VERSION,
@@ -4113,8 +4266,14 @@ def classify_p0_conversion_readiness(
             target, converted_attempts = _convert_tool_call_v1_to_v2(
                 canonical_source,
                 canonical_source_children,
-                private_owner_scope_ref=private_owner_scope_ref,
-                registry_snapshot=registry_snapshot,
+                owner_scope=owner_scope,
+                source_task_record=source_task_record,
+                source_request_unit_record=source_request_unit_record,
+                source_argument_binding_records=(
+                    source_argument_binding_records
+                ),
+                source_registry_snapshot=source_registry_snapshot,
+                target_registry_snapshot=target_registry_snapshot,
             )
             target_children = tuple(converted_attempts)
 
