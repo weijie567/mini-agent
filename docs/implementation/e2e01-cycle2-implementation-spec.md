@@ -1357,6 +1357,50 @@ effective_timeout_ms =
   min(500, remaining_run_time_budget_ms)
 ```
 
+该数值不是 executor 输入。initial attempt 与 recovered attempt 2 的 Application
+writer 必须在提交 durable fence 的同一 CAS 中重读 owner-scoped active Run / link、
+current Task / RequestUnit、完整 InputBinding / verified target、可信服务端时间与
+版本化 Run-budget policy，重新计算正剩余预算并返回一次性的非持久化
+`Cycle2ReadDispatchGrant`：
+
+```text
+Cycle2ReadDispatchGrant
+  write_result: Cycle2DispatchFenceWriteResult
+  tool_call_id?: UUID
+  attempt_no?: strict int 1..2
+  trusted_fenced_at?: UTC datetime
+  effective_timeout_ms?: strict int 1..500
+```
+
+closed matrix 固定为：`APPLIED` iff 四个 grant 字段全部存在、identity 等于本次
+command/fence、timeout 等于 same-CAS `min(500, authoritative remaining)`；所有
+non-`APPLIED` iff 四字段全部为 `null`。它没有 `schema_version`，不是 top-level
+Record、logical child、codec / migration target、模型 capability 或可重放输入；Executor
+只能 exact-check 并直接消费当前 awaited Port 返回值一次。裸 enum、旧 closure budget、
+caller budget / clock、fixture default 或 reconstructed grant 均无 dispatch authority。
+
+Application Port 的 concrete surface 固定为：
+
+```text
+AppendInitialToolAttemptV2Command
+  loaded_closure: ToolRetryRecoveryReadClosureV2  # exact CREATED/attempt0 graph
+  attempt_append_command: AppendToolAttemptV2Command  # pure attempt1 projection
+
+append_initial_tool_attempt_if_current(
+  AppendInitialToolAttemptV2Command
+) -> Cycle2ReadDispatchGrant
+
+append_recovered_tool_attempt_if_current(
+  AppendRecoveredToolAttemptV2Command
+) -> Cycle2ReadDispatchGrant
+```
+
+initial wrapper 必须 exact-bind closure ToolCall、owner 与纯 append projection，只允许
+`CREATED + attempt_count=0 → RUNNING + attempt_no=1`。recovered wrapper继续只允许
+reviewed decision child + attempt 2。旧 `append_tool_attempt_if_current(...) -> enum`
+不得继续暴露为 dispatch-authorizing Port；`AppendToolAttemptV2Command` 仅作为两个
+atomic wrapper 内部的 deterministic projection，不单独授权 Handler。
+
 第 1.1 节 `OA-07` 必须使 Tool owner 的 attempt contract 至少能够表达：
 
 ```text
@@ -1426,12 +1470,13 @@ timeout outcome 携带 service-transient code。
 - Task state、verified target 与 argument binding 未失效。
 - owner scope 不变。
 
-recovery 的 `remaining_run_time_budget_ms` 不是 caller authority。Application
+任何 attempt 的 `remaining_run_time_budget_ms` 都不是 caller authority。Application
 owner-scoped recovery reader 必须同时返回 exact active Run、可信服务端
 `trusted_read_at` 与版本化 Run-budget policy evidence，并从该 evidence 和 Run
 `started_at` 确定性派生剩余预算；writer 在授予第二次 dispatch 的同一 CAS 中重读并
-重新计算。模型、用户消息、executor 参数、旧 closure 中的缓存数字或测试 fixture 均
-不能单独证明当前仍有预算。具体 Run budget 值仍由后续 Runtime composition owner
+重新计算，并由 writer 在同一返回的 `APPLIED` dispatch grant 中给出有效 timeout；
+只返回 enum 或继续使用 CAS 前数字不构成 dispatch authority。模型、用户消息、executor
+参数、旧 closure 中的缓存数字或测试 fixture 均不能单独证明当前仍有预算。具体 Run budget 值仍由后续 Runtime composition owner
 冻结；在该值和 policy version 尚未组成可信 closure 时，recovery 只能 fail closed。
 
 第一次 retryable failure：
@@ -1707,6 +1752,11 @@ get_shipment_attempts <= 2
 retry attempts 属于同一 ToolCall，不增加 `tool_calls` 计数。每个具体 Case 应断言
 更小的实际路径；全局上限不能成为调用无关 Tool 的理由。
 
+attempt fence 的预算、deadline 与 current-state authority 服从第 7.9 节：Run 上限只
+定义政策，不能由 executor 参数实现。任何 initial / recovered fence 在 owner、Run /
+link、Task / RequestUnit、binding / target 或版本化预算发生漂移时都必须返回
+non-`APPLIED` grant、零写、零 dispatch。
+
 ### 7.13 持久化和原子性
 
 Phase 2 至少需要五个新增逻辑记录 / projection，并演进现有 InputBinding、
@@ -1784,18 +1834,24 @@ contract 冻结为可审阅输入：
    current Task version 做 CAS，并原子写 accepted ordinal InputBinding、当前
    RequestUnit binding ref、SelectionRecord、selected target、closed pending question
    与 Task / RequestUnit 新版本；失败时全部不形成，禁止 pre-CAS binding write。
-3. 每个 Tool attempt 继续使用 durable dispatch fence；attempt finalize、
-   `RETRY_SCHEDULED` 和 retry fence 遵循第 7.9 节恢复闭包。
-4. Shipment Observation 必须在 ToolCall terminal `SUCCEEDED` 后写入，并在任何
+3. 每个 Tool attempt 继续使用 durable dispatch fence；initial attempt 必须以加载的
+   exact owner/current closure 和 pure append projection组成单一 atomic command，
+   same-CAS 重验 current state/bindings/target/budget并返回第7.9节的
+   `Cycle2ReadDispatchGrant`。现有只绑定 ToolCall parent/child 的裸 append command /
+   enum 不能成为 dispatch authority。
+4. attempt finalize、`RETRY_SCHEDULED` 和 recovered attempt 2 遵循第7.9节恢复闭包；
+   attempt 2 的 decision child、fence 与 grant timing/timeout来自同一 CAS，Executor
+   禁止读取 pre-CAS closure budget决定 timeout。
+5. Shipment Observation 必须在 ToolCall terminal `SUCCEEDED` 后写入，并在任何
    Assessment 或 Presentation 之前成功。
-5. Assessment 必须绑定 exact current Observation、source version、Task version、
+6. Assessment 必须绑定 exact current Observation、source version、Task version、
    rule version和 current Claim binding（若适用）。
-6. supersession 通过新记录和 current binding 原子更新，不修改历史记录。
-7. owner-scoped reader 对 dangling ref、candidate target mapping 缺失 / 重复 /
+7. supersession 通过新记录和 current binding 原子更新，不修改历史记录。
+8. owner-scoped reader 对 dangling ref、candidate target mapping 缺失 / 重复 /
    wrong-owner、CandidateSet 中出现业务事实或 target、错误 source / content / Task
    version、错误 ordinal、错误 owner、半写 attempt、Selection-without-CAS 或
    Assessment-before-Observation fail closed。
-8. obsolete Run conditional finalization 必须以 expected active Run 和 exact
+9. obsolete Run conditional finalization 必须以 expected active Run 和 exact
    current owner-scoped Task / RequestUnit / link closure 为 CAS 条件，原子写
    Run=`SUPERSEDED`、link no-result closure 与 audit-only `RunStopped`；Task、
    RequestUnit、Agent result、Message 和 `ResponseRendered` 全部不写。
@@ -2682,6 +2738,7 @@ exact-head review 与 merge 证据。
 | 14 | Owner-alignment R6 / merge | owner alignment 是否可合并 | exact-file 与 PR exact-head review 均为 `PASS / 0 findings`；PR #201 squash merge 为 `9ee260f12a82b706269f8a62c460c781c64f1f47`，只关闭 owner alignment |
 | 15 | Contract Activation | Phase 2 现在能进入哪一步 | 用户授权独立 Activation；只推进到 `SCOPED_CONTRACT_ACTIVE / READY_FOR_PLANNING`，Case 保持 `CONTRACT_DEFINED`，不创建功能代码 |
 | 16 | W4 02-09 owner-gap ruling | reviewed Core / Application contract 能否持久化 exact restart recovery | 02-09 preflight 只读证明现有 Port / command 缺少 unfinished parent-only terminal、durable recovery decision child 与 `RETRY_SCHEDULED + RUN_BUDGET_EXHAUSTED` terminal；裁决采用 ToolCall v2 logical decision child、可信 budget evidence 与三个 single-writer correction Packet，02-09 source 保持 clean，Case lifecycle 不变 |
+| 17 | W4 02-09 dispatch-grant ruling | durable attempt fence 是否同时关闭 current-state 与 timeout authority | 02-09 exact-head review证明 initial bare ToolCall CAS 可在 Task/binding drift 后 dispatch，recovered writer只返回 enum会让Executor继续使用pre-CAS budget。裁决采用Application-private非持久化`Cycle2ReadDispatchGrant`、initial atomic wrapper与initial/recovered same-CAS timeout grant；增加`02-09R4 / W4R2` single-writer correction，02-09 head不发布，Case lifecycle不变 |
 
 ## 14. Review checklist
 

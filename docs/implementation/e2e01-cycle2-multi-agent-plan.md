@@ -2,7 +2,7 @@
 
 更新日期：2026-08-01
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / W4_BATCH_A_MERGED / 02-09_OWNER_GAP_RULING`
+状态：`NON_NORMATIVE / PLAN_APPROVED / W4_R1_R2_R3_MERGED / 02-09_DISPATCH_GRANT_OWNER_RULING`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -26,14 +26,17 @@ squash merge；`B_C2_PLAN_APPROVED =
 > PR #227 的实际 merge successor
 > `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de` / tree
 > `174fbebcfa622336ffeade113cfae74a5611edae` 与 reviewed overlay相等。W4
-> `02-06/08/09/13` 已从该同一 product barrier重冻结。Batch A 的 02-06 与 02-13
-> 已分别经 bounded feature/residual/overlay review 和 PR #229/#230 串行 merge，
-> 当前 integration successor 为 `15d3bd41f83b0ae42e01aae48e0682d1d1ba66ed` / tree
-> `f91732eabf3672961681383a92cf578b999be604`。Batch B 的 02-08 正在原 Packet 内执行；
-> 02-09 preflight 后确认 shared recovery contract 无法表示 unfinished parent-only
+> `02-06/08/09/13` 已从该同一 product barrier重冻结并 reviewed merge。02-09
+> preflight 后确认 shared recovery contract 无法表示 unfinished parent-only
 > terminal、durable recovery decision child 与 `RETRY_SCHEDULED + budget exhausted`
-> terminal，因此 source 保持 clean，先增加 `02-09R1/R2/R3` 三个 single-writer
-> correction Packet，再从真实 correction barrier 重冻结 02-09。
+> terminal，因此先增加 `02-09R1/R2/R3` 三个 single-writer correction Packet；三者
+> 已由 PR #234/#237/#239 reviewed merge并形成
+> `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree
+> `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`。replacement 02-09 exact-head
+> review 随后发现两个跨 shared Application owner 的 HIGH：initial bare ToolCall CAS
+> 未在 fence 时重验 current state/bindings；recovered fence 只返回 enum，使 executor
+> 继续使用 pre-CAS budget。该 implementation head未发布；先增加 `02-09R4 / W4R2`
+> dispatch-grant correction，再从真实 R4 successor第二次重冻结 02-09。
 >
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
 > 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
@@ -91,18 +94,18 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `02-00..05 + W3R COMPLETE / 02-06+13 MERGED / 02-08 IN PROGRESS / 02-09 BLOCKED FOR R1-R3` |
-| Task Packets | `W4 BATCH A REVIEWED MERGE / 02-09 OWNER GAP CONFIRMED / R1-R3 PLAN PENDING` |
-| Proposed Plan / Packet slots / Waves | `25 / 15`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3` / 原 `W0..W12` + `W3R/W4R`） |
+| Future GSD Plans | `W1-W3R + 02-06/13/08 + 02-09R1/R2/R3 COMPLETE / 02-09 QUARANTINED / 02-09R4 OWNER RULING` |
+| Task Packets | `W4 LEAVES EXCEPT 02-09 REVIEWED MERGE / DISPATCH-GRANT OWNER GAP CONFIRMED / R4 PLAN PENDING` |
+| Proposed Plan / Packet slots / Waves | `26 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 15d3bd41f83b0ae42e01aae48e0682d1d1ba66ed` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / a380d48e5c39de3441104fda44d893693e7a24ce` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W3R + W4 Batch A COMPLETE；02-08 ACTIVE；02-09 CLEAN/BLOCKED` |
-| Writer assignments | `02-08 writer ACTIVE；02-09 writer PAUSED；Integrator owner-ruling single writer ACTIVE` |
-| Execution concurrency | approved ceiling `2` writers；当前 writers `2`（02-08 + owner ruling） |
+| Integration / code feature branches / Worktrees | `W1..W3R + W4 02-06/13/08 + R1/R2/R3 COMPLETE；02-09 local head QUARANTINED / UNPUBLISHED` |
+| Writer assignments | `02-09 writer PAUSED；Integrator R4 owner-ruling single writer ACTIVE` |
+| Execution concurrency | approved ceiling `2` writers；当前 writer `1`（owner ruling） |
 
 ### 2.1 Gate P2-A planning PR exact scope
 
@@ -199,10 +202,11 @@ Tech Lead / Integrator
 
 ## 5. Future Plan / Task Packet slots
 
-以下 25 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
+以下 26 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
 `02-02R/02-04R/02-05R` 是用户授权的 W4 前 correction set，
-`02-09R1/02-09R2/02-09R3` 是 02-09 exact preflight 触发的 recovery owner correction
-set。`02-00` 是零功能代码的
+`02-09R1/02-09R2/02-09R3` 是 02-09 preflight 触发的 recovery owner correction
+set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correction。
+`02-00` 是零功能代码的
 scoped-owner correction；其余 slot 覆盖实现、remediation、lifecycle 与
 post-activation verification。
 每个 slot 后续必须形成且只形成：
@@ -424,7 +428,8 @@ post-activation verification。
   - `tests/component/application/test_read_tool_executor.py`
   - `tests/component/application/test_restart_recovery_service.py`
 - **Depends on:** reviewed `02-02/03/04/05`、`02-04R/02-05R` 与
-  `02-09R1/02-09R2/02-09R3` exact barriers；旧四文件 Plan 在 R1-R3 merge 前不可执行。
+  `02-09R1/02-09R2/02-09R3/02-09R4` exact barriers；当前四文件 head因两个
+  shared-owner HIGH未发布，只有 R4 真实 successor 后的 replacement Plan可执行。
 - **Acceptance:** attempt 1 失败证据不被最终 success 覆盖；deterministic failure
   不重试；state invalidation 形成 OA-10 no-result closure。
 
@@ -468,6 +473,24 @@ post-activation verification。
 - **Depends on:** reviewed `02-09R2` barrier。
 - **Acceptance:** parent/ref/identity/cardinality/ordering/unknown child fail closed；
   02-06 五个 top-level 与六个 v2 parent family 保持不变。
+
+### `02-09R4` — Application dispatch-fence grant contract
+
+- **Owner:** Runtime Engineer / Application contract single writer。
+- **Goal:** 关闭 initial fence current-state TOCTOU 与 recovered fence pre-CAS budget
+  authority；增加非持久化 `Cycle2ReadDispatchGrant`、initial atomic wrapper，并使
+  initial / recovered Port 只以 same-CAS `APPLIED` identity + timeout grant授权 dispatch。
+- **Proposed files:**
+  - `src/mini_agent/application/records.py`
+  - `src/mini_agent/application/ports.py`
+  - `tests/component/application/test_record_contracts.py`
+  - `tests/component/application/test_ports_contract.py`
+- **Depends on:** 本 dispatch-grant owner ruling reviewed merge；exact base由后续 Plan
+  在真实 integration successor冻结。
+- **Acceptance:** initial CAS重验 owner/current Run/link/Task/RequestUnit/bindings/target /
+  budget；recovered CAS返回本次 attempt2 same-CAS timeout；non-APPLIED grant全空、零写、
+  零dispatch；裸 enum / old closure number无authority；grant无schema/codec/migration /
+  Action surface。
 
 ### `02-10` — Physical schema and migration
 
@@ -640,8 +663,9 @@ post-activation verification。
 | `W3` | `02-05` | 1 | `B_C2_APP_CONTRACT` |
 | `W3R` | `02-02R → 02-04R → 02-05R` | 1 | exact-type dependencies require reviewed serial successors；形成 `B_C2_W4_READY` |
 | `W4` | `02-06, 02-13, 02-08；02-09 waits for W4R` | max 2 | each exact review + serial merge；Batch A 已完成 |
-| `W4R` | `02-09R1 → 02-09R2 → 02-09R3` | 1 | recovery owner corrections serial merge；形成 `B_C2_02_09_READY` |
-| `W4 resumed` | `02-09` | 1 | 从 exact `B_C2_02_09_READY` 重冻结后执行；形成 `B_C2_LEAVES` |
+| `W4R` | `02-09R1 → 02-09R2 → 02-09R3` | 1 | recovery owner corrections serial merge；历史形成 `B_C2_02_09_READY` |
+| `W4R2` | `02-09R4` | 1 | dispatch-grant contract correction；形成新的 exact `B_C2_02_09_DISPATCH_READY` |
+| `W4 resumed` | `02-09` | 1 | 仅从 `B_C2_02_09_DISPATCH_READY` 第二次重冻结后执行；形成 `B_C2_LEAVES` |
 | `W5` | `02-10` | 1 | `B_C2_PHYSICAL` |
 | `W6` | `02-07, 02-11` | max 2 | business / record Adapter files不重叠；serial merge；形成 `B_C2_INFRA` |
 | `W7` | `02-12` | 1 | `B_C2_RUNTIME` |
@@ -807,6 +831,9 @@ W4R correction review 同样有界：
   child、second-fence/terminal/OA-10 command 与 Port 的 APPLIED/zero-write 边界；
 - `02-09R3 = TARGETED_CHILD_CODEC`：只审 recovery child identity/ref/cardinality、
   unknown/mixed child fail-closed 与 Phase 1 codec compatibility。
+- `02-09R4 = TARGETED_DISPATCH_GRANT_CONTRACT`：只审 initial/recovered atomic wrapper、
+  owner/current graph与budget same-CAS、APPLIED grant closed matrix、identity/timeout exact
+  bind、bare-enum/old-budget旁路消失，以及 non-persistent/no-codec/no-Action boundary。
 
 W3R correction review 同样有界：
 
@@ -919,7 +946,8 @@ closure 需要后续独立 exact Plan / Task Packet 和用户批准；其 eviden
 | obsolete Run overwrites new state / sends result | CRITICAL | conditional CAS、`SUPERSEDED`、null link result、no outbound/task write | `03,05,09,11,12,14` |
 | model / Eval fabricates business evidence | CRITICAL | deterministic projection/mapper、authenticated artifacts、real HTTP SUT | `12,13,14,15,18` |
 | `CONTRACT_DEFINED` Case dispatched或 artifact 自激活 | CRITICAL | Harness pre-dispatch fail closed；reviewed execution seam；独立 owner ruling；atomic lifecycle / manifest / loader sync | `13,14,15,16,17,18` |
-| read-only phase enables Action / side effect | CRITICAL | exact Registry 仅三个 `READ` tools；无 confirmation、ActionPolicy、idempotency claim/key、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery | `04,09R1,09R2,09R3,11,13,15,18` |
+| read-only phase enables Action / side effect | CRITICAL | exact Registry 仅三个 `READ` tools；无 confirmation、ActionPolicy、idempotency claim/key、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery | `04,09R1,09R2,09R3,09R4,11,13,15,18` |
+| bare ToolCall CAS or stale budget grants dispatch | CRITICAL | initial/recovered writer same-CAS重验完整current graph与budget；只返回identity-bound `Cycle2ReadDispatchGrant`；裸enum/old closure无authority | `09R4,09` |
 
 任何 CRITICAL / HIGH threat 缺少可复现 mitigation evidence 都阻断 slot merge、Wave
 barrier 与 release。
@@ -930,8 +958,9 @@ barrier 与 release。
 
 1. **先完整暴露 slots，不用“大包”隐藏复杂度。** 原 19 slots / 13 wave labels 与
    Gate P2-A1 的 22 / 14 都保留为历史批准层级；本轮“有问题先修复”的用户指令经
-   Gate P2-A2 收口为再增加 `02-09R1/R2/R3` 与 `W4R`，当前冻结集合为 25 slots /
-   15 wave labels / max 2 writers。后续再增减任一 slot 仍需重新裁决 master Plan。
+   Gate P2-A2 收口为增加 `02-09R1/R2/R3` 与 `W4R`；replacement 02-09 review的两个
+   HIGH 再由 Gate P2-A3 增加 `02-09R4 / W4R2`。当前冻结集合为 26 slots /
+   16 wave labels / max 2 writers。后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
    contract change / review；不生成临时 replacement Plan。
 3. **同一 finding 优先在原 Packet 内关闭。** 只有跨 allowlist / owner / base 的
@@ -1011,18 +1040,31 @@ parent-only recovery、durable recovery decision child 或
 重冻结、bounded review、串行 merge，再重冻结 02-09。该裁决不推进 Case lifecycle，
 不增加 Action、`RESULT_UNKNOWN`、shared Trace 字段或 top-level business record。
 
+### Gate P2-A3 — 02-09 dispatch-grant owner correction
+
+状态：`OWNER_GAP_CONFIRMED / OWNER_RULING REVIEW`。R1/R2/R3 reviewed merge并从真实
+`B_C2_02_09_READY` 重冻结 02-09 后，bounded exact-head review发现两个不能在四文件
+service Packet内关闭的 HIGH：initial attempt只CAS ToolCall，无法证明 fence时 Task /
+binding/target仍current；recovered writer same-CAS重算预算却只返回enum，使Executor可用
+pre-CAS数字设定timeout。该02-09 head保持local clean且未发布。最小correction固定为
+`02-09R4 / W4R2`：Application-private non-persistent dispatch grant + initial/recovered
+atomic Port contract。R4 reviewed merge后必须从真实 successor第二次重冻结02-09；不得
+rebase/push旧head。该裁决不推进Case lifecycle，不增加codec/migration/top-level record、
+Action或`RESULT_UNKNOWN` side-effect path。
+
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / W1-W3R COMPLETE / W4 BATCH A MERGED / 02-09 R1-R3 PENDING`。P2-A 通过后始终按
+状态：`IN_PROGRESS / W1-W3R COMPLETE / W4 02-06/13/08 + R1/R2/R3 MERGED / 02-09R4 OWNER RULING`。P2-A 通过后始终按
 真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造 SHA。W3 reviewed
 merge 已真实形成 `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6`
 / tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；owner-ruling、02-02R 与 02-04R
 已依次形成 `B_C2_W3R_RULING`、`B_C2_INPUT_BINDING_V2`、
 `B_C2_SELECTED_TARGET_GATEWAY` 与最终 `B_C2_W4_READY = 5f2fa6d...` / tree
 `174fbebc...`。W4 `02-06/08/09/13` 四份Plan已从该同一product base重冻结并经
-planning provenance merge；02-06/13 已 reviewed implementation merge，02-08 正在执行。
-02-09 必须等待 Gate P2-A2 owner ruling 与 R1-R3 exact Plan provenance，旧 Plan 不再是
-当前可执行输入。
+planning provenance merge；02-06/13/08 与 R1/R2/R3 已 reviewed implementation merge，
+并形成 `B_C2_02_09_READY = cdf8c194...`。第一次 refrozen 02-09 head因Gate P2-A3的
+两个HIGH未发布；必须等待R4 exact Plan、reviewed merge与第二次refreeze，旧Plan/head
+均不再是当前可执行输入。
 
 用户需逐项或整组批准：
 
@@ -1071,8 +1113,8 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
       remediation，且不会由 Executor猜测。
 - [x] 原 19 slots / 13 Waves / max concurrency 2 已由 Gate P2-A 批准；Gate P2-A1
       历史增加三个 W3R correction slots，形成 22 / 14；本轮用户“有问题先修复”
-      指令经 Gate P2-A2 增加 `02-09R1/R2/R3` 与 `W4R`，当前冻结为 25 slots /
-      15 wave labels，并发上限仍为 2。
+      指令经 Gate P2-A2 增加 `02-09R1/R2/R3` 与 `W4R`，又经 Gate P2-A3增加
+      `02-09R4 / W4R2`；当前冻结为 26 slots / 16 wave labels，并发上限仍为 2。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
 - [x] single-writer hotspots唯一。
