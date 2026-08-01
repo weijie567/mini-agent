@@ -2594,6 +2594,9 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
     current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
+    current_candidate_source_tool_call_record: ToolCallRecordV2 | None = None
+    current_search_observation_record: SearchOrdersObservation | None = None
+    current_candidate_set_record: OrderCandidateSetRecord | None = None
     trusted_read_at: datetime
 
     @model_validator(mode="before")
@@ -2610,6 +2613,11 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
                 ),
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
+            },
+            optional_model_fields={
+                "current_candidate_source_tool_call_record": ToolCallRecordV2,
+                "current_search_observation_record": SearchOrdersObservation,
+                "current_candidate_set_record": OrderCandidateSetRecord,
             },
         )
 
@@ -2649,6 +2657,75 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
             > self.trusted_read_at
         ):
             raise ValueError("search owner-scoped current read closure mismatch")
+        previous_source = self.current_candidate_source_tool_call_record
+        previous_observation = self.current_search_observation_record
+        previous_candidate_set = self.current_candidate_set_record
+        previous_graph = (
+            previous_source,
+            previous_observation,
+            previous_candidate_set,
+        )
+        if all(record is None for record in previous_graph):
+            return self
+        if (
+            previous_source is None
+            or previous_observation is None
+            or previous_candidate_set is None
+        ):
+            raise ValueError("search current CandidateSet graph must be complete")
+        if (
+            previous_source.status is not ToolCallStatus.SUCCEEDED
+            or previous_source.effect is not ToolEffect.READ
+            or previous_source.canonical_tool_name.value != "search_orders"
+            or previous_source.finished_at is None
+            or previous_source.result_ref is None
+            or previous_source.private_owner_scope_ref
+            != self.owner_scope.customer_id
+            or not _owner_matches_private_scope(
+                self.owner_scope,
+                previous_observation.private_owner_scope,
+            )
+            or previous_source.task_id != task.task_id
+            or previous_source.request_unit_id != unit.request_unit_id
+            or previous_source.validated_task_state_version
+            != previous_candidate_set.base_task_state_version
+            or previous_source.argument_binding_refs != (query.binding_ref,)
+            or previous_observation.source_tool_call_id
+            != previous_source.tool_call_id
+            or previous_candidate_set.source_tool_call_id
+            != previous_source.tool_call_id
+            or previous_candidate_set.private_owner_scope_ref
+            != self.owner_scope.customer_id
+            or previous_candidate_set.conversation_id
+            != conversation.conversation_id
+            or previous_candidate_set.task_id != task.task_id
+            or previous_candidate_set.request_unit_id != unit.request_unit_id
+            or previous_candidate_set.query_binding_refs != (query.binding_ref,)
+            or previous_candidate_set.result_task_state_version
+            != task.state_version
+            or query.accepted_task_state_version
+            > previous_candidate_set.base_task_state_version
+            or not (
+                query.accepted_at
+                <= previous_source.started_at
+                <= previous_source.finished_at
+                <= previous_observation.recorded_at
+                <= self.trusted_read_at
+            )
+        ):
+            raise ValueError("search current CandidateSet aggregate mismatch")
+        validate_search_candidate_set_observation_closure(
+            candidate_set=previous_candidate_set,
+            observation=previous_observation,
+        )
+        if previous_candidate_set.outcome is OrderCandidateSetOutcome.UNIQUE:
+            if task.status is not TaskStatus.ACTIVE or unit.open_questions:
+                raise ValueError("current UNIQUE CandidateSet Task effect mismatch")
+        elif (
+            task.status is not TaskStatus.WAITING_USER
+            or len(unit.open_questions) != 1
+        ):
+            raise ValueError("current MULTIPLE CandidateSet Task effect mismatch")
         return self
 
     def require_same_persisted_graph(
@@ -2672,6 +2749,27 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
             for field_name in graph_fields
         ):
             raise ValueError("search persisted read fence mismatch")
+
+
+def _require_disjoint_search_candidate_refs(
+    *,
+    previous: SearchOrdersObservation,
+    current: SearchOrdersObservation,
+) -> None:
+    """Reject reuse of any Runtime-private candidate authority reference."""
+
+    previous_candidate_refs = {
+        candidate.observation_candidate_ref
+        for candidate in previous.normalized_value.ordered_candidates
+    }
+    current_candidate_refs = {
+        candidate.observation_candidate_ref
+        for candidate in current.normalized_value.ordered_candidates
+    }
+    if previous_candidate_refs & current_candidate_refs:
+        raise ValueError(
+            "CandidateSet supersession requires disjoint candidate refs"
+        )
 
 
 class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
@@ -2752,6 +2850,8 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or loaded.current_query_binding != query_binding
             or loaded.current_task_record != expected_task
             or loaded.current_request_unit_record != expected_unit
+            or loaded.current_candidate_set_record
+            != self.previous_candidate_set_record
         ):
             raise ValueError("search command/read closure mismatch")
 
@@ -2864,14 +2964,22 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         else:
             if previous is None:
                 raise ValueError("CandidateSet supersession requires previous record")
+            previous_source = loaded.current_candidate_source_tool_call_record
+            previous_observation = loaded.current_search_observation_record
+            if previous_source is None or previous_observation is None:
+                raise ValueError("CandidateSet supersession requires current graph")
             if (
-                previous.source_tool_call_id == candidate_set.source_tool_call_id
-                or previous.search_observation_ref
+                previous_source.tool_call_id == source.tool_call_id
+                or previous_observation.observation_id
                 == candidate_set.search_observation_ref
             ):
                 raise ValueError(
                     "CandidateSet supersession requires distinct Search outcomes"
                 )
+            _require_disjoint_search_candidate_refs(
+                previous=previous_observation,
+                current=observation,
+            )
             from mini_agent.core.task_state import validate_candidate_set_supersession
 
             validate_candidate_set_supersession(

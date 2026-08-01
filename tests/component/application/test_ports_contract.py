@@ -2260,6 +2260,19 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
     )
     assert "Only ``APPLIED``" in dispatch_doc
     assert "never grant dispatch" in dispatch_doc
+    search_read_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "current query",
+        "CandidateSet",
+        "Search aggregate",
+        "partial graph fails closed",
+    ):
+        assert required_term in search_read_doc
     search_write_doc = " ".join(
         (
             Cycle2RuntimeRecordPort.apply_order_search_outcome_if_current.__doc__
@@ -2271,6 +2284,7 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         "loaded_read_closure",
         "require_same_persisted_graph",
         "zero writes",
+        "current Search graph",
     ):
         assert required_term in search_write_doc
     assessment_write_doc = " ".join(

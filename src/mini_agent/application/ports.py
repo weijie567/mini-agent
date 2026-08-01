@@ -392,10 +392,11 @@ class Cycle2RuntimeRecordPort(Protocol):
         request_unit_id: UUID,
         trusted_read_at: datetime,
     ) -> OrderSearchCurrentReadClosure | None:
-        """Load the one current product-description query and exact roots.
+        """Load current query, roots, and any current Search aggregate.
 
         ``None`` represents absent and unauthorized equivalently. More than one
-        current query, any unknown binding family, or a partial graph fails closed.
+        current query, CandidateSet, or Search aggregate, any unknown binding
+        family, or a partial graph fails closed.
         """
         ...
 
@@ -403,7 +404,7 @@ class Cycle2RuntimeRecordPort(Protocol):
         self,
         command: ApplyOrderSearchOutcomeV2Command,
     ) -> Cycle2WriteResult:
-        """Re-read exact roots/query, then atomically commit the Search effect.
+        """Re-read exact roots/query/current Search graph, then commit atomically.
 
         The in-transaction read must equal ``command.loaded_read_closure`` through
         ``require_same_persisted_graph``. A mismatch returns zero writes.
