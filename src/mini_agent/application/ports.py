@@ -9,6 +9,7 @@ from uuid import UUID
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendRecoveredToolAttemptV2Command,
     AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
@@ -30,9 +31,13 @@ from mini_agent.application.records import (
     EvalResultRecord,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    FinalizeBudgetExhaustedToolRecoveryV2Command,
+    FinalizeCreatedToolRecoveryV2Command,
+    FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
+    FinalizeUnfinishedToolRecoveryV2Command,
     InsertOnlyWriteResult,
     InitialToolCallV2ReadClosure,
     MessageRecord,
@@ -51,6 +56,7 @@ from mini_agent.application.records import (
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
+    ToolRetryRecoveryReadClosureV2,
     ShipmentAssessmentReadClosure,
     SupersededRunReadClosure,
 )
@@ -523,6 +529,82 @@ class Cycle2RuntimeRecordPort(Protocol):
         command: FinalizeToolAttemptV2Command,
     ) -> Cycle2WriteResult:
         """Replace the exact unfinished child and project its parent atomically."""
+        ...
+
+    async def load_tool_retry_recovery_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        tool_call_id: UUID,
+    ) -> ToolRetryRecoveryReadClosureV2 | None:
+        """Load exact active Run/Task/bindings/ToolCall recovery evidence.
+
+        The owner-scoped reader obtains trusted server time and the versioned
+        Run-budget policy itself; it accepts no caller remaining-budget, clock,
+        policy, decision, or dispatch authority. Duplicate, partial,
+        mixed-version, wrong-owner, or contradictory graph evidence fails closed.
+        """
+        ...
+
+    async def append_recovered_tool_attempt_if_current(
+        self,
+        command: AppendRecoveredToolAttemptV2Command,
+    ) -> Cycle2DispatchFenceWriteResult:
+        """Same-CAS re-read/recompute, decision-child plus attempt-2 fence.
+
+        The transaction re-reads owner/current Run, state, bindings, trusted
+        server time and authoritative budget policy, recomputes the decision,
+        and commits both records atomically. Only APPLIED grants one dispatch;
+        every other result is zero-write and zero-dispatch.
+        """
+        ...
+
+    async def finalize_unfinished_tool_recovery_if_current(
+        self,
+        command: FinalizeUnfinishedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        """Same-CAS append the decision child and parent-only terminal closure.
+
+        APPLIED preserves the unfinished attempt. Every non-APPLIED result is
+        zero-write and grants no dispatch.
+        """
+        ...
+
+    async def finalize_created_tool_recovery_if_current(
+        self,
+        command: FinalizeCreatedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        """Same-CAS interrupt one CREATED zero-attempt ToolCall parent only.
+
+        The transaction re-reads the exact owner/current closure. APPLIED writes
+        only the exact INTERRUPTED parent. It creates no recovery decision child,
+        attempt, result, recovery metadata/ref, or dispatch. Every non-APPLIED
+        result is zero-write and zero-dispatch.
+        """
+        ...
+
+    async def finalize_budget_exhausted_tool_recovery_if_current(
+        self,
+        command: FinalizeBudgetExhaustedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        """Same-CAS recompute budget and atomically close the exact parent.
+
+        APPLIED appends RUN_BUDGET_EXHAUSTED and its R1 terminal projection.
+        Every non-APPLIED result is zero-write and zero-dispatch.
+        """
+        ...
+
+    async def finalize_state_invalidated_tool_recovery_if_current(
+        self,
+        command: FinalizeStateInvalidatedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        """Atomically compose Tool recovery with the exact OA-10 no-result closure.
+
+        The same CAS re-reads both owner/current graphs. APPLIED writes the
+        decision child, Tool parent, SUPERSEDED Run/link and audit Trace only;
+        no Task, RequestUnit, Message, Result, outbound, or dispatch is allowed.
+        Every non-APPLIED result means zero writes.
+        """
         ...
 
     async def save_shipment_observation_if_current(
