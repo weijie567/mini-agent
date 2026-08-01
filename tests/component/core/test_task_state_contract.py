@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -23,6 +25,7 @@ from mini_agent.core.task_state import (
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
+    InputBindingV2,
     InputValidationStatus,
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
@@ -31,6 +34,7 @@ from mini_agent.core.task_state import (
     TaskRecord,
     TaskStateTransition,
     TaskStatus,
+    convert_input_binding_v1_to_v2,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -50,6 +54,228 @@ def _binding(**overrides: object) -> InputBinding:
     }
     values.update(overrides)
     return InputBinding.model_validate(values)
+
+
+def _binding_v2(
+    *,
+    name: object = "order_id",
+    normalized_value: object = "O-4242",
+    **overrides: object,
+) -> InputBindingV2:
+    values: dict[str, object] = {
+        "binding_id": uuid4(),
+        "name": name,
+        "normalized_value": normalized_value,
+        "authority": InputAuthority.USER_CLAIM,
+        "source_refs": (uuid4(),),
+        "validation_status": InputValidationStatus.ACCEPTED,
+        "confirmed_by_user": True,
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+    values.update(overrides)
+    return InputBindingV2.model_validate(values)
+
+
+def test_input_binding_v1_shape_schema_and_dump_remain_compatible() -> None:
+    binding_id = uuid4()
+    source_ref = uuid4()
+    supersedes = uuid4()
+    updated_at = NOW + timedelta(seconds=1)
+    binding = _binding(
+        binding_id=binding_id,
+        source_refs=(source_ref,),
+        updated_at=updated_at,
+        supersedes=supersedes,
+    )
+
+    assert tuple(InputBinding.model_fields) == (
+        "binding_id",
+        "name",
+        "normalized_value",
+        "authority",
+        "source_refs",
+        "validation_status",
+        "confirmed_by_user",
+        "created_at",
+        "updated_at",
+        "supersedes",
+    )
+    schema_bytes = json.dumps(
+        InputBinding.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    assert hashlib.sha256(schema_bytes).hexdigest() == (
+        "3625b69289512f6420b307a86e7a93b3b5c1f344a98f0e942f813890394de68d"
+    )
+    assert binding.model_dump() == {
+        "binding_id": binding_id,
+        "name": "order_id",
+        "normalized_value": "O-4242",
+        "authority": InputAuthority.USER_CLAIM,
+        "source_refs": (source_ref,),
+        "validation_status": InputValidationStatus.ACCEPTED,
+        "confirmed_by_user": True,
+        "created_at": NOW,
+        "updated_at": updated_at,
+        "supersedes": supersedes,
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "normalized_value"),
+    [
+        ("order_id", "O-0000"),
+        ("order_id", f"O-{'1' * 20}"),
+        ("product_description", "red shoes"),
+        ("candidate_ordinal", 1),
+        ("candidate_ordinal", 5),
+        ("shipment_not_received", False),
+        ("shipment_not_received", True),
+    ],
+)
+def test_input_binding_v2_accepts_only_the_closed_name_value_matrix(
+    name: str,
+    normalized_value: object,
+) -> None:
+    binding = _binding_v2(name=name, normalized_value=normalized_value)
+
+    assert binding.name == name
+    assert binding.normalized_value == normalized_value
+    assert type(binding.normalized_value) is type(normalized_value)
+    assert binding.authority is InputAuthority.USER_CLAIM
+    assert binding.validation_status is InputValidationStatus.ACCEPTED
+    assert binding.confirmed_by_user is True
+
+
+@pytest.mark.parametrize(
+    ("name", "normalized_value"),
+    [
+        ("order_id", "O-123"),
+        ("order_id", f"O-{'1' * 21}"),
+        ("order_id", "red shoes"),
+        ("order_id", b"O-4242"),
+        ("order_id", 1),
+        ("order_id", True),
+        ("product_description", " Red  Shoes "),
+        ("product_description", ""),
+        ("product_description", "鞋" * 81),
+        ("product_description", "\ud800"),
+        ("product_description", b"red shoes"),
+        ("product_description", 1),
+        ("product_description", False),
+        ("candidate_ordinal", 0),
+        ("candidate_ordinal", 6),
+        ("candidate_ordinal", True),
+        ("candidate_ordinal", "1"),
+        ("candidate_ordinal", 1.0),
+        ("shipment_not_received", 0),
+        ("shipment_not_received", 1),
+        ("shipment_not_received", "true"),
+        ("shipment_not_received", 0.0),
+    ],
+)
+def test_input_binding_v2_rejects_wrong_or_non_strict_name_value_pairs(
+    name: str,
+    normalized_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        _binding_v2(name=name, normalized_value=normalized_value)
+
+
+def test_input_binding_v2_product_description_requires_exact_normalization() -> None:
+    assert _binding_v2(
+        name="product_description",
+        normalized_value="strasse shoes",
+    ).normalized_value == "strasse shoes"
+    assert _binding_v2(
+        name="product_description",
+        normalized_value="鞋" * 80,
+    ).normalized_value == "鞋" * 80
+
+    with pytest.raises(ValidationError):
+        _binding_v2(
+            name="product_description",
+            normalized_value="  STRAẞE   ＳＨＯＥＳ  ",
+        )
+
+
+def test_input_binding_v2_remains_claim_only_and_has_no_target_or_fact() -> None:
+    assert tuple(InputBindingV2.model_fields) == tuple(InputBinding.model_fields)
+    assert InputBindingV2.contract_visibility is ContractVisibility.AUDIT_ONLY
+    forbidden_fields = {
+        "business_fact",
+        "customer_id",
+        "observation_ref",
+        "owner_customer_id",
+        "verified_target_ref",
+    }
+    assert forbidden_fields.isdisjoint(InputBindingV2.model_fields)
+
+    for field_name in forbidden_fields:
+        with pytest.raises(ValidationError, match="extra"):
+            _binding_v2(**{field_name: uuid4()})
+
+    for field_name, value in (
+        ("name", "not_received_claim"),
+        ("authority", "BUSINESS_OBSERVATION"),
+        ("validation_status", "PENDING"),
+        ("confirmed_by_user", False),
+        ("source_refs", ()),
+    ):
+        with pytest.raises(ValidationError):
+            _binding_v2(**{field_name: value})
+
+
+def test_input_binding_v2_preserves_time_and_supersession_invariants() -> None:
+    supersedes = uuid4()
+    binding = _binding_v2(
+        updated_at=NOW + timedelta(seconds=1),
+        supersedes=supersedes,
+    )
+    assert binding.supersedes == supersedes
+
+    with pytest.raises(ValidationError, match="UTC"):
+        _binding_v2(created_at=datetime(2030, 1, 1))
+    with pytest.raises(ValidationError, match="precede"):
+        _binding_v2(updated_at=NOW - timedelta(microseconds=1))
+
+
+def test_input_binding_v1_to_v2_conversion_is_an_exact_order_id_copy() -> None:
+    source = _binding(
+        updated_at=NOW + timedelta(seconds=1),
+        supersedes=uuid4(),
+    )
+
+    converted = convert_input_binding_v1_to_v2(source)
+
+    assert type(converted) is InputBindingV2
+    assert converted.name == "order_id"
+    assert converted.model_dump() == source.model_dump()
+    assert converted.binding_id == source.binding_id
+    assert converted.source_refs == source.source_refs
+    assert converted.supersedes == source.supersedes
+
+
+def test_input_binding_v1_to_v2_conversion_rejects_non_exact_sources() -> None:
+    source = _binding()
+
+    class InputBindingSubclass(InputBinding):
+        pass
+
+    subclass = InputBindingSubclass.model_validate(source.model_dump())
+    v2 = _binding_v2()
+    malformed_v1 = InputBinding.model_construct(
+        **{**source.model_dump(), "normalized_value": "4242"}
+    )
+
+    for value in (subclass, v2, source.model_dump(), object()):
+        with pytest.raises(TypeError, match="exact InputBinding"):
+            convert_input_binding_v1_to_v2(value)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        convert_input_binding_v1_to_v2(malformed_v1)
 
 
 def test_input_binding_is_only_an_accepted_user_claim() -> None:

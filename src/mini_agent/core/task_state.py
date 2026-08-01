@@ -10,13 +10,23 @@ from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, Self, cast
 from uuid import UUID
 
-from pydantic import Field, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from .common import AuditOnlyModel, RuntimePrivateModel, require_utc
 from .order_search import (
     ORDER_SEARCH_MAX_CANDIDATES,
+    OrderId as StrictOrderIdV2,
     OrderCandidateSourceVersion,
     OrderSearchSnapshotSourceVersion,
+    normalize_product_description,
 )
 from .request_understanding import InputAuthority, TaskDeltaOperation
 
@@ -53,6 +63,84 @@ class InputBinding(AuditOnlyModel):
         if self.updated_at < self.created_at:
             raise ValueError("InputBinding updated_at cannot precede created_at")
         return self
+
+
+InputBindingNameV2 = Literal[
+    "order_id",
+    "product_description",
+    "candidate_ordinal",
+    "shipment_not_received",
+]
+InputBindingNormalizedValueV2 = StrictStr | StrictInt | StrictBool
+_STRICT_ORDER_ID_V2_ADAPTER = TypeAdapter(StrictOrderIdV2)
+
+
+class InputBindingV2(AuditOnlyModel):
+    """Inactive Cycle 2 accepted input; it remains only a user Claim."""
+
+    binding_id: UUID
+    name: InputBindingNameV2
+    normalized_value: InputBindingNormalizedValueV2
+    authority: Literal[InputAuthority.USER_CLAIM]
+    source_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    validation_status: Literal[InputValidationStatus.ACCEPTED]
+    confirmed_by_user: Literal[True]
+    created_at: datetime
+    updated_at: datetime
+    supersedes: UUID | None = None
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def binding_timestamps_are_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="InputBindingV2 timestamp")
+
+    @model_validator(mode="after")
+    def accepted_name_value_pair_is_closed(self) -> Self:
+        value = self.normalized_value
+        if self.name == "order_id":
+            _STRICT_ORDER_ID_V2_ADAPTER.validate_python(value)
+        elif self.name == "product_description":
+            if (
+                type(value) is not str
+                or normalize_product_description(value) != value
+            ):
+                raise ValueError(
+                    "product_description must be the exact normalized value"
+                )
+        elif self.name == "candidate_ordinal":
+            if type(value) is not int or not 1 <= value <= 5:
+                raise ValueError(
+                    "candidate_ordinal must be a strict integer from 1 to 5"
+                )
+        elif type(value) is not bool:
+            raise ValueError("shipment_not_received must be a strict boolean")
+        return self
+
+    @model_validator(mode="after")
+    def update_does_not_precede_creation(self) -> Self:
+        if self.updated_at < self.created_at:
+            raise ValueError("InputBindingV2 updated_at cannot precede created_at")
+        return self
+
+
+def convert_input_binding_v1_to_v2(binding: InputBinding) -> InputBindingV2:
+    """Copy one exact validated v1 order-id binding into the inactive v2 shape."""
+
+    if type(binding) is not InputBinding:
+        raise TypeError("conversion requires an exact InputBinding instance")
+    validated = InputBinding.model_validate(binding.model_dump(), strict=True)
+    return InputBindingV2(
+        binding_id=validated.binding_id,
+        name=validated.name,
+        normalized_value=validated.normalized_value,
+        authority=validated.authority,
+        source_refs=validated.source_refs,
+        validation_status=validated.validation_status,
+        confirmed_by_user=validated.confirmed_by_user,
+        created_at=validated.created_at,
+        updated_at=validated.updated_at,
+        supersedes=validated.supersedes,
+    )
 
 
 class CandidateValidationDecision(StrEnum):
