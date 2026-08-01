@@ -1,6 +1,6 @@
 # Gate W6｜Adapter and PostgreSQL records execution card
 
-状态：`02-11R_COMPLETE / B_C2_RECORD_HISTORY_PHYSICAL / 02-11_REFREEZE_REVIEW`
+状态：`W6_COMPLETE / B_C2_INFRA / CANONICAL_FULL_PASS`
 
 ## Exact input
 
@@ -26,6 +26,11 @@
 - Case lifecycle：`E2E01-02/03/05/06 = CONTRACT_DEFINED`。
 - 02-11 checkpoint 不得发布或直接作为 feature head；必须在真实 `02-11R`
   successor 上新建 Worktree 并重冻结回放。
+- `02-11` refreeze PR #262 与 implementation PR #263 已reviewed merge；真实
+  `B_C2_INFRA = 6217b2213d576dab052dc70e223f8cf02c9c577b` / tree
+  `7de3e6db75ebc58fcf4d15c46538ded424564d8c`。
+- W6唯一一次canonical full：`2840 passed, 1 deselected, 12 warnings`；依赖同步、
+  canonical db/db-test health与migration head均PASS。
 
 ## Ordered dispatch
 
@@ -55,7 +60,6 @@ exact base/tree/blob/barrier 不相等，立即停止并裁决。
 
 ## Current gate
 
-`02-11` 只在本 third-refrozen exact Plan 获得 independent exact-file `PASS` 并通过
-planning PR合并后可从 reviewed `B_C2_RECORD_HISTORY_PHYSICAL` 真实 successor 回放；
-blocked checkpoint只作source patch reference。Cases、Harness/Result 与canonical full
-在此前均不得推进。
+`CLOSED / PASS`。W6已形成真实`B_C2_INFRA`；旧checkpoint只保留为未发布历史
+source-patch evidence，不得复用。下一步只可从该barrier冻结W7 `02-12`；Cases与
+Harness/Result仍未推进。
