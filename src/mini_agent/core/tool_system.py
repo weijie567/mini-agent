@@ -1106,6 +1106,9 @@ class ToolRecoveryDisposition(StrEnum):
 
     UNFINISHED_ATTEMPT_INTERRUPTED = "UNFINISHED_ATTEMPT_INTERRUPTED"
     RETRY_SCHEDULED_STATE_INVALIDATED = "RETRY_SCHEDULED_STATE_INVALIDATED"
+    RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED = (
+        "RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED"
+    )
 
 
 class ToolCallRecordV2(AuditOnlyModel):
@@ -1261,11 +1264,38 @@ class ToolCallRecordV2(AuditOnlyModel):
                     and self.timeout_phase is None
                     and self.finished_at >= last.finished_at
                 )
+                scheduled_budget_exhaustion_recovery = (
+                    self.attempt_count == 1
+                    and last.attempt_no == 1
+                    and last.finished_at is not None
+                    and last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
+                    and (
+                        (
+                            last.outcome is ToolResultOutcome.SYSTEM_FAILURE
+                            and self.status is ToolCallStatus.FAILED
+                            and self.failure_code == last.failure_code
+                            and self.timeout_phase is None
+                        )
+                        or (
+                            last.outcome is ToolResultOutcome.TIMEOUT
+                            and self.status is ToolCallStatus.TIMED_OUT
+                            and self.failure_code == "TOOL_CALL_TIMEOUT"
+                            and self.timeout_phase is last.timeout_phase
+                        )
+                    )
+                    and self.interruption_reason is None
+                    and self.recovery_disposition
+                    is ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+                    and self.recovery_decision_ref is not None
+                    and self.finished_at >= last.finished_at
+                )
                 if last.finished_at is None or (
                     last.retry_decision is ToolRetryDecision.RETRY_SCHEDULED
                 ):
                     if not (
-                        unfinished_recovery or scheduled_invalidation_recovery
+                        unfinished_recovery
+                        or scheduled_invalidation_recovery
+                        or scheduled_budget_exhaustion_recovery
                     ):
                         raise ValueError(
                             "recovery disposition/ref does not match the approved "
@@ -1539,6 +1569,105 @@ def decide_cycle2_tool_recovery(
         decision=ToolRecoveryDecision.FAIL_CLOSED,
         stable_reason_code="RECOVERY_EVIDENCE_CONTRADICTORY",
         decided_at=decided_at,
+    )
+
+
+def project_cycle2_budget_exhausted_recovery_terminal(
+    *,
+    tool_call: object,
+    recovery_decision: object,
+    recovery_decision_ref: object,
+) -> ToolCallRecordV2:
+    """Close a scheduled retry whose revalidated Run budget is exhausted."""
+
+    if type(tool_call) is not ToolCallRecordV2:
+        raise ValueError("budget-exhausted recovery source must be exact")
+    try:
+        validated = ToolCallRecordV2.model_validate(
+            tool_call.model_dump(),
+            strict=True,
+        )
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        AttributeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        raise ValueError("budget-exhausted recovery source must be exact") from exc
+    if not _cycle2_raw_value_is_exact(tool_call, validated):
+        raise ValueError("budget-exhausted recovery source must be exact")
+    if (
+        validated.status is not ToolCallStatus.RUNNING
+        or validated.attempt_count != 1
+        or len(validated.attempts) != 1
+    ):
+        raise ValueError("budget-exhausted recovery source must be RUNNING attempt 1")
+    last = validated.attempts[0]
+    if (
+        last.attempt_no != 1
+        or last.finished_at is None
+        or last.retry_decision is not ToolRetryDecision.RETRY_SCHEDULED
+        or last.outcome
+        not in {ToolResultOutcome.SYSTEM_FAILURE, ToolResultOutcome.TIMEOUT}
+    ):
+        raise ValueError(
+            "budget-exhausted recovery source requires finalized RETRY_SCHEDULED "
+            "attempt 1"
+        )
+
+    if type(recovery_decision) is not ToolRetryRecoveryDecision:
+        raise ValueError("budget-exhausted recovery decision must be exact")
+    try:
+        validated_decision = ToolRetryRecoveryDecision.model_validate(
+            recovery_decision.model_dump(),
+            strict=True,
+        )
+    except (
+        ValidationError,
+        PydanticSerializationError,
+        AttributeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        raise ValueError("budget-exhausted recovery decision must be exact") from exc
+    if not _cycle2_raw_value_is_exact(recovery_decision, validated_decision):
+        raise ValueError("budget-exhausted recovery decision must be exact")
+    if validated_decision.tool_call_id != validated.tool_call_id:
+        raise ValueError("budget-exhausted recovery decision identity mismatch")
+    if validated_decision.last_attempt_no != 1:
+        raise ValueError("budget-exhausted recovery decision attempt mismatch")
+    if (
+        validated_decision.decision is not ToolRecoveryDecision.TERMINATE_RETRY_PATH
+        or validated_decision.stable_reason_code != "RUN_BUDGET_EXHAUSTED"
+        or validated_decision.candidate_next_attempt_no is not None
+        or validated_decision.durable_cas_claimed is not False
+    ):
+        raise ValueError("budget-exhausted recovery decision is not terminal evidence")
+    if validated_decision.decided_at < last.finished_at:
+        raise ValueError("budget-exhausted recovery decision precedes attempt finalize")
+    if type(recovery_decision_ref) is not UUID:
+        raise ValueError("budget-exhausted recovery decision ref must be an exact UUID")
+
+    status = (
+        ToolCallStatus.TIMED_OUT
+        if last.outcome is ToolResultOutcome.TIMEOUT
+        else ToolCallStatus.FAILED
+    )
+    return ToolCallRecordV2(
+        **{
+            **validated.model_dump(),
+            "status": status,
+            "finished_at": validated_decision.decided_at,
+            "failure_code": last.failure_code,
+            "timeout_phase": last.timeout_phase,
+            "interruption_reason": None,
+            "result_ref": None,
+            "recovery_disposition": (
+                ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+            ),
+            "recovery_decision_ref": recovery_decision_ref,
+        }
     )
 
 

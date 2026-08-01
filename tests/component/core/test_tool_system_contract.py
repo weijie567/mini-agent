@@ -52,6 +52,7 @@ from mini_agent.core.tool_system import (
     effective_cycle2_tool_timeout_ms,
     get_shipment_tool_spec,
     get_order_tool_spec,
+    project_cycle2_budget_exhausted_recovery_terminal,
     project_cycle2_tool_terminal,
     search_orders_tool_spec,
     validate_cycle2_registry_snapshot,
@@ -1706,6 +1707,28 @@ def _tool_call_v2_values(
     }
 
 
+def _budget_exhausted_recovery_source(
+    *,
+    outcome: ToolResultOutcome = ToolResultOutcome.SYSTEM_FAILURE,
+) -> ToolCallRecordV2:
+    tool_call_id = uuid4()
+    timeout = outcome is ToolResultOutcome.TIMEOUT
+    attempt = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=outcome,
+        failure_code=("TOOL_CALL_TIMEOUT" if timeout else "ORDER_SEARCH_TRANSIENT"),
+        timeout_phase=(ToolTimeoutPhase.AFTER_DISPATCH if timeout else None),
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    source = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(attempt,),
+        status=ToolCallStatus.RUNNING,
+    )
+    return _with_all_model_fields_explicit(source)  # type: ignore[return-value]
+
+
 def test_cycle2_command_and_toolcall_share_exact_uuid_target_identity() -> None:
     target_ref = uuid4()
     binding_ref = uuid4()
@@ -2762,6 +2785,219 @@ def test_cycle2_terminal_recovery_exceptions_require_exact_disposition_and_ref()
             finished_at=NOW + timedelta(seconds=1),
             interruption_reason="PROCESS_RESTART_DETECTED",
         )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status", "expected_failure", "expected_timeout"),
+    [
+        (
+            ToolResultOutcome.SYSTEM_FAILURE,
+            ToolCallStatus.FAILED,
+            "ORDER_SEARCH_TRANSIENT",
+            None,
+        ),
+        (
+            ToolResultOutcome.TIMEOUT,
+            ToolCallStatus.TIMED_OUT,
+            "TOOL_CALL_TIMEOUT",
+            ToolTimeoutPhase.AFTER_DISPATCH,
+        ),
+    ],
+)
+def test_cycle2_budget_exhausted_recovery_projects_exact_original_failure(
+    outcome: ToolResultOutcome,
+    expected_status: ToolCallStatus,
+    expected_failure: str,
+    expected_timeout: ToolTimeoutPhase | None,
+) -> None:
+    source = _budget_exhausted_recovery_source(outcome=outcome)
+    source_before = source.model_dump()
+    decided_at = source.attempts[0].finished_at + timedelta(milliseconds=1)
+    decision = decide_cycle2_tool_recovery(
+        tool_call=source,
+        revalidation=_retry_revalidation(
+            parent_tool_call=source,
+            remaining_run_time_budget_ms=0,
+        ),
+        decided_at=decided_at,
+    )
+    decision_ref = uuid4()
+
+    terminal = project_cycle2_budget_exhausted_recovery_terminal(
+        tool_call=source,
+        recovery_decision=decision,
+        recovery_decision_ref=decision_ref,
+    )
+
+    assert source.model_dump() == source_before
+    assert terminal.attempts == source.attempts
+    assert terminal.attempt_count == 1
+    assert terminal.status is expected_status
+    assert terminal.finished_at == decided_at
+    assert terminal.failure_code == expected_failure
+    assert terminal.timeout_phase is expected_timeout
+    assert terminal.result_ref is None
+    assert terminal.interruption_reason is None
+    assert terminal.recovery_disposition is (
+        ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+    )
+    assert terminal.recovery_decision_ref == decision_ref
+
+
+@pytest.mark.parametrize(
+    ("decision_change", "error"),
+    [
+        (
+            {
+                "decision": ToolRecoveryDecision.APPEND_SECOND_ATTEMPT,
+                "stable_reason_code": "RETRY_REVALIDATED_CAS_REQUIRED",
+                "candidate_next_attempt_no": 2,
+            },
+            "budget-exhausted recovery decision",
+        ),
+        (
+            {"stable_reason_code": "STATE_OR_BINDING_INVALIDATED"},
+            "budget-exhausted recovery decision",
+        ),
+        ({"tool_call_id": uuid4()}, "identity"),
+        ({"last_attempt_no": 2}, "attempt"),
+    ],
+)
+def test_cycle2_budget_exhausted_recovery_rejects_mismatched_decision_evidence(
+    decision_change: dict[str, object],
+    error: str,
+) -> None:
+    source = _budget_exhausted_recovery_source()
+    decision = ToolRetryRecoveryDecision(
+        tool_call_id=source.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        decided_at=source.attempts[0].finished_at + timedelta(milliseconds=1),
+    ).model_copy(update=decision_change)
+
+    with pytest.raises(ValueError, match=error):
+        project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=source,
+            recovery_decision=decision,
+            recovery_decision_ref=uuid4(),
+        )
+
+
+@pytest.mark.parametrize("evidence_kind", ["unknown", "malformed", "duplicate"])
+def test_cycle2_budget_exhausted_recovery_fails_closed_on_noncanonical_evidence(
+    evidence_kind: str,
+) -> None:
+    source = _budget_exhausted_recovery_source()
+    exact = ToolRetryRecoveryDecision(
+        tool_call_id=source.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        decided_at=source.attempts[0].finished_at + timedelta(milliseconds=1),
+    )
+    if evidence_kind == "unknown":
+        evidence: object = exact.model_copy(
+            update={"stable_reason_code": "UNKNOWN_RECOVERY_REASON"}
+        )
+    elif evidence_kind == "malformed":
+        evidence = exact.model_copy(update={"rogue_evidence": True})
+    else:
+        evidence = (exact, exact)
+
+    with pytest.raises(ValueError, match="budget-exhausted recovery decision"):
+        project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=source,
+            recovery_decision=evidence,
+            recovery_decision_ref=uuid4(),
+        )
+
+
+def test_cycle2_budget_exhausted_recovery_requires_ordered_decision_and_ref() -> None:
+    source = _budget_exhausted_recovery_source()
+    decision = ToolRetryRecoveryDecision(
+        tool_call_id=source.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        decided_at=source.attempts[0].finished_at - timedelta(microseconds=1),
+    )
+
+    with pytest.raises(ValueError, match="precedes attempt finalize"):
+        project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=source,
+            recovery_decision=decision,
+            recovery_decision_ref=uuid4(),
+        )
+    decision = decision.model_copy(
+        update={"decided_at": source.attempts[0].finished_at}
+    )
+    with pytest.raises(ValueError, match="decision ref"):
+        project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=source,
+            recovery_decision=decision,
+            recovery_decision_ref=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "source_change",
+    [
+        {"attempts": (_attempt_v2(),), "attempt_count": 1},
+        {"status": ToolCallStatus.INTERRUPTED},
+        {"attempt_count": 2},
+    ],
+)
+def test_cycle2_budget_exhausted_recovery_rejects_nonmatching_parent_state(
+    source_change: dict[str, object],
+) -> None:
+    source = _budget_exhausted_recovery_source().model_copy(update=source_change)
+    decision = ToolRetryRecoveryDecision(
+        tool_call_id=source.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        decided_at=NOW + timedelta(seconds=1),
+    )
+
+    with pytest.raises(ValueError, match="budget-exhausted recovery source"):
+        project_cycle2_budget_exhausted_recovery_terminal(
+            tool_call=source,
+            recovery_decision=decision,
+            recovery_decision_ref=uuid4(),
+        )
+
+
+def test_cycle2_budget_exhausted_terminal_exception_is_exclusive() -> None:
+    source = _budget_exhausted_recovery_source()
+    last = source.attempts[0]
+    values = {
+        **source.model_dump(),
+        "status": ToolCallStatus.FAILED,
+        "finished_at": last.finished_at + timedelta(milliseconds=1),
+        "failure_code": last.failure_code,
+        "recovery_disposition": (
+            ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+        ),
+        "recovery_decision_ref": uuid4(),
+    }
+    terminal = ToolCallRecordV2(**values)
+    assert terminal.attempts == source.attempts
+
+    for change in (
+        {"status": ToolCallStatus.INTERRUPTED},
+        {"failure_code": "TOOL_CALL_TIMEOUT"},
+        {"interruption_reason": "STATE_OR_BINDING_INVALIDATED"},
+        {"result_ref": uuid4()},
+        {"recovery_decision_ref": None},
+        {
+            "recovery_disposition": (
+                ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+            )
+        },
+    ):
+        with pytest.raises(ValidationError, match="terminal exception|non-success"):
+            ToolCallRecordV2(**{**values, **change})
 
 
 def test_cycle2_terminal_projector_rejects_unscoped_failure_code() -> None:
