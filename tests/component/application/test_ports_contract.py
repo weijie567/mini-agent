@@ -1,5 +1,6 @@
 import ast
 import inspect
+from datetime import datetime
 from pathlib import Path
 from typing import get_type_hints
 from uuid import UUID
@@ -9,6 +10,7 @@ import mini_agent.application.records as application_records_module
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
+    Cycle2RuntimeRecordPort,
     ExactRunEvidencePort,
     EvalResultPort,
     GetOrderPort,
@@ -20,9 +22,14 @@ from mini_agent.application.ports import (
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendToolAttemptV2Command,
+    ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    Cycle2DispatchFenceWriteResult,
+    Cycle2WriteResult,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -31,10 +38,13 @@ from mini_agent.application.records import (
     EvalResultRecord,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
+    FinalizeToolAttemptV2Command,
     InsertOnlyWriteResult,
     NonEmptyString,
     ObservationWriteResult,
+    OrderCandidateSelectionReadClosure,
     PositiveAttempt,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
@@ -42,6 +52,10 @@ from mini_agent.application.records import (
     RestartRecoveryClosure,
     SaveRequestUnderstandingV2NoTaskCommand,
     SaveObservationCommand,
+    SaveShipmentAssessmentV2Command,
+    SaveShipmentObservationV2Command,
+    ShipmentAssessmentReadClosure,
+    SupersededRunReadClosure,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
@@ -51,6 +65,7 @@ from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
 )
+from mini_agent.core.task_state import OrderCandidateSelectionRequest
 
 
 class CandidateOnlyProvider:
@@ -2042,3 +2057,196 @@ def test_exact_run_evidence_port_is_owner_scoped_snapshot_only_boundary() -> Non
         "build_eval_result",
     ):
         assert not hasattr(ExactRunEvidencePort, forbidden_method)
+
+
+def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
+    assert Cycle2RuntimeRecordPort._is_protocol
+    assert Cycle2RuntimeRecordPort is not RuntimeRecordPort
+    for method_name in (
+        "apply_order_search_outcome_if_current",
+        "load_order_candidate_selection_closure_for_owner",
+        "apply_order_candidate_selection_if_current",
+        "append_tool_attempt_if_current",
+        "finalize_tool_attempt_if_current",
+        "save_shipment_observation_if_current",
+        "load_shipment_assessment_closure_for_owner",
+        "save_shipment_assessment_if_current",
+        "load_superseded_run_closure_for_owner",
+        "finalize_superseded_run_if_current",
+    ):
+        assert hasattr(Cycle2RuntimeRecordPort, method_name)
+        assert not hasattr(RuntimeRecordPort, method_name)
+
+    _assert_signature(
+        Cycle2RuntimeRecordPort.apply_order_search_outcome_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": ApplyOrderSearchOutcomeV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.apply_order_candidate_selection_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": ApplyOrderCandidateSelectionV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.append_tool_attempt_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": AppendToolAttemptV2Command,
+            "return": Cycle2DispatchFenceWriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.finalize_tool_attempt_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": FinalizeToolAttemptV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.save_shipment_observation_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": SaveShipmentObservationV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.save_shipment_assessment_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": SaveShipmentAssessmentV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.finalize_superseded_run_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": FinalizeSupersededRunV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+
+
+def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_order_candidate_selection_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "conversation_id",
+            "task_id",
+            "request_unit_id",
+            "selection_request",
+            "trusted_now",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "conversation_id": UUID,
+            "task_id": UUID,
+            "request_unit_id": UUID,
+            "selection_request": OrderCandidateSelectionRequest,
+            "trusted_now": datetime,
+            "return": OrderCandidateSelectionReadClosure | None,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "task_id",
+            "request_unit_id",
+            "verified_order_target_ref",
+            "trusted_assessed_at",
+            "current_claim_binding_ref",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "task_id": UUID,
+            "request_unit_id": UUID,
+            "verified_order_target_ref": NonEmptyString,
+            "trusted_assessed_at": datetime,
+            "current_claim_binding_ref": UUID | None,
+            "return": ShipmentAssessmentReadClosure | None,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_superseded_run_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "obsolete_run_id",
+            "replacement_run_id",
+            "request_unit_id",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "obsolete_run_id": UUID,
+            "replacement_run_id": UUID,
+            "request_unit_id": UUID,
+            "return": SupersededRunReadClosure | None,
+        },
+    )
+    for method in (
+        Cycle2RuntimeRecordPort.load_order_candidate_selection_closure_for_owner,
+        Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
+        Cycle2RuntimeRecordPort.load_superseded_run_closure_for_owner,
+    ):
+        assert all(
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            for name, parameter in inspect.signature(method).parameters.items()
+            if name != "self"
+        )
+
+
+def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
+    normalized_doc = " ".join((Cycle2RuntimeRecordPort.__doc__ or "").split())
+    for required_term in (
+        "Inactive",
+        "exact-version-only",
+        "transactionally consistent",
+        "owner-scoped",
+        "atomic CAS",
+        "absent",
+        "unauthorized",
+        "dangling",
+        "duplicate",
+        "wrong-owner",
+        "partial",
+        "mixed-version",
+        "contradictory",
+        "fails closed",
+        "APPLIED",
+        "zero writes",
+        "Tool dispatch",
+        "business-fact authority",
+        "user-visible result authority",
+    ):
+        assert required_term in normalized_doc
+    dispatch_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort.append_tool_attempt_if_current.__doc__
+            or ""
+        ).split()
+    )
+    assert "Only ``APPLIED``" in dispatch_doc
+    assert "never grant dispatch" in dispatch_doc
+    oa10_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort.finalize_superseded_run_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for forbidden_write in (
+        "Task",
+        "RequestUnit",
+        "Message",
+        "AgentRunResult",
+        "ResponseRendered",
+    ):
+        assert forbidden_write in oa10_doc
