@@ -29,6 +29,7 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
     RUN_TASK_LINK_RECORD_V2_SCHEMA_VERSION,
+    ToolRetryRecoveryDecisionRecordV2,
     TrustedOwnerScope,
 )
 from mini_agent.core.common import (
@@ -70,7 +71,10 @@ from mini_agent.core.tool_system import (
     ToolAttemptRecordV2,
     ToolCallRecord,
     ToolCallRecordV2,
+    ToolCallStatus,
     ToolEffect,
+    ToolRecoveryDecision,
+    ToolRecoveryDisposition,
     ToolResultOutcome,
     ToolRetryDecision,
     convert_gate_decision_v1_to_v2,
@@ -114,6 +118,9 @@ class P0LogicalChildCode(StrEnum):
     ACCEPTED_TASK_DELTA = "accepted_task_delta"
     TASK_STATE_TRANSITION = "task_state_transition"
     TOOL_ATTEMPT_RECORD = "tool_attempt_record"
+    TOOL_RETRY_RECOVERY_DECISION_RECORD = (
+        "tool_retry_recovery_decision_record"
+    )
 
 
 JsonScalar = str | int | float | bool | None
@@ -2549,7 +2556,10 @@ _CYCLE2_V2_PARENT_SPECS = {
         ToolCallRecordV2,
         ("tool_call_id",),
         _TOOL_CALL_V2_PROJECTIONS,
-        allowed_child_codes=(P0LogicalChildCode.TOOL_ATTEMPT_RECORD,),
+        allowed_child_codes=(
+            P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+            P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD,
+        ),
     ),
     _R.AGENT_RUN_RECORD: _cycle2_record_spec(
         _R.AGENT_RUN_RECORD,
@@ -2582,6 +2592,25 @@ _TOOL_ATTEMPT_V2_SPEC = _P0LogicalChildSchemaSpec(
     identity_fields=("tool_call_id", "attempt_no"),
     closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
     projection_decisions=_CHILD_PROJECTIONS[P0LogicalChildCode.TOOL_ATTEMPT_RECORD],
+)
+
+_TOOL_RETRY_RECOVERY_DECISION_V2_PROJECTIONS = (
+    _decision(
+        "tool_call_id",
+        _D.PARENT_FIELD_EQUALITY,
+        value_projector=_one("tool_call_id"),
+        minimum=1,
+        maximum=1,
+    ),
+)
+
+_TOOL_RETRY_RECOVERY_DECISION_V2_SPEC = _P0LogicalChildSchemaSpec(
+    child_code=P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD,
+    source_model=ToolRetryRecoveryDecisionRecordV2,
+    parent_record_code=P0RecordCode.TOOL_CALL_RECORD,
+    identity_fields=("recovery_decision_id",),
+    closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
+    projection_decisions=_TOOL_RETRY_RECOVERY_DECISION_V2_PROJECTIONS,
 )
 
 _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
@@ -2618,6 +2647,11 @@ P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG: Mapping[
             "tool_call_record.p0.v2",
             P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
         ): _TOOL_ATTEMPT_V2_SPEC,
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD,
+        ): _TOOL_RETRY_RECOVERY_DECISION_V2_SPEC,
     }
 )
 
@@ -3008,6 +3042,123 @@ def _versioned_top_level_projection(
     )
 
 
+def _tool_call_v2_children_are_closed(
+    parent: ToolCallRecordV2,
+    children: tuple[ContractModel, ...],
+) -> bool:
+    attempts = tuple(
+        child for child in children if type(child) is ToolAttemptRecordV2
+    )
+    decisions = tuple(
+        child
+        for child in children
+        if type(child) is ToolRetryRecoveryDecisionRecordV2
+    )
+    if (
+        len(attempts) != len(parent.attempts)
+        or len(decisions) > 1
+        or any(
+            not _versioned_runtime_values_match_exactly(expected, actual)
+            for expected, actual in zip(parent.attempts, attempts, strict=True)
+        )
+    ):
+        return False
+
+    if not decisions:
+        return (
+            parent.recovery_disposition is None
+            and parent.recovery_decision_ref is None
+            and all(
+                _versioned_runtime_values_match_exactly(expected, actual)
+                for expected, actual in zip(
+                    parent.attempts,
+                    children,
+                    strict=True,
+                )
+            )
+        )
+
+    decision = decisions[0]
+    if decision.tool_call_id != parent.tool_call_id:
+        return False
+
+    expected_children: tuple[ContractModel, ...]
+    if (
+        parent.recovery_disposition is None
+        and parent.recovery_decision_ref is None
+    ):
+        if (
+            len(parent.attempts) != 2
+            or parent.attempts[0].finished_at is None
+            or parent.attempts[0].retry_decision
+            is not ToolRetryDecision.RETRY_SCHEDULED
+            or decision.decision
+            is not ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+            or decision.stable_reason_code
+            != "RETRY_REVALIDATED_CAS_REQUIRED"
+            or decision.last_attempt_no != 1
+            or decision.candidate_next_attempt_no != 2
+            or decision.decided_at < parent.attempts[0].finished_at
+            or decision.decided_at > parent.attempts[1].started_at
+        ):
+            return False
+        expected_children = (
+            parent.attempts[0],
+            decision,
+            parent.attempts[1],
+        )
+    else:
+        if (
+            parent.recovery_decision_ref != decision.recovery_decision_id
+            or parent.finished_at != decision.decided_at
+            or not parent.attempts
+            or decision.last_attempt_no != parent.attempts[-1].attempt_no
+            or decision.candidate_next_attempt_no is not None
+        ):
+            return False
+        exact_terminal = {
+            ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED: (
+                (ToolCallStatus.INTERRUPTED,),
+                ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+                "UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+                "PROCESS_RESTART_DETECTED",
+            ),
+            ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED: (
+                (ToolCallStatus.INTERRUPTED,),
+                ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+                "STATE_OR_BINDING_INVALIDATED",
+                "STATE_OR_BINDING_INVALIDATED",
+            ),
+            ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED: (
+                (ToolCallStatus.FAILED, ToolCallStatus.TIMED_OUT),
+                ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+                "RUN_BUDGET_EXHAUSTED",
+                None,
+            ),
+        }.get(parent.recovery_disposition)
+        if exact_terminal is None:
+            return False
+        (
+            expected_statuses,
+            expected_decision,
+            expected_reason,
+            expected_interruption,
+        ) = exact_terminal
+        if (
+            parent.status not in expected_statuses
+            or decision.decision is not expected_decision
+            or decision.stable_reason_code != expected_reason
+            or parent.interruption_reason != expected_interruption
+        ):
+            return False
+        expected_children = (*parent.attempts, decision)
+
+    return len(children) == len(expected_children) and all(
+        _versioned_runtime_values_match_exactly(expected, actual)
+        for expected, actual in zip(expected_children, children, strict=True)
+    )
+
+
 def _selected_versioned_child_payloads(
     parent_spec: P0RecordSchemaSpec,
     parent_record: ContractModel,
@@ -3025,12 +3176,14 @@ def _selected_versioned_child_payloads(
         _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
 
     if parent_spec is _CYCLE2_V2_PARENT_SPECS[_R.TOOL_CALL_RECORD]:
-        attempts = parent_record.attempts
-        if len(validated_children) != len(attempts):
+        if (
+            type(parent_record) is not ToolCallRecordV2
+            or not _tool_call_v2_children_are_closed(
+                parent_record,
+                validated_children,
+            )
+        ):
             _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
-        for expected, actual in zip(attempts, validated_children, strict=True):
-            if not _versioned_runtime_values_match_exactly(expected, actual):
-                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
 
     payloads: list[P0LogicalChildPayload] = []
     child_references: list[P0RecordReference] = []

@@ -37,6 +37,7 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     SaveInputBindingCommand,
     SaveObservationCommand,
+    ToolRetryRecoveryDecisionRecordV2,
     TrustedOwnerScope,
 )
 from mini_agent.core.common import freeze_json_value
@@ -783,8 +784,16 @@ def test_registry_is_exact_immutable_and_closed() -> None:
         ]
 
     assert isinstance(P0_LOGICAL_CHILD_SPECS, MappingProxyType)
-    assert tuple(P0_LOGICAL_CHILD_SPECS) == tuple(P0LogicalChildCode)
+    assert tuple(P0_LOGICAL_CHILD_SPECS) == (
+        P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        P0LogicalChildCode.TASK_STATE_TRANSITION,
+        P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+    )
     assert len(P0_LOGICAL_CHILD_SPECS) == 3
+    assert (
+        P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD
+        not in P0_LOGICAL_CHILD_SPECS
+    )
     assert not hasattr(persistence_module, "register")
     assert not hasattr(persistence_module, "_REGISTRY")
     assert not hasattr(persistence_module, "_CHILD_SPECS")
@@ -4062,7 +4071,11 @@ from mini_agent.core.tool_system import (
     ExecutionPolicy,
     RegistrySnapshot,
     ToolAttemptRecordV2,
+    ToolRecoveryDecision,
+    ToolRecoveryDisposition,
     ToolRegistration,
+    ToolResultOutcome,
+    ToolRetryDecision,
     build_cycle2_registry_snapshot,
 )
 
@@ -4330,6 +4343,348 @@ def test_tool_call_v2_attempt_is_strict_parent_versioned_child() -> None:
     assert mixed.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
 
 
+def _recovered_tool_call_v2() -> tuple[object, object, object, object]:
+    first = ToolAttemptRecordV2(
+        tool_call_id=_uuid(520),
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=UTC_NOW + timedelta(seconds=1),
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=_uuid(521),
+        tool_call_id=first.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.APPEND_SECOND_ATTEMPT,
+        stable_reason_code="RETRY_REVALIDATED_CAS_REQUIRED",
+        candidate_next_attempt_no=2,
+        decided_at=UTC_NOW + timedelta(seconds=2),
+    )
+    second = ToolAttemptRecordV2(
+        tool_call_id=first.tool_call_id,
+        attempt_no=2,
+        started_at=decision.decided_at,
+    )
+    source, _ = _tool_call_v2_with_unfinished_attempt()
+    parent = persistence_module.ToolCallRecordV2(
+        **{
+            **source.model_dump(),
+            "tool_call_id": first.tool_call_id,
+            "attempt_count": 2,
+            "attempts": (first, second),
+        }
+    )
+    return parent, first, decision, second
+
+
+def test_tool_call_v2_recovery_decision_child_round_trips_in_append_order() -> None:
+    parent, first, decision, second = _recovered_tool_call_v2()
+    children = (first, decision, second)
+    envelope = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        parent,
+        logical_children=children,
+    )
+    assert tuple(
+        child.child_code for child in envelope.payload.logical_children
+    ) == (
+        P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+        P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD,
+        P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+    )
+    decoded = persistence_module.decode_persistence_record_versioned(
+        envelope,
+        expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+        expected_schema_version="tool_call_record.p0.v2",
+        correlation_ref=_uuid(529),
+    )
+    assert decoded.source_record == parent
+    assert decoded.logical_children == children
+
+    finalized_second = ToolAttemptRecordV2(
+        tool_call_id=second.tool_call_id,
+        attempt_no=2,
+        started_at=second.started_at,
+        finished_at=second.started_at + timedelta(seconds=1),
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.MAX_ATTEMPTS_REACHED,
+    )
+    terminal_parent = persistence_module.ToolCallRecordV2(
+        **{
+            **parent.model_dump(),
+            "attempts": (first, finalized_second),
+            "status": ToolCallStatus.FAILED,
+            "finished_at": finalized_second.finished_at,
+            "failure_code": finalized_second.failure_code,
+        }
+    )
+    terminal_envelope = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        terminal_parent,
+        logical_children=(first, decision, finalized_second),
+    )
+    terminal_decoded = persistence_module.decode_persistence_record_versioned(
+        terminal_envelope,
+        expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+        expected_schema_version="tool_call_record.p0.v2",
+        correlation_ref=_uuid(528),
+    )
+    assert terminal_decoded.logical_children == (
+        first,
+        decision,
+        finalized_second,
+    )
+
+    for malformed in (
+        (first, second, decision),
+        (first, decision, decision, second),
+        (second, decision, first),
+    ):
+        with pytest.raises(P0PersistenceIntegrityError) as raised:
+            persistence_module.encode_persistence_record_versioned(
+                P0RecordCode.TOOL_CALL_RECORD,
+                "tool_call_record.p0.v2",
+                parent,
+                logical_children=malformed,
+            )
+        assert raised.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+
+def _terminal_recovery_tool_calls_v2() -> tuple[tuple[object, object, object], ...]:
+    running, unfinished = _tool_call_v2_with_unfinished_attempt()
+    unfinished_decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=_uuid(531),
+        tool_call_id=unfinished.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+        stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+        decided_at=UTC_NOW + timedelta(seconds=2),
+    )
+    unfinished_parent = persistence_module.ToolCallRecordV2(
+        **{
+            **running.model_dump(),
+            "status": ToolCallStatus.INTERRUPTED,
+            "finished_at": unfinished_decision.decided_at,
+            "interruption_reason": "PROCESS_RESTART_DETECTED",
+            "recovery_disposition": (
+                ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+            ),
+            "recovery_decision_ref": (
+                unfinished_decision.recovery_decision_id
+            ),
+        }
+    )
+
+    recovered, first, _, _ = _recovered_tool_call_v2()
+    budget_decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=_uuid(532),
+        tool_call_id=first.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        decided_at=UTC_NOW + timedelta(seconds=2),
+    )
+    budget_parent = persistence_module.ToolCallRecordV2(
+        **{
+            **recovered.model_dump(),
+            "attempt_count": 1,
+            "attempts": (first,),
+            "status": ToolCallStatus.FAILED,
+            "finished_at": budget_decision.decided_at,
+            "failure_code": first.failure_code,
+            "recovery_disposition": (
+                ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+            ),
+            "recovery_decision_ref": budget_decision.recovery_decision_id,
+        }
+    )
+    state_decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=_uuid(533),
+        tool_call_id=first.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="STATE_OR_BINDING_INVALIDATED",
+        decided_at=UTC_NOW + timedelta(seconds=2),
+    )
+    state_parent = persistence_module.ToolCallRecordV2(
+        **{
+            **recovered.model_dump(),
+            "attempt_count": 1,
+            "attempts": (first,),
+            "status": ToolCallStatus.INTERRUPTED,
+            "finished_at": state_decision.decided_at,
+            "interruption_reason": "STATE_OR_BINDING_INVALIDATED",
+            "recovery_disposition": (
+                ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+            ),
+            "recovery_decision_ref": state_decision.recovery_decision_id,
+        }
+    )
+    return (
+        (unfinished_parent, unfinished, unfinished_decision),
+        (budget_parent, first, budget_decision),
+        (state_parent, first, state_decision),
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent", "attempt", "decision"),
+    _terminal_recovery_tool_calls_v2(),
+)
+def test_tool_call_v2_terminal_recovery_child_closes_parent_reference(
+    parent: object,
+    attempt: object,
+    decision: object,
+) -> None:
+    children = (attempt, decision)
+    envelope = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        parent,
+        logical_children=children,
+    )
+    decoded = persistence_module.decode_persistence_record_versioned(
+        envelope,
+        expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+        expected_schema_version="tool_call_record.p0.v2",
+        correlation_ref=_uuid(539),
+    )
+    assert decoded.logical_children == children
+
+    with pytest.raises(P0PersistenceIntegrityError) as missing:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            parent,
+            logical_children=(attempt,),
+        )
+    assert missing.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+    wrong_ref_parent = parent.model_copy(
+        update={"recovery_decision_ref": _uuid(538)}
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as wrong_ref:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            wrong_ref_parent,
+            logical_children=children,
+        )
+    assert wrong_ref.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+
+def test_recovery_decision_child_is_v2_tool_call_only_and_decode_fails_closed() -> None:
+    parent, first, decision, second = _recovered_tool_call_v2()
+    child_catalog = persistence_module.P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG
+    decision_code = P0LogicalChildCode.TOOL_RETRY_RECOVERY_DECISION_RECORD
+    assert (
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        decision_code,
+    ) in child_catalog
+    assert (
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        decision_code,
+    ) not in child_catalog
+    assert decision_code not in P0_LOGICAL_CHILD_SPECS
+    assert len(persistence_module._CYCLE2_NEW_TOP_LEVEL_SPECS) == 5
+    assert len(persistence_module._CYCLE2_V2_PARENT_SPECS) == 6
+
+    v1_parent = _case(P0RecordCode.TOOL_CALL_RECORD).record
+    with pytest.raises(P0PersistenceIntegrityError) as v1:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v1",
+            v1_parent,
+            logical_children=(decision,),
+        )
+    assert v1.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+    created = parent.model_copy(
+        update={
+            "attempt_count": 0,
+            "attempts": (),
+            "status": ToolCallStatus.CREATED,
+        }
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as dangling:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            created,
+            logical_children=(decision,),
+        )
+    assert dangling.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+    ordinary, ordinary_attempt = _tool_call_v2_with_unfinished_attempt()
+    ordinary_decision = decision.model_copy(
+        update={"tool_call_id": ordinary.tool_call_id}
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as ordinary_extra:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            ordinary,
+            logical_children=(ordinary_attempt, ordinary_decision),
+        )
+    assert (
+        ordinary_extra.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+
+    raw = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        parent,
+        logical_children=(first, decision, second),
+    ).model_dump(mode="json")
+    raw["payload"]["logical_children"][1]["logical_identity"] = [
+        ["recovery_decision_id", str(_uuid(537))]
+    ]
+    with pytest.raises(P0PersistenceIntegrityError) as identity:
+        persistence_module.decode_persistence_record_versioned(
+            raw,
+            expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+            expected_schema_version="tool_call_record.p0.v2",
+            correlation_ref=_uuid(537),
+        )
+    assert identity.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+    raw["payload"]["logical_children"][1]["logical_identity"] = [
+        ["recovery_decision_id", str(decision.recovery_decision_id)]
+    ]
+    raw["payload"]["logical_children"].insert(
+        2,
+        dict(raw["payload"]["logical_children"][1]),
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as duplicate_decode:
+        persistence_module.decode_persistence_record_versioned(
+            raw,
+            expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+            expected_schema_version="tool_call_record.p0.v2",
+            correlation_ref=_uuid(535),
+        )
+    assert (
+        duplicate_decode.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+    raw["payload"]["logical_children"].pop(2)
+    raw["payload"]["logical_children"][1]["child_code"] = "unknown_child"
+    with pytest.raises(P0PersistenceIntegrityError):
+        persistence_module.decode_persistence_record_versioned(
+            raw,
+            expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+            expected_schema_version="tool_call_record.p0.v2",
+            correlation_ref=_uuid(536),
+        )
+
+
 def _phase1_get_order_registry_snapshot() -> RegistrySnapshot:
     return RegistrySnapshot.build(
         tool_registry_version="e2e01-thin-tools-v1",
@@ -4441,6 +4796,10 @@ def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
     ) == tuple(
         (attempt.tool_call_id, attempt.attempt_no)
         for attempt in tool_case.logical_children
+    )
+    assert all(
+        type(child) is ToolAttemptRecordV2
+        for child in tool_ready.target_logical_children
     )
 
 
