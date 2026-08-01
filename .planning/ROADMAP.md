@@ -40,8 +40,10 @@ tree `01b33357...`。W4 exit三组回归全部通过；PR #247/#248随后reviewe
 `02-10` migration并形成`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`。
 W6 preflight的Application Port owner缺口已经用户授权为`02-07R`；PR #250
 将slots更正为27且不新增wave label。PR #251/#252已reviewed完成R并冻结
-`B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree `c598651b...`；`02-07/02-11`
-已从该successor重冻结并正在planning review。
+`B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree `c598651b...`。Adapter preflight
+随后确认 search authority物理层缺口；PR #254 reviewed批准`02-10R`、slots
+`27→28`且不新增wave。当前审核该exact Plan；原`02-07/02-11`暂停并等待真实
+`02-10R` successor重冻结。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -177,7 +179,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_BUSINESS_READ_PORTS / W6_ADAPTER_PLANNING / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W6_02-10R_PHYSICAL_CORRECTION_PLANNING / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -196,7 +198,8 @@ Plans:
 合并。用户随后批准 `02-02R/02-04R/02-05R` 与 `W3R`，并在 recovery owner
 ruling 中把 `02-09R1/R2/R3` 加入前置修复链；PR #241又把`02-09R4/W4R2`
 加入dispatch-grant修复链。W6 preflight又经用户授权与PR #250增加
-`02-07R`，不新增wave label。当前目标为27 slots / 16 wave labels，最大并发仍为`2`。
+`02-07R`，不新增wave label。Adapter preflight确认既有物理承载缺口后，用户又批准
+`02-10R`且PR #254 reviewed merge；当前目标为28 slots / 16 wave labels，最大并发仍为`2`。
 `02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
@@ -217,8 +220,8 @@ PR #242/#243 reviewed merge形成真实dispatch-ready successor；PR #244/#245�
 successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passed`；旧02-09
 base/head仍不得复用；W5 `02-10`已reviewed完成并冻结`B_C2_PHYSICAL`。
 PR #250已批准W6 `02-07R` owner correction；PR #251/#252已reviewed完成R并形成
-`B_C2_BUSINESS_READ_PORTS`。当前审核从该真实successor重冻结的
-`02-07/02-11` exact Plans，未planning merge前不dispatch。
+`B_C2_BUSINESS_READ_PORTS`。PR #254随后批准`02-10R` physical correction与28 slots；
+当前审核该exact Plan，原`02-07/02-11`暂停且必须在真实successor后重冻结。
 
 **Branch mapping**:
 
@@ -352,6 +355,11 @@ B_C2_BUSINESS_READ_PORTS
 = c775ef45eb42c9f03e63d0065d493e2fb2a43556
 = tree c598651b56db003e6ab77a08d266d709a0ff8e76
 = PR #250 owner ruling + PR #251/#252 reviewed 02-07R planning/implementation successor
+
+W6_02_10R_OWNER_RULING
+= d05933238db26939e06421d148060c513a0aed6a
+= tree d37da0d30f2d76c7a572d1900ea6c50bb9a5db90
+= PR #254 reviewed owner ruling; 02-10R authorized; 28 slots / 16 wave labels
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -363,8 +371,9 @@ B_C2_BUSINESS_READ_PORTS
 02-09 head保持quarantine；真实`B_C2_PHYSICAL`已由reviewed W5 successor冻结。
 PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#252随后
 完成`02-07R`并冻结`B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree
-`c598651b...`。`02-07/02-11`已从该真实successor重冻结planning provenance，
-但仍必须等planning review/merge后才dispatch。旧 `B_C2_APP_CONTRACT`、
+`c598651b...`。PR #254 reviewed owner ruling形成`d0593323...` / tree `d37da0d3...`，
+批准`02-10R`与28 slots。原`02-07/02-11` planning provenance已暂停，且必须在
+真实`02-10R` successor后重新冻结才能dispatch。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -444,7 +453,7 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 19/27 | `W1-W5 + 02-07R complete；B_C2_BUSINESS_READ_PORTS frozen；02-07/02-11 planning review；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 19/28 | `W1-W5 + 02-07R complete；02-10R planning review；02-07/02-11 paused；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
