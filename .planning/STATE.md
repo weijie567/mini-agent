@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-09R2"
-status: "phase_2_w4_recovery_application_plan_review"
+current_plan: "02-09R3"
+status: "phase_2_w4_recovery_codec_plan_review"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — 02-09R1 PR #233/#234 reviewed merge；从 B_C2_RECOVERY_CORE 重冻结 02-09R2"
+last_activity: "2026-08-01 — 02-09R2 PR #235/#236/#237 reviewed merge；从 B_C2_RECOVERY_APP_CONTRACT 重冻结 02-09R3"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 25
-  completed_plans: 13
-  percent: 52
+  completed_plans: 14
+  percent: 56
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -29,39 +29,39 @@ See: [PROJECT.md](PROJECT.md)
 
 **Current focus:** W1–W3R 与 W4 `02-06/13/08` 已 reviewed merge。`02-09`
 preflight 暴露 recovery owner gap，PR #231 owner ruling 已固定 `02-09R1/R2/R3`
-前置链；R1 planning/implementation PR #233/#234 已 reviewed merge，当前 exact
-integration / `B_C2_RECOVERY_CORE` 为
-`fe627a5d81d909e096e9e60773fcca03b51f84be`、tree
-`42767c8535dbc05837ab9dabeee2c1432813e0fb`。原 `02-09` Worktree 保持 clean、
-Packet blocked；当前只从该真实 R1 barrier 重冻结 `02-09R2` 并等待独立 planning review。
+前置链；R1 PR #233/#234 与 R2 PR #235/#236/#237 已 reviewed merge，当前 exact
+integration / `B_C2_RECOVERY_APP_CONTRACT` 为
+`46a0b1f67153846dee6441ce47b7b5d5de4bc4d7`、tree
+`9c58a0885c93146017d352a5df11b48f5f9240af`。原 `02-09` Worktree 保持 clean、
+Packet blocked；当前只从该真实 R2 barrier 重冻结 `02-09R3` 并等待独立 planning review。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-09R2
+Current Plan: 02-09R3
 Total Phases: 6
 Total Plans in Phase: 25
-Status: Phase 2 W4 / 02-09R2 exact Plan review
+Status: Phase 2 W4 / 02-09R3 exact Plan review
 Last Activity: 2026-08-01
-Last Activity Description: 02-09R1 reviewed merge；02-09 blocked；02-09R2 从真实 B_C2_RECOVERY_CORE 重冻结；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1–W3R + W4 02-06/13/08 + R1 complete；tracked Plan files 13、authorized slots 25、completed slots 13/25；1/6 phases
+Last Activity Description: 02-09R2 reviewed merge；02-09 blocked；02-09R3 从真实 B_C2_RECOVERY_APP_CONTRACT 重冻结；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1–W3R + W4 02-06/13/08 + R1/R2 complete；tracked Plan files 14、authorized slots 25、completed slots 14/25；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 25 USER-AUTHORIZED SLOTS / W1-W3R + 02-06/13/08 + R1 COMPLETE / 02-09R2 PLAN REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_RECOVERY_CORE_CONFIRMED / 02-09_BLOCKED / 02-09R2_PLANNING`
-Last activity: 2026-08-01 — PR #234 merge tree已核对；02-09R2 以该真实barrier冻结
-Progress: Phase 1 100% complete；Phase 2 completed slots 13/25；W4 recovery correction planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 25 USER-AUTHORIZED SLOTS / W1-W3R + 02-06/13/08 + R1/R2 COMPLETE / 02-09R3 PLAN REVIEW`
+Status: `CONTRACT_ACTIVE / B_C2_RECOVERY_APP_CONTRACT_CONFIRMED / 02-09_BLOCKED / 02-09R3_PLANNING`
+Last activity: 2026-08-01 — PR #237 merge tree已核对；02-09R3 以该真实barrier冻结
+Progress: Phase 1 100% complete；Phase 2 completed slots 14/25；W4 recovery correction planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 `02-09R2` 做 bounded exact-file planning review；`PASS` 后只合并该 planning provenance。
-2. 从 exact `B_C2_RECOVERY_CORE = fe627a5d...` 创建 R2 implementation Worktree，限定 Application records/Ports四文件并完成 feature / latest-integration overlay review与串行merge。
-3. 取得真实 `B_C2_RECOVERY_APP_CONTRACT` 后才重冻结、审查并执行 `02-09R3`。
+1. 对 `02-09R3` 做 bounded exact-file planning review；`PASS` 后只合并该 planning provenance。
+2. 从 exact `B_C2_RECOVERY_APP_CONTRACT = 46a0b1f...` 创建 R3 implementation Worktree，限定 persistence codec两文件并完成 feature / latest-integration overlay review与串行merge。
+3. 取得真实 `B_C2_02_09_READY` 后才从该 successor重冻结、审查并执行原 `02-09`。
 4. R1/R2/R3 全部 reviewed merge 后才从真实 R3 successor 重冻结原 `02-09`；不得猜测中间 SHA。
 5. `02-09` reviewed merge 后冻结 `B_C2_LEAVES`，只运行 integration-focused / neighbor 与 Phase 1 直接回归；不运行 canonical full，不推进 Case lifecycle。
 6. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
@@ -196,12 +196,17 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `fe627a5d81d909e096e9e60773fcca03b51f84be`、tree
   `42767c8535dbc05837ab9dabeee2c1432813e0fb` 与 reviewed overlay tree相等；
   focused 144、neighbor 558、compile/diff通过。
-- `REFROZEN / 02-09R2_PLAN_REVIEW`: R2 只拥有 Application records/Ports及其两个
-  component tests；R3 和重冻结后的 02-09 尚无可填写的未来 base/head SHA。
+- `CONFIRMED / B_C2_RECOVERY_APP_CONTRACT`: R2 planning PR #235、CREATED-path
+  correction PR #236 与 implementation PR #237 已 bounded feature/fix/overlay review
+  `PASS` 并 merge；successor `46a0b1f67153846dee6441ce47b7b5d5de4bc4d7`、tree
+  `9c58a0885c93146017d352a5df11b48f5f9240af` 与 reviewed overlay tree相等；
+  focused 416、neighbor 576、compile/diff通过。
+- `REFROZEN / 02-09R3_PLAN_REVIEW`: R3 只拥有 Application persistence codec及其
+  component test；重冻结后的 02-09 尚无可填写的未来 base/head SHA。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: `02-09R2/R3`、重冻结后的 `02-09`、`B_C2_LEAVES`；
+- `OPEN`: `02-09R3`、重冻结后的 `02-09`、`B_C2_LEAVES`；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -211,5 +216,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: 02-09R2 exact Plan review；原 02-09 Worktree clean且blocked
+Stopped At: 02-09R3 exact Plan review；原 02-09 Worktree clean且blocked
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)
