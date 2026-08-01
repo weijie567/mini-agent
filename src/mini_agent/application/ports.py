@@ -367,7 +367,10 @@ class Cycle2RuntimeRecordPort(Protocol):
 
     Every method is exact-version-only. A compliant Adapter must use one
     transactionally consistent owner-scoped snapshot for each read closure and
-    one atomic CAS transaction for each write command. Normal absent and
+    must derive its opaque ``TrustedCycle2OwnerReadSnapshot`` attestation from
+    that same complete read; callers cannot construct, replace, or narrow it.
+    The Adapter must use one atomic CAS transaction for each write command.
+    Normal absent and
     unauthorized states are indistinguishable; once an owner root is selected,
     dangling, duplicate, wrong-owner, partial, mixed-version, or contradictory
     evidence fails closed rather than degrading to absence.
@@ -446,8 +449,9 @@ class Cycle2RuntimeRecordPort(Protocol):
 
         ``None`` represents both absent and unauthorized. Stale or contradictory
         selected graphs fail closed and cannot be returned as current facts. The
-        caller cannot select or omit a Claim; the owner-scoped reader determines
-        the complete current RequestUnit graph atomically.
+        caller cannot select, relabel, or omit a binding, Observation, or current
+        Assessment; the owner-scoped reader determines and attests the complete
+        current RequestUnit graph atomically.
         """
         ...
 
