@@ -928,9 +928,10 @@ barrier 与 release。
 
 ## 11. Risk controls learned from Phase 1
 
-1. **先完整暴露 slots，不用“大包”隐藏复杂度。** 原 19 slots 仍保留；当前用户已
-   明确批准增加 `02-02R/02-04R/02-05R`，形成 22 slots。后续再增减任一 slot 仍需
-   用户重新批准 master Plan。
+1. **先完整暴露 slots，不用“大包”隐藏复杂度。** 原 19 slots / 13 wave labels 与
+   Gate P2-A1 的 22 / 14 都保留为历史批准层级；本轮“有问题先修复”的用户指令经
+   Gate P2-A2 收口为再增加 `02-09R1/R2/R3` 与 `W4R`，当前冻结集合为 25 slots /
+   15 wave labels / max 2 writers。后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
    contract change / review；不生成临时 replacement Plan。
 3. **同一 finding 优先在原 Packet 内关闭。** 只有跨 allowlist / owner / base 的
@@ -1068,9 +1069,10 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
 - [x] dependency / ownership / risk map 已独立复核。
 - [x] `C2-BLOCK-01/02` 有明确用户裁决或被列为 Task Packet 前的强制 owner
       remediation，且不会由 Executor猜测。
-- [x] 原 19 slots / 13 Waves / max concurrency 2 已由 Gate P2-A 批准；当前用户又
-      明确批准三个 correction slots 与 `W3R`，形成 22 slots / 14 wave labels，
-      并发上限仍为 2。
+- [x] 原 19 slots / 13 Waves / max concurrency 2 已由 Gate P2-A 批准；Gate P2-A1
+      历史增加三个 W3R correction slots，形成 22 / 14；本轮用户“有问题先修复”
+      指令经 Gate P2-A2 增加 `02-09R1/R2/R3` 与 `W4R`，当前冻结为 25 slots /
+      15 wave labels，并发上限仍为 2。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
 - [x] single-writer hotspots唯一。
