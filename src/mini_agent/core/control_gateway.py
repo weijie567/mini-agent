@@ -7,10 +7,14 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import UUID
+from weakref import ref
 
 from pydantic import (
     Field,
     JsonValue,
+    StrictBool,
+    StrictInt,
+    StrictStr,
     ValidationError,
     field_serializer,
     field_validator,
@@ -19,6 +23,7 @@ from pydantic import (
 from pydantic_core import PydanticSerializationError
 
 from .common import (
+    FrozenJsonDict,
     RuntimePrivateModel,
     find_trusted_argument_field,
     freeze_json_value,
@@ -32,8 +37,10 @@ from .request_processing import RevalidatedNextMove
 from .request_understanding import InputAuthority
 from .task_state import InputBinding, RequestUnitRecord, TaskRecord, TaskStatus
 from .tool_system import (
+    AuthorizedToolCommandV2,
     Cycle2ToolName,
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     RegistrySnapshot,
@@ -60,10 +67,16 @@ class Cycle2AcceptedBindingFacts(RuntimePrivateModel):
     task_id: UUID
     request_unit_id: UUID
     task_state_version: Annotated[int, Field(strict=True, ge=1)]
-    name: Literal["product_description", "order_id", "not_received_claim"]
-    normalized_value: Annotated[str, Field(strict=True, min_length=1)]
-    authority: InputAuthority
+    name: Literal[
+        "order_id",
+        "product_description",
+        "candidate_ordinal",
+        "shipment_not_received",
+    ]
+    normalized_value: StrictStr | StrictInt | StrictBool
+    authority: Literal[InputAuthority.USER_CLAIM]
     validation_status: Literal["ACCEPTED"] = "ACCEPTED"
+    confirmed_by_user: Literal[True]
     source_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     superseded_by: UUID | None = None
 
@@ -77,14 +90,30 @@ class Cycle2AcceptedBindingFacts(RuntimePrivateModel):
     @model_validator(mode="after")
     def normalized_value_is_canonical(self) -> Self:
         if self.name == "product_description":
-            if normalize_product_description(self.normalized_value) != (
-                self.normalized_value
+            if (
+                type(self.normalized_value) is not str
+                or normalize_product_description(self.normalized_value)
+                != self.normalized_value
             ):
                 raise ValueError("search binding must store its exact normalized value")
-        elif self.name == "order_id" and _ORDER_ID_PATTERN.fullmatch(
-            self.normalized_value
-        ) is None:
-            raise ValueError("order_id binding must be an exact normalized Order ID")
+        elif self.name == "order_id":
+            if (
+                type(self.normalized_value) is not str
+                or _ORDER_ID_PATTERN.fullmatch(self.normalized_value) is None
+            ):
+                raise ValueError(
+                    "order_id binding must be an exact normalized Order ID"
+                )
+        elif self.name == "candidate_ordinal":
+            if (
+                type(self.normalized_value) is not int
+                or not 1 <= self.normalized_value <= 5
+            ):
+                raise ValueError(
+                    "candidate_ordinal must be a strict integer from 1 to 5"
+                )
+        elif type(self.normalized_value) is not bool:
+            raise ValueError("shipment_not_received must be a strict boolean")
         return self
 
 
@@ -158,6 +187,23 @@ class Cycle2ToolProgressFact(RuntimePrivateModel):
     validated_arguments: Mapping[str, JsonValue]
     task_state_version: Annotated[int, Field(strict=True, ge=1)]
     argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    verified_target_ref: UUID | None
+
+    @field_validator("argument_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("Cycle 2 progress binding refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def target_is_not_a_binding(self) -> Self:
+        if (
+            self.verified_target_ref is not None
+            and self.verified_target_ref in self.argument_binding_refs
+        ):
+            raise ValueError("Cycle 2 progress target cannot be a binding ref")
+        return self
 
     @field_validator("validated_arguments", mode="before")
     @classmethod
@@ -685,67 +731,60 @@ def _cycle2_loaded_graph_complete(loaded: Cycle2GatewayLoadedClosure) -> bool:
     return True
 
 
-def _cycle2_argument_binding_valid(
+def _cycle2_current_binding_for_candidate(
     *,
     candidate: Cycle2GatewayCandidate,
     loaded: Cycle2GatewayLoadedClosure,
-    tool_name: Cycle2ToolName | None,
-) -> bool:
-    if tool_name is None or not _cycle2_loaded_graph_complete(loaded):
-        return False
-    normalized = _cycle2_normalized_argument(
-        tool_name=tool_name,
-        arguments=candidate.candidate_arguments,
-    )
-    if normalized is None:
-        return False
-    expected_name, normalized_value = normalized
+) -> Cycle2AcceptedBindingFacts | None:
+    if len(candidate.argument_binding_refs) != 1:
+        return None
+    binding_ref = candidate.argument_binding_refs[0]
     matching_bindings = tuple(
         binding
         for binding in loaded.current_input_bindings
-        if binding.binding_id in candidate.argument_binding_refs
-        and binding.name == expected_name
-        and binding.normalized_value == normalized_value
+        if binding.binding_id == binding_ref
     )
     if len(matching_bindings) != 1:
-        return False
+        return None
     binding = matching_bindings[0]
-    common_binding_closed = (
-        binding.name == expected_name
-        and binding.normalized_value == normalized_value
-        and binding.superseded_by is None
+    if not (
+        binding.superseded_by is None
         and binding.private_owner_scope_ref == loaded.private_owner_scope_ref
         and binding.owner_customer_id == loaded.customer_context.customer_id
         and binding.task_id == candidate.task_id
         and binding.request_unit_id == candidate.request_unit_id
         and binding.task_state_version == candidate.validated_task_state_version
         and binding.binding_id in loaded.current_request_unit.input_binding_refs
-    )
-    if not common_binding_closed:
+        and binding.confirmed_by_user is True
+    ):
+        return None
+    return binding
+
+
+def _cycle2_verified_target_closed(
+    *,
+    verified_target_ref: UUID | None,
+    task_id: UUID,
+    request_unit_id: UUID,
+    task_state_version: int,
+    loaded: Cycle2GatewayLoadedClosure,
+    binding: Cycle2AcceptedBindingFacts,
+    order_id: str,
+) -> bool:
+    if verified_target_ref is None:
         return False
-
-    if tool_name is Cycle2ToolName.SEARCH_ORDERS:
-        return (
-            binding.authority
-            in {InputAuthority.USER_CLAIM, InputAuthority.MODEL_INFERENCE}
-            and candidate.verified_target_ref is None
-            and candidate.argument_binding_refs == (binding.binding_id,)
-        )
-    if tool_name is Cycle2ToolName.GET_ORDER:
-        return (
-            binding.authority is InputAuthority.USER_CLAIM
-            and candidate.verified_target_ref is None
-            and candidate.argument_binding_refs == (binding.binding_id,)
-        )
-
-    matching_targets = tuple(
+    order_binding_targets = tuple(
         target
         for target in loaded.current_verified_order_targets
-        if target.verified_target_ref == candidate.verified_target_ref
+        if target.order_id == order_id
+        and binding.binding_id in target.input_binding_refs
     )
-    if len(matching_targets) != 1:
+    if (
+        len(order_binding_targets) != 1
+        or order_binding_targets[0].verified_target_ref != verified_target_ref
+    ):
         return False
-    target = matching_targets[0]
+    target = order_binding_targets[0]
     matching_observations = tuple(
         observation
         for observation in loaded.current_target_observations
@@ -764,18 +803,79 @@ def _cycle2_argument_binding_valid(
         target.superseded_by is None
         and target.private_owner_scope_ref == loaded.private_owner_scope_ref
         and target.owner_customer_id == loaded.customer_context.customer_id
-        and target.task_id == candidate.task_id
-        and target.request_unit_id == candidate.request_unit_id
-        and target.task_state_version == candidate.validated_task_state_version
-        and target.order_id == normalized_value
-        and binding.binding_id in target.input_binding_refs
+        and target.task_id == task_id
+        and target.request_unit_id == request_unit_id
+        and target.task_state_version == task_state_version
+        and target.order_id == order_id
+        and target.input_binding_refs == (binding.binding_id,)
         and target.source_observation_ref
         in loaded.current_request_unit.observation_refs
         and observation.observation_version == target.source_observation_version
+        and observation.input_binding_refs == (binding.binding_id,)
         and manifest_ref_matches
-        and candidate.verified_target_ref == target.verified_target_ref
-        and candidate.argument_binding_refs
-        == (binding.binding_id, target.verified_target_ref)
+    )
+
+
+def _cycle2_argument_binding_valid(
+    *,
+    candidate: Cycle2GatewayCandidate,
+    loaded: Cycle2GatewayLoadedClosure,
+    tool_name: Cycle2ToolName | None,
+) -> bool:
+    if tool_name is None or not _cycle2_loaded_graph_complete(loaded):
+        return False
+    normalized = _cycle2_normalized_argument(
+        tool_name=tool_name,
+        arguments=candidate.candidate_arguments,
+    )
+    if normalized is None:
+        return False
+    _argument_name, normalized_value = normalized
+    binding = _cycle2_current_binding_for_candidate(
+        candidate=candidate,
+        loaded=loaded,
+    )
+    if binding is None:
+        return False
+
+    if tool_name is Cycle2ToolName.SEARCH_ORDERS:
+        return (
+            binding.name == "product_description"
+            and binding.normalized_value == normalized_value
+            and candidate.verified_target_ref is None
+            and candidate.argument_binding_refs == (binding.binding_id,)
+        )
+    if tool_name is Cycle2ToolName.GET_ORDER:
+        if candidate.verified_target_ref is None:
+            return (
+                binding.name == "order_id"
+                and binding.normalized_value == normalized_value
+                and candidate.argument_binding_refs == (binding.binding_id,)
+            )
+        return (
+            binding.name == "candidate_ordinal"
+            and _cycle2_verified_target_closed(
+                verified_target_ref=candidate.verified_target_ref,
+                task_id=candidate.task_id,
+                request_unit_id=candidate.request_unit_id,
+                task_state_version=candidate.validated_task_state_version,
+                loaded=loaded,
+                binding=binding,
+                order_id=normalized_value,
+            )
+        )
+    return (
+        binding.name == "order_id"
+        and binding.normalized_value == normalized_value
+        and _cycle2_verified_target_closed(
+            verified_target_ref=candidate.verified_target_ref,
+            task_id=candidate.task_id,
+            request_unit_id=candidate.request_unit_id,
+            task_state_version=candidate.validated_task_state_version,
+            loaded=loaded,
+            binding=binding,
+            order_id=normalized_value,
+        )
     )
 
 
@@ -838,13 +938,16 @@ def _cycle2_progress_semantic_identity(
     tool_name: Cycle2ToolName,
     arguments: Mapping[str, JsonValue],
     argument_binding_refs: tuple[UUID, ...],
+    verified_target_ref: UUID | None,
     loaded: Cycle2GatewayLoadedClosure,
     arguments_must_be_canonical: bool,
-) -> tuple[Cycle2ToolName, str, str, tuple[UUID, ...]] | None:
+) -> tuple[Cycle2ToolName, str, str, tuple[UUID, ...], UUID | None] | None:
     """Derive one exact tool/argument/controlled-reference progress identity."""
 
     if (
-        len(argument_binding_refs) != len(set(argument_binding_refs))
+        len(argument_binding_refs) != 1
+        or len(argument_binding_refs) != len(set(argument_binding_refs))
+        or verified_target_ref in argument_binding_refs
         or not _cycle2_loaded_graph_complete(loaded)
     ):
         return None
@@ -866,39 +969,78 @@ def _cycle2_progress_semantic_identity(
     matching_bindings = tuple(
         binding
         for binding in loaded.current_input_bindings
-        if binding.name == argument_name
-        and binding.normalized_value == argument_value
+        if binding.binding_id == argument_binding_refs[0]
     )
     if len(matching_bindings) != 1:
         return None
     binding = matching_bindings[0]
+    if not (
+        binding.superseded_by is None
+        and binding.private_owner_scope_ref == loaded.private_owner_scope_ref
+        and binding.owner_customer_id == loaded.customer_context.customer_id
+        and binding.task_id == loaded.current_task.task_id
+        and binding.request_unit_id == loaded.current_request_unit.request_unit_id
+        and binding.task_state_version == loaded.current_task.state_version
+        and binding.confirmed_by_user is True
+    ):
+        return None
     if tool_name is Cycle2ToolName.SEARCH_ORDERS:
-        if binding.authority not in {
-            InputAuthority.USER_CLAIM,
-            InputAuthority.MODEL_INFERENCE,
-        }:
+        if not (
+            binding.name == "product_description"
+            and binding.normalized_value == argument_value
+            and verified_target_ref is None
+        ):
             return None
-        canonical_refs = (binding.binding_id,)
+        canonical_target_ref = None
     elif tool_name is Cycle2ToolName.GET_ORDER:
-        if binding.authority is not InputAuthority.USER_CLAIM:
-            return None
-        canonical_refs = (binding.binding_id,)
+        if verified_target_ref is None:
+            if not (
+                binding.name == "order_id"
+                and binding.normalized_value == argument_value
+            ):
+                return None
+            canonical_target_ref = None
+        else:
+            if not (
+                binding.name == "candidate_ordinal"
+                and _cycle2_verified_target_closed(
+                    verified_target_ref=verified_target_ref,
+                    task_id=loaded.current_task.task_id,
+                    request_unit_id=loaded.current_request_unit.request_unit_id,
+                    task_state_version=loaded.current_task.state_version,
+                    loaded=loaded,
+                    binding=binding,
+                    order_id=argument_value,
+                )
+            ):
+                return None
+            canonical_target_ref = verified_target_ref
     else:
-        matching_targets = tuple(
-            target
-            for target in loaded.current_verified_order_targets
-            if target.order_id == argument_value
-            and binding.binding_id in target.input_binding_refs
-        )
-        if len(matching_targets) != 1:
+        if not (
+            binding.name == "order_id"
+            and binding.normalized_value == argument_value
+            and _cycle2_verified_target_closed(
+                verified_target_ref=verified_target_ref,
+                task_id=loaded.current_task.task_id,
+                request_unit_id=loaded.current_request_unit.request_unit_id,
+                task_state_version=loaded.current_task.state_version,
+                loaded=loaded,
+                binding=binding,
+                order_id=argument_value,
+            )
+        ):
             return None
-        canonical_refs = (
-            binding.binding_id,
-            matching_targets[0].verified_target_ref,
-        )
+        canonical_target_ref = verified_target_ref
+    canonical_refs = (binding.binding_id,)
     if argument_binding_refs != canonical_refs:
         return None
-    return tool_name, argument_name, argument_value, canonical_refs
+    return (
+        tool_name,
+        argument_name,
+        argument_value,
+        canonical_refs,
+        canonical_target_ref,
+    )
 
 
 def _cycle2_progress_valid(
@@ -939,6 +1081,7 @@ def _cycle2_progress_valid(
             tool_name=step.canonical_tool_name,
             arguments=step.validated_arguments,
             argument_binding_refs=step.argument_binding_refs,
+            verified_target_ref=step.verified_target_ref,
             loaded=loaded,
             arguments_must_be_canonical=True,
         )
@@ -953,6 +1096,7 @@ def _cycle2_progress_valid(
         tool_name=tool_name,
         arguments=candidate.candidate_arguments,
         argument_binding_refs=candidate.argument_binding_refs,
+        verified_target_ref=candidate.verified_target_ref,
         loaded=loaded,
         arguments_must_be_canonical=False,
     )
@@ -968,7 +1112,7 @@ def _cycle2_malformed_rejection(
     gate_decision_id: UUID,
     provider_tool_call_id: str | None,
     decided_at: datetime,
-) -> GateDecision:
+) -> GateDecisionV2:
     """Return auditable non-executable evidence for bypassed malformed input."""
 
     model_call_id = getattr(candidate, "model_call_id", None)
@@ -980,19 +1124,13 @@ def _cycle2_malformed_rejection(
     requested_name = getattr(candidate, "requested_provider_tool_name", None)
     if type(requested_name) is not str or not requested_name:
         requested_name = "invalid_cycle2_candidate"
-    raw_refs = getattr(candidate, "argument_binding_refs", ())
-    if not isinstance(raw_refs, tuple):
-        raw_refs = ()
-    binding_refs = tuple(ref for ref in raw_refs if isinstance(ref, UUID))
-    if len(binding_refs) != len(set(binding_refs)):
-        binding_refs = ()
     proposed_version = getattr(candidate, "proposed_base_task_state_version", None)
     if type(proposed_version) is not int or proposed_version < 1:
         proposed_version = None
     validated_version = getattr(candidate, "validated_task_state_version", None)
     if type(validated_version) is not int or validated_version < 1:
         validated_version = None
-    return GateDecision(
+    return GateDecisionV2(
         gate_decision_id=gate_decision_id,
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
@@ -1004,7 +1142,9 @@ def _cycle2_malformed_rejection(
         schema_valid=False,
         trusted_field_valid=False,
         argument_binding_valid=False,
-        argument_binding_refs=binding_refs,
+        argument_binding_refs=(),
+        verified_target_ref=None,
+        validated_arguments=None,
         budget_valid=False,
         progress_valid=False,
         proposed_base_task_state_version=proposed_version,
@@ -1088,15 +1228,15 @@ def _cycle2_raw_exact_type_preflight(
     return True
 
 
-def evaluate_cycle2_control_gateway(
+def _evaluate_cycle2_gate_decision(
     *,
     candidate: Cycle2GatewayCandidate,
     loaded_closure: Cycle2GatewayLoadedClosure,
     gate_decision_id: UUID,
     provider_tool_call_id: str | None,
     decided_at: datetime,
-) -> GateDecision:
-    """Return only a pure decision over the typed Cycle 2 loaded closure.
+) -> GateDecisionV2:
+    """Return an unsealed pure decision over the typed Cycle 2 loaded closure.
 
     This inactive helper neither creates a ToolCall nor dispatches, persists, or
     claims a durable authorization/fence.
@@ -1243,7 +1383,24 @@ def evaluate_cycle2_control_gateway(
         reason_code = GateReasonCode.NO_PROGRESS
 
     accepted = all(checks)
-    return GateDecision(
+    current_binding_ids = {
+        binding.binding_id for binding in loaded_closure.current_input_bindings
+    }
+    gate_binding_refs = tuple(
+        ref for ref in candidate.argument_binding_refs if ref in current_binding_ids
+    )
+    if (
+        not accepted
+        and reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+        and not gate_binding_refs
+    ):
+        return _cycle2_malformed_rejection(
+            candidate=candidate,
+            gate_decision_id=gate_decision_id,
+            provider_tool_call_id=provider_tool_call_id,
+            decided_at=decided_at,
+        )
+    gate = GateDecisionV2(
         gate_decision_id=gate_decision_id,
         model_call_id=candidate.model_call_id,
         context_manifest_id=candidate.context_manifest_id,
@@ -1255,7 +1412,9 @@ def evaluate_cycle2_control_gateway(
         schema_valid=schema_valid,
         trusted_field_valid=trusted_field_valid,
         argument_binding_valid=argument_binding_valid,
-        argument_binding_refs=candidate.argument_binding_refs,
+        argument_binding_refs=gate_binding_refs,
+        verified_target_ref=(candidate.verified_target_ref if accepted else None),
+        validated_arguments=(candidate.candidate_arguments if accepted else None),
         budget_valid=budget_valid,
         progress_valid=progress_valid,
         proposed_base_task_state_version=(
@@ -1270,3 +1429,248 @@ def evaluate_cycle2_control_gateway(
         reason_code=reason_code,
         decided_at=decided_at,
     )
+    return gate
+
+
+def _build_cycle2_gateway_authorizer() -> tuple[Any, Any]:
+    """Bind executable Gate provenance to one exact evaluator-created object."""
+
+    evaluate_gate_decision = _evaluate_cycle2_gate_decision
+    seal_registry: dict[int, tuple[Any, bytes, Any]] = {}
+
+    class AuthorizationSeal:
+        __slots__ = ("_owner_ref", "_snapshot", "__weakref__")
+
+        def __new__(cls) -> Self:
+            raise TypeError("Cycle 2 Gate authorization seal cannot be constructed")
+
+        def __setattr__(self, _name: str, _value: Any) -> None:
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+
+        def __delattr__(self, _name: str) -> None:
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+
+        def __copy__(self) -> Self:
+            return self
+
+        def __deepcopy__(self, _memo: dict[int, Any]) -> Self:
+            return self
+
+        def __reduce__(self) -> Any:
+            raise TypeError("Cycle 2 Gate authorization seal is not serializable")
+
+        def __repr__(self) -> str:
+            return "<Cycle2GateAuthorizationSeal>"
+
+    def authorization_snapshot(value: object) -> bytes | None:
+        if type(value) is not GateDecisionV2:
+            return None
+        declared_fields = set(GateDecisionV2.model_fields)
+        try:
+            state = value.__dict__
+            fields_set = value.__pydantic_fields_set__
+            if (
+                type(state) is not dict
+                or set(state) != declared_fields
+                or any(type(key) is not str for key in state)
+                or type(fields_set) is not set
+                or fields_set != declared_fields
+                or any(type(field) is not str for field in fields_set)
+                or value.__pydantic_extra__ is not None
+                or value.decision is not GateDecisionValue.ACCEPT
+                or value.resolved_canonical_tool_name is None
+                or value.validated_arguments is None
+                or type(value.validated_arguments) is not FrozenJsonDict
+                or not cycle2_pydantic_model_graph_is_raw_closed(value)
+            ):
+                return None
+            serialized = value.model_dump_json(
+                round_trip=True,
+                warnings="error",
+            ).encode("utf-8")
+        except (
+            AttributeError,
+            PydanticSerializationError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+        field_manifest = repr(tuple(sorted(fields_set))).encode("utf-8")
+        return (
+            b"mini-agent:cycle2-gate-authorization:v1\x00"
+            + serialized
+            + b"\x00"
+            + field_manifest
+        )
+
+    def authorization_seal_matches(value: object) -> bool:
+        if type(value) is not GateDecisionV2:
+            return False
+        private_state = getattr(value, "__pydantic_private__", None)
+        if (
+            type(private_state) is not dict
+            or any(type(key) is not str for key in private_state)
+            or set(private_state) != {"_authorization_seal"}
+        ):
+            return False
+        seal = private_state["_authorization_seal"]
+        if type(seal) is not AuthorizationSeal:
+            return False
+        snapshot = authorization_snapshot(value)
+        try:
+            sealed_owner = seal._owner_ref()
+            sealed_snapshot = seal._snapshot
+        except (AttributeError, TypeError):
+            return False
+        registered = seal_registry.get(id(seal))
+        if (
+            registered is None
+            or registered[0]() is not seal
+            or registered[2]() is not value
+        ):
+            return False
+        return (
+            sealed_owner is value
+            and type(sealed_snapshot) is bytes
+            and snapshot is not None
+            and registered[1] == snapshot
+            and sealed_snapshot == registered[1]
+            and sealed_snapshot == snapshot
+        )
+
+    def evaluate_cycle2_control_gateway(
+        *,
+        candidate: Cycle2GatewayCandidate,
+        loaded_closure: Cycle2GatewayLoadedClosure,
+        gate_decision_id: UUID,
+        provider_tool_call_id: str | None,
+        decided_at: datetime,
+    ) -> GateDecisionV2:
+        gate = evaluate_gate_decision(
+            candidate=candidate,
+            loaded_closure=loaded_closure,
+            gate_decision_id=gate_decision_id,
+            provider_tool_call_id=provider_tool_call_id,
+            decided_at=decided_at,
+        )
+        if gate.decision is not GateDecisionValue.ACCEPT:
+            return gate
+
+        private_state = getattr(gate, "__pydantic_private__", None)
+        snapshot = authorization_snapshot(gate)
+        if type(private_state) is not dict or private_state or snapshot is None:
+            raise ValueError("Cycle 2 Gate is not sealable")
+        seal = object.__new__(AuthorizationSeal)
+        object.__setattr__(seal, "_owner_ref", ref(gate))
+        object.__setattr__(seal, "_snapshot", snapshot)
+        seal_id = id(seal)
+
+        def discard_seal(
+            _dead_ref: Any,
+            *,
+            registered_seal_id: int = seal_id,
+        ) -> None:
+            seal_registry.pop(registered_seal_id, None)
+
+        seal_registry[seal_id] = (
+            ref(seal, discard_seal),
+            snapshot,
+            ref(gate, discard_seal),
+        )
+        gate._authorization_seal = seal
+        if not authorization_seal_matches(gate):
+            raise ValueError("Cycle 2 Gate authorization seal mismatch")
+        return gate
+
+    def build_cycle2_authorized_tool_command(
+        *,
+        gate_decision: GateDecisionV2,
+        candidate: Cycle2GatewayCandidate,
+        registry_snapshot_ref: str,
+        trusted_context_ref: str,
+    ) -> AuthorizedToolCommandV2:
+        """Exact-copy one accepted v2 Gate into an inactive executor command."""
+
+        if (
+            type(gate_decision) is not GateDecisionV2
+            or type(candidate) is not Cycle2GatewayCandidate
+            or (
+                gate_decision.validated_arguments is not None
+                and type(gate_decision.validated_arguments) is not FrozenJsonDict
+            )
+            or not authorization_seal_matches(gate_decision)
+            or not cycle2_pydantic_model_graph_is_raw_closed(
+                gate_decision,
+                candidate,
+            )
+        ):
+            raise ValueError("Cycle 2 authorization requires exact typed inputs")
+        try:
+            validated_gate = GateDecisionV2.model_validate(
+                gate_decision.model_dump(),
+                strict=True,
+            )
+            candidate = Cycle2GatewayCandidate.model_validate(
+                candidate.model_dump(),
+                strict=True,
+            )
+        except (
+            ValidationError,
+            PydanticSerializationError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise ValueError("Cycle 2 authorization input is malformed") from exc
+        if validated_gate.model_dump() != gate_decision.model_dump():
+            raise ValueError("Cycle 2 authorization input is malformed")
+        if (
+            gate_decision.decision is not GateDecisionValue.ACCEPT
+            or gate_decision.resolved_canonical_tool_name is None
+            or gate_decision.validated_arguments is None
+            or gate_decision.model_call_id != candidate.model_call_id
+            or gate_decision.context_manifest_id != candidate.context_manifest_id
+            or gate_decision.requested_provider_tool_name
+            != candidate.requested_provider_tool_name
+            or gate_decision.argument_binding_refs
+            != candidate.argument_binding_refs
+            or gate_decision.validated_task_state_version
+            != candidate.validated_task_state_version
+            or gate_decision.verified_target_ref != candidate.verified_target_ref
+            or gate_decision.validated_arguments != candidate.candidate_arguments
+        ):
+            raise ValueError("Cycle 2 Gate and revalidated candidate do not match")
+        try:
+            tool_name = Cycle2ToolName(
+                gate_decision.resolved_canonical_tool_name
+            )
+        except ValueError as exc:
+            raise ValueError("Cycle 2 Gate has an invalid canonical Tool") from exc
+        if not _cycle2_schema_valid(
+            tool_name=tool_name,
+            arguments=gate_decision.validated_arguments,
+        ):
+            raise ValueError("Cycle 2 Gate has invalid validated arguments")
+        if not authorization_seal_matches(gate_decision):
+            raise ValueError("Cycle 2 Gate authorization seal mismatch")
+        return AuthorizedToolCommandV2(
+            gate_decision_id=gate_decision.gate_decision_id,
+            canonical_tool_name=gate_decision.resolved_canonical_tool_name,
+            validated_arguments=gate_decision.validated_arguments,
+            argument_binding_refs=gate_decision.argument_binding_refs,
+            validated_task_state_version=(
+                gate_decision.validated_task_state_version
+            ),
+            registry_snapshot_ref=registry_snapshot_ref,
+            trusted_context_ref=trusted_context_ref,
+            verified_target_ref=gate_decision.verified_target_ref,
+        )
+
+    return evaluate_cycle2_control_gateway, build_cycle2_authorized_tool_command
+
+
+(
+    evaluate_cycle2_control_gateway,
+    build_cycle2_authorized_tool_command,
+) = _build_cycle2_gateway_authorizer()
+del _build_cycle2_gateway_authorizer
+del _evaluate_cycle2_gate_decision

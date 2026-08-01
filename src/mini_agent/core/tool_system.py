@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     Field,
     JsonValue,
+    PrivateAttr,
     TypeAdapter,
     ValidationError,
     field_serializer,
@@ -388,6 +389,110 @@ class GateDecision(AuditOnlyModel):
         return self
 
 
+class GateDecisionV2(GateDecision):
+    """Inactive Cycle 2 Gate shape with target/binding identity separation."""
+
+    _authorization_seal: object = PrivateAttr()
+
+    verified_target_ref: UUID | None = None
+    validated_arguments: Mapping[str, JsonValue] | None = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        private_state = getattr(self, "__pydantic_private__", None)
+        if (
+            name == "_authorization_seal"
+            and isinstance(private_state, dict)
+            and name in private_state
+        ):
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == "_authorization_seal":
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+        super().__delattr__(name)
+
+    @field_validator("validated_arguments", mode="before")
+    @classmethod
+    def validated_argument_input_is_native_json(
+        cls,
+        value: Any,
+    ) -> Any:
+        if value is None:
+            return None
+        return thaw_json_value(value)
+
+    @field_validator("validated_arguments")
+    @classmethod
+    def validated_arguments_are_frozen_and_untrusted_field_free(
+        cls,
+        value: Mapping[str, JsonValue] | None,
+    ) -> Mapping[str, JsonValue] | None:
+        if value is None:
+            return None
+        copied = deepcopy(value)
+        forbidden = find_trusted_argument_field(copied)
+        if forbidden is not None:
+            raise ValueError(
+                f"validated Gate arguments cannot include {forbidden!r}"
+            )
+        return freeze_json_value(copied)
+
+    @field_serializer("validated_arguments")
+    def serialize_validated_arguments(
+        self,
+        value: Mapping[str, JsonValue] | None,
+    ) -> dict[str, JsonValue] | None:
+        if value is None:
+            return None
+        return thaw_json_value(value)
+
+    @field_validator("argument_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("GateDecisionV2 binding refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def target_identity_is_fail_closed(self) -> Self:
+        if (
+            self.verified_target_ref is not None
+            and self.verified_target_ref in self.argument_binding_refs
+        ):
+            raise ValueError(
+                "GateDecisionV2 target cannot be an argument binding ref"
+            )
+        if (
+            self.decision is GateDecisionValue.REJECT
+            and self.verified_target_ref is not None
+        ):
+            raise ValueError("rejected GateDecisionV2 cannot retain a target")
+        if (
+            self.decision is GateDecisionValue.REJECT
+            and self.validated_arguments is not None
+        ):
+            raise ValueError("rejected GateDecisionV2 cannot retain arguments")
+        if self.verified_target_ref is not None and self.validated_arguments is None:
+            raise ValueError(
+                "target-bearing GateDecisionV2 requires validated arguments"
+            )
+        return self
+
+
+def convert_gate_decision_v1_to_v2(decision: GateDecision) -> GateDecisionV2:
+    """Copy one exact v1 Gate while introducing only a null target."""
+
+    if type(decision) is not GateDecision:
+        raise TypeError("conversion requires an exact GateDecision instance")
+    validated = GateDecision.model_validate(decision.model_dump(), strict=True)
+    return GateDecisionV2(
+        **validated.model_dump(),
+        verified_target_ref=None,
+        validated_arguments=None,
+    )
+
+
 class AuthorizedToolCommand(RuntimePrivateModel):
     gate_decision_id: UUID
     canonical_tool_name: ToolName
@@ -427,6 +532,46 @@ class AuthorizedToolCommand(RuntimePrivateModel):
         if not value:
             raise ValueError("AuthorizedToolCommand requires argument bindings")
         return value
+
+
+class AuthorizedToolCommandV2(AuthorizedToolCommand):
+    """Inactive Cycle 2 command that preserves Gate-owned target identity."""
+
+    verified_target_ref: UUID | None = None
+
+    @field_validator("argument_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("AuthorizedToolCommandV2 binding refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def target_is_separate_and_matches_tool_path(self) -> Self:
+        try:
+            tool_name = Cycle2ToolName(self.canonical_tool_name)
+        except ValueError as exc:
+            raise ValueError(
+                "AuthorizedToolCommandV2 requires a Cycle 2 Read Tool"
+            ) from exc
+        if (
+            self.verified_target_ref is not None
+            and self.verified_target_ref in self.argument_binding_refs
+        ):
+            raise ValueError(
+                "AuthorizedToolCommandV2 target cannot be an argument binding ref"
+            )
+        if (
+            tool_name is Cycle2ToolName.SEARCH_ORDERS
+            and self.verified_target_ref is not None
+        ):
+            raise ValueError("search_orders cannot carry a verified target")
+        if (
+            tool_name is Cycle2ToolName.GET_SHIPMENT
+            and self.verified_target_ref is None
+        ):
+            raise ValueError("get_shipment requires a verified target")
+        return self
 
 
 class ToolCallStatus(StrEnum):
