@@ -1426,6 +1426,14 @@ timeout outcome 携带 service-transient code。
 - Task state、verified target 与 argument binding 未失效。
 - owner scope 不变。
 
+recovery 的 `remaining_run_time_budget_ms` 不是 caller authority。Application
+owner-scoped recovery reader 必须同时返回 exact active Run、可信服务端
+`trusted_read_at` 与版本化 Run-budget policy evidence，并从该 evidence 和 Run
+`started_at` 确定性派生剩余预算；writer 在授予第二次 dispatch 的同一 CAS 中重读并
+重新计算。模型、用户消息、executor 参数、旧 closure 中的缓存数字或测试 fixture 均
+不能单独证明当前仍有预算。具体 Run budget 值仍由后续 Runtime composition owner
+冻结；在该值和 policy version 尚未组成可信 closure 时，recovery 只能 fail closed。
+
 第一次 retryable failure：
 
 1. CAS finalize attempt 1，并以 `retry_decision = RETRY_SCHEDULED` 保存当前可重试
@@ -1454,18 +1462,31 @@ crash / restart 恢复固定为：
 2. `RUNNING + unfinished attempt`：保留未完成 record，不倒填未观察到的 timeout /
    success / failure；ToolCall 变为 `INTERRUPTED`，本 Run 不自动 redispatch。
 3. attempt 1 已 finalize 为 `RETRY_SCHEDULED`、attempt 2 fence 尚未出现：恢复者只能
-   在 exact CAS 和全部重试条件重新通过后追加 attempt 2；否则追加安全
-   `ToolRetryRecoveryDecision`，并把 ToolCall 终止为原失败对应的 `FAILED /
-   TIMED_OUT`，或在 state 已失效时终止为 `INTERRUPTED`。
+   在 exact CAS 和全部重试条件重新通过后，原子追加
+   `ToolRetryRecoveryDecisionRecordV2(APPEND_SECOND_ATTEMPT)` 与 attempt 2 fence；
+   否则追加安全 recovery decision child。若可信 budget 已耗尽，attempt 1 的
+   `RETRY_SCHEDULED` 永久保留，ToolCall 使用
+   `RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED` recovery disposition 并终止为原失败
+   对应的 `FAILED / TIMED_OUT`；若 owner-scoped exact current closure 唯一证明
+   state / binding 已失效，则使用既有 `RETRY_SCHEDULED_STATE_INVALIDATED` 并终止
+   为 `INTERRUPTED`。unknown、重复、非唯一或矛盾 evidence 零写且不得猜测终态。
 4. attempt 2 已存在或 ToolCall 已 terminal：恢复者不得追加新 attempt。
 
-`ToolRetryRecoveryDecision` 只记录 tool_call ref、last attempt no、revalidation
-result、stable reason code 和 trusted time，不记录业务 payload。对应 shared
-Trace structure 服从 Core Runtime，专项 payload 服从 Tool owner。本合同默认不
-改变 shared `TraceEvent` structure。OA-10 已因 Core terminal closed-matrix 语义
-变化单独批准 `trace_event_record.p0.v2`，但没有批准任何新增共享字段；若实现设计
-确需新增共享字段或公共结构，必须另行提交 cross-file impact analysis 和 owner
-裁决，不能由本节、Plan 或代码自动取得授权。
+`ToolRetryRecoveryDecisionRecordV2` 是 `ToolCallRecordV2` 的 logical child；不是
+第六个 Cycle 2 top-level record，也不进入独立业务事实域。它只记录
+`recovery_decision_id`、tool_call ref、last attempt no、Core recovery decision、
+stable reason code、可选 next attempt no 和 trusted time，不记录业务 payload、
+result、Observation、用户文本、raw owner scope 或 Action 字段。terminal recovery
+时 parent `recovery_decision_ref` 必须 exact-copy child ID；successful recovery append
+则由同一原子 command 同时写 child 与 attempt 2 fence。logical-child codec、
+Application command/Port 与 Core terminal closed matrix 必须分别由 single-writer
+correction Packet 修复；不得把任一层私藏在 02-09 service 文件中。
+
+对应 shared Trace structure 继续服从 Core Runtime，专项 payload 服从 Tool owner。
+本裁决不改变 shared `TraceEvent` structure。OA-10 已因 Core terminal closed-matrix
+语义变化单独批准 `trace_event_record.p0.v2`，但没有批准任何新增 shared Trace
+字段；若实现设计确需新增共享字段或公共结构，必须另行提交 cross-file impact
+analysis 和 owner 裁决，不能由本节、Plan 或代码自动取得授权。
 
 确定性失败、`FACTS_INSUFFICIENT`、结果 Schema 错误、source version 错误、
 cardinality / source-integrity failure、Gateway reject 和 stale state 不进入自动
@@ -2660,6 +2681,7 @@ exact-head review 与 merge 证据。
 | 13 | Owner-alignment R5 remediation | 如何关闭 import / delta overlap 的 `1 HIGH` | 同一授权范围内把 Phase 1 §8.1 order success 与 §10.4 restart 纳入 import manifest；移除 Phase 2 delta `RM-17/RM-I03`，改用 `P1-RM-ORDER-SUCCESS/P1-RM-PROCESS-RESTART` reference rows；`C2-MAPPER-01` 回归四个 imported rows，Phase 2 recovery 只增加 attempt evidence；Phase 1 Spec、代码和共享 owner继续只读；R6 exact-file review 前不推进 Activation |
 | 14 | Owner-alignment R6 / merge | owner alignment 是否可合并 | exact-file 与 PR exact-head review 均为 `PASS / 0 findings`；PR #201 squash merge 为 `9ee260f12a82b706269f8a62c460c781c64f1f47`，只关闭 owner alignment |
 | 15 | Contract Activation | Phase 2 现在能进入哪一步 | 用户授权独立 Activation；只推进到 `SCOPED_CONTRACT_ACTIVE / READY_FOR_PLANNING`，Case 保持 `CONTRACT_DEFINED`，不创建功能代码 |
+| 16 | W4 02-09 owner-gap ruling | reviewed Core / Application contract 能否持久化 exact restart recovery | 02-09 preflight 只读证明现有 Port / command 缺少 unfinished parent-only terminal、durable recovery decision child 与 `RETRY_SCHEDULED + RUN_BUDGET_EXHAUSTED` terminal；裁决采用 ToolCall v2 logical decision child、可信 budget evidence 与三个 single-writer correction Packet，02-09 source 保持 clean，Case lifecycle 不变 |
 
 ## 14. Review checklist
 
@@ -2685,7 +2707,7 @@ Reviewer 应重点判断：
    obsolete Run suppression、restart no-retroactive-send 与 response-channel
    ownership 是否只有一个 disposition，且 `RM-I05` 不产生任何 mapper result /
    state mutation。
-9. v2 ToolCall（含 attempt child）/ Run / link / Trace record 的 closure、
+9. v2 ToolCall（含 attempt 与 recovery decision logical children）/ Run / link / Trace record 的 closure、
    exact-version cutover 和 rollback fence 是否可机械实现，且没有补造历史 attempt
    metadata 或把新 Task version 伪装为旧 Run result。
 10. 组件 ownership 矩阵是否正确区分 semantic、Python source、Port、Adapter 与
