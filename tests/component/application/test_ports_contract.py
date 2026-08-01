@@ -2161,19 +2161,17 @@ def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
         parameters=(
             "owner_scope",
             "task_id",
-            "request_unit_id",
-            "verified_order_target_ref",
-            "trusted_assessed_at",
-            "current_claim_binding_ref",
-        ),
+                "request_unit_id",
+                "verified_order_target_ref",
+                "trusted_assessed_at",
+            ),
         type_hints={
             "owner_scope": TrustedOwnerScope,
             "task_id": UUID,
             "request_unit_id": UUID,
-            "verified_order_target_ref": NonEmptyString,
-            "trusted_assessed_at": datetime,
-            "current_claim_binding_ref": UUID | None,
-            "return": ShipmentAssessmentReadClosure | None,
+                "verified_order_target_ref": NonEmptyString,
+                "trusted_assessed_at": datetime,
+                "return": ShipmentAssessmentReadClosure | None,
         },
     )
     _assert_signature(

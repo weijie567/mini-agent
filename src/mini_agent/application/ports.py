@@ -441,12 +441,13 @@ class Cycle2RuntimeRecordPort(Protocol):
         request_unit_id: UUID,
         verified_order_target_ref: NonEmptyString,
         trusted_assessed_at: datetime,
-        current_claim_binding_ref: UUID | None,
     ) -> ShipmentAssessmentReadClosure | None:
-        """Load exact durable Observation/Task/Claim inputs for Assessment.
+        """Load the complete durable Observation and InputBinding partitions.
 
         ``None`` represents both absent and unauthorized. Stale or contradictory
-        selected graphs fail closed and cannot be returned as current facts.
+        selected graphs fail closed and cannot be returned as current facts. The
+        caller cannot select or omit a Claim; the owner-scoped reader determines
+        the complete current RequestUnit graph atomically.
         """
         ...
 

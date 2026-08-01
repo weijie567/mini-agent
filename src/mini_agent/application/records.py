@@ -114,7 +114,7 @@ class _StrictUserVisibleRecord(UserVisibleModel):
 _OWNER_SCOPE_FACTORY_TOKEN = object()
 _TRUSTED_OWNER_SCOPE_INSTANCES: dict[
     int,
-    weakref.ReferenceType["TrustedOwnerScope"],
+    tuple[weakref.ReferenceType["TrustedOwnerScope"], str],
 ] = {}
 
 
@@ -175,19 +175,24 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
                 *,
                 registered_id: int = instance_id,
             ) -> None:
-                if _TRUSTED_OWNER_SCOPE_INSTANCES.get(registered_id) is expired:
+                registered = _TRUSTED_OWNER_SCOPE_INSTANCES.get(registered_id)
+                if registered is not None and registered[0] is expired:
                     _TRUSTED_OWNER_SCOPE_INSTANCES.pop(registered_id, None)
 
-            _TRUSTED_OWNER_SCOPE_INSTANCES[instance_id] = weakref.ref(
-                self,
-                discard_if_same,
+            _TRUSTED_OWNER_SCOPE_INSTANCES[instance_id] = (
+                weakref.ref(self, discard_if_same),
+                customer_context.customer_id,
             )
 
     def require_trusted_derivation(self) -> None:
         """Reject objects that bypassed the trusted CustomerContext factory."""
 
         registered = _TRUSTED_OWNER_SCOPE_INSTANCES.get(id(self))
-        if registered is None or registered() is not self:
+        if (
+            registered is None
+            or registered[0]() is not self
+            or self.customer_id != registered[1]
+        ):
             raise ValueError("TrustedOwnerScope lacks CustomerContext derivation")
 
 
@@ -722,6 +727,7 @@ def _require_exact_trusted_owner_scope(value: object) -> TrustedOwnerScope:
         state = value.__dict__
         fields_set = value.__pydantic_fields_set__
         extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
     except (AttributeError, TypeError):
         raise ValueError(error_message) from None
     if (
@@ -731,6 +737,7 @@ def _require_exact_trusted_owner_scope(value: object) -> TrustedOwnerScope:
         or type(fields_set) is not set
         or fields_set != {"customer_id"}
         or extra is not None
+        or private is not None
     ):
         raise ValueError(error_message)
     try:
@@ -2657,8 +2664,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             conversation.owner_customer_id != owner.customer_id
             or candidate_set.conversation_id != conversation.conversation_id
             or run.conversation_id != conversation.conversation_id
-            or run.status
-            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            or run.status is not AgentRunStatusV2.RUNNING
             or run.started_at > observation.recorded_at
             or conversation.created_at > run.started_at
         ):
@@ -2694,7 +2700,10 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         if (
             source.task_id != expected_task.task_id
             or source.request_unit_id != expected_unit.request_unit_id
+            or source.run_id != run.run_id
             or source.validated_task_state_version != expected_task.state_version
+            or source.finished_at is None
+            or source.finished_at > observation.recorded_at
             or observation.source_tool_call_id != source.tool_call_id
             or candidate_set.source_tool_call_id != source.tool_call_id
             or candidate_set.task_id != expected_task.task_id
@@ -2836,6 +2845,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
     owner_scope: TrustedOwnerScope
     trusted_conversation_record: ConversationRecord
     current_run_record: AgentRunRecordV2
+    current_run_task_link_record: RunTaskLinkRecordV2
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
     current_candidate_set_record: OrderCandidateSetRecord
@@ -2859,6 +2869,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 "owner_scope": TrustedOwnerScope,
                 "trusted_conversation_record": ConversationRecord,
                 "current_run_record": AgentRunRecordV2,
+                "current_run_task_link_record": RunTaskLinkRecordV2,
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
                 "current_candidate_set_record": OrderCandidateSetRecord,
@@ -2886,6 +2897,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         candidate_set = self.current_candidate_set_record
         conversation = self.trusted_conversation_record
         run = self.current_run_record
+        run_link = self.current_run_task_link_record
         binding = self.ordinal_binding_closure
         query_binding = self.current_query_binding
         _task_and_request_unit_form_current_pair(
@@ -2899,8 +2911,11 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             conversation.owner_customer_id != self.owner_scope.customer_id
             or candidate_set.conversation_id != conversation.conversation_id
             or run.conversation_id != conversation.conversation_id
-            or run.status
-            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            or run.status is not AgentRunStatusV2.RUNNING
+            or run_link.run_id != run.run_id
+            or run_link.task_id != task.task_id
+            or run_link.base_task_state_version != task.state_version
+            or run_link.result_task_state_version is not None
             or run.started_at > self.trusted_now
             or conversation.created_at > run.started_at
         ):
@@ -2916,6 +2931,8 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             or binding.request_unit_id != unit.request_unit_id
             or binding.task_state_version != task.state_version
             or binding.binding_ref not in unit.input_binding_refs
+            or binding.source_message_record.received_at < candidate_set.created_at
+            or binding.accepted_at < candidate_set.created_at
             or binding.accepted_at > self.trusted_now
         ):
             raise ValueError("ordinal InputBinding closure mismatch")
@@ -2942,24 +2959,6 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             set(self.superseded_candidate_set_refs)
         ):
             raise ValueError("superseded CandidateSet refs must be unique")
-        validate_candidate_selection_closure(
-            current_candidate_sets=(candidate_set,),
-            observation=self.search_observation_record,
-            request=self.selection_request,
-            trusted_owner_scope_ref=self.owner_scope.customer_id,
-            conversation_id=conversation.conversation_id,
-            task_id=task.task_id,
-            request_unit_id=unit.request_unit_id,
-            pending_candidate_set_ref=self.pending_candidate_set_ref,
-            current_task_state_version=task.state_version,
-            current_query_binding_refs=self.current_query_binding_refs,
-            trusted_now=self.trusted_now,
-            resolved_owner_scoped_order_target_ref=(
-                self.resolved_owner_scoped_order_target_ref
-            ),
-            superseded_candidate_set_refs=self.superseded_candidate_set_refs,
-            existing_selection_records=self.existing_selection_records,
-        )
         for existing in self.existing_selection_records:
             matching_entries = tuple(
                 entry
@@ -2990,7 +2989,12 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 != self.search_observation_record.record_schema_version
                 or existing.base_task_state_version != task.state_version
                 or existing.result_task_state_version != task.state_version + 1
+                or existing.source_message_ref
+                != binding.source_message_record.message_id
+                or existing.ordinal_input_binding_ref != binding.binding_ref
                 or existing.selected_at < candidate_set.created_at
+                or existing.selected_at >= candidate_set.valid_until
+                or existing.selected_at > self.trusted_now
                 or len(matching_entries) != 1
                 or len(matching_targets) != 1
                 or matching_targets[0].owner_scoped_order_ref
@@ -2999,6 +3003,24 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
                 != existing.owner_scoped_order_target_ref
             ):
                 raise ValueError("existing selection record graph mismatch")
+        validate_candidate_selection_closure(
+            current_candidate_sets=(candidate_set,),
+            observation=self.search_observation_record,
+            request=self.selection_request,
+            trusted_owner_scope_ref=self.owner_scope.customer_id,
+            conversation_id=conversation.conversation_id,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            pending_candidate_set_ref=self.pending_candidate_set_ref,
+            current_task_state_version=task.state_version,
+            current_query_binding_refs=self.current_query_binding_refs,
+            trusted_now=self.trusted_now,
+            resolved_owner_scoped_order_target_ref=(
+                self.resolved_owner_scoped_order_target_ref
+            ),
+            superseded_candidate_set_refs=self.superseded_candidate_set_refs,
+            existing_selection_records=self.existing_selection_records,
+        )
         if self.existing_selection_records:
             raise ValueError("current CandidateSet capability is already consumed")
         return self
@@ -3086,6 +3108,8 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             raise ValueError("SelectionRecord does not match exact loaded closure")
         if self.closed_pending_candidate_set_ref != candidate_set.candidate_set_id:
             raise ValueError("selection must close the exact pending CandidateSet")
+        if selection.selected_at != closure.trusted_now:
+            raise ValueError("selection timestamp must equal trusted transaction time")
         _task_pair_advances_once(
             expected_task_record=current_task,
             next_task_record=self.next_task_record,
@@ -3331,6 +3355,8 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
             source.task_id != task.task_id
             or source.request_unit_id != unit.request_unit_id
             or source.validated_task_state_version != task.state_version
+            or source.finished_at is None
+            or source.finished_at > observation.recorded_at
             or source.result_ref != self.source_result_ref
             or result.outcome is not GetShipmentOutcome.FOUND
             or observation.source_tool_call_id != source.tool_call_id
@@ -3423,7 +3449,7 @@ class ShipmentNotReceivedClaimReadClosure(_StrictRuntimePrivateRecord):
 
 
 class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
-    """Owner-scoped exact fresh inputs for one deterministic Assessment."""
+    """Owner-reader's complete current graph for deterministic Assessment."""
 
     owner_scope: TrustedOwnerScope
     trusted_conversation_record: ConversationRecord
@@ -3431,10 +3457,20 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
     current_request_unit_record: RequestUnitRecord
     current_observation_record: ShipmentObservation
     current_observation_ref: UUID
+    superseded_observation_records: tuple[ShipmentObservation, ...] = ()
     verified_order_target_ref: NonEmptyString
     trusted_assessed_at: datetime
-    current_claim_binding: ShipmentNotReceivedClaimReadClosure | None = None
-    current_assessment_record: ShipmentAssessment | None = None
+    current_input_binding_records: tuple[InputBinding, ...] = ()
+    current_query_bindings: tuple[AcceptedOrderSearchQueryBindingReadClosure, ...] = ()
+    current_ordinal_bindings: tuple[AcceptedOrdinalBindingReadClosure, ...] = ()
+    current_claim_bindings: Annotated[
+        tuple[ShipmentNotReceivedClaimReadClosure, ...],
+        Field(max_length=1),
+    ] = ()
+    current_assessment_records: Annotated[
+        tuple[ShipmentAssessment, ...],
+        Field(max_length=1),
+    ] = ()
 
     @model_validator(mode="before")
     @classmethod
@@ -3448,9 +3484,15 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
                 "current_request_unit_record": RequestUnitRecord,
                 "current_observation_record": ShipmentObservation,
             },
-            optional_model_fields={
-                "current_claim_binding": ShipmentNotReceivedClaimReadClosure,
-                "current_assessment_record": ShipmentAssessment,
+            tuple_model_fields={
+                "superseded_observation_records": ShipmentObservation,
+                "current_input_binding_records": InputBinding,
+                "current_query_bindings": (
+                    AcceptedOrderSearchQueryBindingReadClosure
+                ),
+                "current_ordinal_bindings": AcceptedOrdinalBindingReadClosure,
+                "current_claim_bindings": ShipmentNotReceivedClaimReadClosure,
+                "current_assessment_records": ShipmentAssessment,
             },
         )
 
@@ -3490,32 +3532,128 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             < observation.valid_until
         ):
             raise ValueError("Shipment Assessment requires a fresh Observation")
-        claim = self.current_claim_binding
-        if claim is not None and (
-            claim.binding_ref not in unit.input_binding_refs
-            or claim.private_owner_scope_ref != self.owner_scope.customer_id
-            or claim.conversation_id != conversation.conversation_id
-            or claim.task_id != task.task_id
-            or claim.request_unit_id != unit.request_unit_id
-            or claim.task_state_version != task.state_version
-            or claim.verified_order_target_ref != self.verified_order_target_ref
-            or claim.accepted_at > self.trusted_assessed_at
+
+        shipment_records = (
+            observation,
+            *self.superseded_observation_records,
+        )
+        shipment_by_ref = {
+            record.observation_id: record for record in shipment_records
+        }
+        if (
+            len(shipment_by_ref) != len(shipment_records)
+            or not set(shipment_by_ref).issubset(unit.observation_refs)
+            or any(
+                not _owner_matches_private_scope(
+                    self.owner_scope,
+                    record.private_owner_scope,
+                )
+                or record.task_id != task.task_id
+                or record.request_unit_id != unit.request_unit_id
+                or record.verified_order_target_ref
+                != self.verified_order_target_ref
+                for record in shipment_records
+            )
         ):
-            raise ValueError("current Claim binding closure mismatch")
+            raise ValueError("complete Shipment Observation graph mismatch")
+        traversed_superseded_refs: set[UUID] = set()
+        cursor = observation
+        while cursor.supersedes is not None:
+            next_ref = cursor.supersedes
+            if (
+                next_ref in traversed_superseded_refs
+                or next_ref not in shipment_by_ref
+            ):
+                raise ValueError(
+                    "Shipment Observation current/supersession graph mismatch"
+                )
+            traversed_superseded_refs.add(next_ref)
+            next_record = shipment_by_ref[next_ref]
+            validate_shipment_observation_supersession(
+                current=cursor,
+                previous=next_record,
+            )
+            cursor = next_record
+        if traversed_superseded_refs != {
+            record.observation_id
+            for record in self.superseded_observation_records
+        }:
+            raise ValueError("Shipment Observation current/supersession graph mismatch")
+
+        binding_refs = tuple(
+            binding.binding_id for binding in self.current_input_binding_records
+        ) + tuple(
+            binding.binding_ref for binding in self.current_query_bindings
+        ) + tuple(
+            binding.binding_ref for binding in self.current_ordinal_bindings
+        ) + tuple(
+            binding.binding_ref for binding in self.current_claim_bindings
+        )
+        if (
+            len(binding_refs) != len(set(binding_refs))
+            or len(binding_refs) != len(unit.input_binding_refs)
+            or set(binding_refs) != set(unit.input_binding_refs)
+        ):
+            raise ValueError("complete current InputBinding partition mismatch")
+        for query in self.current_query_bindings:
+            if (
+                query.private_owner_scope_ref != self.owner_scope.customer_id
+                or query.conversation_id != conversation.conversation_id
+                or query.task_id != task.task_id
+                or query.request_unit_id != unit.request_unit_id
+                or query.current_task_state_version != task.state_version
+                or query.accepted_at > self.trusted_assessed_at
+            ):
+                raise ValueError("current query binding closure mismatch")
+        for ordinal in self.current_ordinal_bindings:
+            if (
+                ordinal.private_owner_scope_ref != self.owner_scope.customer_id
+                or ordinal.conversation_id != conversation.conversation_id
+                or ordinal.task_id != task.task_id
+                or ordinal.request_unit_id != unit.request_unit_id
+                or ordinal.task_state_version != task.state_version
+                or ordinal.accepted_at > self.trusted_assessed_at
+            ):
+                raise ValueError("current ordinal binding closure mismatch")
+        for claim in self.current_claim_bindings:
+            if (
+                claim.private_owner_scope_ref != self.owner_scope.customer_id
+                or claim.conversation_id != conversation.conversation_id
+                or claim.task_id != task.task_id
+                or claim.request_unit_id != unit.request_unit_id
+                or claim.task_state_version != task.state_version
+                or claim.verified_order_target_ref
+                != self.verified_order_target_ref
+                or claim.accepted_at > self.trusted_assessed_at
+            ):
+                raise ValueError("current Claim binding closure mismatch")
         previous = self.current_assessment_record
         if previous is not None and (
             previous.private_owner_scope_ref != self.owner_scope.customer_id
             or previous.task_id != task.task_id
+            or previous.request_unit_id != unit.request_unit_id
+            or previous.task_state_version > task.state_version
             or previous.verified_order_target_ref != self.verified_order_target_ref
+            or previous.shipment_observation_ref not in shipment_by_ref
+            or shipment_by_ref[
+                previous.shipment_observation_ref
+            ].source_version != previous.shipment_observation_source_version
+            or previous.assessed_at > self.trusted_assessed_at
         ):
             raise ValueError("current Shipment Assessment context mismatch")
         return self
 
     @property
     def current_claim_binding_ref(self) -> UUID | None:
-        if self.current_claim_binding is None:
+        if not self.current_claim_bindings:
             return None
-        return self.current_claim_binding.binding_ref
+        return self.current_claim_bindings[0].binding_ref
+
+    @property
+    def current_assessment_record(self) -> ShipmentAssessment | None:
+        if not self.current_assessment_records:
+            return None
+        return self.current_assessment_records[0]
 
 
 class SaveShipmentAssessmentV2Command(_StrictRuntimePrivateRecord):
@@ -3581,6 +3719,8 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
     current_authoritative_link_record: RunTaskLinkRecordV2
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
+    obsolete_task_record: TaskRecord | None = None
+    obsolete_request_unit_record: RequestUnitRecord | None = None
     trusted_current_evidence_at: datetime
     invalidation_kind: SupersededRunInvalidationKind
     obsolete_binding_refs: tuple[UUID, ...] = ()
@@ -3601,6 +3741,10 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
             },
+            optional_model_fields={
+                "obsolete_task_record": TaskRecord,
+                "obsolete_request_unit_record": RequestUnitRecord,
+            },
         )
 
     @field_validator("trusted_current_evidence_at")
@@ -3616,13 +3760,14 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
         current_link = self.current_authoritative_link_record
         current_task = self.current_task_record
         current_unit = self.current_request_unit_record
+        obsolete_task = self.obsolete_task_record
+        obsolete_unit = self.obsolete_request_unit_record
         conversation = self.trusted_conversation_record
         if run.status not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}:
             raise ValueError("obsolete fence requires active v2 Run")
         if (
             link.run_id != run.run_id
             or link.result_task_state_version is not None
-            or link.base_task_state_version is None
         ):
             raise ValueError("obsolete fence requires active no-result RunTaskLink")
         _task_and_request_unit_form_current_pair(
@@ -3632,8 +3777,26 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
         )
         if link.task_id != current_task.task_id:
             raise ValueError("obsolete fence current Task does not match RunTaskLink")
-        if current_task.state_version <= link.base_task_state_version:
-            raise ValueError("obsolete fence requires an advanced current Task version")
+        if link.base_task_state_version is None:
+            if obsolete_task is not None or obsolete_unit is not None:
+                raise ValueError("initial Run cannot carry invented obsolete snapshots")
+        else:
+            if obsolete_task is None or obsolete_unit is None:
+                raise ValueError("versioned obsolete Run requires exact old Task graph")
+            _task_and_request_unit_form_current_pair(
+                owner_scope=self.owner_scope,
+                task_record=obsolete_task,
+                request_unit_record=obsolete_unit,
+            )
+            if (
+                obsolete_task.task_id != link.task_id
+                or obsolete_task.state_version != link.base_task_state_version
+                or obsolete_unit.request_unit_id != current_unit.request_unit_id
+                or current_task.state_version <= obsolete_task.state_version
+                or current_task.updated_at < obsolete_task.updated_at
+                or current_unit.updated_at < obsolete_unit.updated_at
+            ):
+                raise ValueError("obsolete Task snapshot/version graph mismatch")
         if (
             current_run.run_id == run.run_id
             or current_run.status
@@ -3703,9 +3866,19 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
                     "Task-version invalidation cannot carry binding evidence"
                 )
         else:
+            if obsolete_unit is None:
+                raise ValueError(
+                    "binding invalidation requires versioned obsolete RequestUnit"
+                )
+            removed_binding_refs = tuple(
+                binding_ref
+                for binding_ref in obsolete_unit.input_binding_refs
+                if binding_ref not in set(current_unit.input_binding_refs)
+            )
             if (
                 not self.obsolete_binding_refs
                 or self.invalidated_binding_refs != self.obsolete_binding_refs
+                or self.obsolete_binding_refs != removed_binding_refs
             ):
                 raise ValueError("binding invalidation requires exact binding refs")
             if set(self.invalidated_binding_refs).intersection(
