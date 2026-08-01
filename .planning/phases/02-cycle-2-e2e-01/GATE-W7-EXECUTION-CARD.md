@@ -1,6 +1,6 @@
 # Gate W7｜Runtime mapper and Renderer execution card
 
-状态：`B_C2_INFRA_CONFIRMED / 02-12_PLANNING_REVIEW`
+状态：`COMPLETE / B_C2_RUNTIME_CONFIRMED`
 
 ## Exact input
 
@@ -39,6 +39,9 @@ obsolete/RM-I05出站、exact base/tree/blob/protection不相等，立即停止�
 
 ## Current gate
 
-`02-12` 只在exact Plan与本Card获得independent `PASS`并通过planning PR合并后可
-dispatch。feature必须保持八文件边界、latest-tree复验与bounded review；Cases全程
-保持`CONTRACT_DEFINED`。
+PR #264/#265 已依次完成planning与implementation review/merge；focused
+`85 passed`、neighbor `1346 passed`，exact eight-file containment、compile/diff与
+bounded exact-head review均PASS。真实successor为
+`B_C2_RUNTIME = d02b8f2e43431b1f8f6a615b13f4e792ea250bde` / tree
+`8bd3ba88a8ae4bfdd0a16e3e0ad0e82c739f6a84`。W7未运行full、未dispatch Harness、
+未生成Eval Result；Cases保持`CONTRACT_DEFINED`。

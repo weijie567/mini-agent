@@ -33,8 +33,9 @@
   保持unpublished/fail closed；PR #259 reviewed批准`02-11R`与29 slots，PR #260/#261
   随后reviewed完成并冻结`B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc5...` / tree
   `8e4a9392...`。PR #262/#263又reviewed完成`02-11`并形成`B_C2_INFRA =
-  6217b221...` / tree `7de3e6db...`；W6 full `2840 passed`。当前冻结W7 `02-12`
-  exact Plan；这不推进任一Case lifecycle。
+  6217b221...` / tree `7de3e6db...`；W6 full `2840 passed`。PR #264/#265随后
+  reviewed完成W7并冻结`B_C2_RUNTIME = d02b8f2e...` / tree `8bd3ba88...`。当前只从
+  该真实barrier冻结W8 `02-14` exact Plan；这不推进任一Case lifecycle。
   Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
@@ -46,7 +47,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_INFRA / W7 RUNTIME PLANNING）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_RUNTIME / W8 EVAL MACHINERY PLANNING）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
@@ -65,8 +66,9 @@ replacement 02-09实现未发布；PR #241追加`02-09R4` shared grant correctio
 #242/#243已reviewed完成R4，PR #244/#245又reviewed完成second-refrozen 02-09。
 W4 exit三组回归全部通过并冻结`B_C2_LEAVES`；这些Component证据仍不构成Phase 2
 Case activation、Trajectory/E2E Result或完整E2E-01证据。四个Case继续保持`CONTRACT_DEFINED`，
-上方 checkbox 继续未勾选；当前没有 Phase 2 Eval artifact、Case activation、完整
-E2E-01 evidence，也没有 Runtime / Tool composition cutover。
+上方 checkbox 继续未勾选；Cycle 2 Eval artifact虽已存在但保持
+`CONTRACT_DEFINED`且未进入Phase 2 Harness dispatch/Result；当前没有Case activation、
+完整E2E-01 evidence，也没有Composition / HTTP cutover。
 
 ## Phase 3｜Cycle 3a：RAG、Evidence 与资格判断（PLANNED MAPPING ONLY）
 
@@ -100,10 +102,10 @@ E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 |---|---:|---|---|
 | `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
-| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_INFRA / 02-12_PLANNING` |
-| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_INFRA / 02-12_PLANNING` |
-| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_INFRA / 02-12_PLANNING` |
-| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_INFRA / 02-12_PLANNING` |
+| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RUNTIME / 02-14_PLANNING` |
+| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RUNTIME / 02-14_PLANNING` |
+| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RUNTIME / 02-14_PLANNING` |
+| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RUNTIME / 02-14_PLANNING` |
 | `E2E02-01` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-02` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-03` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |

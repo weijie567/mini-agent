@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-12"
-status: "phase_2_w7_runtime_planning_review"
+current_plan: "02-14"
+status: "phase_2_w8_eval_machinery_planning_review"
 last_updated: "2026-08-02"
-last_activity: "2026-08-02 — PR #262/#263完成02-11；W6 full 2840 passed；冻结B_C2_INFRA"
+last_activity: "2026-08-02 — PR #264/#265完成W7；冻结B_C2_RUNTIME；开始W8 planning"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 29
-  completed_plans: 23
-  percent: 79
+  completed_plans: 24
+  percent: 83
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -51,36 +51,40 @@ fail closed。PR #259 reviewed批准`02-11R` immutable history correction，slot
 `B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc5...` / tree `8e4a9392...`。PR #262/#263又
 reviewed完成third-refreeze与`02-11`回放，真实`B_C2_INFRA = 6217b221...` /
 tree `7de3e6db...`；W6唯一canonical full为`2840 passed, 1 deselected, 12 warnings`。
-W6已完成，当前冻结W7 `02-12` exact Plan；Case仍为`CONTRACT_DEFINED`。
+W6已完成；PR #264/#265又reviewed完成W7 planning/implementation并冻结真实
+`B_C2_RUNTIME = d02b8f2e...` / tree `8bd3ba88...`。focused `85 passed`、neighbor
+`1346 passed`，compile/diff/containment与bounded exact-head review均PASS；W7未运行
+full、未dispatch Harness或生成Eval Result。当前只从该barrier冻结W8 `02-14` exact
+Plan；Case仍为`CONTRACT_DEFINED`。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-12
+Current Plan: 02-14
 Total Phases: 6
 Total Plans in Phase: 29
-Status: Phase 2 W7 / 02-12 Runtime planning review
+Status: Phase 2 W8 / 02-14 Eval machinery planning review
 Last Activity: 2026-08-02
-Last Activity Description: PR #262/#263 reviewed完成02-11；W6 full 2840 passed并冻结B_C2_INFRA
-Progress: Phase 1 complete；Phase 2 W1–W6 complete；tracked Plan files 23、authorized slots 29、completed slots 23/29；1/6 phases
+Last Activity Description: PR #264/#265 reviewed完成W7并冻结B_C2_RUNTIME；开始02-14 planning
+Progress: Phase 1 complete；Phase 2 W1–W7 complete；tracked Plan files 24、authorized slots 29、completed slots 24/29；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 29 USER-AUTHORIZED SLOTS / W6 COMPLETE / 02-12 PLANNING REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_INFRA_CONFIRMED / W7_RUNTIME_PLANNING`
-Last activity: 2026-08-02 — PR #262/#263 + W6 full PASS；current integration 6217b221 / 7de3e6db
-Progress: Phase 1 100% complete；Phase 2 completed slots 23/29；W7 Runtime planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 29 USER-AUTHORIZED SLOTS / W7 COMPLETE / 02-14 PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / B_C2_RUNTIME_CONFIRMED / W8_EVAL_MACHINERY_PLANNING`
+Last activity: 2026-08-02 — PR #264/#265 PASS；current integration d02b8f2e / 8bd3ba88
+Progress: Phase 1 100% complete；Phase 2 completed slots 24/29；W8 Eval machinery planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 完成 `02-12` exact Plan与Gate W7 independent bounded review/merge；未合并前不dispatch。
-2. 从exact `6217b221... / 7de3e6db...`创建八文件Runtime Worktree，实现effective Mapper、Cycle2 orchestration与safe Renderer。
-3. 完成focused/neighbor/compile、30秒exact-head review与latest integration identity/overlay后串行merge，冻结`B_C2_RUNTIME`。
-4. W7不运行canonical full，不推进Case lifecycle/Harness/Result；随后仅从真实Runtime barrier冻结W8。
+1. 完成 `02-14` exact Plan与Gate W8 independent bounded review/merge；未合并前不dispatch。
+2. 从exact `d02b8f2e... / 8bd3ba88...`创建四文件Eval Worktree，实现独立exact profiles、typed evidence与Harness pre-dispatch machinery。
+3. 完成focused/neighbor/compile、20秒exact-head review与latest integration identity/overlay后串行merge，冻结`B_C2_EVAL_MACHINERY`。
+4. W8不运行canonical full，不推进Case lifecycle或Phase 2 Harness dispatch/Result；随后仅从真实Eval machinery barrier冻结W9。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
 
 ## Current Decisions
@@ -288,7 +292,11 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `7de3e6db75ebc58fcf4d15c46538ded424564d8c`；02-11 focused `114 passed`、neighbor
   `1358 passed`、compile/diff/review PASS；W6唯一canonical full为
   `2840 passed, 1 deselected, 12 warnings`。
-- `OPEN`: `02-12` planning/implementation、latest overlay/identity、serial merge、
+- `CONFIRMED / B_C2_RUNTIME / W7_EXIT`: PR #264/#265 reviewed merge；current
+  integration `d02b8f2e43431b1f8f6a615b13f4e792ea250bde` / tree
+  `8bd3ba88a8ae4bfdd0a16e3e0ad0e82c739f6a84`；focused `85 passed`、neighbor
+  `1346 passed`、compile/diff/containment与bounded exact-head review PASS；full未运行。
+- `OPEN`: `02-14` planning/implementation、latest overlay/identity、serial merge、
   Phase 2 Harness/Eval Result；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
@@ -299,5 +307,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-02
-Stopped At: W7 `02-12` exact planning review；W6 complete
-Resume File: [phases/02-cycle-2-e2e-01/GATE-W7-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W7-EXECUTION-CARD.md)
+Stopped At: W8 `02-14` exact planning review；W7 complete
+Resume File: [phases/02-cycle-2-e2e-01/GATE-W8-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W8-EXECUTION-CARD.md)
