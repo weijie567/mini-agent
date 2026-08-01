@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W4 COMPLETE / W5 NOT STARTED`；真实 current integration / `B_C2_LEAVES = fc3a603b963ea54c597e00847ac816050bd007bf` / tree `01b33357c15d16ee2c1dc15194254f86dd07252c`；PR #244/#245 已reviewed完成second-refrozen 02-09，W4 exit为integration-focused `726 passed`、neighbor `877 passed`、Phase 1 direct regression `398 passed`；Case仍为`CONTRACT_DEFINED`，canonical full仍延至W6 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W4 COMPLETE / W5 02-10 PLAN REVIEW`；真实 current integration `21e8b6b15461f1c0513194213cd9b05f1e74c515` / tree `041c55e8b6e96ac3100d48376a80c75aaff1e43a`包含`B_C2_LEAVES = fc3a603b...`；02-10只从该actual successor冻结migration Packet，implementation branch/revision尚不存在；Case仍为`CONTRACT_DEFINED`，canonical full仍延至W6 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
