@@ -27,6 +27,9 @@ from mini_agent.application.records import (
     EvalResultRecord,
     MessageRecord,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
+    RUN_TASK_LINK_RECORD_V2_SCHEMA_VERSION,
+    TrustedOwnerScope,
 )
 from mini_agent.core.common import (
     ContractModel,
@@ -36,22 +39,50 @@ from mini_agent.core.common import (
     freeze_json_value,
     thaw_json_value,
 )
-from mini_agent.core.memory import ContextManifest, OrderObservation
+from mini_agent.core.memory import (
+    ContextManifest,
+    OrderObservation,
+    SearchOrdersObservation,
+    ShipmentObservation,
+)
+from mini_agent.core.shipment import ShipmentAssessment
 from mini_agent.core.task_state import (
     CandidateValidationDecision,
     InputBinding,
+    InputBindingV2,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSetRecord,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
+    convert_input_binding_v1_to_v2,
 )
 from mini_agent.core.tool_system import (
+    Cycle2ToolName,
+    ExecutionPolicy,
     GateDecision,
+    GateDecisionV2,
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     ModelVisibleToolsetArtifact,
+    RegistrySnapshot,
+    ToolRegistration,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
+    ToolEffect,
+    ToolResultOutcome,
+    ToolRetryDecision,
+    convert_gate_decision_v1_to_v2,
+    get_order_tool_spec,
+    validate_cycle2_registry_snapshot,
 )
-from mini_agent.core.trace import AgentRunRecord, TraceEvent
+from mini_agent.core.trace import (
+    AgentRunRecord,
+    AgentRunRecordV2,
+    TraceEvent,
+    TraceEventV2,
+)
 
 
 class P0RecordCode(StrEnum):
@@ -72,6 +103,11 @@ class P0RecordCode(StrEnum):
     TRACE_EVENT_RECORD = "trace_event_record"
     EVAL_RESULT_RECORD = "eval_result_record"
     EVAL_EXECUTION_FAILURE_RECORD = "eval_execution_failure_record"
+    ORDER_SEARCH_OBSERVATION_RECORD = "order_search_observation_record"
+    ORDER_CANDIDATE_SET_RECORD = "order_candidate_set_record"
+    ORDER_CANDIDATE_SELECTION_RECORD = "order_candidate_selection_record"
+    SHIPMENT_OBSERVATION_RECORD = "shipment_observation_record"
+    SHIPMENT_ASSESSMENT_RECORD = "shipment_assessment_record"
 
 
 class P0LogicalChildCode(StrEnum):
@@ -182,6 +218,35 @@ class P0PersistenceIntegrityError(Exception):
     @property
     def correlation_ref(self) -> UUID:
         return self._correlation_ref
+
+
+class P0ConversionReadinessCategory(StrEnum):
+    READY = "READY"
+    UNKNOWN_SOURCE_VERSION = "UNKNOWN_SOURCE_VERSION"
+    UNKNOWN_TARGET_VERSION = "UNKNOWN_TARGET_VERSION"
+    UNSUPPORTED_CONVERSION = "UNSUPPORTED_CONVERSION"
+    SOURCE_MODEL_MISMATCH = "SOURCE_MODEL_MISMATCH"
+    MIXED_ACTIVE_VERSION = "MIXED_ACTIVE_VERSION"
+    LOGICAL_CHILD_MISMATCH = "LOGICAL_CHILD_MISMATCH"
+    AUTHORITY_REQUIRED = "AUTHORITY_REQUIRED"
+    AMBIGUOUS_CONVERSION = "AMBIGUOUS_CONVERSION"
+    CONTRADICTORY_GRAPH = "CONTRADICTORY_GRAPH"
+
+
+@dataclass(frozen=True, slots=True)
+class P0ConversionReadiness:
+    """Pure classification; a READY result still performs no persistence I/O."""
+
+    category: P0ConversionReadinessCategory
+    record_code: P0RecordCode | None
+    source_schema_version: str
+    target_schema_version: str
+    target_record: ContractModel | None = None
+    target_logical_children: tuple[ContractModel, ...] = ()
+
+    @property
+    def is_ready(self) -> bool:
+        return self.category is P0ConversionReadinessCategory.READY
 
 
 class _IntegritySignal(Exception):
@@ -1131,7 +1196,15 @@ def _reference_for_value(
 ) -> P0RecordReference:
     if rule.relation is None or rule.target_record_code is None:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
-    target_spec = _NON_RU_PERSISTENCE_REGISTRY[rule.target_record_code]
+    target_specs = tuple(
+        spec
+        for (record_code, _), spec in P0_RECORD_SCHEMA_VERSION_CATALOG.items()
+        if record_code is rule.target_record_code
+    )
+    identity_shapes = {spec.identity_fields for spec in target_specs}
+    if len(identity_shapes) != 1:
+        _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+    target_spec = target_specs[0]
     if len(target_spec.identity_fields) != 1:
         _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
     return P0RecordReference(
@@ -1432,12 +1505,9 @@ def _build_envelope(
 ) -> P0PersistenceEnvelope:
     spec = _NON_RU_PERSISTENCE_REGISTRY.get(record_code)
     if spec is None:
-        category = (
+        _raise_signal(
             P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
-            if record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-            else P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
         )
-        _raise_signal(category)
     validated = _strict_record(spec, record)
     identity = _logical_identity(validated, spec.identity_fields)
     owner, source_references = _top_level_projection(spec, validated)
@@ -1488,7 +1558,7 @@ def encode_persistence_record(
     try:
         if not isinstance(record_code, P0RecordCode):
             _raise_signal(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
-        if record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
+        if record_code not in _NON_RU_PERSISTENCE_REGISTRY:
             _raise_signal(
                 P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
             )
@@ -1900,7 +1970,7 @@ def decode_persistence_record(
 ) -> DecodedP0PersistenceRecord:
     if type(correlation_ref) is not UUID:
         raise TypeError("correlation_ref must be UUID")
-    if expected_record_code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
+    if expected_record_code not in _NON_RU_PERSISTENCE_REGISTRY:
         raise _public_error(
             P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION,
             correlation_ref,
@@ -2082,6 +2152,438 @@ _ACCEPTED_TASK_DELTA_V2_SPEC = _P0LogicalChildSchemaSpec(
     projection_decisions=_ACCEPTED_TASK_DELTA_V2_PROJECTIONS,
 )
 
+
+def _cycle2_record_spec(
+    code: P0RecordCode,
+    schema_version: str,
+    source_model: type[ContractModel],
+    identity_fields: tuple[str, ...],
+    projection_decisions: tuple[_P0ProjectionDecision, ...],
+    *,
+    version_mirror_field: str | None = None,
+    allowed_child_codes: tuple[P0LogicalChildCode, ...] = (),
+    specialized_version_validator: Callable[[ContractModel], bool] | None = None,
+) -> P0RecordSchemaSpec:
+    return P0RecordSchemaSpec(
+        record_code=code,
+        record_schema_version=schema_version,
+        source_model=source_model,
+        identity_fields=identity_fields,
+        projection_decisions=projection_decisions,
+        version_mirror_field=version_mirror_field,
+        allowed_child_codes=allowed_child_codes,
+        specialized_version_validator=specialized_version_validator,
+    )
+
+
+_ORDER_SEARCH_OBSERVATION_PROJECTIONS = (
+    _decision(
+        "private_owner_scope",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "source_tool_call_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="source_tool_call_id",
+        target_record_code=_R.TOOL_CALL_RECORD,
+        value_projector=_one("source_tool_call_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "source_resource_ref",
+        _D.PAYLOAD_CORRELATION,
+        value_projector=_one("source_resource_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+)
+
+_ORDER_CANDIDATE_SET_PROJECTIONS = (
+    _decision(
+        "private_owner_scope_ref",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "conversation_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="conversation_id",
+        target_record_code=_R.CONVERSATION_RECORD,
+        value_projector=_one("conversation_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "task_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="task_id",
+        target_record_code=_R.TASK_RECORD,
+        value_projector=_one("task_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "request_unit_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="request_unit_id",
+        target_record_code=_R.REQUEST_UNIT_RECORD,
+        value_projector=_one("request_unit_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "query_binding_refs[]",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="query_binding_ref",
+        target_record_code=_R.INPUT_BINDING_RECORD,
+        value_projector=_many("query_binding_refs"),
+        minimum=1,
+        unique=True,
+    ),
+    _decision(
+        "source_tool_call_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="source_tool_call_id",
+        target_record_code=_R.TOOL_CALL_RECORD,
+        value_projector=_one("source_tool_call_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "search_observation_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="search_observation_ref",
+        target_record_code=_R.ORDER_SEARCH_OBSERVATION_RECORD,
+        value_projector=_one("search_observation_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "supersedes_candidate_set_ref?",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="supersedes_candidate_set_ref",
+        target_record_code=_R.ORDER_CANDIDATE_SET_RECORD,
+        value_projector=_optional("supersedes_candidate_set_ref"),
+        maximum=1,
+    ),
+)
+
+_ORDER_CANDIDATE_SELECTION_PROJECTIONS = (
+    _decision(
+        "private_owner_scope_ref",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "conversation_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="conversation_id",
+        target_record_code=_R.CONVERSATION_RECORD,
+        value_projector=_one("conversation_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "task_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="task_id",
+        target_record_code=_R.TASK_RECORD,
+        value_projector=_one("task_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "request_unit_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="request_unit_id",
+        target_record_code=_R.REQUEST_UNIT_RECORD,
+        value_projector=_one("request_unit_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "source_message_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="source_message_ref",
+        target_record_code=_R.MESSAGE_RECORD,
+        value_projector=_one("source_message_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "ordinal_input_binding_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="ordinal_input_binding_ref",
+        target_record_code=_R.INPUT_BINDING_RECORD,
+        value_projector=_one("ordinal_input_binding_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "candidate_set_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="candidate_set_ref",
+        target_record_code=_R.ORDER_CANDIDATE_SET_RECORD,
+        value_projector=_one("candidate_set_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "search_observation_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="search_observation_ref",
+        target_record_code=_R.ORDER_SEARCH_OBSERVATION_RECORD,
+        value_projector=_one("search_observation_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+)
+
+_SHIPMENT_OBSERVATION_PROJECTIONS = (
+    _decision(
+        "private_owner_scope",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "task_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="task_id",
+        target_record_code=_R.TASK_RECORD,
+        value_projector=_one("task_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "request_unit_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="request_unit_id",
+        target_record_code=_R.REQUEST_UNIT_RECORD,
+        value_projector=_one("request_unit_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "source_tool_call_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="source_tool_call_id",
+        target_record_code=_R.TOOL_CALL_RECORD,
+        value_projector=_one("source_tool_call_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "supersedes?",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="supersedes",
+        target_record_code=_R.SHIPMENT_OBSERVATION_RECORD,
+        value_projector=_optional("supersedes"),
+        maximum=1,
+    ),
+    _decision(
+        "verified_order_target_ref,source_resource_ref,raw_result_ref?",
+        _D.RESTRICTED_DIAGNOSTIC_CORRELATION,
+        value_projector=_combined(
+            _one("verified_order_target_ref"),
+            _one("source_resource_ref"),
+            _optional("raw_result_ref"),
+        ),
+        minimum=2,
+        maximum=3,
+    ),
+)
+
+_SHIPMENT_ASSESSMENT_PROJECTIONS = (
+    _decision(
+        "private_owner_scope_ref",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "task_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="task_id",
+        target_record_code=_R.TASK_RECORD,
+        value_projector=_one("task_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "request_unit_id",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="request_unit_id",
+        target_record_code=_R.REQUEST_UNIT_RECORD,
+        value_projector=_one("request_unit_id"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "shipment_observation_ref",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="shipment_observation_ref",
+        target_record_code=_R.SHIPMENT_OBSERVATION_RECORD,
+        value_projector=_one("shipment_observation_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    _decision(
+        "claim_binding_ref?",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="claim_binding_ref",
+        target_record_code=_R.INPUT_BINDING_RECORD,
+        value_projector=_optional("claim_binding_ref"),
+        maximum=1,
+    ),
+    _decision(
+        "supersedes_assessment_ref?",
+        _D.TOP_LEVEL_P0_REFERENCE,
+        relation="supersedes_assessment_ref",
+        target_record_code=_R.SHIPMENT_ASSESSMENT_RECORD,
+        value_projector=_optional("supersedes_assessment_ref"),
+        maximum=1,
+    ),
+    _decision(
+        "verified_order_target_ref",
+        _D.RESTRICTED_DIAGNOSTIC_CORRELATION,
+        value_projector=_one("verified_order_target_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+)
+
+_TOOL_CALL_V2_PROJECTIONS = (
+    _decision(
+        "private_owner_scope_ref",
+        _D.DIRECT_OWNER,
+        value_projector=_one("private_owner_scope_ref"),
+        minimum=1,
+        maximum=1,
+    ),
+    *_TOP_LEVEL_PROJECTIONS[_R.TOOL_CALL_RECORD],
+)
+
+_CYCLE2_NEW_TOP_LEVEL_SPECS = {
+    _R.ORDER_SEARCH_OBSERVATION_RECORD: _cycle2_record_spec(
+        _R.ORDER_SEARCH_OBSERVATION_RECORD,
+        "order_search_observation_record.p0.v1",
+        SearchOrdersObservation,
+        ("observation_id",),
+        _ORDER_SEARCH_OBSERVATION_PROJECTIONS,
+        specialized_version_validator=lambda record: (
+            record.record_schema_version
+            == "order_search_observation_record.p0.v1"
+        ),
+    ),
+    _R.ORDER_CANDIDATE_SET_RECORD: _cycle2_record_spec(
+        _R.ORDER_CANDIDATE_SET_RECORD,
+        "order_candidate_set_record.p0.v1",
+        OrderCandidateSetRecord,
+        ("candidate_set_id",),
+        _ORDER_CANDIDATE_SET_PROJECTIONS,
+        specialized_version_validator=lambda record: (
+            record.record_schema_version
+            == "order_candidate_set_record.p0.v1"
+        ),
+    ),
+    _R.ORDER_CANDIDATE_SELECTION_RECORD: _cycle2_record_spec(
+        _R.ORDER_CANDIDATE_SELECTION_RECORD,
+        "order_candidate_selection_record.p0.v1",
+        OrderCandidateSelectionRecord,
+        ("selection_id",),
+        _ORDER_CANDIDATE_SELECTION_PROJECTIONS,
+        specialized_version_validator=lambda record: (
+            record.record_schema_version
+            == "order_candidate_selection_record.p0.v1"
+        ),
+    ),
+    _R.SHIPMENT_OBSERVATION_RECORD: _cycle2_record_spec(
+        _R.SHIPMENT_OBSERVATION_RECORD,
+        "shipment_observation_record.p0.v1",
+        ShipmentObservation,
+        ("observation_id",),
+        _SHIPMENT_OBSERVATION_PROJECTIONS,
+        specialized_version_validator=lambda record: (
+            record.record_schema_version
+            == "shipment_observation_record.p0.v1"
+        ),
+    ),
+    _R.SHIPMENT_ASSESSMENT_RECORD: _cycle2_record_spec(
+        _R.SHIPMENT_ASSESSMENT_RECORD,
+        "shipment_assessment_record.p0.v1",
+        ShipmentAssessment,
+        ("assessment_id",),
+        _SHIPMENT_ASSESSMENT_PROJECTIONS,
+    ),
+}
+
+_CYCLE2_V2_PARENT_SPECS = {
+    _R.INPUT_BINDING_RECORD: _cycle2_record_spec(
+        _R.INPUT_BINDING_RECORD,
+        "input_binding_record.p0.v2",
+        InputBindingV2,
+        ("binding_id",),
+        _TOP_LEVEL_PROJECTIONS[_R.INPUT_BINDING_RECORD],
+    ),
+    _R.GATE_DECISION_RECORD: _cycle2_record_spec(
+        _R.GATE_DECISION_RECORD,
+        "gate_decision_record.p0.v2",
+        GateDecisionV2,
+        ("gate_decision_id",),
+        _TOP_LEVEL_PROJECTIONS[_R.GATE_DECISION_RECORD],
+    ),
+    _R.TOOL_CALL_RECORD: _cycle2_record_spec(
+        _R.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        ToolCallRecordV2,
+        ("tool_call_id",),
+        _TOOL_CALL_V2_PROJECTIONS,
+        allowed_child_codes=(P0LogicalChildCode.TOOL_ATTEMPT_RECORD,),
+    ),
+    _R.AGENT_RUN_RECORD: _cycle2_record_spec(
+        _R.AGENT_RUN_RECORD,
+        "agent_run_record.p0.v2",
+        AgentRunRecordV2,
+        ("run_id",),
+        _TOP_LEVEL_PROJECTIONS[_R.AGENT_RUN_RECORD],
+    ),
+    _R.RUN_TASK_LINK_RECORD: _cycle2_record_spec(
+        _R.RUN_TASK_LINK_RECORD,
+        RUN_TASK_LINK_RECORD_V2_SCHEMA_VERSION,
+        RunTaskLinkRecordV2,
+        ("run_id", "task_id"),
+        _TOP_LEVEL_PROJECTIONS[_R.RUN_TASK_LINK_RECORD],
+        version_mirror_field="record_schema_version",
+    ),
+    _R.TRACE_EVENT_RECORD: _cycle2_record_spec(
+        _R.TRACE_EVENT_RECORD,
+        "trace_event_record.p0.v2",
+        TraceEventV2,
+        ("trace_event_id",),
+        _TOP_LEVEL_PROJECTIONS[_R.TRACE_EVENT_RECORD],
+    ),
+}
+
+_TOOL_ATTEMPT_V2_SPEC = _P0LogicalChildSchemaSpec(
+    child_code=P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+    source_model=ToolAttemptRecordV2,
+    parent_record_code=P0RecordCode.TOOL_CALL_RECORD,
+    identity_fields=("tool_call_id", "attempt_no"),
+    closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
+    projection_decisions=_CHILD_PROJECTIONS[P0LogicalChildCode.TOOL_ATTEMPT_RECORD],
+)
+
 _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
     tuple[P0RecordCode, str, P0LogicalChildCode],
     _P0LogicalChildSchemaSpec,
@@ -2092,6 +2594,30 @@ _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
             "request_understanding_record.p0.v2",
             P0LogicalChildCode.ACCEPTED_TASK_DELTA,
         ): _ACCEPTED_TASK_DELTA_V2_SPEC,
+    }
+)
+
+P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG: Mapping[
+    tuple[P0RecordCode, str, P0LogicalChildCode],
+    _P0LogicalChildSchemaSpec,
+] = MappingProxyType(
+    {
+        **{
+            (
+                spec.parent_record_code,
+                _NON_RU_PERSISTENCE_REGISTRY[
+                    spec.parent_record_code
+                ].record_schema_version,
+                child_code,
+            ): spec
+            for child_code, spec in _NON_RU_LOGICAL_CHILD_SPECS.items()
+        },
+        **_REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG,
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            P0LogicalChildCode.TOOL_ATTEMPT_RECORD,
+        ): _TOOL_ATTEMPT_V2_SPEC,
     }
 )
 
@@ -2121,6 +2647,14 @@ P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
             P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
             "request_understanding_record.p0.v2",
         ): _REQUEST_UNDERSTANDING_V2_SPEC,
+        **{
+            (code, spec.record_schema_version): spec
+            for code, spec in _CYCLE2_NEW_TOP_LEVEL_SPECS.items()
+        },
+        **{
+            (code, spec.record_schema_version): spec
+            for code, spec in _CYCLE2_V2_PARENT_SPECS.items()
+        },
     }
 )
 
@@ -2129,14 +2663,12 @@ P0_PERSISTENCE_REGISTRY: Mapping[
     P0RecordSchemaSpec,
 ] = MappingProxyType(
     {
-        **{
-            code: (
-                _REQUEST_UNDERSTANDING_V2_SPEC
-                if code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-                else _NON_RU_PERSISTENCE_REGISTRY[code]
-            )
-            for code in P0RecordCode
-        },
+        code: (
+            _REQUEST_UNDERSTANDING_V2_SPEC
+            if code is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+            else _NON_RU_PERSISTENCE_REGISTRY[code]
+        )
+        for code in tuple(P0RecordCode)[:17]
     }
 )
 
@@ -2410,10 +2942,22 @@ def _strict_selected_versioned_children(
     for child in logical_children:
         child_spec = next(
             (
-                P0_LOGICAL_CHILD_SPECS[child_code]
+                P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                    (
+                        spec.record_code,
+                        spec.record_schema_version,
+                        child_code,
+                    )
+                ]
                 for child_code in spec.allowed_child_codes
                 if type(child)
-                is P0_LOGICAL_CHILD_SPECS[child_code].source_model
+                is P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                    (
+                        spec.record_code,
+                        spec.record_schema_version,
+                        child_code,
+                    )
+                ].source_model
             ),
             None,
         )
@@ -2460,6 +3004,127 @@ def _versioned_top_level_projection(
         _normalize_references(
             tuple(references),
             collapse_duplicates=True,
+        ),
+    )
+
+
+def _selected_versioned_child_payloads(
+    parent_spec: P0RecordSchemaSpec,
+    parent_record: ContractModel,
+    parent_identity: LogicalIdentity,
+    logical_children: tuple[ContractModel, ...],
+) -> tuple[
+    tuple[P0LogicalChildPayload, ...],
+    tuple[P0RecordReference, ...],
+]:
+    validated_children = _strict_selected_versioned_children(
+        parent_spec,
+        logical_children,
+    )
+    if not parent_spec.allowed_child_codes and validated_children:
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+    if parent_spec is _CYCLE2_V2_PARENT_SPECS[_R.TOOL_CALL_RECORD]:
+        attempts = parent_record.attempts
+        if len(validated_children) != len(attempts):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        for expected, actual in zip(attempts, validated_children, strict=True):
+            if not _versioned_runtime_values_match_exactly(expected, actual):
+                _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+    payloads: list[P0LogicalChildPayload] = []
+    child_references: list[P0RecordReference] = []
+    for child in validated_children:
+        child_spec = next(
+            (
+                P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                    (
+                        parent_spec.record_code,
+                        parent_spec.record_schema_version,
+                        child_code,
+                    )
+                ]
+                for child_code in parent_spec.allowed_child_codes
+                if type(child)
+                is P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                    (
+                        parent_spec.record_code,
+                        parent_spec.record_schema_version,
+                        child_code,
+                    )
+                ].source_model
+            ),
+            None,
+        )
+        if child_spec is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_data = child.model_dump(mode="json", warnings="error")
+        for rule in child_spec.projection_decisions:
+            values = _projected_values(rule, child_data)
+            if rule.classification is _D.PARENT_FIELD_EQUALITY:
+                parent_data = parent_record.model_dump(
+                    mode="json",
+                    warnings="error",
+                )
+                if any(value != parent_data.get(rule.field_label) for value in values):
+                    _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+            elif rule.classification is _D.CHILD_TOP_LEVEL_P0_REFERENCE:
+                child_references.extend(
+                    _reference_for_value(rule, value) for value in values
+                )
+        payloads.append(
+            P0LogicalChildPayload(
+                child_code=child_spec.child_code,
+                parent_record_code=parent_spec.record_code,
+                parent_logical_identity=parent_identity,
+                logical_identity=_logical_identity(
+                    child,
+                    child_spec.identity_fields,
+                ),
+                data=child_data,
+            )
+        )
+    return (
+        tuple(payloads),
+        _normalize_references(
+            tuple(child_references),
+            collapse_duplicates=True,
+        ),
+    )
+
+
+def _build_selected_versioned_envelope(
+    spec: P0RecordSchemaSpec,
+    record: object,
+    *,
+    external_references: tuple[P0RecordReference, ...],
+    logical_children: tuple[ContractModel, ...],
+) -> P0PersistenceEnvelope:
+    validated = _strict_selected_versioned_record(spec, record)
+    identity = _logical_identity(validated, spec.identity_fields)
+    owner, source_references = _versioned_top_level_projection(spec, validated)
+    external = _validate_external_references(spec, external_references)
+    children, child_references = _selected_versioned_child_payloads(
+        spec,
+        validated,
+        identity,
+        logical_children,
+    )
+    references = _normalize_references(
+        (*source_references, *external, *child_references),
+        collapse_duplicates=True,
+    )
+    return P0PersistenceEnvelope(
+        record_code=spec.record_code,
+        record_schema_version=spec.record_schema_version,
+        logical_identity=identity,
+        direct_owner_customer_id=owner,
+        record_references=references,
+        payload=P0VersionedPayload(
+            record_code=spec.record_code,
+            record_schema_version=spec.record_schema_version,
+            data=validated.model_dump(mode="json", warnings="error"),
+            logical_children=children,
         ),
     )
 
@@ -2690,7 +3355,7 @@ def encode_persistence_record_versioned(
                 external_references=external_references,
                 logical_children=logical_children,
             )
-        else:
+        elif _NON_RU_PERSISTENCE_REGISTRY.get(record_code) is selected:
             validated_record = _strict_selected_versioned_record(
                 selected,
                 record,
@@ -2704,6 +3369,13 @@ def encode_persistence_record_versioned(
                 validated_record,
                 external_references=external_references,
                 logical_children=validated_children,
+            )
+        else:
+            result = _build_selected_versioned_envelope(
+                selected,
+                record,
+                external_references=external_references,
+                logical_children=logical_children,
             )
     except _IntegritySignal as signal:
         category = signal.category
@@ -2900,6 +3572,138 @@ def _decode_request_understanding_v2(
     )
 
 
+def _decode_selected_versioned(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    spec: P0RecordSchemaSpec,
+) -> DecodedP0PersistenceRecord:
+    raw_json = _json_input(envelope)
+    outer_data = _classify_outer_versioned(
+        raw_json,
+        spec.record_code,
+        spec.record_schema_version,
+        spec,
+    )
+    inner_data = outer_data.get("payload")
+    if (
+        not isinstance(inner_data, dict)
+        or inner_data.get("record_code") != spec.record_code.value
+        or inner_data.get("record_schema_version")
+        != spec.record_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    category: P0PersistenceIntegrityCategory | None = None
+    validated_envelope: P0PersistenceEnvelope | None = None
+    try:
+        validated_envelope = P0PersistenceEnvelope.model_validate_json(
+            raw_json,
+            strict=True,
+        )
+    except ValidationError as error:
+        category = _envelope_validation_category(error)
+    except (TypeError, ValueError, RecursionError):
+        category = P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+    if category is not None:
+        _raise_signal(category)
+    if validated_envelope is None:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        validated_envelope.payload.record_code is not spec.record_code
+        or validated_envelope.payload.record_schema_version
+        != spec.record_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    source_json = _json_mapping_text(
+        validated_envelope.payload.data,
+        failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+    )
+    source_record: ContractModel | None = None
+    try:
+        source_record = spec.source_model.model_validate_json(
+            source_json,
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if source_record is None:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    source_record = _strict_selected_versioned_record(spec, source_record)
+
+    children: list[ContractModel] = []
+    for child_payload in validated_envelope.payload.logical_children:
+        if (
+            child_payload.parent_record_code is not spec.record_code
+            or child_payload.parent_logical_identity
+            != validated_envelope.logical_identity
+            or child_payload.child_code not in spec.allowed_child_codes
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_spec = P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG.get(
+            (
+                spec.record_code,
+                spec.record_schema_version,
+                child_payload.child_code,
+            )
+        )
+        if child_spec is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_json = _json_mapping_text(
+            child_payload.data,
+            failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+        )
+        child: ContractModel | None = None
+        try:
+            child = child_spec.source_model.model_validate_json(
+                child_json,
+                strict=True,
+            )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        if child is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        children.append(child)
+
+    external_relations = {
+        rule.relation
+        for rule in spec.projection_decisions
+        if rule.classification is _D.EXTERNAL_REQUIRED_P0_REFERENCE
+    }
+    external_references = tuple(
+        reference
+        for reference in validated_envelope.record_references
+        if reference.relation in external_relations
+    )
+    expected = _build_selected_versioned_envelope(
+        spec,
+        source_record,
+        external_references=external_references,
+        logical_children=tuple(children),
+    )
+    if expected.logical_identity != validated_envelope.logical_identity:
+        _raise_signal(P0PersistenceIntegrityCategory.IDENTITY_MISMATCH)
+    if (
+        expected.direct_owner_customer_id
+        != validated_envelope.direct_owner_customer_id
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH)
+    if expected.record_references != validated_envelope.record_references:
+        _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+    if expected.payload.data != validated_envelope.payload.data:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        expected.payload.logical_children
+        != validated_envelope.payload.logical_children
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    return DecodedP0PersistenceRecord(
+        record_code=spec.record_code,
+        record_schema_version=spec.record_schema_version,
+        source_record=source_record,
+        logical_children=tuple(children),
+    )
+
+
 def decode_persistence_record_versioned(
     envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
     *,
@@ -2930,7 +3734,7 @@ def decode_persistence_record_versioned(
                 expected_record_code,
                 expected_schema_version,
             )
-        else:
+        elif _NON_RU_PERSISTENCE_REGISTRY.get(expected_record_code) is selected:
             raw_json = _json_input(envelope)
             _classify_outer_versioned(
                 raw_json,
@@ -2939,6 +3743,8 @@ def decode_persistence_record_versioned(
                 selected,
             )
             result = _decode(raw_json, expected_record_code)
+        else:
+            result = _decode_selected_versioned(envelope, selected)
     except _IntegritySignal as signal:
         category = signal.category
     if category is not None:
@@ -2949,3 +3755,566 @@ def decode_persistence_record_versioned(
             correlation_ref,
         )
     return result
+
+
+_P0_APPROVED_V1_TO_V2_PAIRS = frozenset(
+    {
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "input_binding_record.p0.v1",
+            "input_binding_record.p0.v2",
+        ),
+        (
+            P0RecordCode.GATE_DECISION_RECORD,
+            "gate_decision_record.p0.v1",
+            "gate_decision_record.p0.v2",
+        ),
+        (
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v1",
+            "tool_call_record.p0.v2",
+        ),
+        (
+            P0RecordCode.AGENT_RUN_RECORD,
+            "agent_run_record.p0.v1",
+            "agent_run_record.p0.v2",
+        ),
+        (
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            "run_task_link_record.p0.v1",
+            "run_task_link_record.p0.v2",
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "trace_event_record.p0.v1",
+            "trace_event_record.p0.v2",
+        ),
+    }
+)
+
+
+def _conversion_result(
+    category: P0ConversionReadinessCategory,
+    *,
+    record_code: P0RecordCode | None,
+    source_schema_version: str,
+    target_schema_version: str,
+    target_record: ContractModel | None = None,
+    target_logical_children: tuple[ContractModel, ...] = (),
+) -> P0ConversionReadiness:
+    return P0ConversionReadiness(
+        category=category,
+        record_code=record_code,
+        source_schema_version=source_schema_version,
+        target_schema_version=target_schema_version,
+        target_record=target_record,
+        target_logical_children=target_logical_children,
+    )
+
+
+def _convert_v1_model_with_shared_json_fields(
+    source: ContractModel,
+    target_model: type[ContractModel],
+    *,
+    replacements: Mapping[str, JsonValue] | None = None,
+    removed_fields: tuple[str, ...] = (),
+) -> ContractModel:
+    payload = source.model_dump(mode="json", warnings="error")
+    for field_name in removed_fields:
+        payload.pop(field_name, None)
+    payload.update(replacements or {})
+    return target_model.model_validate_json(
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        strict=True,
+    )
+
+
+def _phase1_get_order_registry_snapshot() -> RegistrySnapshot:
+    return RegistrySnapshot.build(
+        tool_registry_version="e2e01-thin-tools-v1",
+        registrations=(
+            ToolRegistration(
+                tool_spec=get_order_tool_spec(),
+                provider_visible_name="get_order",
+                effect=ToolEffect.READ,
+                risk="LOW",
+                idempotency="READ_ONLY",
+                handler_ref="orders.get_order",
+                execution_policy=ExecutionPolicy(
+                    timeout_ms=500,
+                    max_attempts=1,
+                    interrupt_behavior="MARK_INTERRUPTED",
+                ),
+            ),
+        ),
+    )
+
+
+def _canonical_source_registry_authority(
+    source: ToolCallRecord,
+    source_registry_snapshot: RegistrySnapshot | None,
+) -> RegistrySnapshot:
+    if type(source_registry_snapshot) is not RegistrySnapshot:
+        raise PermissionError("exact source RegistrySnapshot is required")
+    try:
+        canonical = _strict_versioned_model(
+            source_registry_snapshot,
+            RegistrySnapshot,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+    except _IntegritySignal as error:
+        raise ValueError("source RegistrySnapshot is not canonical") from error
+    expected = _phase1_get_order_registry_snapshot()
+    if (
+        canonical != expected
+        or canonical.tool_registry_version != source.tool_registry_version
+        or source.canonical_tool_name != "get_order"
+    ):
+        raise ValueError("source RegistrySnapshot/version/tool/policy mismatch")
+    return canonical
+
+
+def _canonical_target_registry_authority(
+    target_registry_snapshot: RegistrySnapshot | None,
+) -> RegistrySnapshot:
+    if type(target_registry_snapshot) is not RegistrySnapshot:
+        raise PermissionError("exact target RegistrySnapshot is required")
+    try:
+        canonical = _strict_versioned_model(
+            target_registry_snapshot,
+            RegistrySnapshot,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        return validate_cycle2_registry_snapshot(canonical)
+    except (_IntegritySignal, TypeError, ValueError) as error:
+        raise ValueError("target RegistrySnapshot is not canonical") from error
+
+
+def _trusted_source_tool_owner(
+    source: ToolCallRecord,
+    *,
+    owner_scope: TrustedOwnerScope | None,
+    source_task_record: TaskRecord | None,
+    source_request_unit_record: RequestUnitRecord | None,
+    source_argument_binding_records: tuple[InputBinding, ...],
+) -> str:
+    if (
+        type(owner_scope) is not TrustedOwnerScope
+        or type(source_task_record) is not TaskRecord
+        or type(source_request_unit_record) is not RequestUnitRecord
+        or type(source_argument_binding_records) is not tuple
+        or not source_argument_binding_records
+    ):
+        raise PermissionError("complete trusted source owner graph is required")
+    try:
+        owner_scope.require_trusted_derivation()
+    except ValueError as error:
+        raise PermissionError("owner scope lacks trusted derivation") from error
+    if (
+        set(owner_scope.__dict__) != set(TrustedOwnerScope.model_fields)
+        or set(owner_scope.model_fields_set)
+        != set(TrustedOwnerScope.model_fields)
+    ):
+        raise PermissionError("owner scope runtime state is not exact")
+
+    try:
+        task = _strict_versioned_model(
+            source_task_record,
+            TaskRecord,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        request_unit = _strict_versioned_model(
+            source_request_unit_record,
+            RequestUnitRecord,
+            failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        )
+        bindings = tuple(
+            _strict_versioned_model(
+                binding,
+                InputBinding,
+                failure_category=(
+                    P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED
+                ),
+            )
+            for binding in source_argument_binding_records
+        )
+    except _IntegritySignal as error:
+        raise ValueError("source owner graph is not canonical") from error
+
+    binding_ids = tuple(binding.binding_id for binding in bindings)
+    if (
+        task.owner_customer_id != owner_scope.customer_id
+        or source.task_id != task.task_id
+        or source.request_unit_id != request_unit.request_unit_id
+        or request_unit.task_id != task.task_id
+        or source.validated_task_state_version != task.state_version
+        or source.validated_task_state_version != request_unit.state_version
+        or task.status is not request_unit.status
+        or binding_ids != source.argument_binding_refs
+        or binding_ids != request_unit.input_binding_refs
+        or len(binding_ids) != len(set(binding_ids))
+    ):
+        raise ValueError("source owner/Task/RequestUnit/binding graph mismatch")
+    return owner_scope.customer_id
+
+
+def _convert_tool_attempts_v1_to_v2(
+    parent: ToolCallRecord,
+    attempts: tuple[ToolAttemptRecord, ...],
+    snapshot: RegistrySnapshot,
+) -> tuple[ToolAttemptRecordV2, ...]:
+    registrations = tuple(
+        registration
+        for registration in snapshot.canonical_registrations
+        if registration.tool_spec.name == parent.canonical_tool_name
+    )
+    if len(registrations) != 1:
+        raise ValueError("canonical registration is not unique")
+    registration = registrations[0]
+    if registration.effect is not parent.effect:
+        raise ValueError("registration effect contradicts ToolCall")
+    policy = registration.execution_policy
+    retryable_codes = frozenset(policy.retryable_failure_codes)
+
+    converted: list[ToolAttemptRecordV2] = []
+    for index, attempt in enumerate(attempts):
+        has_next = index + 1 < len(attempts)
+        if attempt.finished_at is None:
+            converted.append(
+                ToolAttemptRecordV2(
+                    tool_call_id=attempt.tool_call_id,
+                    attempt_no=attempt.attempt_no,
+                    started_at=attempt.started_at,
+                )
+            )
+            continue
+        outcome = attempt.outcome
+        if outcome is None:
+            raise ValueError("finalized attempt is missing outcome")
+
+        timeout_phase = None
+        if outcome is ToolResultOutcome.TIMEOUT:
+            is_terminal_parent_timeout = (
+                not has_next
+                and parent.status.value == "TIMED_OUT"
+                and parent.timeout_phase is not None
+            )
+            if not is_terminal_parent_timeout:
+                raise LookupError("timeout phase is not uniquely reconstructable")
+            timeout_phase = parent.timeout_phase
+
+        if has_next:
+            if (
+                attempt.failure_code not in retryable_codes
+                or attempt.attempt_no >= policy.max_attempts
+            ):
+                raise ValueError("next attempt contradicts execution policy")
+            retry_decision = ToolRetryDecision.RETRY_SCHEDULED
+        elif outcome is ToolResultOutcome.SUCCESS:
+            retry_decision = ToolRetryDecision.NOT_APPLICABLE
+        elif outcome is ToolResultOutcome.BUSINESS_FAILURE:
+            retry_decision = ToolRetryDecision.NOT_RETRYABLE
+        elif outcome is ToolResultOutcome.INTERRUPTED:
+            retry_decision = {
+                "RUN_BUDGET_EXHAUSTED": (
+                    ToolRetryDecision.RUN_BUDGET_EXHAUSTED
+                ),
+                "STATE_OR_BINDING_INVALIDATED": (
+                    ToolRetryDecision.STATE_OR_BINDING_INVALIDATED
+                ),
+            }.get(
+                attempt.failure_code,
+                ToolRetryDecision.NOT_RETRYABLE,
+            )
+        elif outcome is ToolResultOutcome.TIMEOUT:
+            if attempt.attempt_no >= policy.max_attempts:
+                retry_decision = ToolRetryDecision.MAX_ATTEMPTS_REACHED
+            else:
+                raise LookupError(
+                    "timeout retry decision is not uniquely reconstructable"
+                )
+        elif attempt.failure_code not in retryable_codes:
+            retry_decision = ToolRetryDecision.NOT_RETRYABLE
+        elif attempt.attempt_no >= policy.max_attempts:
+            retry_decision = ToolRetryDecision.MAX_ATTEMPTS_REACHED
+        elif parent.status.value == "RUNNING":
+            retry_decision = ToolRetryDecision.RETRY_SCHEDULED
+        else:
+            raise LookupError("retry decision is not uniquely reconstructable")
+
+        converted.append(
+            ToolAttemptRecordV2(
+                tool_call_id=attempt.tool_call_id,
+                attempt_no=attempt.attempt_no,
+                started_at=attempt.started_at,
+                finished_at=attempt.finished_at,
+                outcome=outcome,
+                failure_code=attempt.failure_code,
+                timeout_phase=timeout_phase,
+                retry_decision=retry_decision,
+            )
+        )
+    return tuple(converted)
+
+
+def _convert_tool_call_v1_to_v2(
+    source: ToolCallRecord,
+    children: tuple[ContractModel, ...],
+    *,
+    owner_scope: TrustedOwnerScope | None,
+    source_task_record: TaskRecord | None,
+    source_request_unit_record: RequestUnitRecord | None,
+    source_argument_binding_records: tuple[InputBinding, ...],
+    source_registry_snapshot: RegistrySnapshot | None,
+    target_registry_snapshot: RegistrySnapshot | None,
+) -> tuple[ToolCallRecordV2, tuple[ToolAttemptRecordV2, ...]]:
+    private_owner_scope_ref = _trusted_source_tool_owner(
+        source,
+        owner_scope=owner_scope,
+        source_task_record=source_task_record,
+        source_request_unit_record=source_request_unit_record,
+        source_argument_binding_records=source_argument_binding_records,
+    )
+    source_snapshot = _canonical_source_registry_authority(
+        source,
+        source_registry_snapshot,
+    )
+    target_snapshot = _canonical_target_registry_authority(
+        target_registry_snapshot,
+    )
+    try:
+        Cycle2ToolName(source.canonical_tool_name)
+    except ValueError as error:
+        raise ValueError("v1 Tool name is outside Cycle 2") from error
+    if len(children) != source.attempt_count:
+        raise ValueError("attempt count mismatch")
+    attempts = tuple(children)
+    if any(type(attempt) is not ToolAttemptRecord for attempt in attempts):
+        raise ValueError("v1 ToolCall requires exact v1 attempt children")
+    if tuple(attempt.attempt_no for attempt in attempts) != tuple(
+        range(1, source.attempt_count + 1)
+    ):
+        raise ValueError("attempt identity/order mismatch")
+    if any(attempt.tool_call_id != source.tool_call_id for attempt in attempts):
+        raise ValueError("attempt parent mismatch")
+
+    converted_attempts = _convert_tool_attempts_v1_to_v2(
+        source,
+        attempts,
+        source_snapshot,
+    )
+    source_data = source.model_dump(mode="json", warnings="error")
+    payload = {
+        field_name: source_data[field_name]
+        for field_name in ToolCallRecordV2.model_fields
+        if field_name in source_data
+    }
+    payload.update(
+        {
+            "tool_registry_version": target_snapshot.tool_registry_version,
+            "private_owner_scope_ref": private_owner_scope_ref,
+            "verified_target_ref": None,
+            "attempts": [
+                attempt.model_dump(mode="json", warnings="error")
+                for attempt in converted_attempts
+            ],
+            "recovery_disposition": None,
+            "recovery_decision_ref": None,
+        }
+    )
+    target = ToolCallRecordV2.model_validate_json(
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        strict=True,
+    )
+    return target, converted_attempts
+
+
+def classify_p0_conversion_readiness(
+    record_code: P0RecordCode,
+    source_schema_version: str,
+    target_schema_version: str,
+    source_record: ContractModel,
+    *,
+    active_schema_versions: tuple[str, ...],
+    external_references: tuple[P0RecordReference, ...] = (),
+    source_logical_children: tuple[ContractModel, ...] = (),
+    owner_scope: TrustedOwnerScope | None = None,
+    source_task_record: TaskRecord | None = None,
+    source_request_unit_record: RequestUnitRecord | None = None,
+    source_argument_binding_records: tuple[InputBinding, ...] = (),
+    source_registry_snapshot: RegistrySnapshot | None = None,
+    target_registry_snapshot: RegistrySnapshot | None = None,
+) -> P0ConversionReadiness:
+    """Classify one exact v1 graph for a future atomic migration, without I/O."""
+
+    code = record_code if type(record_code) is P0RecordCode else None
+    base = {
+        "record_code": code,
+        "source_schema_version": source_schema_version,
+        "target_schema_version": target_schema_version,
+    }
+    if code is None or (code, source_schema_version) not in (
+        P0_RECORD_SCHEMA_VERSION_CATALOG
+    ):
+        return _conversion_result(
+            P0ConversionReadinessCategory.UNKNOWN_SOURCE_VERSION,
+            **base,
+        )
+    if (code, target_schema_version) not in P0_RECORD_SCHEMA_VERSION_CATALOG:
+        return _conversion_result(
+            P0ConversionReadinessCategory.UNKNOWN_TARGET_VERSION,
+            **base,
+        )
+    if (
+        type(active_schema_versions) is not tuple
+        or active_schema_versions != (source_schema_version,)
+    ):
+        return _conversion_result(
+            P0ConversionReadinessCategory.MIXED_ACTIVE_VERSION,
+            **base,
+        )
+    if (
+        code,
+        source_schema_version,
+        target_schema_version,
+    ) not in _P0_APPROVED_V1_TO_V2_PAIRS:
+        return _conversion_result(
+            P0ConversionReadinessCategory.UNSUPPORTED_CONVERSION,
+            **base,
+        )
+    if (
+        type(external_references) is not tuple
+        or type(source_logical_children) is not tuple
+    ):
+        return _conversion_result(
+            P0ConversionReadinessCategory.LOGICAL_CHILD_MISMATCH,
+            **base,
+        )
+
+    source_spec = P0_RECORD_SCHEMA_VERSION_CATALOG[
+        (code, source_schema_version)
+    ]
+    try:
+        canonical_source = _strict_selected_versioned_record(
+            source_spec,
+            source_record,
+        )
+    except _IntegritySignal:
+        return _conversion_result(
+            P0ConversionReadinessCategory.SOURCE_MODEL_MISMATCH,
+            **base,
+        )
+    try:
+        canonical_source_children = _strict_selected_versioned_children(
+            source_spec,
+            source_logical_children,
+        )
+    except _IntegritySignal:
+        return _conversion_result(
+            P0ConversionReadinessCategory.LOGICAL_CHILD_MISMATCH,
+            **base,
+        )
+
+    try:
+        target_children: tuple[ContractModel, ...] = ()
+        if code is P0RecordCode.INPUT_BINDING_RECORD:
+            if canonical_source_children:
+                raise ValueError("InputBinding has no logical children")
+            target = convert_input_binding_v1_to_v2(canonical_source)
+        elif code is P0RecordCode.GATE_DECISION_RECORD:
+            if canonical_source_children:
+                raise ValueError("GateDecision has no logical children")
+            target = convert_gate_decision_v1_to_v2(canonical_source)
+        elif code is P0RecordCode.AGENT_RUN_RECORD:
+            if canonical_source_children:
+                raise ValueError("AgentRun has no logical children")
+            target = _convert_v1_model_with_shared_json_fields(
+                canonical_source,
+                AgentRunRecordV2,
+            )
+        elif code is P0RecordCode.RUN_TASK_LINK_RECORD:
+            if canonical_source_children:
+                raise ValueError("RunTaskLink has no logical children")
+            target = _convert_v1_model_with_shared_json_fields(
+                canonical_source,
+                RunTaskLinkRecordV2,
+                replacements={
+                    "record_schema_version": (
+                        RUN_TASK_LINK_RECORD_V2_SCHEMA_VERSION
+                    )
+                },
+                removed_fields=("schema_version",),
+            )
+        elif code is P0RecordCode.TRACE_EVENT_RECORD:
+            if canonical_source_children:
+                raise ValueError("TraceEvent has no logical children")
+            target = _convert_v1_model_with_shared_json_fields(
+                canonical_source,
+                TraceEventV2,
+            )
+        else:
+            target, converted_attempts = _convert_tool_call_v1_to_v2(
+                canonical_source,
+                canonical_source_children,
+                owner_scope=owner_scope,
+                source_task_record=source_task_record,
+                source_request_unit_record=source_request_unit_record,
+                source_argument_binding_records=(
+                    source_argument_binding_records
+                ),
+                source_registry_snapshot=source_registry_snapshot,
+                target_registry_snapshot=target_registry_snapshot,
+            )
+            target_children = tuple(converted_attempts)
+
+        target_spec = P0_RECORD_SCHEMA_VERSION_CATALOG[
+            (code, target_schema_version)
+        ]
+        canonical_target = _strict_selected_versioned_record(
+            target_spec,
+            target,
+        )
+        _build_selected_versioned_envelope(
+            target_spec,
+            canonical_target,
+            external_references=external_references,
+            logical_children=target_children,
+        )
+    except PermissionError:
+        return _conversion_result(
+            P0ConversionReadinessCategory.AUTHORITY_REQUIRED,
+            **base,
+        )
+    except LookupError:
+        return _conversion_result(
+            P0ConversionReadinessCategory.AMBIGUOUS_CONVERSION,
+            **base,
+        )
+    except (
+        _IntegritySignal,
+        AttributeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+        PydanticSerializationError,
+    ):
+        return _conversion_result(
+            P0ConversionReadinessCategory.CONTRADICTORY_GRAPH,
+            **base,
+        )
+    return _conversion_result(
+        P0ConversionReadinessCategory.READY,
+        target_record=canonical_target,
+        target_logical_children=target_children,
+        **base,
+    )
