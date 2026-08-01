@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_R1A_OWNER_APPROVED / 02-15R1A_PLANNING_REVIEW`
+状态：`B_C2_W9_INITIAL_RU_CONFIRMED / 02-15R1_REFREEZE_REVIEW`
 
 ## Exact input
 
@@ -13,6 +13,9 @@
 - PR #270/#271已reviewed完成R0；真实
   `B_C2_W9_SEED_CONTRACT = 95b2acf3be79bba1d6e40ba8a56bffc9109b54d6` /
   tree `466e07a4aec381967c5bc59c248207f111bb97f3`。R0禁止W9预置Runtime graph。
+- PR #274/#275已reviewed完成R1A；真实
+  `B_C2_W9_INITIAL_RU = 2fb68b0210a865c293bcb7f471b38c728dcbb7dd` /
+  tree `b0dfc7802b81bee21168c4e79e2d046a642d0162`。
 
 ## Ordered dispatch
 
@@ -34,4 +37,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R1A` exact-four-file Core correction planning/review；R1保持clean-blocked，R2/02-15尚未冻结。
+当前只允许从真实`B_C2_W9_INITIAL_RU`重冻结`02-15R1` exact-six-file Application correction；R2/02-15尚未冻结。

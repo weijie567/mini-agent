@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W8 + R0 COMPLETE / W9 02-15R1A PLANNING`；真实 current integration `48dd7bca378fdf2496f12fd86e2b7c7cebdc96f2` / tree `9987534ef7a05603102f97b5ef0f5d789d14e5af`；PR #270/#271 reviewed完成R0，PR #272完成R1 planning，R1写前Core blocker经PR #273 reviewed批准R1A与33 slots / 16 wave labels；当前只冻结R1A Core initial RU，R1保持clean-blocked；Case仍为`CONTRACT_DEFINED`，W9 correction/full均不推进Phase 2 Harness dispatch/Result |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W8 + R0 + R1A COMPLETE / W9 02-15R1 REFREEZE`；真实 current integration `2fb68b0210a865c293bcb7f471b38c728dcbb7dd` / tree `b0dfc7802b81bee21168c4e79e2d046a642d0162`；PR #273/#274/#275 reviewed完成R1A owner/planning/implementation，focused `159 passed`、neighbor `669 passed`；当前只从真实R1A successor重冻结R1；Case仍为`CONTRACT_DEFINED`，W9 correction/full均不推进Phase 2 Harness dispatch/Result |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
