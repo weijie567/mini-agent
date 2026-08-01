@@ -15,6 +15,7 @@ from mini_agent.core.request_understanding import NextMove, NextMoveKind
 from mini_agent.core.tool_system import (
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     AuthorizedToolCommand,
+    AuthorizedToolCommandV2,
     CYCLE2_TOOL_REGISTRY_VERSION,
     Cycle2RetryRevalidation,
     Cycle2ToolDispatchFacts,
@@ -22,6 +23,7 @@ from mini_agent.core.tool_system import (
     Cycle2ToolTerminalProjection,
     ExecutionPolicy,
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
@@ -44,6 +46,7 @@ from mini_agent.core.tool_system import (
     build_cycle2_registry_snapshot,
     cycle2_tool_profiles,
     compute_model_visible_toolset_hash,
+    convert_gate_decision_v1_to_v2,
     decide_cycle2_tool_recovery,
     decide_cycle2_tool_retry,
     effective_cycle2_tool_timeout_ms,
@@ -681,6 +684,168 @@ def test_authorized_command_cannot_move_identity_into_business_arguments() -> No
             validated_task_state_version=1,
             registry_snapshot_ref="snapshot-safe-ref",
             trusted_context_ref="private-context-safe-ref",
+        )
+
+
+def _accepted_gate_v1() -> GateDecision:
+    return GateDecision(
+        gate_decision_id=uuid4(),
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        provider_tool_call_id="provider-call-v1",
+        requested_provider_tool_name="get_order",
+        resolved_canonical_tool_name="get_order",
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(uuid4(),),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=1,
+        validated_task_state_version=1,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        reason_code=None,
+        decided_at=NOW,
+    )
+
+
+def test_cycle2_gate_and_command_are_additive_without_v1_shape_drift() -> None:
+    expected_gate_v1_fields = {
+        "gate_decision_id",
+        "model_call_id",
+        "context_manifest_id",
+        "provider_tool_call_id",
+        "requested_provider_tool_name",
+        "resolved_canonical_tool_name",
+        "snapshot_match",
+        "registration_valid",
+        "schema_valid",
+        "trusted_field_valid",
+        "argument_binding_valid",
+        "argument_binding_refs",
+        "budget_valid",
+        "progress_valid",
+        "proposed_base_task_state_version",
+        "validated_task_state_version",
+        "state_version_valid",
+        "action_boundary_valid",
+        "decision",
+        "reason_code",
+        "decided_at",
+    }
+    expected_command_v1_fields = {
+        "gate_decision_id",
+        "canonical_tool_name",
+        "validated_arguments",
+        "argument_binding_refs",
+        "validated_task_state_version",
+        "registry_snapshot_ref",
+        "trusted_context_ref",
+    }
+
+    assert set(GateDecision.model_fields) == expected_gate_v1_fields
+    assert set(AuthorizedToolCommand.model_fields) == expected_command_v1_fields
+    assert "verified_target_ref" not in GateDecision.model_fields
+    assert "verified_target_ref" not in AuthorizedToolCommand.model_fields
+    assert set(GateDecisionV2.model_fields) == {
+        *GateDecision.model_fields,
+        "verified_target_ref",
+    }
+    assert set(AuthorizedToolCommandV2.model_fields) == {
+        *AuthorizedToolCommand.model_fields,
+        "verified_target_ref",
+    }
+
+    gate_v1 = _accepted_gate_v1()
+    converted = convert_gate_decision_v1_to_v2(gate_v1)
+
+    assert converted.model_dump(exclude={"verified_target_ref"}) == gate_v1.model_dump()
+    assert converted.verified_target_ref is None
+    assert gate_v1.model_dump() == GateDecision.model_validate(
+        gate_v1.model_dump(),
+        strict=True,
+    ).model_dump()
+
+
+def test_cycle2_gate_v1_conversion_is_exact_and_never_infers_target() -> None:
+    gate_v1 = _accepted_gate_v1()
+
+    class GateDecisionSubclass(GateDecision):
+        pass
+
+    with pytest.raises(TypeError, match="exact GateDecision"):
+        convert_gate_decision_v1_to_v2(
+            GateDecisionSubclass.model_validate(gate_v1.model_dump(), strict=True)
+        )
+
+    with pytest.raises(ValidationError, match="target cannot be an argument"):
+        GateDecisionV2(
+            **gate_v1.model_dump(),
+            verified_target_ref=gate_v1.argument_binding_refs[0],
+        )
+
+    rejected = GateDecisionV2.model_validate(
+        {
+            **gate_v1.model_dump(),
+            "argument_binding_valid": False,
+            "decision": GateDecisionValue.REJECT,
+            "reason_code": GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+            "verified_target_ref": None,
+        },
+        strict=True,
+    )
+    with pytest.raises(ValidationError, match="cannot retain a target"):
+        GateDecisionV2.model_validate(
+            {
+                **rejected.model_dump(),
+                "verified_target_ref": uuid4(),
+            },
+            strict=True,
+        )
+
+
+def test_cycle2_authorized_command_keeps_target_outside_binding_refs() -> None:
+    binding_ref = uuid4()
+    target_ref = uuid4()
+    command = AuthorizedToolCommandV2(
+        gate_decision_id=uuid4(),
+        canonical_tool_name=Cycle2ToolName.GET_ORDER,
+        validated_arguments={"order_id": "O-4242"},
+        argument_binding_refs=(binding_ref,),
+        validated_task_state_version=2,
+        registry_snapshot_ref="cycle2-snapshot",
+        trusted_context_ref="cycle2-context",
+        verified_target_ref=target_ref,
+    )
+
+    assert command.argument_binding_refs == (binding_ref,)
+    assert command.verified_target_ref == target_ref
+    with pytest.raises(ValidationError, match="target cannot be an argument"):
+        AuthorizedToolCommandV2.model_validate(
+            {
+                **command.model_dump(),
+                "argument_binding_refs": (binding_ref, target_ref),
+            },
+            strict=True,
+        )
+    with pytest.raises(ValidationError, match="get_shipment requires"):
+        AuthorizedToolCommandV2(
+            **{
+                **command.model_dump(),
+                "canonical_tool_name": Cycle2ToolName.GET_SHIPMENT,
+                "verified_target_ref": None,
+            }
+        )
+    with pytest.raises(ValidationError, match="search_orders cannot"):
+        AuthorizedToolCommandV2(
+            **{
+                **command.model_dump(),
+                "canonical_tool_name": Cycle2ToolName.SEARCH_ORDERS,
+            }
         )
 
 
@@ -1502,6 +1667,40 @@ def _tool_call_v2_values(
         "effect": ToolEffect.READ,
         "started_at": NOW,
     }
+
+
+def test_cycle2_command_and_toolcall_share_exact_uuid_target_identity() -> None:
+    target_ref = uuid4()
+    binding_ref = uuid4()
+    command = AuthorizedToolCommandV2(
+        gate_decision_id=uuid4(),
+        canonical_tool_name=Cycle2ToolName.GET_ORDER,
+        validated_arguments={"order_id": "O-1001"},
+        argument_binding_refs=(binding_ref,),
+        validated_task_state_version=3,
+        registry_snapshot_ref="cycle2-snapshot",
+        trusted_context_ref="cycle2-context",
+        verified_target_ref=target_ref,
+    )
+    tool_call = ToolCallRecordV2(
+        **{
+            **_tool_call_v2_values(
+                canonical_tool_name=Cycle2ToolName.GET_ORDER,
+            ),
+            "gate_decision_id": command.gate_decision_id,
+            "validated_task_state_version": command.validated_task_state_version,
+            "argument_binding_refs": command.argument_binding_refs,
+            "verified_target_ref": command.verified_target_ref,
+            "attempt_count": 0,
+            "attempts": (),
+            "status": ToolCallStatus.CREATED,
+        }
+    )
+
+    assert type(command.verified_target_ref) is UUID
+    assert tool_call.verified_target_ref is command.verified_target_ref
+    assert tool_call.argument_binding_refs == (binding_ref,)
+    assert target_ref not in tool_call.argument_binding_refs
 
 
 def test_cycle2_effective_timeout_is_bounded_by_policy_and_run_budget() -> None:

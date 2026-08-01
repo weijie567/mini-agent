@@ -388,6 +388,47 @@ class GateDecision(AuditOnlyModel):
         return self
 
 
+class GateDecisionV2(GateDecision):
+    """Inactive Cycle 2 Gate shape with target/binding identity separation."""
+
+    verified_target_ref: UUID | None = None
+
+    @field_validator("argument_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("GateDecisionV2 binding refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def target_identity_is_fail_closed(self) -> Self:
+        if (
+            self.verified_target_ref is not None
+            and self.verified_target_ref in self.argument_binding_refs
+        ):
+            raise ValueError(
+                "GateDecisionV2 target cannot be an argument binding ref"
+            )
+        if (
+            self.decision is GateDecisionValue.REJECT
+            and self.verified_target_ref is not None
+        ):
+            raise ValueError("rejected GateDecisionV2 cannot retain a target")
+        return self
+
+
+def convert_gate_decision_v1_to_v2(decision: GateDecision) -> GateDecisionV2:
+    """Copy one exact v1 Gate while introducing only a null target."""
+
+    if type(decision) is not GateDecision:
+        raise TypeError("conversion requires an exact GateDecision instance")
+    validated = GateDecision.model_validate(decision.model_dump(), strict=True)
+    return GateDecisionV2(
+        **validated.model_dump(),
+        verified_target_ref=None,
+    )
+
+
 class AuthorizedToolCommand(RuntimePrivateModel):
     gate_decision_id: UUID
     canonical_tool_name: ToolName
@@ -427,6 +468,46 @@ class AuthorizedToolCommand(RuntimePrivateModel):
         if not value:
             raise ValueError("AuthorizedToolCommand requires argument bindings")
         return value
+
+
+class AuthorizedToolCommandV2(AuthorizedToolCommand):
+    """Inactive Cycle 2 command that preserves Gate-owned target identity."""
+
+    verified_target_ref: UUID | None = None
+
+    @field_validator("argument_binding_refs")
+    @classmethod
+    def binding_refs_are_unique(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("AuthorizedToolCommandV2 binding refs must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def target_is_separate_and_matches_tool_path(self) -> Self:
+        try:
+            tool_name = Cycle2ToolName(self.canonical_tool_name)
+        except ValueError as exc:
+            raise ValueError(
+                "AuthorizedToolCommandV2 requires a Cycle 2 Read Tool"
+            ) from exc
+        if (
+            self.verified_target_ref is not None
+            and self.verified_target_ref in self.argument_binding_refs
+        ):
+            raise ValueError(
+                "AuthorizedToolCommandV2 target cannot be an argument binding ref"
+            )
+        if (
+            tool_name is Cycle2ToolName.SEARCH_ORDERS
+            and self.verified_target_ref is not None
+        ):
+            raise ValueError("search_orders cannot carry a verified target")
+        if (
+            tool_name is Cycle2ToolName.GET_SHIPMENT
+            and self.verified_target_ref is None
+        ):
+            raise ValueError("get_shipment requires a verified target")
+        return self
 
 
 class ToolCallStatus(StrEnum):

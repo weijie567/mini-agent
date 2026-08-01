@@ -19,6 +19,7 @@ from mini_agent.core.control_gateway import (
     Cycle2TargetObservationFacts,
     Cycle2ToolProgressFact,
     Cycle2VerifiedOrderTargetFacts,
+    build_cycle2_authorized_tool_command,
     evaluate_control_gateway,
     evaluate_cycle2_control_gateway,
 )
@@ -51,8 +52,10 @@ from mini_agent.core.request_understanding import (
 )
 from mini_agent.core.task_state import TaskStatus
 from mini_agent.core.tool_system import (
+    AuthorizedToolCommandV2,
     Cycle2ToolName,
     ExecutionPolicy,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     RegistrySnapshot,
@@ -538,6 +541,7 @@ def _cycle2_gateway_case(
     tool_name: Cycle2ToolName,
     *,
     binding_authority: InputAuthority = InputAuthority.USER_CLAIM,
+    selected_get_order: bool = False,
 ) -> tuple[Cycle2GatewayCandidate, Cycle2GatewayLoadedClosure]:
     decision = _decision()
     task = decision.task_graph.task.model_copy(
@@ -558,10 +562,16 @@ def _cycle2_gateway_case(
     model_call_id = uuid4()
     context_manifest_id = uuid4()
     snapshot = build_cycle2_registry_snapshot()
+    if selected_get_order and tool_name is not Cycle2ToolName.GET_ORDER:
+        raise ValueError("selected_get_order is only valid for get_order")
     if tool_name is Cycle2ToolName.SEARCH_ORDERS:
         binding_name = "product_description"
         normalized_value = "跑鞋"
         arguments = {"product_description": normalized_value}
+    elif selected_get_order:
+        binding_name = "candidate_ordinal"
+        normalized_value = 2
+        arguments = {"order_id": "O-1001"}
     else:
         binding_name = "order_id"
         normalized_value = "O-1001"
@@ -576,11 +586,14 @@ def _cycle2_gateway_case(
         task_state_version=task.state_version,
         name=binding_name,
         normalized_value=normalized_value,
-        authority=binding_authority,
+        authority=InputAuthority.USER_CLAIM,
         validation_status="ACCEPTED",
+        confirmed_by_user=True,
         source_refs=(uuid4(),),
         superseded_by=None,
     )
+    if binding_authority is not InputAuthority.USER_CLAIM:
+        binding = binding.model_copy(update={"authority": binding_authority})
     request_unit = request_unit.model_copy(
         update={"input_binding_refs": (binding_id,)}
     )
@@ -591,7 +604,7 @@ def _cycle2_gateway_case(
     manifest_observation_refs: tuple[VersionedRecordRef, ...] = ()
     candidate_refs = (binding_id,)
     candidate_target_ref = None
-    if tool_name is Cycle2ToolName.GET_SHIPMENT:
+    if tool_name is Cycle2ToolName.GET_SHIPMENT or selected_get_order:
         source_observation_ref = uuid4()
         source_observation_version = "shipment-observation-v1"
         verified_targets = (
@@ -632,7 +645,7 @@ def _cycle2_gateway_case(
                 version=source_observation_version,
             ),
         )
-        candidate_refs = (binding_id, target_ref)
+        candidate_refs = (binding_id,)
         candidate_target_ref = target_ref
 
     manifest = _manifest(
@@ -716,17 +729,22 @@ def _foreign_shadow_model(model: BaseModel) -> BaseModel:
 
 
 @pytest.mark.parametrize(
-    "tool_name",
+    ("tool_name", "selected_get_order"),
     [
-        Cycle2ToolName.SEARCH_ORDERS,
-        Cycle2ToolName.GET_ORDER,
-        Cycle2ToolName.GET_SHIPMENT,
+        (Cycle2ToolName.SEARCH_ORDERS, False),
+        (Cycle2ToolName.GET_ORDER, False),
+        (Cycle2ToolName.GET_ORDER, True),
+        (Cycle2ToolName.GET_SHIPMENT, False),
     ],
 )
-def test_cycle2_gateway_accepts_three_distinct_typed_binding_paths(
+def test_cycle2_gateway_accepts_four_distinct_typed_binding_paths(
     tool_name: Cycle2ToolName,
+    selected_get_order: bool,
 ) -> None:
-    candidate, loaded = _cycle2_gateway_case(tool_name)
+    candidate, loaded = _cycle2_gateway_case(
+        tool_name,
+        selected_get_order=selected_get_order,
+    )
 
     gate = _evaluate_cycle2(candidate, loaded)
 
@@ -736,13 +754,126 @@ def test_cycle2_gateway_accepts_three_distinct_typed_binding_paths(
     assert gate.argument_binding_refs == candidate.argument_binding_refs
     assert "tool_call_id" not in type(gate).model_fields
     assert "authorized_tool_command" not in type(gate).model_fields
-    if tool_name is Cycle2ToolName.GET_ORDER:
+    assert isinstance(gate, GateDecisionV2)
+    assert gate.verified_target_ref == candidate.verified_target_ref
+    if tool_name is Cycle2ToolName.GET_ORDER and not selected_get_order:
         assert loaded.current_verified_order_targets == ()
         assert loaded.current_input_bindings[0].authority is InputAuthority.USER_CLAIM
         assert candidate.verified_target_ref is None
-    elif tool_name is Cycle2ToolName.GET_SHIPMENT:
+    elif tool_name is Cycle2ToolName.GET_SHIPMENT or selected_get_order:
         assert candidate.verified_target_ref is not None
-        assert candidate.verified_target_ref in candidate.argument_binding_refs
+        assert candidate.verified_target_ref not in candidate.argument_binding_refs
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "selected_get_order"),
+    [
+        (Cycle2ToolName.SEARCH_ORDERS, False),
+        (Cycle2ToolName.GET_ORDER, False),
+        (Cycle2ToolName.GET_ORDER, True),
+        (Cycle2ToolName.GET_SHIPMENT, False),
+    ],
+)
+def test_cycle2_accepted_gate_builds_exact_target_preserving_command(
+    tool_name: Cycle2ToolName,
+    selected_get_order: bool,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        tool_name,
+        selected_get_order=selected_get_order,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    command = build_cycle2_authorized_tool_command(
+        gate_decision=gate,
+        candidate=candidate,
+        registry_snapshot_ref="cycle2-snapshot-ref",
+        trusted_context_ref="cycle2-trusted-context-ref",
+    )
+
+    assert isinstance(command, AuthorizedToolCommandV2)
+    assert command.gate_decision_id == gate.gate_decision_id
+    assert command.canonical_tool_name == gate.resolved_canonical_tool_name
+    assert command.model_dump(mode="json")["validated_arguments"] == dict(
+        candidate.candidate_arguments
+    )
+    assert command.argument_binding_refs == gate.argument_binding_refs
+    assert command.validated_task_state_version == gate.validated_task_state_version
+    assert command.verified_target_ref == gate.verified_target_ref
+    if command.verified_target_ref is not None:
+        assert command.verified_target_ref not in command.argument_binding_refs
+
+
+def test_cycle2_rejected_or_mismatched_gate_cannot_form_command() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    rejected = _evaluate_cycle2(
+        candidate.model_copy(update={"verified_target_ref": uuid4()}),
+        loaded,
+    )
+    assert rejected.decision is GateDecisionValue.REJECT
+    assert rejected.verified_target_ref is None
+
+    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=rejected,
+            candidate=candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+    accepted = _evaluate_cycle2(candidate, loaded)
+    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=accepted,
+            candidate=candidate.model_copy(update={"verified_target_ref": uuid4()}),
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["missing-target", "target-in-bindings", "order-binding", "wrong-order"],
+)
+def test_cycle2_selected_get_order_never_falls_back_to_direct_path(
+    drift: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    if drift == "missing-target":
+        candidate = candidate.model_copy(update={"verified_target_ref": None})
+    elif drift == "target-in-bindings":
+        candidate = candidate.model_copy(
+            update={
+                "argument_binding_refs": (
+                    candidate.argument_binding_refs[0],
+                    candidate.verified_target_ref,
+                )
+            }
+        )
+    elif drift == "order-binding":
+        binding = loaded.current_input_bindings[0].model_copy(
+            update={"name": "order_id", "normalized_value": "O-1001"}
+        )
+        loaded = loaded.model_copy(update={"current_input_bindings": (binding,)})
+    else:
+        candidate = candidate.model_copy(
+            update={"candidate_arguments": {"order_id": "O-9999"}}
+        )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.verified_target_ref is None
+    assert gate.reason_code in {
+        GateReasonCode.ARGUMENT_BINDING_MISMATCH,
+        GateReasonCode.SCHEMA_INVALID,
+    }
 
 
 def test_cycle2_gateway_accepts_search_length_after_normalization() -> None:
@@ -1037,7 +1168,11 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.progress_valid is False
-    assert gate.reason_code is GateReasonCode.NO_PROGRESS
+    assert gate.reason_code is (
+        GateReasonCode.SCHEMA_INVALID
+        if history_variant == "duplicate-binding-ref"
+        else GateReasonCode.NO_PROGRESS
+    )
 
 
 def test_cycle2_gateway_accepts_legitimate_distinct_progress_semantics() -> None:
@@ -1052,14 +1187,15 @@ def test_cycle2_gateway_accepts_legitimate_distinct_progress_semantics() -> None
     assert gate.progress_valid is True
 
 
-def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() -> None:
+def test_cycle2_direct_get_order_requires_current_user_claim_and_null_target() -> None:
     candidate, loaded = _cycle2_gateway_case(
         Cycle2ToolName.GET_ORDER,
         binding_authority=InputAuthority.MODEL_INFERENCE,
     )
     rejected = _evaluate_cycle2(candidate, loaded)
     assert rejected.decision is GateDecisionValue.REJECT
-    assert rejected.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+    assert rejected.reason_code is GateReasonCode.SCHEMA_INVALID
+    assert rejected.verified_target_ref is None
 
     candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
     source_observation_ref = uuid4()
@@ -1120,7 +1256,7 @@ def test_cycle2_get_order_requires_current_user_claim_but_not_verified_target() 
         ("snapshot", GateReasonCode.SNAPSHOT_MISMATCH),
         ("schema-extra", GateReasonCode.SCHEMA_INVALID),
         ("binding-value", GateReasonCode.ARGUMENT_BINDING_MISMATCH),
-        ("binding-ref", GateReasonCode.ARGUMENT_BINDING_MISMATCH),
+        ("binding-ref", GateReasonCode.SCHEMA_INVALID),
         ("owner", GateReasonCode.STATE_VERSION_MISMATCH),
         ("state", GateReasonCode.STATE_VERSION_MISMATCH),
         ("budget", GateReasonCode.BUDGET_EXCEEDED),
@@ -1198,6 +1334,7 @@ def test_cycle2_gateway_compares_loaded_facts_and_fails_closed(
                                     candidate.validated_task_state_version
                                 ),
                                 argument_binding_refs=candidate.argument_binding_refs,
+                                verified_target_ref=candidate.verified_target_ref,
                             ),
                         )
                     }
@@ -1283,9 +1420,43 @@ def test_cycle2_gateway_typed_surface_has_no_public_or_model_target_authority() 
         )
 
 
-@pytest.mark.parametrize("extra_name", ["not_received_claim", "product_description"])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("not_received_claim", True),
+        ("shipment_not_received", "true"),
+        ("shipment_not_received", 1),
+        ("candidate_ordinal", True),
+        ("candidate_ordinal", "2"),
+        ("candidate_ordinal", 0),
+        ("candidate_ordinal", 6),
+    ],
+)
+def test_cycle2_gateway_binding_vocabulary_is_strict_and_canonical(
+    name: str,
+    value: object,
+) -> None:
+    _candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    base = loaded.current_input_bindings[0]
+
+    with pytest.raises(ValidationError):
+        Cycle2AcceptedBindingFacts.model_validate(
+            {
+                **base.model_dump(),
+                "name": name,
+                "normalized_value": value,
+            },
+            strict=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra_name", "extra_value"),
+    [("shipment_not_received", True), ("product_description", "跑鞋")],
+)
 def test_cycle2_gateway_selects_candidate_binding_from_complete_multi_binding_closure(
     extra_name: str,
+    extra_value: bool | str,
 ) -> None:
     candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
     primary = loaded.current_input_bindings[0]
@@ -1297,9 +1468,10 @@ def test_cycle2_gateway_selects_candidate_binding_from_complete_multi_binding_cl
         request_unit_id=loaded.current_request_unit.request_unit_id,
         task_state_version=loaded.current_task.state_version,
         name=extra_name,
-        normalized_value=("包裹还没收到" if extra_name == "not_received_claim" else "跑鞋"),
+        normalized_value=extra_value,
         authority=InputAuthority.USER_CLAIM,
         validation_status="ACCEPTED",
+        confirmed_by_user=True,
         source_refs=(uuid4(),),
         superseded_by=None,
     )
@@ -1316,6 +1488,15 @@ def test_cycle2_gateway_selects_candidate_binding_from_complete_multi_binding_cl
 
     assert gate.decision is GateDecisionValue.ACCEPT
     assert gate.argument_binding_refs == candidate.argument_binding_refs
+    command = build_cycle2_authorized_tool_command(
+        gate_decision=gate,
+        candidate=candidate,
+        registry_snapshot_ref="cycle2-snapshot-ref",
+        trusted_context_ref="cycle2-trusted-context-ref",
+    )
+    assert extra.binding_id not in command.argument_binding_refs
+    assert extra.binding_id != command.verified_target_ref
+    assert set(command.validated_arguments) == {"order_id"}
 
 
 @pytest.mark.parametrize(
@@ -1366,6 +1547,59 @@ def test_cycle2_shipment_target_requires_exact_current_observation_closure(
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.argument_binding_valid is False
+
+
+def test_cycle2_gateway_rejects_multiple_current_targets_for_same_binding() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    target = loaded.current_verified_order_targets[0]
+    observation = loaded.current_target_observations[0]
+    second_observation_ref = uuid4()
+    second_version = "shipment-observation-v2"
+    second_target = target.model_copy(
+        update={
+            "verified_target_ref": uuid4(),
+            "source_observation_ref": second_observation_ref,
+            "source_observation_version": second_version,
+        }
+    )
+    second_observation = observation.model_copy(
+        update={
+            "observation_ref": second_observation_ref,
+            "observation_version": second_version,
+            "verified_target_ref": second_target.verified_target_ref,
+        }
+    )
+    loaded = loaded.model_copy(
+        update={
+            "current_verified_order_targets": (target, second_target),
+            "current_target_observations": (observation, second_observation),
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={
+                    "observation_refs": (
+                        observation.observation_ref,
+                        second_observation_ref,
+                    )
+                }
+            ),
+            "context_manifest": loaded.context_manifest.model_copy(
+                update={
+                    "observation_refs_and_versions": (
+                        *loaded.context_manifest.observation_refs_and_versions,
+                        VersionedRecordRef(
+                            record_ref=second_observation_ref,
+                            version=second_version,
+                        ),
+                    )
+                }
+            ),
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+    assert gate.verified_target_ref is None
 
 
 @pytest.mark.parametrize(
@@ -1732,6 +1966,7 @@ def _cycle2_complete_gateway_model_graph() -> tuple[
         validated_arguments={"order_id": "O-1001"},
         task_state_version=candidate.validated_task_state_version,
         argument_binding_refs=(loaded.current_input_bindings[0].binding_id,),
+        verified_target_ref=None,
     )
     loaded = loaded.model_copy(
         update={
@@ -1757,6 +1992,43 @@ def test_cycle2_progress_fact_requires_durable_tool_call_identity() -> None:
     legacy_payload.pop("tool_call_id")
     with pytest.raises(ValidationError):
         Cycle2ToolProgressFact.model_validate(legacy_payload, strict=True)
+
+    missing_target_payload = prior_step.model_dump()
+    missing_target_payload.pop("verified_target_ref")
+    with pytest.raises(ValidationError):
+        Cycle2ToolProgressFact.model_validate(
+            missing_target_payload,
+            strict=True,
+        )
+
+
+def test_cycle2_progress_identity_keeps_target_separate_and_distinguishable() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    first = Cycle2ToolProgressFact(
+        tool_call_id=uuid4(),
+        run_id=candidate.run_id,
+        context_manifest_id=candidate.context_manifest_id,
+        tool_registry_version=loaded.registry_snapshot.tool_registry_version,
+        model_visible_toolset_hash=loaded.registry_snapshot.model_visible_toolset_hash,
+        canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+        validated_arguments={"order_id": "O-1001"},
+        task_state_version=candidate.validated_task_state_version,
+        argument_binding_refs=candidate.argument_binding_refs,
+        verified_target_ref=candidate.verified_target_ref,
+    )
+    second = Cycle2ToolProgressFact.model_validate(
+        {
+            **first.model_dump(),
+            "tool_call_id": uuid4(),
+            "verified_target_ref": uuid4(),
+        },
+        strict=True,
+    )
+
+    assert first.verified_target_ref not in first.argument_binding_refs
+    assert second.verified_target_ref not in second.argument_binding_refs
+    assert first.verified_target_ref != second.verified_target_ref
+    assert first != second
 
 
 def _nested_gateway_models(value: object) -> tuple[BaseModel, ...]:
