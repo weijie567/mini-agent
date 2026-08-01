@@ -63,6 +63,7 @@ from mini_agent.application.records import (
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, OrderObservation
 from mini_agent.core.order import GetOrderQuery, GetOrderResult
+from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import (
     PresentationInput,
     PresentationPlan,
@@ -77,6 +78,7 @@ from mini_agent.core.task_state import (
     RequestUnitRecord,
     TaskRecord,
 )
+from mini_agent.core.shipment import GetShipmentQuery, GetShipmentResult
 from mini_agent.core.tool_system import (
     GateDecision,
     ModelVisibleToolsetArtifact,
@@ -104,6 +106,26 @@ class GetOrderPort(Protocol):
     """Perform one customer-scoped order lookup."""
 
     async def get_order(self, query: GetOrderQuery) -> GetOrderResult: ...
+
+
+@runtime_checkable
+class SearchOrdersPort(Protocol):
+    """Perform one customer-scoped order search."""
+
+    async def search_orders(
+        self,
+        query: SearchOrdersQuery,
+    ) -> SearchOrdersResult: ...
+
+
+@runtime_checkable
+class GetShipmentPort(Protocol):
+    """Perform one customer-scoped Shipment lookup."""
+
+    async def get_shipment(
+        self,
+        query: GetShipmentQuery,
+    ) -> GetShipmentResult: ...
 
 
 @runtime_checkable
