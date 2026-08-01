@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel, ValidationError, create_model
 
+import mini_agent.core.control_gateway as control_gateway_module
 from mini_agent.core.common import (
     FrozenJsonDict,
     RuntimePrivateModel,
@@ -818,7 +819,7 @@ def test_cycle2_rejected_or_mismatched_gate_cannot_form_command() -> None:
     assert rejected.verified_target_ref is None
     assert rejected.validated_arguments is None
 
-    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+    with pytest.raises(ValueError, match="exact typed inputs"):
         build_cycle2_authorized_tool_command(
             gate_decision=rejected,
             candidate=candidate,
@@ -880,10 +881,14 @@ def test_cycle2_command_rejects_raw_constructed_gate_argument_replacement() -> N
     )
     gate = _evaluate_cycle2(candidate, loaded)
     raw_replacement = gate.model_copy(
-        update={"validated_arguments": {"order_id": "O-9999"}}
+        update={
+            "validated_arguments": freeze_json_value({"order_id": "O-9999"})
+        }
     )
     drifted_candidate = candidate.model_copy(
-        update={"candidate_arguments": {"order_id": "O-9999"}}
+        update={
+            "candidate_arguments": freeze_json_value({"order_id": "O-9999"})
+        }
     )
 
     with pytest.raises(ValueError, match="exact typed inputs"):
@@ -895,18 +900,178 @@ def test_cycle2_command_rejects_raw_constructed_gate_argument_replacement() -> N
         )
 
 
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "tool",
+        "requested-provider-tool",
+        "arguments",
+        "binding-refs",
+        "version",
+        "target",
+        "model-call",
+        "context-manifest",
+        "provider-call",
+        "gate-id",
+    ],
+)
+def test_cycle2_gate_seal_rejects_every_authorization_field_drift(
+    drift: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    gate_update: dict[str, object] = {}
+    candidate_update: dict[str, object] = {}
+    if drift == "tool":
+        gate_update["resolved_canonical_tool_name"] = Cycle2ToolName.GET_SHIPMENT
+    elif drift == "requested-provider-tool":
+        replacement_provider_name = "get_shipment"
+        gate_update["requested_provider_tool_name"] = replacement_provider_name
+        candidate_update["requested_provider_tool_name"] = replacement_provider_name
+    elif drift == "arguments":
+        replacement = freeze_json_value({"order_id": "O-9999"})
+        gate_update["validated_arguments"] = replacement
+        candidate_update["candidate_arguments"] = replacement
+    elif drift == "binding-refs":
+        replacement_refs = (uuid4(),)
+        gate_update["argument_binding_refs"] = replacement_refs
+        candidate_update["argument_binding_refs"] = replacement_refs
+    elif drift == "version":
+        gate_update["validated_task_state_version"] = 99
+        candidate_update["validated_task_state_version"] = 99
+    elif drift == "target":
+        replacement_target = uuid4()
+        gate_update["verified_target_ref"] = replacement_target
+        candidate_update["verified_target_ref"] = replacement_target
+    elif drift == "model-call":
+        replacement_model_call = uuid4()
+        gate_update["model_call_id"] = replacement_model_call
+        candidate_update["model_call_id"] = replacement_model_call
+    elif drift == "context-manifest":
+        replacement_manifest = uuid4()
+        gate_update["context_manifest_id"] = replacement_manifest
+        candidate_update["context_manifest_id"] = replacement_manifest
+    elif drift == "provider-call":
+        gate_update["provider_tool_call_id"] = "provider-call-replaced"
+    else:
+        gate_update["gate_decision_id"] = uuid4()
+    drifted_gate = gate.model_copy(update=gate_update)
+    drifted_candidate = candidate.model_copy(update=candidate_update)
+
+    with pytest.raises(ValueError, match="exact typed inputs"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=drifted_gate,
+            candidate=drifted_candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+
+def test_cycle2_gate_seal_rejects_serialized_copies_and_transplants() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    validated_copy = GateDecisionV2.model_validate(
+        gate.model_dump(),
+        strict=True,
+    )
+    constructed_copy = GateDecisionV2.model_construct(**gate.__dict__)
+    copied_gate = gate.model_copy()
+    transplanted = GateDecisionV2.model_construct(**gate.__dict__)
+    transplanted.__pydantic_private__["_authorization_seal"] = (
+        gate.__pydantic_private__["_authorization_seal"]
+    )
+
+    for unsealed_or_transplanted in (
+        validated_copy,
+        constructed_copy,
+        copied_gate,
+        transplanted,
+    ):
+        with pytest.raises(ValueError, match="exact typed inputs"):
+            build_cycle2_authorized_tool_command(
+                gate_decision=unsealed_or_transplanted,
+                candidate=candidate,
+                registry_snapshot_ref="cycle2-snapshot-ref",
+                trusted_context_ref="cycle2-trusted-context-ref",
+            )
+
+
+def test_cycle2_gate_seal_rejects_in_place_public_snapshot_tamper() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    replacement = freeze_json_value({"order_id": "O-9999"})
+    gate.__dict__["validated_arguments"] = replacement
+    drifted_candidate = candidate.model_copy(
+        update={"candidate_arguments": replacement}
+    )
+
+    with pytest.raises(ValueError, match="exact typed inputs"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=gate,
+            candidate=drifted_candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+
+@pytest.mark.parametrize("tamper", ["snapshot", "owner"])
+def test_cycle2_gate_seal_rejects_private_object_setattr_tamper(
+    tamper: str,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    seal = gate.__pydantic_private__["_authorization_seal"]
+    if tamper == "snapshot":
+        object.__setattr__(seal, "_snapshot", b"forged-snapshot")
+    else:
+        object.__setattr__(seal, "_owner_ref", lambda: candidate)
+
+    with pytest.raises(ValueError, match="exact typed inputs"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=gate,
+            candidate=candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
+
+
+def test_cycle2_gate_seal_issuer_and_matcher_have_no_module_level_bypass() -> None:
+    assert not hasattr(
+        control_gateway_module,
+        "_evaluate_cycle2_control_gateway_impl",
+    )
+    assert not hasattr(
+        control_gateway_module,
+        "_build_cycle2_authorized_tool_command_impl",
+    )
+    assert not hasattr(control_gateway_module, "_build_cycle2_gateway_authorizer")
+
+
 def test_cycle2_command_rejects_inert_gate_without_authorization_arguments() -> None:
     candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_ORDER)
     gate = _evaluate_cycle2(candidate, loaded)
     inert_gate = gate.model_copy(update={"validated_arguments": None})
 
-    with pytest.raises(ValueError, match="Gate and revalidated candidate do not match"):
+    with pytest.raises(ValueError, match="exact typed inputs"):
         build_cycle2_authorized_tool_command(
             gate_decision=inert_gate,
             candidate=candidate,
             registry_snapshot_ref="cycle2-snapshot-ref",
             trusted_context_ref="cycle2-trusted-context-ref",
         )
+
 
 @pytest.mark.parametrize(
     "drift",

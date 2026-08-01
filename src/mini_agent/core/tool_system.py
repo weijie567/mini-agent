@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     Field,
     JsonValue,
+    PrivateAttr,
     TypeAdapter,
     ValidationError,
     field_serializer,
@@ -391,8 +392,25 @@ class GateDecision(AuditOnlyModel):
 class GateDecisionV2(GateDecision):
     """Inactive Cycle 2 Gate shape with target/binding identity separation."""
 
+    _authorization_seal: object = PrivateAttr()
+
     verified_target_ref: UUID | None = None
     validated_arguments: Mapping[str, JsonValue] | None = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        private_state = getattr(self, "__pydantic_private__", None)
+        if (
+            name == "_authorization_seal"
+            and isinstance(private_state, dict)
+            and name in private_state
+        ):
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == "_authorization_seal":
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+        super().__delattr__(name)
 
     @field_validator("validated_arguments", mode="before")
     @classmethod

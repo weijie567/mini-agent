@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import UUID
+from weakref import ref
 
 from pydantic import (
     Field,
@@ -1227,13 +1228,14 @@ def _cycle2_raw_exact_type_preflight(
     return True
 
 
-def evaluate_cycle2_control_gateway(
+def _evaluate_cycle2_control_gateway_impl(
     *,
     candidate: Cycle2GatewayCandidate,
     loaded_closure: Cycle2GatewayLoadedClosure,
     gate_decision_id: UUID,
     provider_tool_call_id: str | None,
     decided_at: datetime,
+    _issue_authorization_seal: Any,
 ) -> GateDecisionV2:
     """Return only a pure decision over the typed Cycle 2 loaded closure.
 
@@ -1399,7 +1401,7 @@ def evaluate_cycle2_control_gateway(
             provider_tool_call_id=provider_tool_call_id,
             decided_at=decided_at,
         )
-    return GateDecisionV2(
+    gate = GateDecisionV2(
         gate_decision_id=gate_decision_id,
         model_call_id=candidate.model_call_id,
         context_manifest_id=candidate.context_manifest_id,
@@ -1428,14 +1430,18 @@ def evaluate_cycle2_control_gateway(
         reason_code=reason_code,
         decided_at=decided_at,
     )
+    if accepted:
+        return _issue_authorization_seal(gate)
+    return gate
 
 
-def build_cycle2_authorized_tool_command(
+def _build_cycle2_authorized_tool_command_impl(
     *,
     gate_decision: GateDecisionV2,
     candidate: Cycle2GatewayCandidate,
     registry_snapshot_ref: str,
     trusted_context_ref: str,
+    _authorization_seal_matches: Any,
 ) -> AuthorizedToolCommandV2:
     """Exact-copy one accepted v2 Gate into an inactive executor command."""
 
@@ -1446,6 +1452,7 @@ def build_cycle2_authorized_tool_command(
             gate_decision.validated_arguments is not None
             and type(gate_decision.validated_arguments) is not FrozenJsonDict
         )
+        or not _authorization_seal_matches(gate_decision)
         or not cycle2_pydantic_model_graph_is_raw_closed(
             gate_decision,
             candidate,
@@ -1453,7 +1460,7 @@ def build_cycle2_authorized_tool_command(
     ):
         raise ValueError("Cycle 2 authorization requires exact typed inputs")
     try:
-        gate_decision = GateDecisionV2.model_validate(
+        validated_gate = GateDecisionV2.model_validate(
             gate_decision.model_dump(),
             strict=True,
         )
@@ -1463,6 +1470,8 @@ def build_cycle2_authorized_tool_command(
         )
     except (ValidationError, PydanticSerializationError, ValueError, TypeError) as exc:
         raise ValueError("Cycle 2 authorization input is malformed") from exc
+    if validated_gate.model_dump() != gate_decision.model_dump():
+        raise ValueError("Cycle 2 authorization input is malformed")
     if (
         gate_decision.decision is not GateDecisionValue.ACCEPT
         or gate_decision.resolved_canonical_tool_name is None
@@ -1487,6 +1496,8 @@ def build_cycle2_authorized_tool_command(
         arguments=gate_decision.validated_arguments,
     ):
         raise ValueError("Cycle 2 Gate has invalid validated arguments")
+    if not _authorization_seal_matches(gate_decision):
+        raise ValueError("Cycle 2 Gate authorization seal mismatch")
     return AuthorizedToolCommandV2(
         gate_decision_id=gate_decision.gate_decision_id,
         canonical_tool_name=gate_decision.resolved_canonical_tool_name,
@@ -1497,3 +1508,181 @@ def build_cycle2_authorized_tool_command(
         trusted_context_ref=trusted_context_ref,
         verified_target_ref=gate_decision.verified_target_ref,
     )
+
+
+def _build_cycle2_gateway_authorizer() -> tuple[Any, Any]:
+    """Bind executable Gate provenance to one exact evaluator-created object."""
+
+    evaluate_impl = _evaluate_cycle2_control_gateway_impl
+    build_impl = _build_cycle2_authorized_tool_command_impl
+    seal_registry: dict[int, tuple[Any, bytes, Any]] = {}
+
+    class AuthorizationSeal:
+        __slots__ = ("_owner_ref", "_snapshot", "__weakref__")
+
+        def __new__(cls) -> Self:
+            raise TypeError("Cycle 2 Gate authorization seal cannot be constructed")
+
+        def __setattr__(self, _name: str, _value: Any) -> None:
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+
+        def __delattr__(self, _name: str) -> None:
+            raise TypeError("Cycle 2 Gate authorization seal is immutable")
+
+        def __copy__(self) -> Self:
+            return self
+
+        def __deepcopy__(self, _memo: dict[int, Any]) -> Self:
+            return self
+
+        def __reduce__(self) -> Any:
+            raise TypeError("Cycle 2 Gate authorization seal is not serializable")
+
+        def __repr__(self) -> str:
+            return "<Cycle2GateAuthorizationSeal>"
+
+    def authorization_snapshot(value: object) -> bytes | None:
+        if type(value) is not GateDecisionV2:
+            return None
+        declared_fields = set(GateDecisionV2.model_fields)
+        try:
+            state = value.__dict__
+            fields_set = value.__pydantic_fields_set__
+            if (
+                type(state) is not dict
+                or set(state) != declared_fields
+                or any(type(key) is not str for key in state)
+                or type(fields_set) is not set
+                or fields_set != declared_fields
+                or any(type(field) is not str for field in fields_set)
+                or value.__pydantic_extra__ is not None
+                or value.decision is not GateDecisionValue.ACCEPT
+                or value.resolved_canonical_tool_name is None
+                or value.validated_arguments is None
+                or type(value.validated_arguments) is not FrozenJsonDict
+                or not cycle2_pydantic_model_graph_is_raw_closed(value)
+            ):
+                return None
+            serialized = value.model_dump_json(
+                round_trip=True,
+                warnings="error",
+            ).encode("utf-8")
+        except (
+            AttributeError,
+            PydanticSerializationError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+        field_manifest = repr(tuple(sorted(fields_set))).encode("utf-8")
+        return (
+            b"mini-agent:cycle2-gate-authorization:v1\x00"
+            + serialized
+            + b"\x00"
+            + field_manifest
+        )
+
+    def authorization_seal_matches(value: object) -> bool:
+        if type(value) is not GateDecisionV2:
+            return False
+        private_state = getattr(value, "__pydantic_private__", None)
+        if (
+            type(private_state) is not dict
+            or any(type(key) is not str for key in private_state)
+            or set(private_state) != {"_authorization_seal"}
+        ):
+            return False
+        seal = private_state["_authorization_seal"]
+        if type(seal) is not AuthorizationSeal:
+            return False
+        snapshot = authorization_snapshot(value)
+        try:
+            sealed_owner = seal._owner_ref()
+            sealed_snapshot = seal._snapshot
+        except (AttributeError, TypeError):
+            return False
+        registered = seal_registry.get(id(seal))
+        if (
+            registered is None
+            or registered[0]() is not seal
+            or registered[2]() is not value
+        ):
+            return False
+        return (
+            sealed_owner is value
+            and type(sealed_snapshot) is bytes
+            and snapshot is not None
+            and registered[1] == snapshot
+            and sealed_snapshot == registered[1]
+            and sealed_snapshot == snapshot
+        )
+
+    def issue_authorization_seal(value: GateDecisionV2) -> GateDecisionV2:
+        private_state = getattr(value, "__pydantic_private__", None)
+        snapshot = authorization_snapshot(value)
+        if type(private_state) is not dict or private_state or snapshot is None:
+            raise ValueError("Cycle 2 Gate is not sealable")
+        seal = object.__new__(AuthorizationSeal)
+        object.__setattr__(seal, "_owner_ref", ref(value))
+        object.__setattr__(seal, "_snapshot", snapshot)
+        seal_id = id(seal)
+
+        def discard_seal(
+            _dead_ref: Any,
+            *,
+            registered_seal_id: int = seal_id,
+        ) -> None:
+            seal_registry.pop(registered_seal_id, None)
+
+        seal_registry[seal_id] = (
+            ref(seal, discard_seal),
+            snapshot,
+            ref(value, discard_seal),
+        )
+        value._authorization_seal = seal
+        if not authorization_seal_matches(value):
+            raise ValueError("Cycle 2 Gate authorization seal mismatch")
+        return value
+
+    def evaluate_cycle2_control_gateway(
+        *,
+        candidate: Cycle2GatewayCandidate,
+        loaded_closure: Cycle2GatewayLoadedClosure,
+        gate_decision_id: UUID,
+        provider_tool_call_id: str | None,
+        decided_at: datetime,
+    ) -> GateDecisionV2:
+        return evaluate_impl(
+            candidate=candidate,
+            loaded_closure=loaded_closure,
+            gate_decision_id=gate_decision_id,
+            provider_tool_call_id=provider_tool_call_id,
+            decided_at=decided_at,
+            _issue_authorization_seal=issue_authorization_seal,
+        )
+
+    def build_cycle2_authorized_tool_command(
+        *,
+        gate_decision: GateDecisionV2,
+        candidate: Cycle2GatewayCandidate,
+        registry_snapshot_ref: str,
+        trusted_context_ref: str,
+    ) -> AuthorizedToolCommandV2:
+        return build_impl(
+            gate_decision=gate_decision,
+            candidate=candidate,
+            registry_snapshot_ref=registry_snapshot_ref,
+            trusted_context_ref=trusted_context_ref,
+            _authorization_seal_matches=authorization_seal_matches,
+        )
+
+    return evaluate_cycle2_control_gateway, build_cycle2_authorized_tool_command
+
+
+(
+    evaluate_cycle2_control_gateway,
+    build_cycle2_authorized_tool_command,
+) = _build_cycle2_gateway_authorizer()
+del _build_cycle2_gateway_authorizer
+del _evaluate_cycle2_control_gateway_impl
+del _build_cycle2_authorized_tool_command_impl
