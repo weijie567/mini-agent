@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W6 02-10R COMPLETE / B_C2_SEARCH_AUTHORITY_PHYSICAL / ADAPTER PLANNING`；真实 current integration `64254f170ced8a71d58fd2f0b0d1adfaa8f275a5` / tree `ad332f6b862d34feec342c57e679d7234179e24e`；PR #255/#256 reviewed完成`02-10R`，focused `74 passed`、neighbor `85 passed`、migration/feature/overlay均PASS；`02-07/02-11`已从真实successor第二次重冻结并正在planning review，旧Worktrees保持clean/paused；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / 02-07 COMPLETE / B_C2_BUSINESS_ADAPTERS / 02-11R PLANNING`；真实 current integration `096fa25a98632d38c3a38e64a6c9ad57f864e0e0` / tree `db7599249ffe25f8ca9a483fbe5c8e9845dd9eaa`；PR #257/#258 reviewed完成`02-07`并形成`B_C2_BUSINESS_ADAPTERS = 78bce02c...` / tree `032e0c5e...`，focused `28 passed`、neighbor `392 passed`；02-11 targeted验证确认OA-10 immutable history physical BLOCK，checkpoint保持unpublished/fail closed；PR #259 reviewed批准`02-11R`与29 slots，当前冻结其exact Plan；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
