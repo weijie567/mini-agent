@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from uuid import UUID
 
@@ -743,9 +743,10 @@ def test_registry_is_exact_immutable_and_closed() -> None:
     non_ru = _non_ru_registry()
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
 
-    assert tuple(code.value for code in P0RecordCode) == EXPECTED_RECORD_CODES
+    phase1_codes = tuple(P0RecordCode)[:17]
+    assert tuple(code.value for code in phase1_codes) == EXPECTED_RECORD_CODES
     assert isinstance(P0_PERSISTENCE_REGISTRY, MappingProxyType)
-    assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)
+    assert tuple(P0_PERSISTENCE_REGISTRY) == phase1_codes
     assert len(P0_PERSISTENCE_REGISTRY) == 17
     assert len({spec.source_model for spec in P0_PERSISTENCE_REGISTRY.values()}) == 17
     assert {
@@ -756,7 +757,7 @@ def test_registry_is_exact_immutable_and_closed() -> None:
             if code is ru_code
             else f"{code.value}.p0.v1"
         )
-        for code in P0RecordCode
+        for code in phase1_codes
     }
     assert P0_PERSISTENCE_REGISTRY[ru_code] is catalog[
         (ru_code, RU_V2_SCHEMA_VERSION)
@@ -764,7 +765,7 @@ def test_registry_is_exact_immutable_and_closed() -> None:
 
     assert isinstance(non_ru, MappingProxyType)
     assert tuple(non_ru) == tuple(
-        code for code in P0RecordCode if code is not ru_code
+        code for code in phase1_codes if code is not ru_code
     )
     assert len(non_ru) == 16
     for code in non_ru:
@@ -1843,7 +1844,7 @@ def _non_ru_registry() -> MappingProxyType:
     return MappingProxyType(
         {
             code: catalog[(code, f"{code.value}.p0.v1")]
-            for code in P0RecordCode
+            for code in tuple(P0RecordCode)[:17]
             if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
         }
     )
@@ -2208,15 +2209,16 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
     ru_v1_version = "request_understanding_record.p0.v1"
     assert isinstance(catalog, MappingProxyType)
-    assert len(catalog) == len(P0_PERSISTENCE_REGISTRY) == 17
-    assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)
+    assert len(catalog) == 28
+    assert len(P0_PERSISTENCE_REGISTRY) == 17
+    assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)[:17]
     assert {
         (code, spec.record_schema_version)
         for code, spec in P0_PERSISTENCE_REGISTRY.items()
-    } == set(catalog)
+    } < set(catalog)
     assert all(
-        P0_PERSISTENCE_REGISTRY[code] is spec
-        for (code, _), spec in catalog.items()
+        catalog[(code, spec.record_schema_version)] is spec
+        for code, spec in P0_PERSISTENCE_REGISTRY.items()
     )
     assert (ru_code, ru_v1_version) not in catalog
     assert (
@@ -2315,10 +2317,20 @@ def test_version_catalog_is_exact_immutable_and_current_only() -> None:
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
 
     assert isinstance(catalog, MappingProxyType)
-    assert len(catalog) == 17
+    assert len(catalog) == 28
     assert {code for code, _ in catalog} == set(P0RecordCode)
     counts = Counter(code for code, _ in catalog)
-    assert set(counts.values()) == {1}
+    assert {count for count in counts.values()} == {1, 2}
+    assert {
+        code for code, count in counts.items() if count == 2
+    } == {
+        P0RecordCode.INPUT_BINDING_RECORD,
+        P0RecordCode.GATE_DECISION_RECORD,
+        P0RecordCode.TOOL_CALL_RECORD,
+        P0RecordCode.AGENT_RUN_RECORD,
+        P0RecordCode.RUN_TASK_LINK_RECORD,
+        P0RecordCode.TRACE_EVENT_RECORD,
+    }
     for code, spec in non_ru.items():
         assert catalog[(code, f"{code.value}.p0.v1")] is spec
         assert P0_PERSISTENCE_REGISTRY[code] is spec
@@ -3821,7 +3833,8 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
 
     non_ru = _non_ru_registry()
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
-    assert len(P0_PERSISTENCE_REGISTRY) == len(P0RecordCode) == 17
+    assert len(P0_PERSISTENCE_REGISTRY) == 17
+    assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)[:17]
     assert len(non_ru) == 16
     assert (
         P0_PERSISTENCE_REGISTRY[ru_code].record_schema_version
@@ -3994,3 +4007,628 @@ def test_all_16_non_ru_versioned_decode_outer_categories_match_generic(
             )
         assert generic_raised.value.category is generic_category
         assert versioned_raised.value.category is versioned_category
+
+
+def test_cycle2_record_codes_and_exact_version_pairs_are_additive() -> None:
+    expected_additive_codes = (
+        "order_search_observation_record",
+        "order_candidate_set_record",
+        "order_candidate_selection_record",
+        "shipment_observation_record",
+        "shipment_assessment_record",
+    )
+    assert tuple(code.value for code in P0RecordCode)[-5:] == expected_additive_codes
+
+    catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    expected_v2_pairs = {
+        (P0RecordCode.INPUT_BINDING_RECORD, "input_binding_record.p0.v2"),
+        (P0RecordCode.GATE_DECISION_RECORD, "gate_decision_record.p0.v2"),
+        (P0RecordCode.TOOL_CALL_RECORD, "tool_call_record.p0.v2"),
+        (P0RecordCode.AGENT_RUN_RECORD, "agent_run_record.p0.v2"),
+        (P0RecordCode.RUN_TASK_LINK_RECORD, "run_task_link_record.p0.v2"),
+        (P0RecordCode.TRACE_EVENT_RECORD, "trace_event_record.p0.v2"),
+    }
+    assert expected_v2_pairs <= set(catalog)
+
+
+from mini_agent.core.memory import (
+    SearchObservationCandidateTargetBinding,
+    SearchOrdersObservation,
+    SearchOrdersObservationCandidate,
+    SearchOrdersObservationValue,
+    ShipmentObservation,
+)
+from mini_agent.core.order_search import (
+    OrderCandidateMatchingItem,
+    OrderCandidatePublicSummary,
+)
+from mini_agent.core.shipment import (
+    ShipmentAssessment,
+    ShipmentAssessmentReason,
+    ShipmentAssessmentResult,
+    ShipmentEventCode,
+    ShipmentStatus,
+    ShipmentSummaryProjection,
+)
+from mini_agent.core.task_state import (
+    InputBindingV2,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSetEntry,
+    OrderCandidateSetOutcome,
+    OrderCandidateSetRecord,
+    compute_order_candidate_set_version,
+)
+from mini_agent.core.tool_system import (
+    ToolAttemptRecordV2,
+    build_cycle2_registry_snapshot,
+)
+
+
+def _cycle2_new_record_cases() -> tuple[tuple[P0RecordCode, str, object], ...]:
+    owner = "owner-scope:codec"
+    snapshot_version = (
+        "mock-order-search-snapshot-source-version.p0.v1:sha256:" + "a" * 64
+    )
+    candidate_version = (
+        "mock-order-search-candidate-source-version.p0.v1:sha256:" + "b" * 64
+    )
+    candidate_ref = _uuid(401)
+    search = SearchOrdersObservation(
+        observation_id=_uuid(402),
+        private_owner_scope=owner,
+        source_tool="search_orders",
+        source_tool_call_id=_uuid(403),
+        source_resource_ref="order-search-snapshot:codec",
+        source_version=snapshot_version,
+        candidate_target_bindings=(
+            SearchObservationCandidateTargetBinding(
+                observation_candidate_ref=candidate_ref,
+                owner_scoped_order_ref="owner-order:codec",
+                candidate_source_version=candidate_version,
+            ),
+        ),
+        normalized_type="ORDER_SEARCH_CANDIDATES",
+        normalized_value=SearchOrdersObservationValue(
+            ordered_candidates=(
+                SearchOrdersObservationCandidate(
+                    observation_candidate_ref=candidate_ref,
+                    candidate_source_version=candidate_version,
+                    public_summary=OrderCandidatePublicSummary(
+                        order_number="O-4001",
+                        ordered_on_utc=date(2026, 7, 25),
+                        status=OrderStatus.SHIPPED,
+                        matching_items=(
+                            OrderCandidateMatchingItem(
+                                product_name="轻量跑鞋",
+                                quantity=1,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            truncated=False,
+        ),
+        observed_at=UTC_NOW,
+        recorded_at=UTC_NOW + timedelta(seconds=1),
+        valid_until=UTC_NOW + timedelta(minutes=15, seconds=1),
+    )
+    entry = OrderCandidateSetEntry(
+        ordinal=1,
+        observation_candidate_ref=candidate_ref,
+        candidate_source_version=candidate_version,
+    )
+    candidate_values: dict[str, object] = {
+        "candidate_set_id": _uuid(404),
+        "private_owner_scope_ref": owner,
+        "conversation_id": _uuid(405),
+        "task_id": _uuid(406),
+        "request_unit_id": _uuid(407),
+        "outcome": OrderCandidateSetOutcome.UNIQUE,
+        "base_task_state_version": 3,
+        "result_task_state_version": 4,
+        "selection_expected_task_state_version": None,
+        "query_binding_refs": (_uuid(408),),
+        "source_tool_call_id": search.source_tool_call_id,
+        "search_observation_ref": search.observation_id,
+        "search_observation_record_schema_version": (
+            "order_search_observation_record.p0.v1"
+        ),
+        "search_observation_source_version": snapshot_version,
+        "ordered_candidates": (entry,),
+        "created_at": search.recorded_at,
+        "valid_until": search.valid_until,
+        "supersedes_candidate_set_ref": None,
+    }
+    candidate_set = OrderCandidateSetRecord(
+        **candidate_values,
+        candidate_set_version=compute_order_candidate_set_version(
+            **candidate_values
+        ),
+    )
+    selection = OrderCandidateSelectionRecord(
+        selection_id=_uuid(409),
+        private_owner_scope_ref=owner,
+        conversation_id=candidate_set.conversation_id,
+        task_id=candidate_set.task_id,
+        request_unit_id=candidate_set.request_unit_id,
+        source_message_ref=_uuid(410),
+        ordinal_input_binding_ref=_uuid(411),
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        search_observation_ref=search.observation_id,
+        search_observation_record_schema_version=(
+            "order_search_observation_record.p0.v1"
+        ),
+        observation_candidate_ref=candidate_ref,
+        candidate_source_version=candidate_version,
+        owner_scoped_order_target_ref="owner-order:codec",
+        selected_target_ref="verified-target:codec",
+        base_task_state_version=4,
+        result_task_state_version=5,
+        selected_at=UTC_NOW + timedelta(minutes=1),
+    )
+    shipment_version = (
+        "mock-shipment-source-version.p0.v1:sha256:" + "c" * 64
+    )
+    shipment = ShipmentObservation(
+        observation_id=_uuid(412),
+        private_owner_scope=owner,
+        task_id=_uuid(413),
+        request_unit_id=_uuid(414),
+        verified_order_target_ref="verified-target:codec",
+        source_tool="get_shipment",
+        source_tool_call_id=_uuid(415),
+        source_resource_ref="shipment:codec",
+        source_version=shipment_version,
+        normalized_type="SHIPMENT_SUMMARY",
+        normalized_value=ShipmentSummaryProjection(
+            shipment_status=ShipmentStatus.IN_TRANSIT,
+            latest_event_code=ShipmentEventCode.IN_TRANSIT,
+            latest_event_at=UTC_NOW - timedelta(hours=1),
+            promised_delivery_at=UTC_NOW + timedelta(days=1),
+        ),
+        observed_at=UTC_NOW,
+        recorded_at=UTC_NOW + timedelta(minutes=1),
+        valid_until=UTC_NOW + timedelta(minutes=5),
+    )
+    assessment = ShipmentAssessment(
+        assessment_id=_uuid(416),
+        private_owner_scope_ref=owner,
+        task_id=shipment.task_id,
+        request_unit_id=shipment.request_unit_id,
+        task_state_version=5,
+        verified_order_target_ref=shipment.verified_order_target_ref,
+        shipment_observation_ref=shipment.observation_id,
+        shipment_observation_source_version=shipment.source_version,
+        primary_result=ShipmentAssessmentResult.NORMAL,
+        reason_codes=(ShipmentAssessmentReason.NO_P0_SHIPMENT_EXCEPTION,),
+        assessed_at=UTC_NOW + timedelta(minutes=2),
+    )
+    return (
+        (
+            P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+            "order_search_observation_record.p0.v1",
+            search,
+        ),
+        (
+            P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+            "order_candidate_set_record.p0.v1",
+            candidate_set,
+        ),
+        (
+            P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+            "order_candidate_selection_record.p0.v1",
+            selection,
+        ),
+        (
+            P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+            "shipment_observation_record.p0.v1",
+            shipment,
+        ),
+        (
+            P0RecordCode.SHIPMENT_ASSESSMENT_RECORD,
+            "shipment_assessment_record.p0.v1",
+            assessment,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("record_code", "schema_version", "record"),
+    _cycle2_new_record_cases(),
+    ids=lambda value: value.value if isinstance(value, P0RecordCode) else None,
+)
+def test_cycle2_new_top_level_records_round_trip_exactly(
+    record_code: P0RecordCode,
+    schema_version: str,
+    record: object,
+) -> None:
+    envelope = persistence_module.encode_persistence_record_versioned(
+        record_code,
+        schema_version,
+        record,
+    )
+    decoded = persistence_module.decode_persistence_record_versioned(
+        envelope.model_dump_json(),
+        expected_record_code=record_code,
+        expected_schema_version=schema_version,
+        correlation_ref=_uuid(499),
+    )
+    assert decoded.source_record == record
+    assert decoded.logical_children == ()
+    assert envelope.direct_owner_customer_id == (
+        getattr(record, "private_owner_scope", None)
+        or getattr(record, "private_owner_scope_ref")
+    )
+
+
+def _tool_call_v2_with_unfinished_attempt() -> tuple[object, object]:
+    attempt = ToolAttemptRecordV2(
+        tool_call_id=_uuid(501),
+        attempt_no=1,
+        started_at=UTC_NOW,
+    )
+    source_v1 = _case(P0RecordCode.TOOL_CALL_RECORD).record
+    record = persistence_module.ToolCallRecordV2(
+        tool_call_id=attempt.tool_call_id,
+        run_id=source_v1.run_id,
+        task_id=source_v1.task_id,
+        request_unit_id=source_v1.request_unit_id,
+        model_call_id=source_v1.model_call_id,
+        context_manifest_id=source_v1.context_manifest_id,
+        gate_decision_id=source_v1.gate_decision_id,
+        canonical_tool_name="search_orders",
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref="owner-scope:codec",
+        validated_task_state_version=source_v1.validated_task_state_version,
+        argument_binding_refs=source_v1.argument_binding_refs,
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        attempts=(attempt,),
+        status=ToolCallStatus.RUNNING,
+        started_at=UTC_NOW,
+    )
+    return record, attempt
+
+
+def test_tool_call_v2_attempt_is_strict_parent_versioned_child() -> None:
+    record, attempt = _tool_call_v2_with_unfinished_attempt()
+    envelope = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        record,
+        logical_children=(attempt,),
+    )
+    decoded = persistence_module.decode_persistence_record_versioned(
+        envelope,
+        expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+        expected_schema_version="tool_call_record.p0.v2",
+        correlation_ref=_uuid(599),
+    )
+    assert decoded.source_record == record
+    assert decoded.logical_children == (attempt,)
+
+    with pytest.raises(P0PersistenceIntegrityError) as missing:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            record,
+        )
+    assert missing.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+    v1_attempt = _case(P0RecordCode.TOOL_CALL_RECORD).logical_children[0]
+    with pytest.raises(P0PersistenceIntegrityError) as mixed:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.TOOL_CALL_RECORD,
+            "tool_call_record.p0.v2",
+            record,
+            logical_children=(v1_attempt,),
+        )
+    assert mixed.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+
+def test_conversion_readiness_is_exact_zero_io_and_fail_closed() -> None:
+    input_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
+    ready = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.INPUT_BINDING_RECORD,
+        "input_binding_record.p0.v1",
+        "input_binding_record.p0.v2",
+        input_case.record,
+        external_references=input_case.external_references,
+    )
+    assert ready.category is persistence_module.P0ConversionReadinessCategory.READY
+    assert type(ready.target_record) is InputBindingV2
+    assert ready.target_record.model_dump() == input_case.record.model_dump()
+
+    mixed = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.INPUT_BINDING_RECORD,
+        "input_binding_record.p0.v1",
+        "input_binding_record.p0.v2",
+        input_case.record,
+        external_references=input_case.external_references,
+        active_schema_versions=(
+            "input_binding_record.p0.v1",
+            "input_binding_record.p0.v2",
+        ),
+    )
+    assert (
+        mixed.category
+        is persistence_module.P0ConversionReadinessCategory.MIXED_ACTIVE_VERSION
+    )
+
+    tool_case = _case(P0RecordCode.TOOL_CALL_RECORD)
+    no_authority = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        source_logical_children=tool_case.logical_children,
+    )
+    assert (
+        no_authority.category
+        is persistence_module.P0ConversionReadinessCategory.AUTHORITY_REQUIRED
+    )
+    tool_ready = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        source_logical_children=tool_case.logical_children,
+        private_owner_scope_ref="owner-scope:codec",
+        registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        tool_ready.category
+        is persistence_module.P0ConversionReadinessCategory.READY
+    )
+    assert tool_ready.target_record.verified_target_ref is None
+    assert tuple(
+        (attempt.tool_call_id, attempt.attempt_no)
+        for attempt in tool_ready.target_logical_children
+    ) == tuple(
+        (attempt.tool_call_id, attempt.attempt_no)
+        for attempt in tool_case.logical_children
+    )
+
+
+def test_conversion_readiness_preserves_gate_run_link_and_trace_evidence() -> None:
+    gate_case = _case(P0RecordCode.GATE_DECISION_RECORD)
+    gate = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.GATE_DECISION_RECORD,
+        "gate_decision_record.p0.v1",
+        "gate_decision_record.p0.v2",
+        gate_case.record,
+    )
+    assert gate.is_ready
+    assert gate.target_record.verified_target_ref is None
+    assert gate.target_record.validated_arguments is None
+    assert {
+        name: getattr(gate.target_record, name)
+        for name in type(gate_case.record).model_fields
+    } == {
+        name: getattr(gate_case.record, name)
+        for name in type(gate_case.record).model_fields
+    }
+
+    incomplete = AgentRunRecord(
+        run_id=_uuid(601),
+        status=AgentRunStatus.INCOMPLETE,
+        provider_lane="scripted",
+        started_at=UTC_NOW,
+        completed_at=UTC_NOW + timedelta(seconds=1),
+        stop_reason="PROCESS_RESTART_DETECTED",
+        incomplete_reason="PROCESS_RESTART_DETECTED",
+    )
+    run = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.AGENT_RUN_RECORD,
+        "agent_run_record.p0.v1",
+        "agent_run_record.p0.v2",
+        incomplete,
+    )
+    assert run.is_ready
+    assert run.target_record.status.value == "INCOMPLETE"
+    assert run.target_record.stop_reason.value == "PROCESS_RESTART_DETECTED"
+    assert run.target_record.status.value != "SUPERSEDED"
+
+    failed = AgentRunRecord(
+        run_id=_uuid(602),
+        status=AgentRunStatus.FAILED,
+        provider_lane="scripted",
+        started_at=UTC_NOW,
+        completed_at=UTC_NOW + timedelta(seconds=1),
+    )
+    failed_run = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.AGENT_RUN_RECORD,
+        "agent_run_record.p0.v1",
+        "agent_run_record.p0.v2",
+        failed,
+    )
+    assert failed_run.is_ready
+    assert failed_run.target_record.status.value == "FAILED"
+
+    active_link = RunTaskLinkRecord(
+        schema_version="run_task_link_record.p0.v1",
+        run_id=_uuid(603),
+        task_id=_uuid(604),
+        base_task_state_version=7,
+        result_task_state_version=None,
+    )
+    link = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.RUN_TASK_LINK_RECORD,
+        "run_task_link_record.p0.v1",
+        "run_task_link_record.p0.v2",
+        active_link,
+    )
+    assert link.is_ready
+    assert link.target_record.result_task_state_version is None
+    assert link.target_record.base_task_state_version == 7
+
+    trace_case = _case(P0RecordCode.TRACE_EVENT_RECORD)
+    trace = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TRACE_EVENT_RECORD,
+        "trace_event_record.p0.v1",
+        "trace_event_record.p0.v2",
+        trace_case.record,
+    )
+    assert trace.is_ready
+    assert trace.target_record.model_dump(mode="json") == (
+        trace_case.record.model_dump(mode="json")
+    )
+
+    input_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
+    input_ready = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.INPUT_BINDING_RECORD,
+        "input_binding_record.p0.v1",
+        "input_binding_record.p0.v2",
+        input_case.record,
+        external_references=input_case.external_references,
+    )
+    public_pairs = (
+        (
+            P0RecordCode.INPUT_BINDING_RECORD,
+            "input_binding_record.p0.v2",
+            input_ready.target_record,
+            input_case.external_references,
+        ),
+        (
+            P0RecordCode.GATE_DECISION_RECORD,
+            "gate_decision_record.p0.v2",
+            gate.target_record,
+            (),
+        ),
+        (
+            P0RecordCode.AGENT_RUN_RECORD,
+            "agent_run_record.p0.v2",
+            run.target_record,
+            (),
+        ),
+        (
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            "run_task_link_record.p0.v2",
+            link.target_record,
+            (),
+        ),
+        (
+            P0RecordCode.TRACE_EVENT_RECORD,
+            "trace_event_record.p0.v2",
+            trace.target_record,
+            (),
+        ),
+    )
+    for code, version, target, external in public_pairs:
+        envelope = persistence_module.encode_persistence_record_versioned(
+            code,
+            version,
+            target,
+            external_references=external,
+        )
+        decoded = persistence_module.decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=code,
+            expected_schema_version=version,
+            correlation_ref=_uuid(698),
+        )
+        assert decoded.source_record == target
+
+    inactive_code, inactive_version, inactive_record = (
+        _cycle2_new_record_cases()[0]
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as generic:
+        encode_persistence_record(inactive_code, inactive_record)
+    assert (
+        generic.value.category
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+    )
+
+
+def test_conversion_readiness_rejects_unknown_duplicate_and_ambiguous_graphs() -> None:
+    input_case = _case(P0RecordCode.INPUT_BINDING_RECORD)
+    unknown = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.INPUT_BINDING_RECORD,
+        "gate_decision_record.p0.v1",
+        "input_binding_record.p0.v2",
+        input_case.record,
+    )
+    assert (
+        unknown.category
+        is persistence_module.P0ConversionReadinessCategory.UNKNOWN_SOURCE_VERSION
+    )
+
+    tool_case = _case(P0RecordCode.TOOL_CALL_RECORD)
+    duplicate = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        tool_case.record,
+        source_logical_children=(
+            tool_case.logical_children[0],
+            tool_case.logical_children[0],
+        ),
+        private_owner_scope_ref="owner-scope:codec",
+        registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert not duplicate.is_ready
+    assert duplicate.target_record is None
+
+    attempt = ToolAttemptRecord(
+        tool_call_id=_uuid(605),
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=UTC_NOW + timedelta(milliseconds=100),
+        outcome="SYSTEM_FAILURE",
+        failure_code="SHIPMENT_SERVICE_TRANSIENT",
+    )
+    ambiguous_parent = ToolCallRecord(
+        tool_call_id=attempt.tool_call_id,
+        run_id=_uuid(606),
+        task_id=_uuid(607),
+        request_unit_id=_uuid(608),
+        model_call_id=_uuid(609),
+        context_manifest_id=_uuid(610),
+        gate_decision_id=_uuid(611),
+        canonical_tool_name="get_shipment",
+        tool_registry_version="e2e01-tools.p0.v1",
+        validated_task_state_version=2,
+        argument_binding_refs=(_uuid(612),),
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        status=ToolCallStatus.FAILED,
+        started_at=UTC_NOW,
+        finished_at=attempt.finished_at,
+        failure_code=attempt.failure_code,
+    )
+    ambiguous = persistence_module.classify_p0_conversion_readiness(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v1",
+        "tool_call_record.p0.v2",
+        ambiguous_parent,
+        source_logical_children=(attempt,),
+        private_owner_scope_ref="owner-scope:codec",
+        registry_snapshot=build_cycle2_registry_snapshot(),
+    )
+    assert (
+        ambiguous.category
+        is persistence_module.P0ConversionReadinessCategory.AMBIGUOUS_CONVERSION
+    )
+    assert ambiguous.target_record is None
+
+
+def test_tool_call_v2_decode_rejects_child_parent_identity_tampering() -> None:
+    record, attempt = _tool_call_v2_with_unfinished_attempt()
+    envelope = persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.TOOL_CALL_RECORD,
+        "tool_call_record.p0.v2",
+        record,
+        logical_children=(attempt,),
+    ).model_dump(mode="json")
+    envelope["payload"]["logical_children"][0]["parent_logical_identity"] = [
+        ["tool_call_id", str(_uuid(699))]
+    ]
+    with pytest.raises(P0PersistenceIntegrityError) as raised:
+        persistence_module.decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=P0RecordCode.TOOL_CALL_RECORD,
+            expected_schema_version="tool_call_record.p0.v2",
+            correlation_ref=_uuid(699),
+        )
+    assert raised.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
