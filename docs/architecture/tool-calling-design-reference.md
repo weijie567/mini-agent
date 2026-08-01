@@ -435,6 +435,22 @@ GateDecision
   decided_at
 ```
 
+Cycle 2 的 selected-target 路径需要把 target 与普通 InputBinding refs 分域，因此
+durable Gate 演进为：
+
+```text
+GateDecisionV2
+  ...GateDecision v1 fields
+  argument_binding_refs[]  # 仍只指向 current RequestUnit InputBinding
+  verified_target_ref?     # 独立 Runtime-private ref
+```
+
+`gate_decision_record.p0.v1 → gate_decision_record.p0.v2` 是 breaking logical
+version change。v1→v2 只允许在完整 exact v1 graph 中把新增 target 写为 `null`；v1
+没有 selected-target capability，禁止从 order id、summary 或其他 payload 反推非空
+target。target-requiring ACCEPT 路径必须保存 exact current ref；REJECT 与不需要
+target 的 ACCEPT 路径保持 `null`，不得把未通过校验的私有 target 写入审计记录。
+
 `Control Gateway` 按顺序至少检查：
 
 1. Context Manifest 与本次 Snapshot 是否一致。
@@ -478,6 +494,11 @@ AuthorizedToolCommand
   registry_snapshot_ref
   trusted_context_ref
 ```
+
+Cycle 2 target-requiring路径使用 `AuthorizedToolCommandV2`，在上述字段之外增加独立
+`verified_target_ref`。它必须 exact-copy accepted `GateDecisionV2` 的 ref；模型不能
+提供该字段。`argument_binding_refs[]` 仍只包含 actual InputBinding refs，不得混入
+verified target、Observation、业务 payload 或 owner scope。
 
 规则：
 
@@ -592,9 +613,16 @@ tool_call_record.p0.v1 → tool_call_record.p0.v2
 ```
 
 v2 必须保留 parent `tool_call_id`、Run / Task / RequestUnit / Context Manifest /
-Gate / InputBinding refs、ToolCall lifecycle、`attempt_count`，以及 child identity
+Gate / InputBinding refs、ToolCall lifecycle、`attempt_count`，增加独立
+`verified_target_ref?`，以及 child identity
 `(tool_call_id, attempt_no)` 和连续 `1..N` closure。v1→v2 只允许下列
 deterministic conversion：
+
+- parent 新增 `verified_target_ref` 固定为 `null`；v1 graph 不能推导非空 target。
+- v2 target-requiring path 必须使 `GateDecisionV2 → AuthorizedToolCommandV2 →
+  ToolCallRecordV2` 的 target exact-copy，并保持 `argument_binding_refs` 全部解析到
+  current RequestUnit InputBinding；target/binding 混用、缺失或冲突使完整 graph
+  fail closed。
 
 | v1 child shape | v2 `timeout_phase` | v2 `retry_decision` |
 |---|---|---|

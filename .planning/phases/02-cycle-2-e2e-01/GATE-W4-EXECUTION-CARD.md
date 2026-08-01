@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W3_REVIEWED_MERGE_CONFIRMED / W4_PACKET_FREEZE_IN_PROGRESS`
+状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_OWNER_RULING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
 
 ## Exact input
 
@@ -14,9 +14,32 @@
   GitHub approval。
 - merge tree 与 reviewed overlay tree 相等，W3 exact product diff 仅 02-05 四文件。
 
+## Confirmed W4 preflight blocker and owner ruling
+
+W4 preflight 已确认旧 barrier 上没有 existing-Task continuation InputBinding writer；
+ordinal binding 若先落盘会推进 Task version 并使 CandidateSet expected version自失效；
+Gateway 又只接受 direct `order_id` Claim，无法授权 selection 后的 `get_order`；Claim
+name 同时存在 `shipment_not_received` / `not_received_claim` 漂移。
+
+用户已授权先修复再开始 W4。当前 owner ruling 固定：
+
+- 保留 v1 owner model，新增 inactive `InputBindingV2`，并以 exact order-id identity
+  conversion 演进到 `input_binding_record.p0.v2`；
+- ordinal binding 与 selection effect 在同一个 CAS 中持久化；
+- `get_order` 保留 direct binding 路径；selected path 使用
+  `argument_binding_refs=[ordinal_input_binding_ref]` 与独立
+  `verified_target_ref=selected_target_ref`。`GateDecisionRecord` 演进到 v2，
+  Gate/Authorized command/ToolCall exact-copy target；`get_shipment` 同样禁止 mixed refs；
+- Claim canonical name 统一为 `shipment_not_received`；
+- 增加 `02-02R/02-04R/02-05R` 与 `W3R`，最大 writer 仍为 2。
+
+只有 owner ruling reviewed merge、三个 correction Packet 逐个 reviewed merge 并冻结
+真实 `B_C2_W4_READY` 后，才可重冻结或创建 W4 implementation Worktree。
+
 ## Packet freeze 与批次
 
-四个 exact Plan / Task Packet 必须逐个在 dedicated planning-status worktree 中由
+旧 02-06 Plan 因 base/dependency/product-blob 变化已失效，不得执行。四个 W4 exact
+Plan / Task Packet 必须在 `B_C2_W4_READY` 后逐个由
 Integrator 单写，并分别取得全新 independent exact-file planning review `PASS`；此前
 不得创建对应实现 branch / Worktree。
 
@@ -27,9 +50,9 @@ Batch B: 02-08 Request understanding/routing || 02-09 executor/recovery
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
 - 建议串行 merge：`02-06 → 02-13 → 02-08 → 02-09`。
-- 四个 implementation Packet 的 product `base_sha` 都是 exact
-  `B_C2_APP_CONTRACT`；planning provenance 只推进 integration control head，不改变
-  product base。每次 merge 前必须在 latest integration 上形成 reviewed overlay。
+- 四个 implementation Packet 的 product `base_sha` 都必须重冻结为真实
+  `B_C2_W4_READY`；不得继续使用 `B_C2_APP_CONTRACT` 或猜测 successor。每次 merge
+  前必须在 latest integration 上形成 reviewed overlay。
 
 ## Review profiles
 
@@ -47,9 +70,11 @@ imported evidence，不重复 W3 式全量审计或 canonical full。finding rem
 
 ## Stop conditions
 
-出现以下任一项立即停止：contract change、owner conflict、allowlist 扩大、Wave/Packet
-数量变化、无法在原 Packet 内关闭的 BLOCK/HIGH、exact barrier 不一致、02-06 conversion
-无法唯一表达、02-13 lifecycle activation 证据不足或任一 W4 allowlist overlap。
+本卡已记录的三项 correction、W3R 与 22-slot amendment 已由当前用户指令授权；它们
+不再是 stop condition。除此以外，出现新的 contract change、owner conflict、allowlist
+扩大、Wave/Packet 数量变化、无法在原 Packet 内关闭的 BLOCK/HIGH、exact barrier
+不一致、02-06 conversion 无法唯一表达、02-13 lifecycle activation 证据不足或任一
+W4 allowlist overlap，立即停止。
 
 ## W4 exit
 

@@ -4,10 +4,10 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-06_planning_review_gate"
-status: "phase_2_w4_02_06_planning_review_gate"
+current_plan: "w3r_owner_ruling_review"
+status: "phase_2_w3r_owner_ruling_review"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — PR #218/#219 reviewed merge关闭W3并冻结B_C2_APP_CONTRACT；02-06 exact Plan/Packet candidate已形成"
+last_activity: "2026-08-01 — W4 preflight确认三项跨owner blocker；用户授权先修复再开始W4；owner ruling candidate已形成"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -28,44 +28,43 @@ See: [PROJECT.md](PROJECT.md)
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
 **Current focus:** W1–W3 `02-01..05` 已 reviewed merge；PR #218/#219 关闭 W3 并
-冻结 exact `B_C2_APP_CONTRACT = 86d1b835...`。现在逐个冻结 W4
-`02-06/08/09/13` exact Plan/Packet；当前只审阅 02-06，planning `PASS`/merge 前不
-创建其实现 branch/Worktree。
+冻结 exact `B_C2_APP_CONTRACT = 86d1b835...`。W4 preflight 已确认三项跨 owner
+blocker；用户授权先修复再开始 W4。当前只审 owner ruling；其 merge 后才从真实 SHA
+签发 `02-02R`，随后签发 `02-04R/02-05R`。W4 Worktree 尚未创建。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-06_planning_review_gate
+Current Plan: w3r_owner_ruling_review
 Total Phases: 6
 Total Plans in Phase: 7
-Status: Phase 2 W4 / 02-06 planning review gate
+Status: Phase 2 W3R / owner ruling review
 Last Activity: 2026-08-01
-Last Activity Description: PR #218/#219 reviewed merge关闭W3；`B_C2_APP_CONTRACT = 86d1b835...`；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W4 planning；Plan files 7/19、completed slots 6/19、functional implementation 5/18；1/6 phases
+Last Activity Description: W4 preflight确认 InputBinding / atomic ordinal selection / selected-target Gateway blocker；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R ruling；Plan files 7/22、completed slots 6/22、functional implementation 5/21；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 19 APPROVED SLOTS / 02-00..02-05 COMPLETE / 02-06 PLANNING REVIEW`
-Status: `CONTRACT_ACTIVE / W3_COMPLETE / W4_02-06_PLANNING_REVIEW`
-Last activity: 2026-08-01 — PR #218/#219 reviewed merge关闭W3；02-06 exact Plan/Packet 与 W4 Gate Card candidate已形成
-Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 implementation Packet complete；W4 planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 22 USER-AUTHORIZED SLOTS / 02-00..02-05 COMPLETE / W3R OWNER RULING REVIEW`
+Status: `CONTRACT_ACTIVE / W3_COMPLETE / W3R_REMEDIATION_RULING / W4_BLOCKED`
+Last activity: 2026-08-01 — owner ruling candidate明确 InputBinding vocabulary、single-CAS ordinal selection、selected-target Gateway 与 canonical Claim name
+Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 implementation Packet complete；W3R ruling；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对当前 02-06 planning allowlist 使用全新 Codex 窗口独立审阅至 `PASS`；只在
-   `0 BLOCK/HIGH`、MEDIUM 全部修复或有证据接受、LOW/INFO 已记录后合并。
-2. 从每次真实 integration planning control head 依次创建并审阅 02-08、02-09、
-   02-13 Plan；四个 implementation `base_sha` 都固定为 exact
-   `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6`。
-3. planning gates 全部通过后按 `02-06 + 02-13`、再 `02-08 + 02-09` 两批实现；
+1. 对 owner ruling exact diff 做一次有界 direct-owner review；`PASS` 后 merge。
+2. 从真实 ruling successor 冻结、审阅、实现并合并 `02-02R`；再从真实 Core
+   successor 冻结 `02-04R/02-05R`，最多两个 writer、串行 merge。
+3. 冻结真实 `B_C2_W4_READY`，重签 `02-06/08/09/13`；旧 02-06 Plan 不可执行。
+4. planning gates 全部通过后按 `02-06 + 02-13`、再 `02-08 + 02-09` 两批实现；
    最多两个 writer、独立 worktree、串行 overlay review/merge。
-4. W4 四个 reviewed merge 后冻结 `B_C2_LEAVES`，只运行 integration-focused /
+5. W4 四个 reviewed merge 后冻结 `B_C2_LEAVES`，只运行 integration-focused /
    neighbor 与 Phase 1 直接回归；不运行 canonical full，不推进 Case lifecycle。
-5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
+6. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
 
@@ -125,7 +124,7 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / PHASE2_CONTRACT_ACTIVE`: Activation 当时只授权 planning；四个 Case
   当前仍为 `CONTRACT_DEFINED`，但 W1 02-01/02/03 Core contract implementation 已
   reviewed merge；不得把这些实现误报为 Case evidence 或 lifecycle advancement。
-- `CONFIRMED / PHASE2_MASTER_PLAN_APPROVED`: 19-slot / W0–W12 master Plan 已由
+- `CONFIRMED / PHASE2_MASTER_PLAN_APPROVED`: 原 19-slot / W0–W12 master Plan 已由
   Gate P2-A 批准；planning PR #203 merge SHA 为
   `2879f5226a073051d1550fe079b4a427c1ec8cb1`。
 - `CONFIRMED / C2_BLOCK_02_CLOSED`: `02-00` 已由用户批准并经 PR #204/#205
@@ -160,12 +159,15 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；W3 merge tree 与 reviewed overlay
   tree 相等。原始 Codex review transcript 未作为 GitHub review object 持久化，PR body /
   merge message 是当前 durable review evidence。
-- `GATE / W4_02-06_PLANNING_REVIEW`: 当前 Plan/Packet/policy/Gate Card/status candidate
-  必须由全新任务 exact-file review 至 `PASS` 并 merge；此前不创建 02-06 实现分支。
+- `GATE / W3R_OWNER_RULING_REVIEW`: 用户已批准三个 correction slots 与 W3R；当前
+  owner ruling exact diff 必须由独立 reviewer 至 `PASS` 并 merge，随后才签发 02-02R。
+- `INVALIDATED / OLD_02_06_PLAN`: 旧 Plan 的 base/dependency/product blobs 不再成立；
+  只保留历史，不得创建实现 branch。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: W4 `02-08/09/13` exact Plan、四个 W4 implementation、`B_C2_LEAVES`；
+- `OPEN`: `02-02R/02-04R/02-05R` exact Plan/implementation、`B_C2_W4_READY`、重冻结
+  W4 `02-06/08/09/13` 与四个 W4 implementation、`B_C2_LEAVES`；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -175,5 +177,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: W4 02-06 exact planning review gate；implementation not started
-Resume File: [phases/02-cycle-2-e2e-01/02-06-PLAN.md](phases/02-cycle-2-e2e-01/02-06-PLAN.md)
+Stopped At: W3R owner ruling exact review gate；remediation/W4 implementation not started
+Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)

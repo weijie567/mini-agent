@@ -550,6 +550,16 @@ L2 不复制权威事实、政策正文、确认或副作用结果。当前业�
   不表示 physical / data migration、decoder、finalizer、持久化 reader 或 Eval
   support 已经实现。
 
+  上述四个版本只对应 OA-07 / OA-10 的 Run / retry shared alignment，不是 Cycle 2
+  所有 specialized record evolution 的穷举。W4 前 owner ruling 另按
+  [Intent Design Reference §10.4.1](docs/architecture/intent-design-reference.md#1041-cycle-2-durable-inputbinding-version-boundary)
+  批准 `input_binding_record.p0.v2`，并按
+  [Tool Calling Design Reference §8.2–8.3](docs/architecture/tool-calling-design-reference.md#82-gatedecision)
+  批准 `gate_decision_record.p0.v2` 与独立 `verified_target_ref` 传播；具体有限词汇、
+  selected-target path 与 migration/rollback 收窄仍由 Cycle 2 scoped Spec 拥有。
+  这两项 specialized evolution 不改变 shared `TraceEvent` structure，也不构成实现、
+  physical migration 或 active Runtime cutover 证据。
+
 ## 10. Tool、RAG 与退款动作
 
 Read / Retrieval 工具：

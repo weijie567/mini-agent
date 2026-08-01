@@ -328,7 +328,8 @@ SearchOrdersInput
 约束：
 
 - `product_description` 必须精确追溯到当前消息 accepted InputBinding。
-- 它仍是 `USER_CLAIM` 或 `MODEL_INFERENCE`，不是业务事实。
+- 本 scoped slice 只把能精确追溯到当前用户消息的值接受为 `USER_CLAIM`；模型提出的
+  `MODEL_INFERENCE` 不能直接成为 durable binding。两者都不是业务事实。
 - Schema 使用 `additionalProperties = false`。
 - 不包含身份、时间窗口、limit、排序、候选集 ID 或 source version。
 
@@ -357,6 +358,32 @@ normalization 与 matching 固定为：
 7. 候选内匹配 line 按 `line_ordinal ASC`；Agent / HTTP / Renderer 只投影前三条，
    不合并同名 line，不披露剩余条数。
 8. 不实现编辑距离、Embedding、向量搜索、模型 rerank 或跨用户全局索引后过滤。
+
+#### 7.2.1.1 Cycle 2 accepted InputBinding vocabulary
+
+Cycle 2 继续使用 Intent owner 定义的同一个 `InputBinding` 语义，但 durable payload
+从 `input_binding_record.p0.v1` 显式演进到 `input_binding_record.p0.v2`；Core 类型使用
+inactive-until-cutover 的 `InputBindingV2`，不得修改 v1 owner model 后继续标记为 v1。
+当前 scoped v2 accepted vocabulary 只允许以下四个 name / normalized value 组合：
+
+| `name` | `normalized_value` | authority / confirmation |
+|---|---|---|
+| `order_id` | Phase 1 exact `O-[0-9]{4,20}` string | `USER_CLAIM / confirmed_by_user=true` |
+| `product_description` | 本节 normalization 后的 1..80 Unicode scalar string | `USER_CLAIM / confirmed_by_user=true` |
+| `candidate_ordinal` | strict positive integer `1..5`；是否命中当前集合仍由第 7.4 节验证 | `USER_CLAIM / confirmed_by_user=true` |
+| `shipment_not_received` | strict boolean；只有 current `true` 触发对应 assessment precedence | `USER_CLAIM / confirmed_by_user=true` |
+
+name 与 value type / range 必须交叉校验；`true` 不能作为 ordinal，数字或字符串也
+不能作为 boolean。`not_received_claim` 不是本 scoped vocabulary；所有 Consumer、
+Gateway、fixture 与 Eval predicate 统一使用 `shipment_not_received`。这些 binding
+仍只是 Claim，不证明订单、候选、物流或遗失事实；business Observation 与
+`verified_target_ref` 仍按各自 owner 分离。
+
+v1→v2 conversion 只接受通过 exact v1 owner model 的 `order_id` binding，并原样保留
+identity、normalized string、authority、source refs、validation、confirmation、时间与
+supersedes；只把 envelope logical version 改为 v2。三个新增 name 没有 v1 source，
+只能在 exact-version atomic cutover 后由 v2 writer 创建。conversion 前全量验证、失败
+原子性、active reader/writer 同切、no fallback 与 rollback fence 服从第 7.13 节。
 
 Runtime-private query：
 
@@ -774,8 +801,9 @@ exact-version dispatch、owner-scoped reader 和关系闭合不得省略。
 当用户回复“第二个”时：
 
 1. 保存当前用户消息。
-2. Request Understanding 形成 `candidate_ordinal = 2` 的候选 InputBinding；它只
-   表示用户 Claim。
+2. Request Understanding 形成 `candidate_ordinal = 2` 的候选 binding payload；
+   它只表示用户 Claim。Runtime 在 CAS 前完成确定性 shape / provenance 校验，但此时
+   不单独持久化 binding，也不提前推进 Task version。
 3. Runtime 只能通过当前 Task 的唯一 pending question 取得 CandidateSet ref；
    模型和用户不能提供该 ref。
 4. owner-scoped exact reader 同时读取 CandidateSet 与其 Search Observation，验证
@@ -787,8 +815,8 @@ exact-version dispatch、owner-scoped reader 和关系闭合不得省略。
 6. exact reader 只能以当前可信 Session owner 调用 Business target reader，把
    mapping 中的 `owner_scoped_order_ref` 解析为 current verified order target；
    禁止从 `order_number`、public summary 或 source-version token 反推目标。随后 CAS
-   原子写入新的 selected target ref、关闭 pending question、推进 Task version，
-   并追加：
+   原子写入 accepted ordinal `InputBinding`、把其 ref 加入当前 RequestUnit、写入新的
+   selected target ref、关闭 pending question、推进 Task version，并追加：
 
    ```text
    OrderCandidateSelectionRecord
@@ -815,11 +843,25 @@ exact-version dispatch、owner-scoped reader 和关系闭合不得省略。
    `owner_scoped_order_target_ref` 与 `selected_target_ref` 都是 Runtime-private ref；
    前者必须 exact copy owner-scoped reader 的已验证结果，后者是 Task Working
    Context 新形成的 `verified_target_ref`。二者均不得进入模型、普通 Trace或回复。
+   ordinal binding、RequestUnit ref、SelectionRecord、selected target、closed pending
+   question 与 Task / RequestUnit 新版本必须同成同败。禁止先保存 ordinal binding、
+   推进版本后再尝试 selection CAS；该顺序会使 CandidateSet 的 expected version
+   自失效。
 7. `base_task_state_version` 必须等于 CandidateSet 的 selection expected version；
    `result_task_state_version` 是 CAS 成功后的 exact 新版本。`selected_at` 是本次
    原子闭包唯一的可信 UTC clock sample。
 8. 使用 `result_task_state_version` 重新形成 / 校验 `get_order` NextMove；
    CandidateSet 中的 order summary 或 source version不能代替 `get_order` 刷新。
+   该 selected-target 路径只在模型候选 `order_id` 与 current verified target 精确
+   相等、`argument_binding_refs = [ordinal_input_binding_ref]`、独立
+   `verified_target_ref = selected_target_ref`，且 owner / Task / RequestUnit / result
+   version 全闭合时放行。GateDecisionV2、AuthorizedToolCommandV2 与
+   ToolCallRecordV2 必须精确复制同一个 `verified_target_ref`；binding refs 仍只包含
+   RequestUnit 当前 InputBinding refs。它不要求伪造新的
+   `order_id` USER_CLAIM binding，也不把 ordinal Claim 升级成业务事实。Phase 1 的
+   直接 `order_id` accepted-binding 路径保持 `argument_binding_refs =
+   [order_id_binding_ref]` 且 `verified_target_ref = null`；两条路径不得混合或
+   fallback。
 
 以下任一情况都返回 `ASK_USER`，且不得创建 SelectionRecord、selected target 或
 `get_order` ToolCall：
@@ -869,6 +911,11 @@ GetShipmentInput
 - `order_id` 必须来自当前 Task 的 verified target ref。
 - 用户消息中的订单号、搜索 Candidate 或旧 InputBinding 本身不足以授权调用。
 - 模型不能提供 `customer_id`、`package_id`、source version 或 freshness metadata。
+- `get_shipment` 的 `argument_binding_refs` 只保存形成该 target 的 current `order_id`
+  InputBinding ref；current target 通过独立 `verified_target_ref` 在
+  GateDecisionV2、AuthorizedToolCommandV2 与 ToolCallRecordV2 中 exact-copy。不得把
+  target ref 塞进 `argument_binding_refs`，也不得只凭 order-id Claim 跳过 target
+  closure。
 
 Runtime-private query：
 
@@ -1641,7 +1688,8 @@ retry attempts 属于同一 ToolCall，不增加 `tool_calls` 计数。每个具
 
 ### 7.13 持久化和原子性
 
-Phase 2 至少需要五个新增逻辑记录 / projection，并演进现有 Tool attempt 记录：
+Phase 2 至少需要五个新增逻辑记录 / projection，并演进现有 InputBinding、
+GateDecision 与 Tool attempt 记录：
 
 ```text
 order_search_observation_record.p0.v1
@@ -1652,13 +1700,19 @@ shipment_assessment_record.p0.v1
 
 tool_call_record.p0.v1 -> tool_call_record.p0.v2
   logical child tool_attempt_record gains timeout_phase + retry_decision
+
+input_binding_record.p0.v1 -> input_binding_record.p0.v2
+gate_decision_record.p0.v1 -> gate_decision_record.p0.v2
 ```
 
-OA-07 / OA-10 同时演进四个现有 records；目标 active logical versions 固定为：
+OA-07 / OA-10 演进原四个 records；Cycle 2 accepted binding 与 verified-target Gate
+closure 再演进两个 records。目标 active logical versions 固定为：
 
 | Record | Current active version | Cycle 2 target version | v2 semantic delta |
 |---|---|---|---|
-| `ToolCallRecord` + logical child `ToolAttemptRecord` | `tool_call_record.p0.v1` | `tool_call_record.p0.v2` | child 增加 `timeout_phase` / `retry_decision` 与 exact attempt closed matrix；attempt 仍不是独立 top-level record |
+| `InputBindingRecord` | `input_binding_record.p0.v1` | `input_binding_record.p0.v2` | 保留 v1 exact order-id shape并增加 scoped `product_description` string、`candidate_ordinal` strict int、`shipment_not_received` strict bool name/value matrix；不包含 business fact 或 verified target |
+| `GateDecisionRecord` | `gate_decision_record.p0.v1` | `gate_decision_record.p0.v2` | 增加独立 `verified_target_ref?`；`argument_binding_refs[]` 仍只指向 current RequestUnit InputBinding；accepted Gate、Authorized command 与 ToolCall exact-copy target ref |
+| `ToolCallRecord` + logical child `ToolAttemptRecord` | `tool_call_record.p0.v1` | `tool_call_record.p0.v2` | parent 增加独立 `verified_target_ref?` 并与 accepted Gate / Authorized command exact-copy；child 增加 `timeout_phase` / `retry_decision` 与 exact attempt closed matrix；attempt 仍不是独立 top-level record |
 | `AgentRunRecord` | `agent_run_record.p0.v1` | `agent_run_record.p0.v2` | 增加 `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` 的 terminal closed matrix；`completed_at` 必填、`incomplete_reason=null`、无用户结果 |
 | `RunTaskLinkRecord` | `run_task_link_record.p0.v1` | `run_task_link_record.p0.v2` | `result_task_state_version=null` 在 parent Run=`SUPERSEDED` 时是合法 no-result terminal closure；不得复制新 Run 的 Task version |
 | `TraceEventRecord` | `trace_event_record.p0.v1` | `trace_event_record.p0.v2` | shared 字段结构不变；`RunStopped` closed matrix 接受 exact stop reason 与 audit-only `BLOCKED` |
@@ -1673,6 +1727,16 @@ contract 冻结为可审阅输入：
 - migration 在写入任何 v2 record 前必须证明全量转换可完成，并以失败原子的
   cutover 使 runtime、decoder、recovery reader、Eval reader 和 writer 同时切换到
   exact v2；禁止 request-time / recovery-time upgrade、fallback 或 mixed reads。
+- `InputBindingRecord` v1→v2 只允许前述 exact order-id identity conversion；
+  `GateDecisionRecord` v1→v2 只允许完整 v1 graph 中把新增
+  `verified_target_ref` 写为 `null`，因为 v1 没有 selected-target capability。unknown /
+  invalid payload、缺失 owner graph 或任何试图从 order id / summary 反推 target 的
+  conversion 都使整批 migration fail closed。
+- `ToolCallRecord` v1→v2 同样必须把 parent 新增 `verified_target_ref` 精确写为
+  `null`；v1 graph 不允许推导非空 target。v2 accepted target path 必须验证
+  GateDecisionV2、AuthorizedToolCommandV2、ToolCallRecordV2 的 target ref 相等，且
+  `argument_binding_refs` 只解析为当前 RequestUnit 的 InputBindingV2；任何 target /
+  binding 混用、缺失或矛盾都使完整 graph fail closed。
 - conversion 必须保留 owner scope、Run / Task / RequestUnit / link identity、
   state versions、时间、既有 stop reason 与 append-only Trace evidence；v1 active
   link 不能因升级而获得伪造 result version。ToolCall conversion 还必须保留
@@ -1681,10 +1745,11 @@ contract 冻结为可审阅输入：
   table 由 parent metadata、allowlisted code 和 exact RegistrySnapshot /
   ExecutionPolicy 唯一重建；无法唯一重建时整批 migration / readiness fail
   closed，不得补默认值。
-- rollback 必须在写入首条 v2-only
-  `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` evidence 或首条带 v2-only attempt
-  字段的 ToolCall aggregate 前完成，或保留经 owner 批准、能够无损读取对应 v2
-  语义的 rollback runtime。任何不能表示 v2 no-result closure / attempt semantics
+- rollback 必须在写入任何首条 v2-only record / field / evidence 前完成，包括新增
+  InputBinding name、非空 Gate / ToolCall `verified_target_ref`、
+  `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` evidence 或带 v2-only attempt 字段的
+  ToolCall aggregate；否则必须保留经 owner 批准、能够无损读取全部对应 v2 语义的
+  rollback runtime。任何不能表示 v2 binding / target / no-result / attempt semantics
   的 v1 downgrade 都被禁止。
 - migration 命令、physical schema、备份 / 恢复、验证向量和实际 rollback 步骤仍
   属于未来 Task Packet；本文不创建 migration，也不声称其可执行。
@@ -1695,8 +1760,9 @@ contract 冻结为可审阅输入：
    bindings）、CandidateSet、Task effect 和新的 Task state version 必须原子闭合；
    `MULTIPLE` 还必须原子写入 pending question 与 `WAITING_USER`。
 2. ordinal selection 必须基于 CandidateSet 的 selection expected version 和
-   current Task version 做 CAS，并原子写 SelectionRecord / selected target /
-   closed pending question；失败时三者都不形成。
+   current Task version 做 CAS，并原子写 accepted ordinal InputBinding、当前
+   RequestUnit binding ref、SelectionRecord、selected target、closed pending question
+   与 Task / RequestUnit 新版本；失败时全部不形成，禁止 pre-CAS binding write。
 3. 每个 Tool attempt 继续使用 durable dispatch fence；attempt finalize、
    `RETRY_SCHEDULED` 和 retry fence 遵循第 7.9 节恢复闭包。
 4. Shipment Observation 必须在 ToolCall terminal `SUCCEEDED` 后写入，并在任何
@@ -1788,9 +1854,8 @@ search_orders
 
 ```text
 user: 第二个
-→ ordinal InputBinding
 → current CandidateSet + SearchOrdersObservation validation
-→ CAS SelectionRecord + selected target
+→ CAS ordinal InputBinding + RequestUnit ref + SelectionRecord + selected target
 → get_order(second order)
 → reply
 ```
@@ -2143,7 +2208,7 @@ artifact 保存该 exact token，Grader 必须从 authenticated Fixture 或实�
 |---|---|
 | `$QUERY_BINDING_REF` | 当前 accepted product-description InputBinding ref |
 | `$ORDINAL_BINDING_REF` | 当前 accepted ordinal InputBinding ref |
-| `$ORDER_BINDING_REF` | 当前 verified order target InputBinding ref |
+| `$ORDER_BINDING_REF` | 当前 order_id InputBinding ref；verified target 仍是独立受控引用 |
 | `$CLAIM_BINDING_REF` | 当前有效“未收到” Claim binding ref |
 | `$TASK_VERSION_AT_GATE` | 实际 Gateway validated Task version |
 | `$SEARCH_BASE_TASK_VERSION` | 搜索 effect CAS base Task version |
@@ -2295,7 +2360,7 @@ trajectory `requirement_refs[]` exact groups：
 | `T2-candidate-out-of-range-rejected` | `MSG-ORDINAL-OUT-OF-RANGE；[fx-current-candidate-set-owner-a-v1]；[]；NONE` | `REQ_BINDING(candidate_ordinal,$ORDINAL_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_STOP(ASK_USER,CANDIDATE_REFRESH_REQUIRED)` | `FORBID_SELECTION, FORBID_ORDER_TOOLCALL, FORBID_SHIPMENT_TOOLCALL` | `ORDINAL_6_NOT_IN_SET, NO_SELECTION_RECORD, NO_TARGET_MUTATION / NO_HIDDEN_CANDIDATE_DISCLOSURE` | `CF-04/12/14` |
 | `T2-candidate-zero-or-multiple-current-rejected` | `MSG-SECOND；[fx-zero-or-multiple-current-candidate-set-owner-a-v1]；[]；NONE` | `REQ_BINDING(candidate_ordinal,$ORDINAL_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_STOP(ASK_USER,CANDIDATE_REFRESH_REQUIRED)` | `FORBID_SELECTION, FORBID_ORDER_TOOLCALL, FORBID_CROSS_TASK_REF_LOAD` | `CURRENT_SET_CARDINALITY_NOT_ONE, NO_SELECTION_RECORD, NO_TARGET_MUTATION / NO_CANDIDATE_SUMMARY_REPLAY` | `CF-03/12/14` |
 | `T2-assessment-delayed-boundary` | `MSG-LOGISTICS；[fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-delayed-boundary-owner-a-v1]；NONE` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_TOOL(get_shipment,1,1,SUCCEEDED,FOUND), REQ_ATTEMPT(get_shipment,1,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(DELAYED,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_STALE_FACT_IN_CONTEXT_OR_REPLY, FORBID_MODEL_GENERATED_FACT_OR_RESULT` | `ASSESSED_AT_EQUALS_PROMISE_BOUNDARY_RULE_INPUT, DELAYED_REASON_ORDER_EXACT / SHIPMENT_RENDERER_WHITELIST_EXACT` | `CF-04/10/12/13/14` |
-| `T2-assessment-delivered-not-received-current-claim` | `MSG-NOT-RECEIVED；[fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-delivered-owner-a-v1]；NONE` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_BINDING(not_received_claim,$CLAIM_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_TOOL(get_shipment,1,1,SUCCEEDED,FOUND), REQ_ATTEMPT(get_shipment,1,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(DELIVERED_NOT_RECEIVED,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_ASSESSMENT_BOUND_TO_OLD_OBSERVATION, FORBID_MODEL_GENERATED_FACT_OR_RESULT` | `CLAIM_TARGET_AND_TASK_CURRENT, DNR_PRECEDENCE_EXACT / SHIPMENT_RENDERER_WHITELIST_EXACT` | `CF-04/10/12/13/14` |
+| `T2-assessment-delivered-not-received-current-claim` | `MSG-NOT-RECEIVED；[fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-delivered-owner-a-v1]；NONE` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_BINDING(shipment_not_received,$CLAIM_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_TOOL(get_shipment,1,1,SUCCEEDED,FOUND), REQ_ATTEMPT(get_shipment,1,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(DELIVERED_NOT_RECEIVED,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_ASSESSMENT_BOUND_TO_OLD_OBSERVATION, FORBID_MODEL_GENERATED_FACT_OR_RESULT` | `CLAIM_TARGET_AND_TASK_CURRENT, DNR_PRECEDENCE_EXACT / SHIPMENT_RENDERER_WHITELIST_EXACT` | `CF-04/10/12/13/14` |
 | `T2-assessment-claim-corrected` | `MSG-LOGISTICS；[fx-corrected-not-received-claim-owner-a-v1,fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-delivered-owner-a-v1]；NONE` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_TOOL(get_shipment,1,1,SUCCEEDED,FOUND), REQ_ATTEMPT(get_shipment,1,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(NORMAL,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_MODEL_GENERATED_FACT_OR_RESULT, FORBID_ASSESSMENT_BOUND_TO_OLD_OBSERVATION` | `OLD_CLAIM_SUPERSEDED, NO_CURRENT_NOT_RECEIVED_CLAIM, OLD_ASSESSMENT_NOT_CURRENT / NO_DNR_TEXT` | `CF-04/10/12/13/14` |
 | `T2-timeout-after-dispatch-then-success` | `MSG-LOGISTICS；[fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-current-owner-a-v1]；fault:get-shipment:timeout-after-dispatch-once-v1` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_TOOL(get_shipment,1,2,SUCCEEDED,FOUND), REQ_ATTEMPT(get_shipment,1,TIMEOUT,TOOL_CALL_TIMEOUT,AFTER_DISPATCH,RETRY_SCHEDULED), REQ_ATTEMPT(get_shipment,2,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(NORMAL,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_ATTEMPT_OVER_BUDGET, FORBID_SECOND_TOOLCALL_IDENTITY_FOR_SAME_SEMANTICS, FORBID_LOSS_OF_PRIOR_ATTEMPT_EVIDENCE, FORBID_MODEL_GENERATED_FACT_OR_RESULT` | `ONE_TOOLCALL_TWO_ATTEMPTS, ATTEMPT1_TIMEOUT_SHAPE_EXACT, TERMINAL_SUCCESS_PRESERVES_ATTEMPT1 / NO_RETRY_METADATA_DISCLOSURE` | `CF-10/12/13/14` |
 | `T2-retry-finalize-before-second-fence-recovery` | `MSG-LOGISTICS；[fx-verified-order-target-o1001-owner-a-v1]；[fx-shipment-current-owner-a-v1]；fault:get-shipment:restart-after-retry-finalize-v1` | `REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE), REQ_ATTEMPT(get_shipment,1,SYSTEM_FAILURE,SHIPMENT_SERVICE_TRANSIENT,NONE,RETRY_SCHEDULED), REQ_RECOVERY(get_shipment,1,PASS,RETRY_CONDITIONS_REVALIDATED,APPEND_ATTEMPT_2), REQ_ATTEMPT(get_shipment,2,SUCCESS,NONE,NONE,NOT_APPLICABLE), REQ_TOOL(get_shipment,1,2,SUCCEEDED,FOUND), REQ_OBSERVATION(SHIPMENT,$SHIPMENT_OBSERVATION_REF,$SHIPMENT_SOURCE_VERSION,FRESH), REQ_ASSESSMENT(NORMAL,shipment-assessment-rules.p0.v1,$SHIPMENT_OBSERVATION_REF), REQ_STOP(COMPLETED,GOAL_COMPLETED)` | `FORBID_SECOND_TOOLCALL_IDENTITY_FOR_SAME_SEMANTICS, FORBID_ATTEMPT_OVER_BUDGET, FORBID_LOSS_OF_PRIOR_ATTEMPT_EVIDENCE, FORBID_MODEL_GENERATED_FACT_OR_RESULT` | `RECOVERY_CAS_UNIQUE, ATTEMPT2_FENCE_APPENDED_ONCE / NO_RECOVERY_METADATA_DISCLOSURE` | `CF-10/12/13/14` |
