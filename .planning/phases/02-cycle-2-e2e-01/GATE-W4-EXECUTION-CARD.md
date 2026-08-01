@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_OWNER_RULING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
+状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_02_02R_PLANNING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
 
 ## Exact input
 
@@ -13,6 +13,9 @@
   object 为空，因此原始 Codex reviewer transcript 为 `NOT_FOUND`，不得改写为
   GitHub approval。
 - merge tree 与 reviewed overlay tree 相等，W3 exact product diff 仅 02-05 四文件。
+- owner-ruling PR [#221](https://github.com/weijie567/mini-agent/pull/221) 已按 branch
+  protection squash merge；`B_C2_W3R_RULING = ed61f4d4da9c75386aa96857a5e77e06de4c4804`，
+  tree `02c06f70459cf9593946c599a2de33d1c5a15a91` 与 reviewed remote-head tree 相等。
 
 ## Confirmed W4 preflight blocker and owner ruling
 
@@ -33,7 +36,8 @@ name 同时存在 `shipment_not_received` / `not_received_claim` 漂移。
 - Claim canonical name 统一为 `shipment_not_received`；
 - 增加 `02-02R/02-04R/02-05R` 与 `W3R`，最大 writer 仍为 2。
 
-只有 owner ruling reviewed merge、三个 correction Packet 逐个 reviewed merge 并冻结
+当前只允许从 exact `B_C2_W3R_RULING` 签发并审阅 `02-02R`；其 Plan review/merge 前
+不得创建 implementation Worktree。三个 correction Packet 逐个 reviewed merge 并冻结
 真实 `B_C2_W4_READY` 后，才可重冻结或创建 W4 implementation Worktree。
 
 ## Packet freeze 与批次
