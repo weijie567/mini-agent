@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from functools import wraps
 from hashlib import sha256
@@ -30,33 +30,75 @@ from mini_agent.application.persistence import (
     encode_persistence_record_versioned,
 )
 from mini_agent.application.records import (
+    AcceptedOrderSearchQueryBindingReadClosure,
+    AcceptedOrdinalBindingReadClosure,
+    AppendInitialToolAttemptV2Command,
+    AppendRecoveredToolAttemptV2Command,
+    AppendToolAttemptV2Command,
+    ApplyContinuationInputBindingV2Command,
+    ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderSearchOutcomeV2Command,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    ContinuationInputBindingReadClosure,
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
+    CreateToolCallV2Command,
+    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
+    Cycle2RunBudgetPolicyEvidence,
+    Cycle2WriteResult,
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
     ExactRunEvidenceClosure,
+    FinalizeBudgetExhaustedToolRecoveryV2Command,
+    FinalizeCreatedToolRecoveryV2Command,
     FinalizeRunCommand,
+    FinalizeStateInvalidatedToolRecoveryV2Command,
+    FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
+    FinalizeToolAttemptV2Command,
+    FinalizeUnfinishedToolRecoveryV2Command,
     InsertOnlyWriteResult,
     MessageRecord,
     ObservationWriteResult,
+    OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
+    SaveShipmentAssessmentV2Command,
+    SaveShipmentObservationV2Command,
     SaveObservationCommand,
     SaveRequestUnderstandingV2NoTaskCommand,
     ToolDispatchFenceWriteResult,
+    ToolRetryRecoveryDecisionRecordV2,
+    ToolRetryRecoveryReadClosureV2,
     TransitionRunCommand,
     TrustedOwnerScope,
+    InitialToolCallV2ReadClosure,
+    ShipmentAssessmentReadClosure,
+    ShipmentNotReceivedClaimReadClosure,
+    SupersededRunInvalidationKind,
+    SupersededRunReadClosure,
 )
-from mini_agent.core.memory import ContextManifest, OrderObservation
+from mini_agent.core.memory import (
+    ContextManifest,
+    OrderObservation,
+    SearchOrdersObservation,
+    ShipmentObservation,
+)
+from mini_agent.core.shipment import ShipmentAssessment
 from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
     InputBinding,
+    InputBindingV2,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSelectionRequest,
+    OrderCandidateSetRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -64,22 +106,29 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     GateDecision,
+    GateDecisionV2,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
     ToolEffect,
 )
 from mini_agent.core.trace import (
     AgentRunRecord,
+    AgentRunRecordV2,
     AgentRunStatus,
+    AgentRunStatusV2,
     StopReason,
     TraceEvent,
+    TraceEventV2,
     TraceEventType,
 )
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
+    P0RecordStateHistoryModel,
 )
 
 _RecordT = TypeVar("_RecordT", bound=BaseModel)
@@ -101,6 +150,62 @@ _PRIVATE_RECORD_CODES = frozenset(
         P0RecordCode.OBSERVATION_RECORD,
         P0RecordCode.CONTEXT_MANIFEST_RECORD,
         P0RecordCode.TRACE_EVENT_RECORD,
+        P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+        P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+        P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+        P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+        P0RecordCode.SHIPMENT_ASSESSMENT_RECORD,
+    }
+)
+_CYCLE2_VERSION_BY_CODE = MappingProxyType(
+    {
+        P0RecordCode.CONVERSATION_RECORD: "conversation_record.p0.v1",
+        P0RecordCode.MESSAGE_RECORD: "message_record.p0.v1",
+        P0RecordCode.TASK_RECORD: "task_record.p0.v1",
+        P0RecordCode.REQUEST_UNIT_RECORD: "request_unit_record.p0.v1",
+        P0RecordCode.CONVERSATION_TASK_LINK_RECORD: (
+            "conversation_task_link_record.p0.v1"
+        ),
+        P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
+        P0RecordCode.INPUT_BINDING_RECORD: "input_binding_record.p0.v2",
+        P0RecordCode.GATE_DECISION_RECORD: "gate_decision_record.p0.v2",
+        P0RecordCode.TOOL_CALL_RECORD: "tool_call_record.p0.v2",
+        P0RecordCode.AGENT_RUN_RECORD: "agent_run_record.p0.v2",
+        P0RecordCode.RUN_TASK_LINK_RECORD: "run_task_link_record.p0.v2",
+        P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v2",
+        P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD: (
+            "order_search_observation_record.p0.v1"
+        ),
+        P0RecordCode.ORDER_CANDIDATE_SET_RECORD: (
+            "order_candidate_set_record.p0.v1"
+        ),
+        P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD: (
+            "order_candidate_selection_record.p0.v1"
+        ),
+        P0RecordCode.SHIPMENT_OBSERVATION_RECORD: (
+            "shipment_observation_record.p0.v1"
+        ),
+        P0RecordCode.SHIPMENT_ASSESSMENT_RECORD: (
+            "shipment_assessment_record.p0.v1"
+        ),
+    }
+)
+_CYCLE2_INPUT_BINDING_VERSIONS = frozenset(
+    {"input_binding_record.p0.v1", "input_binding_record.p0.v2"}
+)
+_CYCLE2_MODEL_BY_PAIR = MappingProxyType(
+    {
+        (P0RecordCode.INPUT_BINDING_RECORD, "input_binding_record.p0.v2"): InputBindingV2,
+        (P0RecordCode.GATE_DECISION_RECORD, "gate_decision_record.p0.v2"): GateDecisionV2,
+        (P0RecordCode.TOOL_CALL_RECORD, "tool_call_record.p0.v2"): ToolCallRecordV2,
+        (P0RecordCode.AGENT_RUN_RECORD, "agent_run_record.p0.v2"): AgentRunRecordV2,
+        (P0RecordCode.RUN_TASK_LINK_RECORD, "run_task_link_record.p0.v2"): RunTaskLinkRecordV2,
+        (P0RecordCode.TRACE_EVENT_RECORD, "trace_event_record.p0.v2"): TraceEventV2,
+        (P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD, "order_search_observation_record.p0.v1"): SearchOrdersObservation,
+        (P0RecordCode.ORDER_CANDIDATE_SET_RECORD, "order_candidate_set_record.p0.v1"): OrderCandidateSetRecord,
+        (P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD, "order_candidate_selection_record.p0.v1"): OrderCandidateSelectionRecord,
+        (P0RecordCode.SHIPMENT_OBSERVATION_RECORD, "shipment_observation_record.p0.v1"): ShipmentObservation,
+        (P0RecordCode.SHIPMENT_ASSESSMENT_RECORD, "shipment_assessment_record.p0.v1"): ShipmentAssessment,
     }
 )
 _RECORD_CODE_BY_VALUE = {code.value: code for code in P0RecordCode}
@@ -530,6 +635,18 @@ class _RuV2WriteProjectionConflict(Exception):
         super().__init__()
 
 
+class _Cycle2NotApplicable(Exception):
+    __slots__ = ()
+
+
+class _Cycle2ProjectionConflict(Exception):
+    __slots__ = ()
+
+
+class _Cycle2AlreadyApplied(Exception):
+    __slots__ = ()
+
+
 def _bounded_database_failures(
     operation: Callable[_Params, Awaitable[_ResultT]],
 ) -> Callable[_Params, Awaitable[_ResultT]]:
@@ -940,8 +1057,760 @@ def _exact_run_validate_decoded_row(
 class PostgresRecordAdapter:
     """Synchronous-SQLAlchemy implementation of the frozen async record Ports."""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        cycle2_clock: Callable[[], datetime] | None = None,
+        cycle2_run_budget_policy: Cycle2RunBudgetPolicyEvidence | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self._cycle2_clock = cycle2_clock
+        self._cycle2_run_budget_policy = cycle2_run_budget_policy
+
+    @staticmethod
+    def _cycle2_version(
+        record_code: P0RecordCode,
+        record: BaseModel | None = None,
+    ) -> str:
+        if record_code is P0RecordCode.INPUT_BINDING_RECORD and record is not None:
+            if type(record) is InputBinding:
+                return "input_binding_record.p0.v1"
+            if type(record) is InputBindingV2:
+                return "input_binding_record.p0.v2"
+        version = _CYCLE2_VERSION_BY_CODE.get(record_code)
+        if version is None:
+            raise _integrity(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+        return version
+
+    @classmethod
+    def _cycle2_encode(
+        cls,
+        record_code: P0RecordCode,
+        record: BaseModel,
+        *,
+        logical_children: tuple[BaseModel, ...] = (),
+        external_references: tuple[P0RecordReference, ...] = (),
+    ) -> P0PersistenceEnvelope:
+        version = cls._cycle2_version(record_code, record)
+        if record_code in {
+            P0RecordCode.CONVERSATION_RECORD,
+            P0RecordCode.MESSAGE_RECORD,
+            P0RecordCode.TASK_RECORD,
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            P0RecordCode.CONTEXT_MANIFEST_RECORD,
+        } or (
+            record_code is P0RecordCode.INPUT_BINDING_RECORD
+            and type(record) is InputBinding
+        ):
+            envelope = encode_persistence_record(
+                record_code,
+                record,
+                logical_children=logical_children,
+                external_references=external_references,
+            )
+            decoded = cls._decode_envelope(
+                envelope,
+                expected_code=record_code,
+            )
+        else:
+            return cls._ru_v2_write_encode(
+                record_code,
+                record,
+                schema_version=version,
+                external_references=external_references,
+                logical_children=logical_children,
+            )
+        if (
+            decoded.source_record != record
+            or decoded.logical_children != logical_children
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        return envelope
+
+    @classmethod
+    def _cycle2_encode_input_binding(
+        cls,
+        record: InputBindingV2,
+        *,
+        request_unit_id: UUID,
+    ) -> P0PersistenceEnvelope:
+        return cls._cycle2_encode(
+            P0RecordCode.INPUT_BINDING_RECORD,
+            record,
+            external_references=(
+                _external_reference(
+                    "request_unit_id",
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    "request_unit_id",
+                    request_unit_id,
+                ),
+            ),
+        )
+
+    @classmethod
+    def _cycle2_projection_values(
+        cls,
+        envelope: P0PersistenceEnvelope,
+        decoded: DecodedP0PersistenceRecord,
+        *,
+        owner_customer_id: str,
+    ) -> dict[str, object]:
+        record = decoded.source_record
+
+        def uuid_projection(field_name: str) -> UUID | None:
+            value = getattr(record, field_name, None)
+            return value if type(value) is UUID else None
+
+        lifecycle_status = _enum_value(getattr(record, "status", None))
+        state_version = getattr(record, "state_version", None)
+        attempt_count = getattr(record, "attempt_count", None)
+        recovery_sort_at = (
+            getattr(record, "started_at", None)
+            if envelope.record_code is P0RecordCode.AGENT_RUN_RECORD
+            else None
+        )
+        return {
+            "record_code": envelope.record_code.value,
+            "record_schema_version": envelope.record_schema_version,
+            "logical_identity": _json_identity(envelope.logical_identity),
+            "direct_owner_customer_id": envelope.direct_owner_customer_id,
+            "scope_owner_customer_id": owner_customer_id,
+            "conversation_id": uuid_projection("conversation_id"),
+            "run_id": uuid_projection("run_id"),
+            "task_id": uuid_projection("task_id"),
+            "request_unit_id": uuid_projection("request_unit_id"),
+            "lifecycle_status": lifecycle_status,
+            "state_version": state_version if type(state_version) is int else None,
+            "attempt_count": attempt_count if type(attempt_count) is int else None,
+            "recovery_sort_at": (
+                recovery_sort_at
+                if type(recovery_sort_at) is datetime
+                else None
+            ),
+            "envelope": envelope.model_dump(mode="json"),
+        }
+
+    @staticmethod
+    def _cycle2_versioned_decode_input(
+        row: P0RecordModel | P0RecordStateHistoryModel,
+        record_code: P0RecordCode,
+    ) -> dict[str, Any]:
+        raw = json.loads(
+            json.dumps(row.envelope, ensure_ascii=False, separators=(",", ":"))
+        )
+        model_type = _CYCLE2_MODEL_BY_PAIR.get(
+            (record_code, row.record_schema_version)
+        )
+        if model_type is None:
+            return raw
+        payload = raw.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            return raw
+        try:
+            rebuilt = model_type.model_validate_json(
+                json.dumps(payload["data"], ensure_ascii=False, separators=(",", ":")),
+                strict=True,
+            )
+            payload["data"] = rebuilt.model_dump(mode="json")
+            children = payload.get("logical_children")
+            if isinstance(children, list):
+                ordered_children = []
+                for child in children:
+                    if not isinstance(child, dict) or not isinstance(child.get("data"), dict):
+                        ordered_children.append(child)
+                        continue
+                    child_type = {
+                        "tool_attempt_record": ToolAttemptRecordV2,
+                        "tool_retry_recovery_decision_record": (
+                            ToolRetryRecoveryDecisionRecordV2
+                        ),
+                    }.get(child.get("child_code"))
+                    if child_type is not None:
+                        child_record = child_type.model_validate_json(
+                            json.dumps(child["data"], ensure_ascii=False, separators=(",", ":")),
+                            strict=True,
+                        )
+                        child["data"] = child_record.model_dump(mode="json")
+                    ordered_children.append(
+                        {
+                            key: child[key]
+                            for key in (
+                                "data",
+                                "child_code",
+                                "parent_record_code",
+                                "parent_logical_identity",
+                                "logical_identity",
+                            )
+                            if key in child
+                        }
+                    )
+                payload["logical_children"] = ordered_children
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            return raw
+        raw["record_references"] = [
+            {
+                key: reference[key]
+                for key in (
+                    "relation",
+                    "target_record_code",
+                    "target_logical_identity",
+                )
+                if key in reference
+            }
+            for reference in raw.get("record_references", [])
+            if isinstance(reference, dict)
+        ]
+        raw["payload"] = {
+            key: payload[key]
+            for key in (
+                "data",
+                "record_code",
+                "record_schema_version",
+                "logical_children",
+            )
+            if key in payload
+        }
+        return {
+            key: raw[key]
+            for key in (
+                "record_code",
+                "record_schema_version",
+                "logical_identity",
+                "direct_owner_customer_id",
+                "record_references",
+                "payload",
+            )
+            if key in raw
+        }
+
+    @staticmethod
+    def _ru_v2_write_decode_cycle2(
+        envelope: P0PersistenceEnvelope | dict[str, Any],
+        *,
+        record_code: P0RecordCode,
+        schema_version: str,
+    ) -> DecodedP0PersistenceRecord:
+        return decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=record_code,
+            expected_schema_version=schema_version,
+            correlation_ref=uuid4(),
+        )
+
+    @classmethod
+    def _cycle2_decode_row(
+        cls,
+        session: Session,
+        row: P0RecordModel,
+        *,
+        owner_customer_id: str,
+        expected_code: P0RecordCode | None = None,
+        expected_versions: frozenset[str] | None = None,
+    ) -> DecodedP0PersistenceRecord:
+        record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+        if record_code is None:
+            raise _integrity(P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE)
+        if expected_code is not None and record_code is not expected_code:
+            raise _integrity(P0PersistenceIntegrityCategory.RECORD_CODE_MISMATCH)
+        allowed_versions = expected_versions
+        if allowed_versions is None:
+            allowed_versions = frozenset({cls._cycle2_version(record_code)})
+        if row.record_schema_version not in allowed_versions:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+            )
+        if row.scope_owner_customer_id != owner_customer_id:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+            )
+        envelope = _exact_run_parse_envelope(row.envelope)
+        decoded = cls._ru_v2_write_decode_cycle2(
+            cls._cycle2_versioned_decode_input(row, record_code),
+            record_code=record_code,
+            schema_version=row.record_schema_version,
+        )
+        expected_projection = cls._cycle2_projection_values(
+            envelope,
+            decoded,
+            owner_customer_id=owner_customer_id,
+        )
+        for field_name, value in expected_projection.items():
+            if getattr(row, field_name) != value:
+                category = (
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                    if field_name == "scope_owner_customer_id"
+                    else P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                )
+                raise _integrity(category)
+        if (
+            envelope.record_code is not record_code
+            or envelope.record_schema_version != row.record_schema_version
+            or (
+                envelope.direct_owner_customer_id is not None
+                and envelope.direct_owner_customer_id != owner_customer_id
+            )
+            or _exact_run_normalized_references(session, row)
+            != envelope.record_references
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        return decoded
+
+    @classmethod
+    def _cycle2_validate_reference_targets(
+        cls,
+        session: Session,
+        envelope: P0PersistenceEnvelope,
+        *,
+        owner_customer_id: str,
+        pending_keys: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        for reference in envelope.record_references:
+            key = (
+                reference.target_record_code.value,
+                _canonical_identity_text(
+                    _json_identity(reference.target_logical_identity)
+                ),
+            )
+            if key in pending_keys:
+                continue
+            statement = select(P0RecordModel).where(
+                P0RecordModel.record_code == reference.target_record_code.value,
+                P0RecordModel.logical_identity
+                == _json_identity(reference.target_logical_identity),
+            )
+            if reference.target_record_code in _PRIVATE_RECORD_CODES:
+                statement = statement.where(
+                    P0RecordModel.scope_owner_customer_id == owner_customer_id
+                )
+            else:
+                statement = statement.where(
+                    P0RecordModel.scope_owner_customer_id.is_(None)
+                )
+            target = session.scalar(statement.limit(1))
+            if target is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            if reference.target_record_code in _PRIVATE_RECORD_CODES:
+                allowed_versions = (
+                    _CYCLE2_INPUT_BINDING_VERSIONS
+                    if reference.target_record_code
+                    is P0RecordCode.INPUT_BINDING_RECORD
+                    else frozenset(
+                        {cls._cycle2_version(reference.target_record_code)}
+                    )
+                )
+                cls._cycle2_decode_row(
+                    session,
+                    target,
+                    owner_customer_id=owner_customer_id,
+                    expected_code=reference.target_record_code,
+                    expected_versions=allowed_versions,
+                )
+
+    @classmethod
+    def _cycle2_row(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        record_code: P0RecordCode,
+        logical_identity: tuple[tuple[str, object], ...],
+        for_update: bool = False,
+        expected_versions: frozenset[str] | None = None,
+    ) -> tuple[P0RecordModel, DecodedP0PersistenceRecord] | None:
+        statement = select(P0RecordModel).where(
+            P0RecordModel.record_code == record_code.value,
+            P0RecordModel.logical_identity == _json_identity(logical_identity),
+            P0RecordModel.scope_owner_customer_id == owner_customer_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement.limit(2)))
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        row = rows[0]
+        decoded = cls._cycle2_decode_row(
+            session,
+            row,
+            owner_customer_id=owner_customer_id,
+            expected_code=record_code,
+            expected_versions=expected_versions,
+        )
+        cls._cycle2_validate_reference_targets(
+            session,
+            _exact_run_parse_envelope(row.envelope),
+            owner_customer_id=owner_customer_id,
+        )
+        return row, decoded
+
+    @classmethod
+    def _cycle2_rows(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        record_code: P0RecordCode,
+        predicates: tuple[object, ...] = (),
+        for_update: bool = False,
+        expected_versions: frozenset[str] | None = None,
+    ) -> tuple[tuple[P0RecordModel, DecodedP0PersistenceRecord], ...]:
+        statement = (
+            select(P0RecordModel)
+            .where(
+                P0RecordModel.record_code == record_code.value,
+                P0RecordModel.scope_owner_customer_id == owner_customer_id,
+                *predicates,
+            )
+            .order_by(P0RecordModel.logical_identity)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement))
+        result = []
+        for row in rows:
+            decoded = cls._cycle2_decode_row(
+                session,
+                row,
+                owner_customer_id=owner_customer_id,
+                expected_code=record_code,
+                expected_versions=expected_versions,
+            )
+            cls._cycle2_validate_reference_targets(
+                session,
+                _exact_run_parse_envelope(row.envelope),
+                owner_customer_id=owner_customer_id,
+            )
+            result.append((row, decoded))
+        return tuple(result)
+
+    @classmethod
+    def _cycle2_insert(
+        cls,
+        session: Session,
+        envelopes: tuple[P0PersistenceEnvelope, ...],
+        *,
+        owner_customer_id: str,
+    ) -> None:
+        keys = frozenset(cls._envelope_key(envelope) for envelope in envelopes)
+        for envelope in envelopes:
+            cls._cycle2_validate_reference_targets(
+                session,
+                envelope,
+                owner_customer_id=owner_customer_id,
+                pending_keys=keys,
+            )
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            decoded = cls._ru_v2_write_decode_cycle2(
+                envelope,
+                record_code=envelope.record_code,
+                schema_version=envelope.record_schema_version,
+            )
+            values = cls._cycle2_projection_values(
+                envelope,
+                decoded,
+                owner_customer_id=owner_customer_id,
+            )
+            inserted = session.scalar(
+                postgresql_insert(P0RecordModel)
+                .values(record_id=uuid4(), **values)
+                .on_conflict_do_nothing(
+                    index_elements=(
+                        P0RecordModel.record_code,
+                        P0RecordModel.logical_identity,
+                    )
+                )
+                .returning(P0RecordModel.record_id)
+            )
+            if inserted is None:
+                raise _Cycle2ProjectionConflict() from None
+        session.flush()
+        for envelope in envelopes:
+            session.add_all(
+                cls._reference_model(
+                    envelope,
+                    ordinal=ordinal,
+                    reference=reference,
+                )
+                for ordinal, reference in enumerate(envelope.record_references)
+            )
+        session.flush()
+
+    @classmethod
+    def _cycle2_archive_preimage(
+        cls,
+        session: Session,
+        row: P0RecordModel,
+        decoded: DecodedP0PersistenceRecord,
+        *,
+        owner_customer_id: str,
+    ) -> None:
+        record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
+        if record_code not in {
+            P0RecordCode.TASK_RECORD,
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        }:
+            return
+        source_record = decoded.source_record
+        if (
+            record_code is P0RecordCode.TASK_RECORD
+            and type(source_record) is not TaskRecord
+        ) or (
+            record_code is P0RecordCode.REQUEST_UNIT_RECORD
+            and type(source_record) is not RequestUnitRecord
+        ):
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        state_version = cast(TaskRecord | RequestUnitRecord, source_record).state_version
+        if (
+            type(state_version) is not int
+            or state_version < 1
+            or row.state_version != state_version
+            or row.scope_owner_customer_id != owner_customer_id
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        values = {
+            "history_id": uuid4(),
+            "record_code": row.record_code,
+            "record_schema_version": row.record_schema_version,
+            "logical_identity": row.logical_identity,
+            "scope_owner_customer_id": owner_customer_id,
+            "state_version": state_version,
+            "envelope": row.envelope,
+        }
+        inserted = session.scalar(
+            postgresql_insert(P0RecordStateHistoryModel)
+            .values(**values)
+            .on_conflict_do_nothing(
+                constraint="uq_p0_record_state_history_logical_version"
+            )
+            .returning(P0RecordStateHistoryModel.history_id)
+        )
+        if inserted is not None:
+            return
+        existing = tuple(
+            session.scalars(
+                select(P0RecordStateHistoryModel)
+                .where(
+                    P0RecordStateHistoryModel.record_code == row.record_code,
+                    P0RecordStateHistoryModel.logical_identity
+                    == row.logical_identity,
+                    P0RecordStateHistoryModel.state_version == state_version,
+                )
+                .limit(2)
+            )
+        )
+        if len(existing) != 1:
+            raise _Cycle2ProjectionConflict() from None
+        historical = existing[0]
+        if any(
+            (
+                historical.record_schema_version != row.record_schema_version,
+                historical.scope_owner_customer_id != owner_customer_id,
+                historical.envelope != row.envelope,
+            )
+        ):
+            raise _Cycle2ProjectionConflict() from None
+        verified = cls._cycle2_historical_row(
+            session,
+            owner_customer_id=owner_customer_id,
+            record_code=record_code,
+            logical_identity=cast(
+                tuple[tuple[str, object], ...],
+                _exact_run_parse_envelope(row.envelope).logical_identity,
+            ),
+            state_version=state_version,
+        )
+        if (
+            verified is None
+            or verified.source_record != decoded.source_record
+            or verified.logical_children != decoded.logical_children
+        ):
+            raise _Cycle2ProjectionConflict() from None
+
+    @classmethod
+    def _cycle2_historical_row(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        record_code: P0RecordCode,
+        logical_identity: tuple[tuple[str, object], ...],
+        state_version: int,
+    ) -> DecodedP0PersistenceRecord | None:
+        expected_version = cls._cycle2_version(record_code)
+        rows = tuple(
+            session.scalars(
+                select(P0RecordStateHistoryModel)
+                .where(
+                    P0RecordStateHistoryModel.scope_owner_customer_id
+                    == owner_customer_id,
+                    P0RecordStateHistoryModel.record_code == record_code.value,
+                    P0RecordStateHistoryModel.logical_identity
+                    == _json_identity(logical_identity),
+                    P0RecordStateHistoryModel.state_version == state_version,
+                )
+                .limit(2)
+            )
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        row = rows[0]
+        if (
+            row.record_schema_version != expected_version
+            or row.scope_owner_customer_id != owner_customer_id
+            or row.record_code != record_code.value
+            or row.logical_identity != _json_identity(logical_identity)
+            or row.state_version != state_version
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        envelope = _exact_run_parse_envelope(row.envelope)
+        decoded = cls._ru_v2_write_decode_cycle2(
+            cls._cycle2_versioned_decode_input(row, record_code),
+            record_code=record_code,
+            schema_version=expected_version,
+        )
+        source_record = decoded.source_record
+        if (
+            record_code is P0RecordCode.TASK_RECORD
+            and type(source_record) is not TaskRecord
+        ) or (
+            record_code is P0RecordCode.REQUEST_UNIT_RECORD
+            and type(source_record) is not RequestUnitRecord
+        ):
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        historical_record = cast(
+            TaskRecord | RequestUnitRecord,
+            source_record,
+        )
+        if (
+            envelope.record_code is not record_code
+            or envelope.record_schema_version != expected_version
+            or _json_identity(envelope.logical_identity) != row.logical_identity
+            or (
+                envelope.direct_owner_customer_id is not None
+                and envelope.direct_owner_customer_id != owner_customer_id
+            )
+            or historical_record.state_version != state_version
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        if (
+            record_code is P0RecordCode.TASK_RECORD
+            and (
+                cast(TaskRecord, source_record).owner_customer_id
+                != owner_customer_id
+            )
+        ):
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        cls._cycle2_validate_reference_targets(
+            session,
+            envelope,
+            owner_customer_id=owner_customer_id,
+        )
+        return decoded
+
+    @classmethod
+    def _cycle2_replace(
+        cls,
+        session: Session,
+        row: P0RecordModel,
+        *,
+        owner_customer_id: str,
+        expected_record: BaseModel,
+        expected_children: tuple[BaseModel, ...] = (),
+        next_envelope: P0PersistenceEnvelope,
+    ) -> None:
+        decoded = cls._cycle2_decode_row(
+            session,
+            row,
+            owner_customer_id=owner_customer_id,
+            expected_code=next_envelope.record_code,
+        )
+        if (
+            decoded.source_record != expected_record
+            or decoded.logical_children != expected_children
+        ):
+            raise _Cycle2NotApplicable() from None
+        cls._cycle2_validate_reference_targets(
+            session,
+            next_envelope,
+            owner_customer_id=owner_customer_id,
+        )
+        next_decoded = cls._ru_v2_write_decode_cycle2(
+            next_envelope,
+            record_code=next_envelope.record_code,
+            schema_version=next_envelope.record_schema_version,
+        )
+        values = cls._cycle2_projection_values(
+            next_envelope,
+            next_decoded,
+            owner_customer_id=owner_customer_id,
+        )
+        cls._cycle2_archive_preimage(
+            session,
+            row,
+            decoded,
+            owner_customer_id=owner_customer_id,
+        )
+        result = session.execute(
+            update(P0RecordModel)
+            .where(
+                P0RecordModel.record_id == row.record_id,
+                P0RecordModel.envelope == row.envelope,
+            )
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            raise _Cycle2NotApplicable() from None
+        session.execute(
+            delete(P0RecordReferenceModel).where(
+                P0RecordReferenceModel.source_record_code == row.record_code,
+                P0RecordReferenceModel.source_logical_identity
+                == row.logical_identity,
+            )
+        )
+        session.add_all(
+            cls._reference_model(
+                next_envelope,
+                ordinal=ordinal,
+                reference=reference,
+            )
+            for ordinal, reference in enumerate(next_envelope.record_references)
+        )
+        session.flush()
+
+    def _cycle2_trusted_now(self) -> datetime:
+        if self._cycle2_clock is None:
+            raise _integrity(P0PersistenceIntegrityCategory.MISSING_RECORD_CODE)
+        trusted_now = self._cycle2_clock()
+        if type(trusted_now) is not datetime or trusted_now.tzinfo is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        if trusted_now.utcoffset() != UTC.utcoffset(trusted_now):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        return trusted_now
 
     @_bounded_database_failures
     async def load_exact_run_evidence_for_owner(
@@ -2012,6 +2881,23 @@ class PostgresRecordAdapter:
             next_envelope,
             scope_owner_customer_id=owner,
         )
+        if row.record_code in {
+            P0RecordCode.TASK_RECORD.value,
+            P0RecordCode.REQUEST_UNIT_RECORD.value,
+        }:
+            if owner is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                )
+            try:
+                self._cycle2_archive_preimage(
+                    session,
+                    row,
+                    decoded,
+                    owner_customer_id=owner,
+                )
+            except _Cycle2ProjectionConflict:
+                return False
         result = session.execute(
             update(P0RecordModel)
             .where(
@@ -2534,10 +3420,15 @@ class PostgresRecordAdapter:
         record_code: P0RecordCode,
         record: BaseModel,
         *,
+        schema_version: str | None = None,
         external_references: tuple[P0RecordReference, ...] = (),
         logical_children: tuple[BaseModel, ...] = (),
     ) -> P0PersistenceEnvelope:
-        expected_version = cls._ru_v2_write_version(record_code)
+        expected_version = (
+            cls._ru_v2_write_version(record_code)
+            if schema_version is None
+            else schema_version
+        )
         envelope = encode_persistence_record_versioned(
             record_code,
             expected_version,
@@ -3769,6 +4660,1860 @@ class PostgresRecordAdapter:
                 ordered.extend(group)
             group_start = group_end
         return tuple(ordered)
+
+    @classmethod
+    def _cycle2_current_task_unit_bindings(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        for_update: bool = False,
+    ) -> tuple[TaskRecord, RequestUnitRecord, tuple[InputBindingV2, ...]] | None:
+        owner = owner_scope.customer_id
+        task_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TASK_RECORD,
+            logical_identity=(("task_id", task_id),),
+            for_update=for_update,
+        )
+        unit_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+            logical_identity=(("request_unit_id", request_unit_id),),
+            for_update=for_update,
+        )
+        if task_loaded is None or unit_loaded is None:
+            return None
+        task = task_loaded[1].source_record
+        unit = unit_loaded[1].source_record
+        if type(task) is not TaskRecord or type(unit) is not RequestUnitRecord:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        bindings: list[InputBindingV2] = []
+        for binding_id in unit.input_binding_refs:
+            loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", binding_id),),
+                for_update=for_update,
+                expected_versions=frozenset({"input_binding_record.p0.v2"}),
+            )
+            if loaded is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            binding = loaded[1].source_record
+            if type(binding) is not InputBindingV2:
+                raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+            bindings.append(binding)
+        if len({binding.binding_id for binding in bindings}) != len(bindings):
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        return task, unit, tuple(bindings)
+
+    @classmethod
+    def _cycle2_continuation_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        message_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_now: datetime,
+        for_update: bool = False,
+    ) -> ContinuationInputBindingReadClosure | None:
+        owner = owner_scope.customer_id
+        roots: list[BaseModel] = []
+        for code, identity, expected_type in (
+            (
+                P0RecordCode.CONVERSATION_RECORD,
+                (("conversation_id", conversation_id),),
+                ConversationRecord,
+            ),
+            (
+                P0RecordCode.MESSAGE_RECORD,
+                (("message_id", message_id),),
+                MessageRecord,
+            ),
+        ):
+            loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=code,
+                logical_identity=identity,
+                for_update=for_update,
+            )
+            if loaded is None:
+                return None
+            record = loaded[1].source_record
+            if type(record) is not expected_type:
+                raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+            roots.append(record)
+        links = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            predicates=(
+                P0RecordModel.conversation_id == conversation_id,
+                P0RecordModel.task_id == task_id,
+            ),
+            for_update=for_update,
+        )
+        if not links:
+            return None
+        if len(links) != 1 or type(links[0][1].source_record) is not ConversationTaskLinkRecord:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        current = cls._cycle2_current_task_unit_bindings(
+            session,
+            owner_scope=owner_scope,
+            task_id=task_id,
+            request_unit_id=request_unit_id,
+            for_update=for_update,
+        )
+        if current is None:
+            return None
+        task, unit, bindings = current
+        return ContinuationInputBindingReadClosure(
+            owner_scope=owner_scope,
+            trusted_conversation_record=cast(ConversationRecord, roots[0]),
+            current_conversation_task_link_record=cast(
+                ConversationTaskLinkRecord, links[0][1].source_record
+            ),
+            saved_user_message_record=cast(MessageRecord, roots[1]),
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_input_binding_records=bindings,
+            trusted_now=trusted_now,
+        )
+
+    @_bounded_database_failures
+    async def load_continuation_input_binding_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        message_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_now: datetime,
+    ) -> ContinuationInputBindingReadClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                return self._cycle2_continuation_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                    trusted_now=trusted_now,
+                )
+
+    @_bounded_database_failures
+    async def apply_continuation_input_binding_if_current(
+        self,
+        command: ApplyContinuationInputBindingV2Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_closure
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_continuation_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    conversation_id=closure.trusted_conversation_record.conversation_id,
+                    message_id=closure.saved_user_message_record.message_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=closure.current_request_unit_record.request_unit_id,
+                    trusted_now=closure.trusted_now,
+                    for_update=True,
+                )
+                if current != closure:
+                    raise _Cycle2NotApplicable() from None
+                owner = closure.owner_scope.customer_id
+                task_row = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=(("task_id", closure.current_task_record.task_id),),
+                    for_update=True,
+                )
+                unit_row = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=(("request_unit_id", closure.current_request_unit_record.request_unit_id),),
+                    for_update=True,
+                )
+                if task_row is None or unit_row is None:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode_input_binding(
+                            command.new_input_binding_record,
+                            request_unit_id=closure.current_request_unit_record.request_unit_id,
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(
+                    session,
+                    task_row[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_task_record,
+                    next_envelope=self._cycle2_encode(P0RecordCode.TASK_RECORD, command.next_task_record),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit_row[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_request_unit_record,
+                    next_envelope=self._cycle2_encode(P0RecordCode.REQUEST_UNIT_RECORD, command.next_request_unit_record),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def load_initial_tool_call_v2_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+    ) -> InitialToolCallV2ReadClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                current = self._cycle2_current_task_unit_bindings(
+                    session,
+                    owner_scope=owner_scope,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                )
+                if current is None:
+                    return None
+                task, unit, bindings = current
+                return InitialToolCallV2ReadClosure(
+                    owner_scope=owner_scope,
+                    current_task_record=task,
+                    current_request_unit_record=unit,
+                    current_input_binding_records=bindings,
+                    trusted_read_at=trusted_read_at,
+                )
+
+    @_bounded_database_failures
+    async def insert_initial_tool_call_v2_if_current(
+        self,
+        command: CreateToolCallV2Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_current_task_unit_bindings(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=closure.current_request_unit_record.request_unit_id,
+                    for_update=True,
+                )
+                if current != (
+                    closure.current_task_record,
+                    closure.current_request_unit_record,
+                    closure.current_input_binding_records,
+                ):
+                    raise _Cycle2NotApplicable() from None
+                gate_id = command.created_record.gate_decision_id
+                existing = self._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    predicates=(P0RecordModel.task_id == closure.current_task_record.task_id,),
+                    for_update=True,
+                )
+                if any(
+                    type(decoded.source_record) is ToolCallRecordV2
+                    and decoded.source_record.gate_decision_id == gate_id
+                    for _, decoded in existing
+                ):
+                    raise _Cycle2ProjectionConflict() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.GATE_DECISION_RECORD,
+                            command.gate_decision,
+                        ),
+                        self._cycle2_encode(
+                            P0RecordCode.TOOL_CALL_RECORD,
+                            command.created_record,
+                            logical_children=command.created_record.attempts,
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def finalize_tool_attempt_if_current(
+        self,
+        command: FinalizeToolAttemptV2Command,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    logical_identity=(("tool_call_id", command.expected_running_record.tool_call_id),),
+                    for_update=True,
+                )
+                if loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_replace(
+                    session,
+                    loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_running_record,
+                    expected_children=command.expected_running_record.attempts,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TOOL_CALL_RECORD,
+                        command.next_record,
+                        logical_children=command.next_record.attempts,
+                    ),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_retry_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        tool_call_id: UUID,
+        trusted_read_at: datetime,
+        run_budget_policy: Cycle2RunBudgetPolicyEvidence,
+        for_update: bool = False,
+    ) -> ToolRetryRecoveryReadClosureV2 | None:
+        owner = owner_scope.customer_id
+        loaded_tool = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TOOL_CALL_RECORD,
+            logical_identity=(("tool_call_id", tool_call_id),),
+            for_update=for_update,
+        )
+        if loaded_tool is None:
+            return None
+        tool = loaded_tool[1].source_record
+        if type(tool) is not ToolCallRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        current = cls._cycle2_current_task_unit_bindings(
+            session,
+            owner_scope=owner_scope,
+            task_id=tool.task_id,
+            request_unit_id=tool.request_unit_id,
+            for_update=for_update,
+        )
+        if current is None:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        task, unit, bindings = current
+        run_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", tool.run_id),),
+            for_update=for_update,
+        )
+        link_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            logical_identity=(("run_id", tool.run_id), ("task_id", tool.task_id)),
+            for_update=for_update,
+        )
+        if run_loaded is None or link_loaded is None:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        run = run_loaded[1].source_record
+        link = link_loaded[1].source_record
+        if type(run) is not AgentRunRecordV2 or type(link) is not RunTaskLinkRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        decisions = tuple(
+            child
+            for child in loaded_tool[1].logical_children
+            if type(child) is ToolRetryRecoveryDecisionRecordV2
+        )
+        attempts = tuple(
+            child
+            for child in loaded_tool[1].logical_children
+            if type(child) is ToolAttemptRecordV2
+        )
+        if attempts != tool.attempts or len(decisions) > 1:
+            raise _integrity(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        return ToolRetryRecoveryReadClosureV2(
+            owner_scope=owner_scope,
+            active_run_record=run,
+            active_run_task_link_record=link,
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_input_binding_records=bindings,
+            tool_call_record=tool,
+            recovery_decision_records=cast(
+                tuple[ToolRetryRecoveryDecisionRecordV2, ...], decisions
+            ),
+            trusted_read_at=trusted_read_at,
+            run_budget_policy=run_budget_policy,
+        )
+
+    @_bounded_database_failures
+    async def load_tool_retry_recovery_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        tool_call_id: UUID,
+    ) -> ToolRetryRecoveryReadClosureV2 | None:
+        trusted_now = self._cycle2_trusted_now()
+        policy = self._cycle2_run_budget_policy
+        if policy is None:
+            raise _integrity(P0PersistenceIntegrityCategory.MISSING_RECORD_CODE)
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                return self._cycle2_retry_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    tool_call_id=tool_call_id,
+                    trusted_read_at=trusted_now,
+                    run_budget_policy=policy,
+                )
+
+    def _cycle2_append_attempt(
+        self,
+        *,
+        loaded_closure: ToolRetryRecoveryReadClosureV2,
+        append_command: AppendToolAttemptV2Command,
+        recovery_decision: ToolRetryRecoveryDecisionRecordV2 | None,
+    ) -> Cycle2ReadDispatchGrant:
+        owner_scope = loaded_closure.owner_scope
+        owner = owner_scope.customer_id
+        policy = self._cycle2_run_budget_policy
+        if policy is None:
+            return Cycle2ReadDispatchGrant(
+                write_result=Cycle2DispatchFenceWriteResult.NOT_APPLICABLE
+            )
+        trusted_now = self._cycle2_trusted_now()
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_retry_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    tool_call_id=loaded_closure.tool_call_record.tool_call_id,
+                    trusted_read_at=trusted_now,
+                    run_budget_policy=policy,
+                    for_update=True,
+                )
+                if current != loaded_closure:
+                    raise _Cycle2NotApplicable() from None
+                if append_command.expected_record != current.tool_call_record:
+                    raise _Cycle2NotApplicable() from None
+                remaining = current.remaining_run_time_budget_ms()
+                if remaining < 1:
+                    raise _Cycle2NotApplicable() from None
+                loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    logical_identity=(("tool_call_id", current.tool_call_record.tool_call_id),),
+                    for_update=True,
+                )
+                if loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                children: tuple[BaseModel, ...] = (
+                    *append_command.next_running_record.attempts,
+                    *((recovery_decision,) if recovery_decision is not None else ()),
+                )
+                self._cycle2_replace(
+                    session,
+                    loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=current.tool_call_record,
+                    expected_children=loaded[1].logical_children,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TOOL_CALL_RECORD,
+                        append_command.next_running_record,
+                        logical_children=children,
+                    ),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2ReadDispatchGrant(
+                write_result=Cycle2DispatchFenceWriteResult.NOT_APPLICABLE
+            )
+        except _Cycle2ProjectionConflict:
+            return Cycle2ReadDispatchGrant(
+                write_result=Cycle2DispatchFenceWriteResult.PROJECTION_CONFLICT
+            )
+        return Cycle2ReadDispatchGrant(
+            write_result=Cycle2DispatchFenceWriteResult.APPLIED,
+            tool_call_id=append_command.next_running_record.tool_call_id,
+            attempt_no=append_command.started_attempt.attempt_no,
+            trusted_fenced_at=trusted_now,
+            effective_timeout_ms=min(500, remaining),
+        )
+
+    async def append_initial_tool_attempt_if_current(
+        self,
+        command: AppendInitialToolAttemptV2Command,
+    ) -> Cycle2ReadDispatchGrant:
+        return self._cycle2_append_attempt(
+            loaded_closure=command.loaded_closure,
+            append_command=command.attempt_append_command,
+            recovery_decision=None,
+        )
+
+    async def append_recovered_tool_attempt_if_current(
+        self,
+        command: AppendRecoveredToolAttemptV2Command,
+    ) -> Cycle2ReadDispatchGrant:
+        return self._cycle2_append_attempt(
+            loaded_closure=command.loaded_closure,
+            append_command=command.attempt_append_command,
+            recovery_decision=command.recovery_decision_record,
+        )
+
+    def _cycle2_recovery_is_applied(
+        self,
+        session: Session,
+        *,
+        loaded_closure: ToolRetryRecoveryReadClosureV2,
+        terminal_record: ToolCallRecordV2,
+        recovery_decision: ToolRetryRecoveryDecisionRecordV2 | None,
+        for_update: bool,
+    ) -> bool:
+        persisted = self._cycle2_row(
+            session,
+            owner_customer_id=loaded_closure.owner_scope.customer_id,
+            record_code=P0RecordCode.TOOL_CALL_RECORD,
+            logical_identity=((
+                "tool_call_id",
+                loaded_closure.tool_call_record.tool_call_id,
+            ),),
+            for_update=for_update,
+        )
+        desired_children: tuple[BaseModel, ...] = (
+            *terminal_record.attempts,
+            *((recovery_decision,) if recovery_decision is not None else ()),
+        )
+        return persisted is not None and (
+            persisted[1].source_record == terminal_record
+            and persisted[1].logical_children == desired_children
+        )
+
+    def _cycle2_finalize_recovery_in_transaction(
+        self,
+        session: Session,
+        *,
+        loaded_closure: ToolRetryRecoveryReadClosureV2,
+        terminal_record: ToolCallRecordV2,
+        recovery_decision: ToolRetryRecoveryDecisionRecordV2 | None,
+    ) -> None:
+        policy = self._cycle2_run_budget_policy
+        if policy is None:
+            raise _Cycle2NotApplicable() from None
+        trusted_now = self._cycle2_trusted_now()
+        owner = loaded_closure.owner_scope.customer_id
+        desired_children: tuple[BaseModel, ...] = (
+            *terminal_record.attempts,
+            *((recovery_decision,) if recovery_decision is not None else ()),
+        )
+        if self._cycle2_recovery_is_applied(
+            session,
+            loaded_closure=loaded_closure,
+            terminal_record=terminal_record,
+            recovery_decision=recovery_decision,
+            for_update=True,
+        ):
+            raise _Cycle2AlreadyApplied() from None
+        current = self._cycle2_retry_closure(
+            session,
+            owner_scope=loaded_closure.owner_scope,
+            tool_call_id=loaded_closure.tool_call_record.tool_call_id,
+            trusted_read_at=trusted_now,
+            run_budget_policy=policy,
+            for_update=True,
+        )
+        if current != loaded_closure:
+            raise _Cycle2NotApplicable() from None
+        loaded = self._cycle2_row(
+            session,
+            owner_customer_id=loaded_closure.owner_scope.customer_id,
+            record_code=P0RecordCode.TOOL_CALL_RECORD,
+            logical_identity=(("tool_call_id", current.tool_call_record.tool_call_id),),
+            for_update=True,
+        )
+        if loaded is None:
+            raise _Cycle2NotApplicable() from None
+        self._cycle2_replace(
+            session,
+            loaded[0],
+            owner_customer_id=loaded_closure.owner_scope.customer_id,
+            expected_record=current.tool_call_record,
+            expected_children=loaded[1].logical_children,
+            next_envelope=self._cycle2_encode(
+                P0RecordCode.TOOL_CALL_RECORD,
+                terminal_record,
+                logical_children=desired_children,
+            ),
+        )
+
+    def _cycle2_finalize_recovery(
+        self,
+        *,
+        loaded_closure: ToolRetryRecoveryReadClosureV2,
+        terminal_record: ToolCallRecordV2,
+        recovery_decision: ToolRetryRecoveryDecisionRecordV2 | None,
+    ) -> Cycle2WriteResult:
+        try:
+            with self.session_factory.begin() as session:
+                self._cycle2_finalize_recovery_in_transaction(
+                    session,
+                    loaded_closure=loaded_closure,
+                    terminal_record=terminal_record,
+                    recovery_decision=recovery_decision,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        except _Cycle2AlreadyApplied:
+            return Cycle2WriteResult.ALREADY_APPLIED
+        return Cycle2WriteResult.APPLIED
+
+    async def finalize_created_tool_recovery_if_current(
+        self,
+        command: FinalizeCreatedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        return self._cycle2_finalize_recovery(
+            loaded_closure=command.loaded_closure,
+            terminal_record=command.terminal_tool_call_record,
+            recovery_decision=None,
+        )
+
+    async def finalize_unfinished_tool_recovery_if_current(
+        self,
+        command: FinalizeUnfinishedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        return self._cycle2_finalize_recovery(
+            loaded_closure=command.loaded_closure,
+            terminal_record=command.terminal_tool_call_record,
+            recovery_decision=command.recovery_decision_record,
+        )
+
+    async def finalize_budget_exhausted_tool_recovery_if_current(
+        self,
+        command: FinalizeBudgetExhaustedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        return self._cycle2_finalize_recovery(
+            loaded_closure=command.loaded_closure,
+            terminal_record=command.terminal_tool_call_record,
+            recovery_decision=command.recovery_decision_record,
+        )
+
+    @_bounded_database_failures
+    async def save_shipment_observation_if_current(
+        self,
+        command: SaveShipmentObservationV2Command,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_current_task_unit_bindings(
+                    session,
+                    owner_scope=command.owner_scope,
+                    task_id=command.current_task_record.task_id,
+                    request_unit_id=command.current_request_unit_record.request_unit_id,
+                    for_update=True,
+                )
+                if current is None or current[:2] != (
+                    command.current_task_record,
+                    command.current_request_unit_record,
+                ):
+                    raise _Cycle2NotApplicable() from None
+                tool_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    logical_identity=(("tool_call_id", command.source_tool_call_record.tool_call_id),),
+                    for_update=True,
+                )
+                if (
+                    tool_loaded is None
+                    or tool_loaded[1].source_record != command.source_tool_call_record
+                ):
+                    raise _Cycle2NotApplicable() from None
+                observations = self._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+                    predicates=(
+                        P0RecordModel.task_id == command.current_task_record.task_id,
+                        P0RecordModel.request_unit_id
+                        == command.current_request_unit_record.request_unit_id,
+                    ),
+                    for_update=True,
+                )
+                records = tuple(
+                    decoded.source_record for _, decoded in observations
+                )
+                if any(type(record) is not ShipmentObservation for record in records):
+                    raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+                superseded = {
+                    cast(ShipmentObservation, record).supersedes
+                    for record in records
+                    if cast(ShipmentObservation, record).supersedes is not None
+                }
+                current_records = tuple(
+                    cast(ShipmentObservation, record)
+                    for record in records
+                    if cast(ShipmentObservation, record).observation_id not in superseded
+                    and cast(ShipmentObservation, record).verified_order_target_ref
+                    == command.observation_record.verified_order_target_ref
+                )
+                expected_previous = (
+                    ()
+                    if command.previous_observation_record is None
+                    else (command.previous_observation_record,)
+                )
+                if current_records != expected_previous:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+                            command.observation_record,
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_source_message(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        binding: InputBindingV2,
+        for_update: bool,
+    ) -> MessageRecord:
+        if len(binding.source_refs) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner_customer_id,
+            record_code=P0RecordCode.MESSAGE_RECORD,
+            logical_identity=(("message_id", binding.source_refs[0]),),
+            for_update=for_update,
+        )
+        if loaded is None or type(loaded[1].source_record) is not MessageRecord:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        return cast(MessageRecord, loaded[1].source_record)
+
+    @classmethod
+    def _cycle2_assessment_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        verified_order_target_ref: str,
+        trusted_assessed_at: datetime,
+        for_update: bool = False,
+    ) -> ShipmentAssessmentReadClosure | None:
+        owner = owner_scope.customer_id
+        task_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TASK_RECORD,
+            logical_identity=(("task_id", task_id),),
+            for_update=for_update,
+        )
+        unit_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+            logical_identity=(("request_unit_id", request_unit_id),),
+            for_update=for_update,
+        )
+        links = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            predicates=(P0RecordModel.task_id == task_id,),
+            for_update=for_update,
+        )
+        if task_loaded is None or unit_loaded is None or len(links) != 1:
+            return None
+        task = task_loaded[1].source_record
+        unit = unit_loaded[1].source_record
+        link = links[0][1].source_record
+        if (
+            type(task) is not TaskRecord
+            or type(unit) is not RequestUnitRecord
+            or type(link) is not ConversationTaskLinkRecord
+        ):
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        conversation_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", link.conversation_id),),
+            for_update=for_update,
+        )
+        if conversation_loaded is None or type(conversation_loaded[1].source_record) is not ConversationRecord:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        observations = tuple(
+            cast(ShipmentObservation, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task_id,
+                    P0RecordModel.request_unit_id == request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            if type(decoded.source_record) is ShipmentObservation
+            and decoded.source_record.verified_order_target_ref
+            == verified_order_target_ref
+        )
+        superseded_refs = {
+            record.supersedes for record in observations if record.supersedes is not None
+        }
+        current_observations = tuple(
+            record for record in observations if record.observation_id not in superseded_refs
+        )
+        if len(current_observations) != 1:
+            if not current_observations:
+                return None
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        current_observation = current_observations[0]
+        binding_rows = []
+        for binding_id in unit.input_binding_refs:
+            loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", binding_id),),
+                for_update=for_update,
+                expected_versions=_CYCLE2_INPUT_BINDING_VERSIONS,
+            )
+            if loaded is None:
+                raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+            binding_rows.append(loaded[1].source_record)
+        legacy = tuple(record for record in binding_rows if type(record) is InputBinding)
+        queries = []
+        ordinals = []
+        claims = []
+        for record in binding_rows:
+            if type(record) is not InputBindingV2:
+                continue
+            binding = cast(InputBindingV2, record)
+            message = cls._cycle2_source_message(
+                session,
+                owner_customer_id=owner,
+                binding=binding,
+                for_update=for_update,
+            )
+            common = dict(
+                binding_ref=binding.binding_id,
+                private_owner_scope_ref=owner,
+                conversation_id=link.conversation_id,
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                source_message_record=message,
+                accepted_at=binding.updated_at,
+            )
+            if binding.name == "product_description":
+                queries.append(
+                    AcceptedOrderSearchQueryBindingReadClosure(
+                        normalized_query=cast(str, binding.normalized_value),
+                        accepted_task_state_version=task.state_version,
+                        current_task_state_version=task.state_version,
+                        **common,
+                    )
+                )
+            elif binding.name == "candidate_ordinal":
+                ordinals.append(
+                    AcceptedOrdinalBindingReadClosure(
+                        normalized_ordinal=cast(int, binding.normalized_value),
+                        task_state_version=task.state_version,
+                        **common,
+                    )
+                )
+            elif binding.name == "shipment_not_received":
+                if binding.normalized_value is not True:
+                    raise _integrity(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+                claims.append(
+                    ShipmentNotReceivedClaimReadClosure(
+                        task_state_version=task.state_version,
+                        verified_order_target_ref=verified_order_target_ref,
+                        **common,
+                    )
+                )
+        assessment_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.SHIPMENT_ASSESSMENT_RECORD,
+            predicates=(
+                P0RecordModel.task_id == task_id,
+                P0RecordModel.request_unit_id == request_unit_id,
+            ),
+            for_update=for_update,
+        )
+        assessments = tuple(
+            cast(ShipmentAssessment, decoded.source_record)
+            for _, decoded in assessment_rows
+            if type(decoded.source_record) is ShipmentAssessment
+            and decoded.source_record.verified_order_target_ref
+            == verified_order_target_ref
+        )
+        assessment_superseded = {
+            item.supersedes_assessment_ref
+            for item in assessments
+            if item.supersedes_assessment_ref is not None
+        }
+        current_assessments = tuple(
+            item for item in assessments if item.assessment_id not in assessment_superseded
+        )
+        if len(current_assessments) > 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        return ShipmentAssessmentReadClosure(
+            owner_scope=owner_scope,
+            trusted_conversation_record=cast(ConversationRecord, conversation_loaded[1].source_record),
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_observation_record=current_observation,
+            current_observation_ref=current_observation.observation_id,
+            superseded_observation_records=tuple(
+                record for record in observations if record != current_observation
+            ),
+            verified_order_target_ref=verified_order_target_ref,
+            trusted_assessed_at=trusted_assessed_at,
+            current_input_binding_records=cast(tuple[InputBinding, ...], legacy),
+            current_query_bindings=tuple(queries),
+            current_ordinal_bindings=tuple(ordinals),
+            current_claim_bindings=tuple(claims),
+            current_assessment_records=current_assessments,
+        )
+
+    @_bounded_database_failures
+    async def load_shipment_assessment_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        verified_order_target_ref: str,
+        trusted_assessed_at: datetime,
+    ) -> ShipmentAssessmentReadClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                return self._cycle2_assessment_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                    verified_order_target_ref=verified_order_target_ref,
+                    trusted_assessed_at=trusted_assessed_at,
+                )
+
+    @_bounded_database_failures
+    async def save_shipment_assessment_if_current(
+        self,
+        command: SaveShipmentAssessmentV2Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_assessment_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=closure.current_request_unit_record.request_unit_id,
+                    verified_order_target_ref=closure.verified_order_target_ref,
+                    trusted_assessed_at=closure.trusted_assessed_at,
+                    for_update=True,
+                )
+                try:
+                    closure.require_same_persisted_graph(cast(ShipmentAssessmentReadClosure, current))
+                except (TypeError, ValueError):
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.SHIPMENT_ASSESSMENT_RECORD,
+                            command.assessment_record,
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_query_binding_closure(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        conversation_id: UUID,
+        task: TaskRecord,
+        unit: RequestUnitRecord,
+        binding: InputBindingV2,
+        accepted_task_state_version: int,
+        for_update: bool,
+    ) -> AcceptedOrderSearchQueryBindingReadClosure:
+        if binding.name != "product_description":
+            raise _integrity(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+        message = cls._cycle2_source_message(
+            session,
+            owner_customer_id=owner_customer_id,
+            binding=binding,
+            for_update=for_update,
+        )
+        return AcceptedOrderSearchQueryBindingReadClosure(
+            binding_ref=binding.binding_id,
+            normalized_query=cast(str, binding.normalized_value),
+            private_owner_scope_ref=owner_customer_id,
+            conversation_id=conversation_id,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            accepted_task_state_version=accepted_task_state_version,
+            current_task_state_version=task.state_version,
+            source_message_record=message,
+            accepted_at=binding.updated_at,
+        )
+
+    @classmethod
+    def _cycle2_search_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        run_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+        for_update: bool = False,
+    ) -> OrderSearchCurrentReadClosure | None:
+        owner = owner_scope.customer_id
+        conversation = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", conversation_id),),
+            for_update=for_update,
+        )
+        run = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", run_id),),
+            for_update=for_update,
+        )
+        current = cls._cycle2_current_task_unit_bindings(
+            session,
+            owner_scope=owner_scope,
+            task_id=task_id,
+            request_unit_id=request_unit_id,
+            for_update=for_update,
+        )
+        if conversation is None or run is None or current is None:
+            return None
+        conversation_record = conversation[1].source_record
+        run_record = run[1].source_record
+        task, unit, bindings = current
+        if type(conversation_record) is not ConversationRecord or type(run_record) is not AgentRunRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        if len(bindings) != 1 or bindings[0].name != "product_description":
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        all_sets = tuple(
+            cast(OrderCandidateSetRecord, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task_id,
+                    P0RecordModel.request_unit_id == request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            if type(decoded.source_record) is OrderCandidateSetRecord
+            and decoded.source_record.query_binding_refs == (bindings[0].binding_id,)
+        )
+        superseded = {
+            record.supersedes_candidate_set_ref
+            for record in all_sets
+            if record.supersedes_candidate_set_ref is not None
+        }
+        current_sets = tuple(
+            record
+            for record in all_sets
+            if record.candidate_set_id not in superseded
+            and record.result_task_state_version == task.state_version
+        )
+        if len(current_sets) > 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        candidate_set = current_sets[0] if current_sets else None
+        accepted_version = (
+            min(record.base_task_state_version for record in all_sets)
+            if all_sets
+            else task.state_version
+        )
+        query = cls._cycle2_query_binding_closure(
+            session,
+            owner_customer_id=owner,
+            conversation_id=conversation_id,
+            task=task,
+            unit=unit,
+            binding=bindings[0],
+            accepted_task_state_version=accepted_version,
+            for_update=for_update,
+        )
+        source = None
+        observation = None
+        if candidate_set is not None:
+            loaded_source = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TOOL_CALL_RECORD,
+                logical_identity=(("tool_call_id", candidate_set.source_tool_call_id),),
+                for_update=for_update,
+            )
+            loaded_observation = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+                logical_identity=(("observation_id", candidate_set.search_observation_ref),),
+                for_update=for_update,
+            )
+            if loaded_source is None or loaded_observation is None:
+                raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+            source = loaded_source[1].source_record
+            observation = loaded_observation[1].source_record
+            if type(source) is not ToolCallRecordV2 or type(observation) is not SearchOrdersObservation:
+                raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        return OrderSearchCurrentReadClosure(
+            owner_scope=owner_scope,
+            trusted_conversation_record=cast(ConversationRecord, conversation_record),
+            source_run_record=cast(AgentRunRecordV2, run_record),
+            current_query_binding=query,
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_candidate_source_tool_call_record=cast(ToolCallRecordV2 | None, source),
+            current_search_observation_record=cast(SearchOrdersObservation | None, observation),
+            current_candidate_set_record=candidate_set,
+            trusted_read_at=trusted_read_at,
+        )
+
+    @_bounded_database_failures
+    async def load_order_search_current_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        run_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+    ) -> OrderSearchCurrentReadClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+                return self._cycle2_search_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                    trusted_read_at=trusted_read_at,
+                )
+
+    @_bounded_database_failures
+    async def apply_order_search_outcome_if_current(
+        self,
+        command: ApplyOrderSearchOutcomeV2Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_read_closure
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_search_closure(
+                    session,
+                    owner_scope=command.owner_scope,
+                    conversation_id=command.trusted_conversation_record.conversation_id,
+                    run_id=command.source_run_record.run_id,
+                    task_id=command.expected_task_record.task_id,
+                    request_unit_id=command.expected_request_unit_record.request_unit_id,
+                    trusted_read_at=closure.trusted_read_at,
+                    for_update=True,
+                )
+                try:
+                    closure.require_same_persisted_graph(cast(OrderSearchCurrentReadClosure, current))
+                except (TypeError, ValueError):
+                    raise _Cycle2NotApplicable() from None
+                tool = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    logical_identity=(("tool_call_id", command.source_tool_call_record.tool_call_id),),
+                    for_update=True,
+                )
+                task = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=(("task_id", command.expected_task_record.task_id),),
+                    for_update=True,
+                )
+                unit = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=(("request_unit_id", command.expected_request_unit_record.request_unit_id),),
+                    for_update=True,
+                )
+                if tool is None or task is None or unit is None or tool[1].source_record != command.source_tool_call_record:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD, command.search_observation_record),
+                        self._cycle2_encode(P0RecordCode.ORDER_CANDIDATE_SET_RECORD, command.candidate_set_record),
+                    ),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(session, task[0], owner_customer_id=owner, expected_record=command.expected_task_record, next_envelope=self._cycle2_encode(P0RecordCode.TASK_RECORD, command.next_task_record))
+                self._cycle2_replace(session, unit[0], owner_customer_id=owner, expected_record=command.expected_request_unit_record, next_envelope=self._cycle2_encode(P0RecordCode.REQUEST_UNIT_RECORD, command.next_request_unit_record))
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_selection_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        selection_request: OrderCandidateSelectionRequest,
+        trusted_now: datetime,
+        for_update: bool = False,
+    ) -> OrderCandidateSelectionReadClosure | None:
+        owner = owner_scope.customer_id
+        conversation = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", conversation_id),),
+            for_update=for_update,
+        )
+        current = cls._cycle2_current_task_unit_bindings(
+            session,
+            owner_scope=owner_scope,
+            task_id=task_id,
+            request_unit_id=request_unit_id,
+            for_update=for_update,
+        )
+        message = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.MESSAGE_RECORD,
+            logical_identity=(("message_id", selection_request.source_message_ref),),
+            for_update=for_update,
+        )
+        if conversation is None or current is None or message is None:
+            return None
+        task, unit, bindings = current
+        candidates = tuple(
+            cast(OrderCandidateSetRecord, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task_id,
+                    P0RecordModel.request_unit_id == request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            if type(decoded.source_record) is OrderCandidateSetRecord
+        )
+        superseded_refs = tuple(
+            cast(UUID, record.supersedes_candidate_set_ref)
+            for record in candidates
+            if record.supersedes_candidate_set_ref is not None
+        )
+        current_sets = tuple(
+            record
+            for record in candidates
+            if record.candidate_set_id not in set(superseded_refs)
+            and record.selection_expected_task_state_version == task.state_version
+        )
+        if not current_sets:
+            return None
+        if len(current_sets) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        candidate_set = current_sets[0]
+        observation_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+            logical_identity=(("observation_id", candidate_set.search_observation_ref),),
+            for_update=for_update,
+        )
+        if observation_loaded is None or type(observation_loaded[1].source_record) is not SearchOrdersObservation:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        observation = cast(SearchOrdersObservation, observation_loaded[1].source_record)
+        query_records = tuple(
+            binding
+            for binding in bindings
+            if binding.binding_id in candidate_set.query_binding_refs
+        )
+        if len(query_records) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        query = cls._cycle2_query_binding_closure(
+            session,
+            owner_customer_id=owner,
+            conversation_id=conversation_id,
+            task=task,
+            unit=unit,
+            binding=query_records[0],
+            accepted_task_state_version=candidate_set.base_task_state_version,
+            for_update=for_update,
+        )
+        matching_entries = tuple(
+            entry
+            for entry in candidate_set.ordered_candidates
+            if entry.ordinal == selection_request.ordinal
+        )
+        if len(matching_entries) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        selected = matching_entries[0]
+        matching_targets = tuple(
+            target
+            for target in observation.candidate_target_bindings
+            if target.observation_candidate_ref == selected.observation_candidate_ref
+            and target.candidate_source_version == selected.candidate_source_version
+        )
+        if len(matching_targets) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        run_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            predicates=(P0RecordModel.conversation_id == conversation_id,),
+            for_update=for_update,
+        )
+        active_runs = tuple(
+            cast(AgentRunRecordV2, decoded.source_record)
+            for _, decoded in run_rows
+            if type(decoded.source_record) is AgentRunRecordV2
+            and decoded.source_record.status is AgentRunStatusV2.RUNNING
+        )
+        if len(active_runs) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        run = active_runs[0]
+        link_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            logical_identity=(("run_id", run.run_id), ("task_id", task_id)),
+            for_update=for_update,
+        )
+        if link_loaded is None or type(link_loaded[1].source_record) is not RunTaskLinkRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        selections = tuple(
+            cast(OrderCandidateSelectionRecord, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task_id,
+                    P0RecordModel.request_unit_id == request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            if type(decoded.source_record) is OrderCandidateSelectionRecord
+            and decoded.source_record.candidate_set_ref == candidate_set.candidate_set_id
+        )
+        return OrderCandidateSelectionReadClosure(
+            owner_scope=owner_scope,
+            trusted_conversation_record=cast(ConversationRecord, conversation[1].source_record),
+            current_run_record=run,
+            current_run_task_link_record=cast(RunTaskLinkRecordV2, link_loaded[1].source_record),
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_candidate_set_record=candidate_set,
+            search_observation_record=observation,
+            selection_request=selection_request,
+            saved_selection_message_record=cast(MessageRecord, message[1].source_record),
+            current_query_binding=query,
+            pending_candidate_set_ref=candidate_set.candidate_set_id,
+            current_query_binding_refs=candidate_set.query_binding_refs,
+            resolved_owner_scoped_order_target_ref=matching_targets[0].owner_scoped_order_ref,
+            superseded_candidate_set_refs=superseded_refs,
+            existing_selection_records=selections,
+            trusted_now=trusted_now,
+        )
+
+    @_bounded_database_failures
+    async def load_order_candidate_selection_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        selection_request: OrderCandidateSelectionRequest,
+        trusted_now: datetime,
+    ) -> OrderCandidateSelectionReadClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+                return self._cycle2_selection_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    conversation_id=conversation_id,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                    selection_request=selection_request,
+                    trusted_now=trusted_now,
+                )
+
+    @_bounded_database_failures
+    async def apply_order_candidate_selection_if_current(
+        self,
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> Cycle2WriteResult:
+        try:
+            command.require_live_target_issuance()
+        except ValueError:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_selection_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    conversation_id=closure.conversation_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=closure.current_request_unit_record.request_unit_id,
+                    selection_request=closure.selection_request,
+                    trusted_now=closure.trusted_now,
+                    for_update=True,
+                )
+                if current != closure:
+                    raise _Cycle2NotApplicable() from None
+                task = self._cycle2_row(session, owner_customer_id=owner, record_code=P0RecordCode.TASK_RECORD, logical_identity=(("task_id", closure.current_task_record.task_id),), for_update=True)
+                unit = self._cycle2_row(session, owner_customer_id=owner, record_code=P0RecordCode.REQUEST_UNIT_RECORD, logical_identity=(("request_unit_id", closure.current_request_unit_record.request_unit_id),), for_update=True)
+                if task is None or unit is None:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode_input_binding(
+                            command.ordinal_input_binding_record,
+                            request_unit_id=closure.current_request_unit_record.request_unit_id,
+                        ),
+                        self._cycle2_encode(P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD, command.selection_record),
+                    ),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(session, task[0], owner_customer_id=owner, expected_record=closure.current_task_record, next_envelope=self._cycle2_encode(P0RecordCode.TASK_RECORD, command.next_task_record))
+                self._cycle2_replace(session, unit[0], owner_customer_id=owner, expected_record=closure.current_request_unit_record, next_envelope=self._cycle2_encode(P0RecordCode.REQUEST_UNIT_RECORD, command.next_request_unit_record))
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_superseded_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        obsolete_run_id: UUID,
+        replacement_run_id: UUID,
+        request_unit_id: UUID,
+        trusted_current_evidence_at: datetime,
+        for_update: bool = False,
+    ) -> SupersededRunReadClosure | None:
+        owner = owner_scope.customer_id
+        obsolete_run_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", obsolete_run_id),),
+            for_update=for_update,
+        )
+        replacement_run_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", replacement_run_id),),
+            for_update=for_update,
+        )
+        if obsolete_run_loaded is None or replacement_run_loaded is None:
+            return None
+        obsolete_run = obsolete_run_loaded[1].source_record
+        replacement_run = replacement_run_loaded[1].source_record
+        if type(obsolete_run) is not AgentRunRecordV2 or type(replacement_run) is not AgentRunRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        obsolete_links = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            predicates=(P0RecordModel.run_id == obsolete_run_id,),
+            for_update=for_update,
+        )
+        replacement_links = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            predicates=(P0RecordModel.run_id == replacement_run_id,),
+            for_update=for_update,
+        )
+        if len(obsolete_links) != 1 or len(replacement_links) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        obsolete_link = obsolete_links[0][1].source_record
+        replacement_link = replacement_links[0][1].source_record
+        if type(obsolete_link) is not RunTaskLinkRecordV2 or type(replacement_link) is not RunTaskLinkRecordV2:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        task_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TASK_RECORD,
+            logical_identity=(("task_id", obsolete_link.task_id),),
+            for_update=for_update,
+        )
+        unit_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+            logical_identity=(("request_unit_id", request_unit_id),),
+            for_update=for_update,
+        )
+        if task_loaded is None or unit_loaded is None:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+        task = task_loaded[1].source_record
+        unit = unit_loaded[1].source_record
+        conversation_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", obsolete_run.conversation_id),),
+            for_update=for_update,
+        )
+        if (
+            type(task) is not TaskRecord
+            or type(unit) is not RequestUnitRecord
+            or conversation_loaded is None
+            or type(conversation_loaded[1].source_record) is not ConversationRecord
+        ):
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        obsolete_task: TaskRecord | None = None
+        obsolete_unit: RequestUnitRecord | None = None
+        obsolete_binding_refs: tuple[UUID, ...] = ()
+        invalidated_binding_refs: tuple[UUID, ...] = ()
+        invalidation_kind = SupersededRunInvalidationKind.TASK_VERSION_ADVANCED
+        if obsolete_link.base_task_state_version is not None:
+            historical_task = cls._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", obsolete_link.task_id),),
+                state_version=obsolete_link.base_task_state_version,
+            )
+            historical_unit = cls._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=(("request_unit_id", request_unit_id),),
+                state_version=obsolete_link.base_task_state_version,
+            )
+            if historical_task is None or historical_unit is None:
+                return None
+            historical_task_record = historical_task.source_record
+            historical_unit_record = historical_unit.source_record
+            if (
+                type(historical_task_record) is not TaskRecord
+                or type(historical_unit_record) is not RequestUnitRecord
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            obsolete_task = historical_task_record
+            obsolete_unit = historical_unit_record
+            removed_binding_refs = tuple(
+                binding_ref
+                for binding_ref in obsolete_unit.input_binding_refs
+                if binding_ref not in set(unit.input_binding_refs)
+            )
+            if removed_binding_refs:
+                invalidation_kind = (
+                    SupersededRunInvalidationKind.BINDING_INVALIDATED
+                )
+                obsolete_binding_refs = removed_binding_refs
+                invalidated_binding_refs = removed_binding_refs
+        try:
+            return SupersededRunReadClosure(
+                owner_scope=owner_scope,
+                trusted_conversation_record=cast(ConversationRecord, conversation_loaded[1].source_record),
+                expected_active_run_record=obsolete_run,
+                expected_active_link_record=obsolete_link,
+                current_authoritative_run_record=replacement_run,
+                current_authoritative_link_record=replacement_link,
+                current_task_record=task,
+                current_request_unit_record=unit,
+                obsolete_task_record=obsolete_task,
+                obsolete_request_unit_record=obsolete_unit,
+                trusted_current_evidence_at=trusted_current_evidence_at,
+                invalidation_kind=invalidation_kind,
+                obsolete_binding_refs=obsolete_binding_refs,
+                invalidated_binding_refs=invalidated_binding_refs,
+            )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            ) from None
+
+    @_bounded_database_failures
+    async def load_superseded_run_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        obsolete_run_id: UUID,
+        replacement_run_id: UUID,
+        request_unit_id: UUID,
+    ) -> SupersededRunReadClosure | None:
+        trusted_now = self._cycle2_trusted_now()
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+                return self._cycle2_superseded_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    obsolete_run_id=obsolete_run_id,
+                    replacement_run_id=replacement_run_id,
+                    request_unit_id=request_unit_id,
+                    trusted_current_evidence_at=trusted_now,
+                )
+
+    def _cycle2_superseded_is_applied(
+        self,
+        session: Session,
+        command: FinalizeSupersededRunV2Command,
+        *,
+        for_update: bool,
+    ) -> bool:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        persisted_run = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", command.superseded_run_record.run_id),),
+            for_update=for_update,
+        )
+        persisted_link = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            logical_identity=(("run_id", command.no_result_link_record.run_id), ("task_id", command.no_result_link_record.task_id)),
+            for_update=for_update,
+        )
+        persisted_trace = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TRACE_EVENT_RECORD,
+            logical_identity=(("trace_event_id", command.run_stopped_trace_record.trace_event_id),),
+            for_update=for_update,
+        )
+        return (
+            persisted_run is not None
+            and persisted_link is not None
+            and persisted_trace is not None
+            and persisted_run[1].source_record == command.superseded_run_record
+            and persisted_link[1].source_record == command.no_result_link_record
+            and persisted_trace[1].source_record == command.run_stopped_trace_record
+        )
+
+    def _cycle2_finalize_superseded_in_transaction(
+        self,
+        session: Session,
+        command: FinalizeSupersededRunV2Command,
+    ) -> None:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        if self._cycle2_superseded_is_applied(
+            session,
+            command,
+            for_update=True,
+        ):
+            raise _Cycle2AlreadyApplied() from None
+        current = self._cycle2_superseded_closure(
+            session,
+            owner_scope=closure.owner_scope,
+            obsolete_run_id=closure.expected_active_run_record.run_id,
+            replacement_run_id=closure.current_authoritative_run_record.run_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+            trusted_current_evidence_at=closure.trusted_current_evidence_at,
+            for_update=True,
+        )
+        if current != closure:
+            raise _Cycle2NotApplicable() from None
+        run_loaded = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", closure.expected_active_run_record.run_id),),
+            for_update=True,
+        )
+        link_loaded = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            logical_identity=(("run_id", closure.expected_active_run_record.run_id), ("task_id", closure.expected_active_link_record.task_id)),
+            for_update=True,
+        )
+        if run_loaded is None or link_loaded is None:
+            raise _Cycle2NotApplicable() from None
+        self._cycle2_replace(
+            session,
+            run_loaded[0],
+            owner_customer_id=owner,
+            expected_record=closure.expected_active_run_record,
+            next_envelope=self._cycle2_encode(P0RecordCode.AGENT_RUN_RECORD, command.superseded_run_record),
+        )
+        self._cycle2_replace(
+            session,
+            link_loaded[0],
+            owner_customer_id=owner,
+            expected_record=closure.expected_active_link_record,
+            next_envelope=self._cycle2_encode(P0RecordCode.RUN_TASK_LINK_RECORD, command.no_result_link_record),
+        )
+        self._cycle2_insert(
+            session,
+            (self._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, command.run_stopped_trace_record),),
+            owner_customer_id=owner,
+        )
+
+    @_bounded_database_failures
+    async def finalize_superseded_run_if_current(
+        self,
+        command: FinalizeSupersededRunV2Command,
+    ) -> Cycle2WriteResult:
+        try:
+            with self.session_factory.begin() as session:
+                self._cycle2_finalize_superseded_in_transaction(session, command)
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        except _Cycle2AlreadyApplied:
+            return Cycle2WriteResult.ALREADY_APPLIED
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def finalize_state_invalidated_tool_recovery_if_current(
+        self,
+        command: FinalizeStateInvalidatedToolRecoveryV2Command,
+    ) -> Cycle2WriteResult:
+        try:
+            with self.session_factory.begin() as session:
+                self._cycle2_finalize_recovery_in_transaction(
+                    session,
+                    loaded_closure=command.loaded_closure,
+                    terminal_record=command.terminal_tool_call_record,
+                    recovery_decision=command.recovery_decision_record,
+                )
+                self._cycle2_finalize_superseded_in_transaction(
+                    session,
+                    command.superseded_run_command,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        except _Cycle2AlreadyApplied:
+            # A composed OA-10 command is idempotent only when both the Tool
+            # terminal and the no-result Run closure are already exact.
+            with self.session_factory() as session:
+                if self._cycle2_recovery_is_applied(
+                    session,
+                    loaded_closure=command.loaded_closure,
+                    terminal_record=command.terminal_tool_call_record,
+                    recovery_decision=command.recovery_decision_record,
+                    for_update=False,
+                ) and self._cycle2_superseded_is_applied(
+                    session,
+                    command.superseded_run_command,
+                    for_update=False,
+                ):
+                    return Cycle2WriteResult.ALREADY_APPLIED
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
 
     async def append_eval_result(
         self,
