@@ -45,6 +45,7 @@ from mini_agent.application.records import (
     NonEmptyString,
     ObservationWriteResult,
     OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     PositiveAttempt,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
@@ -2063,6 +2064,7 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
     assert Cycle2RuntimeRecordPort._is_protocol
     assert Cycle2RuntimeRecordPort is not RuntimeRecordPort
     for method_name in (
+        "load_order_search_current_closure_for_owner",
         "apply_order_search_outcome_if_current",
         "load_order_candidate_selection_closure_for_owner",
         "apply_order_candidate_selection_if_current",
@@ -2137,6 +2139,26 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
 
 def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
     _assert_signature(
+        Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "conversation_id",
+            "run_id",
+            "task_id",
+            "request_unit_id",
+            "trusted_read_at",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "conversation_id": UUID,
+            "run_id": UUID,
+            "task_id": UUID,
+            "request_unit_id": UUID,
+            "trusted_read_at": datetime,
+            "return": OrderSearchCurrentReadClosure | None,
+        },
+    )
+    _assert_signature(
         Cycle2RuntimeRecordPort.load_order_candidate_selection_closure_for_owner,
         parameters=(
             "owner_scope",
@@ -2191,6 +2213,7 @@ def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
         },
     )
     for method in (
+        Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner,
         Cycle2RuntimeRecordPort.load_order_candidate_selection_closure_for_owner,
         Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
         Cycle2RuntimeRecordPort.load_superseded_run_closure_for_owner,
@@ -2209,6 +2232,9 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         "exact-version-only",
         "transactionally consistent",
         "owner-scoped",
+        "not caller-signed trust tokens",
+        "re-read",
+        "exact-compare",
         "atomic CAS",
         "absent",
         "unauthorized",
@@ -2234,6 +2260,35 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
     )
     assert "Only ``APPLIED``" in dispatch_doc
     assert "never grant dispatch" in dispatch_doc
+    search_write_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort.apply_order_search_outcome_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "in-transaction read",
+        "loaded_read_closure",
+        "require_same_persisted_graph",
+        "zero writes",
+    ):
+        assert required_term in search_write_doc
+    assessment_write_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort.save_shipment_assessment_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "same write transaction",
+        "every current typed binding",
+        "every Shipment Observation",
+        "current Assessment",
+        "exact-compare",
+        "require_same_persisted_graph",
+        "caller-provided completeness is never trusted",
+    ):
+        assert required_term in assessment_write_doc
     oa10_doc = " ".join(
         (
             Cycle2RuntimeRecordPort.finalize_superseded_run_if_current.__doc__

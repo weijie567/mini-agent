@@ -21,8 +21,6 @@ from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
     ConversationRecord,
     ConversationTaskLinkRecord,
-    Cycle2CurrentBindingFamily,
-    Cycle2CurrentBindingReadFact,
     Cycle2DispatchFenceWriteResult,
     Cycle2WriteResult,
     CreateInitialTaskGraphV2Command,
@@ -55,6 +53,7 @@ from mini_agent.application.records import (
     MessageRecord,
     ObservationWriteResult,
     OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
     RecoveryWriteResult,
@@ -75,7 +74,6 @@ from mini_agent.application.records import (
     ToolCallRecoveryAggregate,
     TransitionRunCommand,
     TrustedOwnerScope,
-    TrustedCycle2OwnerReadSnapshot,
 )
 from mini_agent.core.common import ContractVisibility
 from mini_agent.core.identity import CustomerContext
@@ -7449,28 +7447,6 @@ def _c2_project(model: BaseModel, **updates: object) -> BaseModel:
     return type(model).model_validate(values, strict=True)
 
 
-def _c2_owner_read_snapshot(
-    *,
-    owner: TrustedOwnerScope,
-    task: TaskRecord,
-    unit: RequestUnitRecord,
-    binding_facts: tuple[Cycle2CurrentBindingReadFact, ...],
-    shipment_observation_refs: tuple[UUID, ...] = (),
-    current_assessment_ref: UUID | None = None,
-    read_at: datetime,
-) -> TrustedCycle2OwnerReadSnapshot:
-    return TrustedCycle2OwnerReadSnapshot._from_owner_reader(
-        owner_scope=owner,
-        task_id=task.task_id,
-        request_unit_id=unit.request_unit_id,
-        task_state_version=task.state_version,
-        binding_facts=binding_facts,
-        shipment_observation_refs=shipment_observation_refs,
-        current_assessment_ref=current_assessment_ref,
-        read_at=read_at,
-    )
-
-
 def _c2_attempt(
     *,
     tool_call_id: UUID,
@@ -7682,6 +7658,7 @@ def _c2_search_runtime_fields(
     owner: TrustedOwnerScope,
     candidate_set: OrderCandidateSetRecord,
     source: ToolCallRecordV2,
+    task: TaskRecord,
     unit: RequestUnitRecord,
 ) -> dict[str, object]:
     conversation = _conversation(
@@ -7692,43 +7669,39 @@ def _c2_search_runtime_fields(
         conversation_id=conversation.conversation_id,
         content="查找最近买的示例鞋",
     )
+    run = AgentRunRecordV2(
+        run_id=source.run_id,
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=UTC_NOW,
+    )
+    query = AcceptedOrderSearchQueryBindingReadClosure(
+        binding_ref=candidate_set.query_binding_refs[0],
+        normalized_query="示例鞋",
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=candidate_set.task_id,
+        request_unit_id=candidate_set.request_unit_id,
+        accepted_task_state_version=candidate_set.base_task_state_version,
+        current_task_state_version=candidate_set.base_task_state_version,
+        source_message_record=source_message,
+        accepted_at=source_message.received_at,
+    )
+    loaded = OrderSearchCurrentReadClosure(
+        owner_scope=owner,
+        trusted_conversation_record=conversation,
+        source_run_record=run,
+        current_query_binding=query,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        trusted_read_at=source.started_at,
+    )
     return {
+        "loaded_read_closure": loaded,
         "trusted_conversation_record": conversation,
-        "source_run_record": AgentRunRecordV2(
-            run_id=source.run_id,
-            conversation_id=conversation.conversation_id,
-            status=AgentRunStatusV2.RUNNING,
-            provider_lane="scripted",
-            started_at=UTC_NOW,
-        ),
-        "owner_read_snapshot": _c2_owner_read_snapshot(
-            owner=owner,
-            task=_task(
-                task_id=candidate_set.task_id,
-                state_version=candidate_set.base_task_state_version,
-            ),
-            unit=unit,
-            binding_facts=tuple(
-                Cycle2CurrentBindingReadFact(
-                    binding_ref=binding_ref,
-                    family=Cycle2CurrentBindingFamily.PRODUCT_DESCRIPTION,
-                )
-                for binding_ref in unit.input_binding_refs
-            ),
-            read_at=candidate_set.created_at,
-        ),
-        "current_query_binding": AcceptedOrderSearchQueryBindingReadClosure(
-            binding_ref=candidate_set.query_binding_refs[0],
-            normalized_query="示例鞋",
-            private_owner_scope_ref=owner.customer_id,
-            conversation_id=conversation.conversation_id,
-            task_id=candidate_set.task_id,
-            request_unit_id=candidate_set.request_unit_id,
-            accepted_task_state_version=candidate_set.base_task_state_version,
-            current_task_state_version=candidate_set.base_task_state_version,
-            source_message_record=source_message,
-            accepted_at=source_message.received_at,
-        ),
+        "source_run_record": run,
+        "current_query_binding": query,
     }
 
 
@@ -7738,7 +7711,7 @@ def _c2_multiple_search_command() -> ApplyOrderSearchOutcomeV2Command:
     )
     return ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
-        **_c2_search_runtime_fields(owner, candidate_set, source, unit),
+        **_c2_search_runtime_fields(owner, candidate_set, source, task, unit),
         expected_task_record=task,
         next_task_record=_c2_project(
             task,
@@ -7818,7 +7791,7 @@ def _c2_unique_search_command() -> ApplyOrderSearchOutcomeV2Command:
     candidate_set = OrderCandidateSetRecord.model_validate(candidate_values)
     return ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
-        **_c2_search_runtime_fields(owner, candidate_set, source, unit),
+        **_c2_search_runtime_fields(owner, candidate_set, source, task, unit),
         expected_task_record=task,
         next_task_record=_c2_project(
             task,
@@ -7881,7 +7854,7 @@ def test_cycle2_search_outcome_closes_multiple_atomically() -> None:
     )
     command = ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
-        **_c2_search_runtime_fields(owner, candidate_set, source, unit),
+        **_c2_search_runtime_fields(owner, candidate_set, source, task, unit),
         expected_task_record=task,
         next_task_record=next_task,
         expected_request_unit_record=unit,
@@ -7983,7 +7956,7 @@ def test_cycle2_search_rejects_task_drift_and_time_rollback() -> None:
         updated_at=command.search_observation_record.recorded_at
         + timedelta(seconds=1),
     )
-    with pytest.raises(ValidationError, match="owner-reader complete-set snapshot"):
+    with pytest.raises(ValidationError, match="command/read closure mismatch"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -8011,7 +7984,7 @@ def test_cycle2_search_requires_exact_tool_candidate_query_binding_closure() -> 
         ApplyOrderSearchOutcomeV2Command(
             **{**values, "source_tool_call_record": wrong_source}
         )
-    with pytest.raises(ValidationError, match="query binding closure"):
+    with pytest.raises(ValidationError, match="at most 1 item"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -8059,48 +8032,6 @@ def test_cycle2_commands_reject_constructed_trusted_owner_scope() -> None:
         ApplyOrderSearchOutcomeV2Command(
             **{**values, "owner_scope": private_sidecar}
         )
-
-
-def test_cycle2_commands_reject_forged_owner_reader_snapshot() -> None:
-    command = _c2_multiple_search_command()
-    values = {
-        field_name: getattr(command, field_name)
-        for field_name in type(command).model_fields
-    }
-    snapshot_values = {
-        field_name: getattr(command.owner_read_snapshot, field_name)
-        for field_name in TrustedCycle2OwnerReadSnapshot.model_fields
-    }
-    constructed = TrustedCycle2OwnerReadSnapshot.model_construct(**snapshot_values)
-    with pytest.raises(ValidationError, match="exact trusted projection"):
-        ApplyOrderSearchOutcomeV2Command(
-            **{**values, "owner_read_snapshot": constructed}
-        )
-    copied = command.owner_read_snapshot.model_copy()
-    with pytest.raises(ValidationError, match="exact trusted projection"):
-        ApplyOrderSearchOutcomeV2Command(
-            **{**values, "owner_read_snapshot": copied}
-        )
-
-    mutated_command = _c2_multiple_search_command()
-    mutated_values = {
-        field_name: getattr(mutated_command, field_name)
-        for field_name in type(mutated_command).model_fields
-    }
-    mutated_command.owner_read_snapshot.__dict__["owner_customer_id"] = "customer-B"
-    with pytest.raises(ValidationError, match="exact trusted projection"):
-        ApplyOrderSearchOutcomeV2Command(**mutated_values)
-
-    sidecar_command = _c2_multiple_search_command()
-    sidecar_values = {
-        field_name: getattr(sidecar_command, field_name)
-        for field_name in type(sidecar_command).model_fields
-    }
-    sidecar_command.owner_read_snapshot.__pydantic_private__ = {
-        "forged_authority": True
-    }
-    with pytest.raises(ValidationError, match="exact trusted projection"):
-        ApplyOrderSearchOutcomeV2Command(**sidecar_values)
 
 
 def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> None:
@@ -8152,6 +8083,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         owner,
         candidate_set,
         source,
+        task,
         unit,
     )[
         "current_query_binding"
@@ -8507,37 +8439,6 @@ def _c2_shipment_inputs() -> tuple[
     return owner, task, unit, source, result, observation
 
 
-def _c2_shipment_assessment_snapshot(
-    *,
-    owner: TrustedOwnerScope,
-    task: TaskRecord,
-    unit: RequestUnitRecord,
-    observation_refs: tuple[UUID, ...],
-    read_at: datetime,
-    claim_refs: frozenset[UUID] = frozenset(),
-    current_assessment_ref: UUID | None = None,
-) -> TrustedCycle2OwnerReadSnapshot:
-    return _c2_owner_read_snapshot(
-        owner=owner,
-        task=task,
-        unit=unit,
-        binding_facts=tuple(
-            Cycle2CurrentBindingReadFact(
-                binding_ref=binding_ref,
-                family=(
-                    Cycle2CurrentBindingFamily.SHIPMENT_NOT_RECEIVED
-                    if binding_ref in claim_refs
-                    else Cycle2CurrentBindingFamily.ORDER_ID
-                ),
-            )
-            for binding_ref in unit.input_binding_refs
-        ),
-        shipment_observation_refs=observation_refs,
-        current_assessment_ref=current_assessment_ref,
-        read_at=read_at,
-    )
-
-
 def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -> None:
     owner, task, unit, source, result, observation = _c2_shipment_inputs()
     SaveShipmentObservationV2Command(
@@ -8554,13 +8455,6 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     conversation = _conversation(owner_customer_id=owner.customer_id)
     closure = ShipmentAssessmentReadClosure(
         owner_scope=owner,
-        owner_read_snapshot=_c2_shipment_assessment_snapshot(
-            owner=owner,
-            task=task,
-            unit=unit,
-            observation_refs=(observation.observation_id,),
-            read_at=assessed_at,
-        ),
         trusted_conversation_record=conversation,
         current_task_record=task,
         current_request_unit_record=unit,
@@ -8590,50 +8484,47 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
         loaded_closure=closure,
         assessment_record=assessment,
     )
-    with pytest.raises(
-        ValidationError,
-        match="complete current Shipment Assessment set mismatch",
-    ):
-        ShipmentAssessmentReadClosure(
+    closure.require_same_persisted_graph(closure)
+    authoritative_with_assessment = ShipmentAssessmentReadClosure(
+        **{
             **{
-                **{
-                    field_name: getattr(closure, field_name)
-                    for field_name in ShipmentAssessmentReadClosure.model_fields
-                },
-                "owner_read_snapshot": _c2_shipment_assessment_snapshot(
-                    owner=owner,
-                    task=task,
-                    unit=unit,
-                    observation_refs=(observation.observation_id,),
-                    current_assessment_ref=assessment.assessment_id,
-                    read_at=assessed_at,
-                ),
-                "current_assessment_records": (),
-            }
-        )
+                field_name: getattr(closure, field_name)
+                for field_name in ShipmentAssessmentReadClosure.model_fields
+            },
+            "current_assessment_records": (assessment,),
+        }
+    )
+    with pytest.raises(ValueError, match="persisted read fence mismatch"):
+        closure.require_same_persisted_graph(authoritative_with_assessment)
 
     omitted_newer_ref = uuid4()
+    newer_observation = _c2_project(
+        observation,
+        observation_id=omitted_newer_ref,
+        source_version="mock-shipment-source-version.p0.v1:sha256:" + "c" * 64,
+        observed_at=observation.observed_at + timedelta(seconds=1),
+        recorded_at=observation.recorded_at + timedelta(seconds=1),
+        valid_until=observation.valid_until + timedelta(seconds=1),
+        supersedes=observation.observation_id,
+    )
     unit_with_newer = _c2_project(
         unit,
         observation_refs=(observation.observation_id, omitted_newer_ref),
     )
-    with pytest.raises(ValidationError, match="complete Shipment Observation graph"):
-        ShipmentAssessmentReadClosure(
+    authoritative_with_newer = ShipmentAssessmentReadClosure(
+        **{
             **{
-                **{
-                    field_name: getattr(closure, field_name)
-                    for field_name in ShipmentAssessmentReadClosure.model_fields
-                },
-                "owner_read_snapshot": _c2_shipment_assessment_snapshot(
-                    owner=owner,
-                    task=task,
-                    unit=unit_with_newer,
-                    observation_refs=(omitted_newer_ref, observation.observation_id),
-                    read_at=assessed_at,
-                ),
-                "current_request_unit_record": unit_with_newer,
-            }
-        )
+                field_name: getattr(closure, field_name)
+                for field_name in ShipmentAssessmentReadClosure.model_fields
+            },
+            "current_request_unit_record": unit_with_newer,
+            "current_observation_record": newer_observation,
+            "current_observation_ref": newer_observation.observation_id,
+            "superseded_observation_records": (observation,),
+        }
+    )
+    with pytest.raises(ValueError, match="persisted read fence mismatch"):
+        closure.require_same_persisted_graph(authoritative_with_newer)
     wrong = ShipmentAssessment(
         **{
             **assessment.model_dump(mode="python"),
@@ -8705,14 +8596,6 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="Claim binding"):
         ShipmentAssessmentReadClosure(
             owner_scope=owner,
-            owner_read_snapshot=_c2_shipment_assessment_snapshot(
-                owner=owner,
-                task=task,
-                unit=unit,
-                observation_refs=(observation.observation_id,),
-                read_at=assessed_at,
-                claim_refs=frozenset({unit.input_binding_refs[0]}),
-            ),
             trusted_conversation_record=conversation,
             current_task_record=task,
             current_request_unit_record=unit,
@@ -8984,7 +8867,7 @@ def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
     with pytest.raises(ValidationError, match="recursively canonical"):
         ApplyOrderSearchOutcomeV2Command(
             owner_scope=owner,
-            **_c2_search_runtime_fields(owner, candidate_set, source, unit),
+            **_c2_search_runtime_fields(owner, candidate_set, source, task, unit),
             expected_task_record=task,
             next_task_record=_c2_project(
                 task,
@@ -9011,6 +8894,13 @@ def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
 
 def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversation() -> None:
     command = _c2_multiple_search_command()
+    command.loaded_read_closure.require_same_persisted_graph(
+        command.loaded_read_closure
+    )
+    with pytest.raises(ValueError, match="persisted read fence mismatch"):
+        command.loaded_read_closure.require_same_persisted_graph(
+            _c2_multiple_search_command().loaded_read_closure
+        )
     values = {
         field_name: getattr(command, field_name)
         for field_name in type(command).model_fields
@@ -9038,25 +8928,20 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
         command.expected_request_unit_record,
         input_binding_refs=query_refs,
     )
-    with pytest.raises(ValidationError, match="exactly one current query family fact"):
+    with pytest.raises(ValidationError, match="current read closure mismatch"):
+        OrderSearchCurrentReadClosure(
+            **{
+                **{
+                    field_name: getattr(command.loaded_read_closure, field_name)
+                    for field_name in OrderSearchCurrentReadClosure.model_fields
+                },
+                "current_request_unit_record": expanded_expected_unit,
+            }
+        )
+    with pytest.raises(ValidationError, match="at most 1 item"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
-                "owner_read_snapshot": _c2_owner_read_snapshot(
-                    owner=command.owner_scope,
-                    task=command.expected_task_record,
-                    unit=expanded_expected_unit,
-                    binding_facts=tuple(
-                        Cycle2CurrentBindingReadFact(
-                            binding_ref=binding_ref,
-                            family=(
-                                Cycle2CurrentBindingFamily.PRODUCT_DESCRIPTION
-                            ),
-                        )
-                        for binding_ref in query_refs
-                    ),
-                    read_at=command.search_observation_record.recorded_at,
-                ),
                 "expected_request_unit_record": expanded_expected_unit,
                 "next_request_unit_record": _c2_project(
                     command.next_request_unit_record,
@@ -9067,7 +8952,7 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
                 "current_query_binding_refs": query_refs,
             }
         )
-    with pytest.raises(ValidationError, match="Conversation/Run closure"):
+    with pytest.raises(ValidationError, match="command/read closure mismatch"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -9077,7 +8962,7 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
             }
         )
 
-    with pytest.raises(ValidationError, match="source graph mismatch"):
+    with pytest.raises(ValidationError, match="command/read closure mismatch"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -9089,7 +8974,7 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
         )
 
     tool_started_at = command.source_tool_call_record.started_at
-    with pytest.raises(ValidationError, match="source graph mismatch"):
+    with pytest.raises(ValidationError, match="command/read closure mismatch"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -9105,7 +8990,7 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
         command.current_query_binding.source_message_record,
         received_at=late_query_at,
     )
-    with pytest.raises(ValidationError, match="source graph mismatch"):
+    with pytest.raises(ValidationError, match="command/read closure mismatch"):
         ApplyOrderSearchOutcomeV2Command(
             **{
                 **values,
@@ -9174,13 +9059,6 @@ def test_cycle2_shipment_rejects_result_drift_and_sanitizes_constructed_closure(
     assessed_at = UTC_NOW + timedelta(minutes=2)
     closure = ShipmentAssessmentReadClosure(
         owner_scope=owner,
-        owner_read_snapshot=_c2_shipment_assessment_snapshot(
-            owner=owner,
-            task=task,
-            unit=unit,
-            observation_refs=(observation.observation_id,),
-            read_at=assessed_at,
-        ),
         trusted_conversation_record=conversation,
         current_task_record=task,
         current_request_unit_record=unit,
@@ -9260,14 +9138,6 @@ def test_cycle2_assessment_requires_current_exact_claim_binding() -> None:
     assessed_at = UTC_NOW + timedelta(minutes=2)
     closure = ShipmentAssessmentReadClosure(
         owner_scope=owner,
-        owner_read_snapshot=_c2_shipment_assessment_snapshot(
-            owner=owner,
-            task=task,
-            unit=unit,
-            observation_refs=(delivered_observation.observation_id,),
-            read_at=assessed_at,
-            claim_refs=frozenset({claim_ref}),
-        ),
         trusted_conversation_record=conversation,
         current_task_record=task,
         current_request_unit_record=unit,
@@ -9301,20 +9171,21 @@ def test_cycle2_assessment_requires_current_exact_claim_binding() -> None:
     )
     assert saved.assessment_record.claim_binding_ref == claim_ref
 
-    with pytest.raises(ValidationError, match="InputBinding partition mismatch"):
-        ShipmentAssessmentReadClosure(
+    relabelled_claim = ShipmentAssessmentReadClosure(
+        **{
             **{
-                **{
-                    field_name: getattr(closure, field_name)
-                    for field_name in ShipmentAssessmentReadClosure.model_fields
-                },
-                "current_claim_bindings": (),
-                "current_input_binding_records": (
-                    *closure.current_input_binding_records,
-                    _input_binding(binding_id=claim_ref),
-                ),
-            }
-        )
+                field_name: getattr(closure, field_name)
+                for field_name in ShipmentAssessmentReadClosure.model_fields
+            },
+            "current_claim_bindings": (),
+            "current_input_binding_records": (
+                *closure.current_input_binding_records,
+                _input_binding(binding_id=claim_ref),
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="persisted read fence mismatch"):
+        relabelled_claim.require_same_persisted_graph(closure)
 
     wrong_target_claim = ShipmentNotReceivedClaimReadClosure(
         **{

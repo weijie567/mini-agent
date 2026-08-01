@@ -35,6 +35,7 @@ from mini_agent.application.records import (
     NonEmptyString,
     ObservationWriteResult,
     OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     PositiveAttempt,
     RecoveryWriteResult,
     RestartRecoveryClosure,
@@ -366,9 +367,10 @@ class Cycle2RuntimeRecordPort(Protocol):
     """Inactive exact-v2 aggregate boundary; it does not extend v1 Ports.
 
     Every method is exact-version-only. A compliant Adapter must use one
-    transactionally consistent owner-scoped snapshot for each read closure and
-    must derive its opaque ``TrustedCycle2OwnerReadSnapshot`` attestation from
-    that same complete read; callers cannot construct, replace, or narrow it.
+    transactionally consistent owner-scoped snapshot for each read closure.
+    Read closures are typed records, not caller-signed trust tokens. Every write
+    must re-read and exact-compare its declared current graph in the same atomic
+    CAS boundary, so a caller cannot replace, relabel, replay, or narrow it.
     The Adapter must use one atomic CAS transaction for each write command.
     Normal absent and
     unauthorized states are indistinguishable; once an owner root is selected,
@@ -380,11 +382,32 @@ class Cycle2RuntimeRecordPort(Protocol):
     business-fact authority, or user-visible result authority.
     """
 
+    async def load_order_search_current_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        run_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+    ) -> OrderSearchCurrentReadClosure | None:
+        """Load the one current product-description query and exact roots.
+
+        ``None`` represents absent and unauthorized equivalently. More than one
+        current query, any unknown binding family, or a partial graph fails closed.
+        """
+        ...
+
     async def apply_order_search_outcome_if_current(
         self,
         command: ApplyOrderSearchOutcomeV2Command,
     ) -> Cycle2WriteResult:
-        """Atomically commit Search Observation, CandidateSet, and Task effect."""
+        """Re-read exact roots/query, then atomically commit the Search effect.
+
+        The in-transaction read must equal ``command.loaded_read_closure`` through
+        ``require_same_persisted_graph``. A mismatch returns zero writes.
+        """
         ...
 
     async def load_order_candidate_selection_closure_for_owner(
@@ -459,7 +482,15 @@ class Cycle2RuntimeRecordPort(Protocol):
         self,
         command: SaveShipmentAssessmentV2Command,
     ) -> Cycle2WriteResult:
-        """Commit only the deterministic derivation of the exact read closure."""
+        """Re-read the complete graph, then commit deterministic derivation.
+
+        The same write transaction must load every current typed binding, every
+        Shipment Observation/supersession record, and the current Assessment,
+        then exact-compare it with ``command.loaded_closure`` through
+        ``require_same_persisted_graph``. Missing, relabeled, replayed, or newly
+        added records return zero writes; caller-provided completeness is never
+        trusted.
+        """
         ...
 
     async def load_superseded_run_closure_for_owner(

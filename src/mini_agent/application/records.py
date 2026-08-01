@@ -2366,8 +2366,6 @@ def _require_exact_cycle2_model(
         raise ValueError(f"{field_name} must be an exact {expected_type.__name__}")
     if expected_type is TrustedOwnerScope:
         return _require_exact_trusted_owner_scope(value)
-    if expected_type is TrustedCycle2OwnerReadSnapshot:
-        return _require_exact_trusted_cycle2_owner_read_snapshot(value)
     error_message = f"{field_name} must be recursively canonical"
     try:
         if expected_type.__module__ == __name__:
@@ -2425,217 +2423,6 @@ def _require_exact_cycle2_inputs(
             for item in items
         )
     return canonical
-
-
-class Cycle2CurrentBindingFamily(StrEnum):
-    """Closed record-family identity from one trusted owner-reader snapshot."""
-
-    ORDER_ID = "order_id"
-    PRODUCT_DESCRIPTION = "product_description"
-    CANDIDATE_ORDINAL = "candidate_ordinal"
-    SHIPMENT_NOT_RECEIVED = "shipment_not_received"
-
-
-class Cycle2CurrentBindingReadFact(_StrictRuntimePrivateRecord):
-    """One exact binding ref/family fact from the owner-scoped reader."""
-
-    binding_ref: UUID
-    family: Cycle2CurrentBindingFamily
-
-
-_CYCLE2_OWNER_READ_SNAPSHOT_FACTORY_TOKEN = object()
-_TRUSTED_CYCLE2_OWNER_READ_SNAPSHOTS: dict[
-    int,
-    tuple[
-        weakref.ReferenceType["TrustedCycle2OwnerReadSnapshot"],
-        tuple[object, ...],
-    ],
-] = {}
-
-
-class TrustedCycle2OwnerReadSnapshot(_StrictRuntimePrivateRecord):
-    """Opaque attestation created only from one atomic owner-scoped read."""
-
-    owner_customer_id: NonEmptyString
-    task_id: UUID
-    request_unit_id: UUID
-    task_state_version: PositiveStateVersion
-    binding_facts: tuple[Cycle2CurrentBindingReadFact, ...]
-    shipment_observation_refs: tuple[UUID, ...]
-    current_assessment_ref: UUID | None
-    read_at: datetime
-
-    @model_validator(mode="before")
-    @classmethod
-    def snapshot_is_created_by_owner_reader(
-        cls,
-        value: object,
-        info: ValidationInfo,
-    ) -> object:
-        validation_context = info.context or {}
-        owner_scope = validation_context.get("owner_scope")
-        if (
-            validation_context.get("owner_read_snapshot_factory_token")
-            is not _CYCLE2_OWNER_READ_SNAPSHOT_FACTORY_TOKEN
-            or type(owner_scope) is not TrustedOwnerScope
-        ):
-            raise ValueError(
-                "TrustedCycle2OwnerReadSnapshot requires owner-reader derivation"
-            )
-        trusted_owner = _require_exact_trusted_owner_scope(owner_scope)
-        if not isinstance(value, Mapping):
-            raise ValueError("owner-reader snapshot requires a mapping projection")
-        if value.get("owner_customer_id") != trusted_owner.customer_id:
-            raise ValueError("owner-reader snapshot owner mismatch")
-        return value
-
-    @field_validator("read_at")
-    @classmethod
-    def read_time_is_utc(cls, value: datetime) -> datetime:
-        return require_utc(value, field_name="owner-reader snapshot read_at")
-
-    @model_validator(mode="after")
-    def snapshot_sets_are_unique(self) -> Self:
-        binding_refs = tuple(fact.binding_ref for fact in self.binding_facts)
-        if len(binding_refs) != len(set(binding_refs)):
-            raise ValueError("owner-reader snapshot binding refs must be unique")
-        if len(self.shipment_observation_refs) != len(
-            set(self.shipment_observation_refs)
-        ):
-            raise ValueError(
-                "owner-reader snapshot Shipment Observation refs must be unique"
-            )
-        return self
-
-    @classmethod
-    def _from_owner_reader(
-        cls,
-        *,
-        owner_scope: TrustedOwnerScope,
-        task_id: UUID,
-        request_unit_id: UUID,
-        task_state_version: int,
-        binding_facts: tuple[Cycle2CurrentBindingReadFact, ...],
-        shipment_observation_refs: tuple[UUID, ...],
-        current_assessment_ref: UUID | None,
-        read_at: datetime,
-    ) -> Self:
-        """Infrastructure-only boundary after one atomic complete-set read."""
-
-        trusted_owner = _require_exact_trusted_owner_scope(owner_scope)
-        canonical_facts = tuple(
-            _require_exact_cycle2_model(
-                fact,
-                Cycle2CurrentBindingReadFact,
-                field_name="binding_facts",
-            )
-            for fact in binding_facts
-        )
-        return cls.model_validate(
-            {
-                "owner_customer_id": trusted_owner.customer_id,
-                "task_id": task_id,
-                "request_unit_id": request_unit_id,
-                "task_state_version": task_state_version,
-                "binding_facts": canonical_facts,
-                "shipment_observation_refs": shipment_observation_refs,
-                "current_assessment_ref": current_assessment_ref,
-                "read_at": read_at,
-            },
-            strict=True,
-            context={
-                "owner_scope": trusted_owner,
-                "owner_read_snapshot_factory_token": (
-                    _CYCLE2_OWNER_READ_SNAPSHOT_FACTORY_TOKEN
-                ),
-            },
-        )
-
-    def _attested_fingerprint(self) -> tuple[object, ...]:
-        return (
-            self.owner_customer_id,
-            self.task_id,
-            self.request_unit_id,
-            self.task_state_version,
-            tuple(
-                (fact.binding_ref, fact.family)
-                for fact in self.binding_facts
-            ),
-            self.shipment_observation_refs,
-            self.current_assessment_ref,
-            self.read_at,
-        )
-
-    def model_post_init(self, context: Any, /) -> None:
-        validation_context = context or {}
-        if (
-            validation_context.get("owner_read_snapshot_factory_token")
-            is not _CYCLE2_OWNER_READ_SNAPSHOT_FACTORY_TOKEN
-        ):
-            return
-        instance_id = id(self)
-
-        def discard_if_same(
-            expired: weakref.ReferenceType[TrustedCycle2OwnerReadSnapshot],
-            *,
-            registered_id: int = instance_id,
-        ) -> None:
-            registered = _TRUSTED_CYCLE2_OWNER_READ_SNAPSHOTS.get(registered_id)
-            if registered is not None and registered[0] is expired:
-                _TRUSTED_CYCLE2_OWNER_READ_SNAPSHOTS.pop(registered_id, None)
-
-        _TRUSTED_CYCLE2_OWNER_READ_SNAPSHOTS[instance_id] = (
-            weakref.ref(self, discard_if_same),
-            self._attested_fingerprint(),
-        )
-
-    def require_trusted_derivation(self) -> None:
-        registered = _TRUSTED_CYCLE2_OWNER_READ_SNAPSHOTS.get(id(self))
-        if (
-            registered is None
-            or registered[0]() is not self
-            or registered[1] != self._attested_fingerprint()
-        ):
-            raise ValueError("owner-reader snapshot attestation mismatch")
-
-
-def _require_exact_trusted_cycle2_owner_read_snapshot(
-    value: object,
-) -> TrustedCycle2OwnerReadSnapshot:
-    error_message = "owner-reader snapshot must be an exact trusted projection"
-    if type(value) is not TrustedCycle2OwnerReadSnapshot:
-        raise ValueError(error_message)
-    try:
-        state = value.__dict__
-        fields_set = value.__pydantic_fields_set__
-        extra = value.__pydantic_extra__
-        private = value.__pydantic_private__
-    except (AttributeError, TypeError):
-        raise ValueError(error_message) from None
-    if (
-        type(state) is not dict
-        or set(state) != set(TrustedCycle2OwnerReadSnapshot.model_fields)
-        or type(fields_set) is not set
-        or fields_set != set(TrustedCycle2OwnerReadSnapshot.model_fields)
-        or extra is not None
-        or private is not None
-        or type(value.binding_facts) is not tuple
-        or type(value.shipment_observation_refs) is not tuple
-    ):
-        raise ValueError(error_message)
-    try:
-        for fact in value.binding_facts:
-            rebuilt = _require_exact_cycle2_model(
-                fact,
-                Cycle2CurrentBindingReadFact,
-                field_name="binding_facts",
-            )
-            if rebuilt != fact:
-                raise ValueError(error_message)
-        value.require_trusted_derivation()
-    except ValueError:
-        raise ValueError(error_message) from None
-    return value
 
 
 def _owner_matches_private_scope(
@@ -2798,25 +2585,16 @@ class AcceptedOrderSearchQueryBindingReadClosure(_StrictRuntimePrivateRecord):
         return self
 
 
-class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
-    """Atomic Search Observation, CandidateSet and Task/RequestUnit effect."""
+class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
+    """Exact typed records returned by the owner-scoped search pre-read."""
 
     owner_scope: TrustedOwnerScope
     trusted_conversation_record: ConversationRecord
     source_run_record: AgentRunRecordV2
-    owner_read_snapshot: TrustedCycle2OwnerReadSnapshot
     current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
-    expected_task_record: TaskRecord
-    next_task_record: TaskRecord
-    expected_request_unit_record: RequestUnitRecord
-    next_request_unit_record: RequestUnitRecord
-    source_tool_call_record: ToolCallRecordV2
-    search_observation_record: SearchOrdersObservation
-    candidate_set_record: OrderCandidateSetRecord
-    previous_candidate_set_record: OrderCandidateSetRecord | None = None
-    current_query_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
-    pending_candidate_set_ref: UUID | None = None
-    resolved_owner_scoped_order_target_ref: NonEmptyString | None = None
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    trusted_read_at: datetime
 
     @model_validator(mode="before")
     @classmethod
@@ -2827,7 +2605,108 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
                 "owner_scope": TrustedOwnerScope,
                 "trusted_conversation_record": ConversationRecord,
                 "source_run_record": AgentRunRecordV2,
-                "owner_read_snapshot": TrustedCycle2OwnerReadSnapshot,
+                "current_query_binding": (
+                    AcceptedOrderSearchQueryBindingReadClosure
+                ),
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+            },
+        )
+
+    @field_validator("trusted_read_at")
+    @classmethod
+    def read_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="search trusted_read_at")
+
+    @model_validator(mode="after")
+    def current_graph_is_exact(self) -> Self:
+        task = self.current_task_record
+        unit = self.current_request_unit_record
+        query = self.current_query_binding
+        conversation = self.trusted_conversation_record
+        run = self.source_run_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=task,
+            request_unit_record=unit,
+        )
+        if (
+            unit.input_binding_refs != (query.binding_ref,)
+            or query.private_owner_scope_ref != self.owner_scope.customer_id
+            or query.conversation_id != conversation.conversation_id
+            or query.task_id != task.task_id
+            or query.request_unit_id != unit.request_unit_id
+            or query.current_task_state_version != task.state_version
+            or run.conversation_id != conversation.conversation_id
+            or run.status is not AgentRunStatusV2.RUNNING
+            or conversation.owner_customer_id != self.owner_scope.customer_id
+            or max(
+                task.updated_at,
+                unit.updated_at,
+                run.started_at,
+                query.accepted_at,
+            )
+            > self.trusted_read_at
+        ):
+            raise ValueError("search owner-scoped current read closure mismatch")
+        return self
+
+    def require_same_persisted_graph(
+        self,
+        current: OrderSearchCurrentReadClosure,
+    ) -> None:
+        """Fail when an atomic Port re-read differs from the loaded closure."""
+
+        rebuilt = _require_exact_cycle2_model(
+            current,
+            OrderSearchCurrentReadClosure,
+            field_name="current search read closure",
+        )
+        graph_fields = tuple(
+            field_name
+            for field_name in OrderSearchCurrentReadClosure.model_fields
+            if field_name != "trusted_read_at"
+        )
+        if any(
+            getattr(rebuilt, field_name) != getattr(self, field_name)
+            for field_name in graph_fields
+        ):
+            raise ValueError("search persisted read fence mismatch")
+
+
+class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
+    """Atomic Search Observation, CandidateSet and Task/RequestUnit effect."""
+
+    owner_scope: TrustedOwnerScope
+    loaded_read_closure: OrderSearchCurrentReadClosure
+    trusted_conversation_record: ConversationRecord
+    source_run_record: AgentRunRecordV2
+    current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
+    expected_task_record: TaskRecord
+    next_task_record: TaskRecord
+    expected_request_unit_record: RequestUnitRecord
+    next_request_unit_record: RequestUnitRecord
+    source_tool_call_record: ToolCallRecordV2
+    search_observation_record: SearchOrdersObservation
+    candidate_set_record: OrderCandidateSetRecord
+    previous_candidate_set_record: OrderCandidateSetRecord | None = None
+    current_query_binding_refs: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    pending_candidate_set_ref: UUID | None = None
+    resolved_owner_scoped_order_target_ref: NonEmptyString | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "loaded_read_closure": OrderSearchCurrentReadClosure,
+                "trusted_conversation_record": ConversationRecord,
+                "source_run_record": AgentRunRecordV2,
                 "current_query_binding": (
                     AcceptedOrderSearchQueryBindingReadClosure
                 ),
@@ -2864,7 +2743,17 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         conversation = self.trusted_conversation_record
         run = self.source_run_record
         query_binding = self.current_query_binding
-        snapshot = self.owner_read_snapshot
+        loaded = self.loaded_read_closure
+
+        if (
+            loaded.owner_scope != owner
+            or loaded.trusted_conversation_record != conversation
+            or loaded.source_run_record != run
+            or loaded.current_query_binding != query_binding
+            or loaded.current_task_record != expected_task
+            or loaded.current_request_unit_record != expected_unit
+        ):
+            raise ValueError("search command/read closure mismatch")
 
         _task_and_request_unit_form_current_pair(
             owner_scope=owner,
@@ -2886,7 +2775,8 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("search outcome Conversation/Run closure mismatch")
         if (
-            query_binding.binding_ref not in expected_unit.input_binding_refs
+            expected_unit.input_binding_refs != self.current_query_binding_refs
+            or self.current_query_binding_refs != (query_binding.binding_ref,)
             or query_binding.private_owner_scope_ref != owner.customer_id
             or query_binding.conversation_id != conversation.conversation_id
             or query_binding.task_id != expected_task.task_id
@@ -2898,34 +2788,6 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or query_binding.accepted_at > observation.recorded_at
         ):
             raise ValueError("search current query InputBinding closure mismatch")
-        if (
-            snapshot.owner_customer_id != owner.customer_id
-            or snapshot.task_id != expected_task.task_id
-            or snapshot.request_unit_id != expected_unit.request_unit_id
-            or snapshot.task_state_version != expected_task.state_version
-            or snapshot.read_at
-            < max(
-                expected_task.updated_at,
-                expected_unit.updated_at,
-                query_binding.accepted_at,
-            )
-            or snapshot.read_at > observation.recorded_at
-            or set(fact.binding_ref for fact in snapshot.binding_facts)
-            != set(expected_unit.input_binding_refs)
-            or len(snapshot.binding_facts)
-            != len(expected_unit.input_binding_refs)
-        ):
-            raise ValueError("search owner-reader complete-set snapshot mismatch")
-        current_query_facts = tuple(
-            fact
-            for fact in snapshot.binding_facts
-            if fact.family is Cycle2CurrentBindingFamily.PRODUCT_DESCRIPTION
-        )
-        if (
-            len(current_query_facts) != 1
-            or current_query_facts[0].binding_ref != query_binding.binding_ref
-        ):
-            raise ValueError("search requires exactly one current query family fact")
         if (
             source.status is not ToolCallStatus.SUCCEEDED
             or source.effect is not ToolEffect.READ
@@ -2949,6 +2811,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or not (
                 run.started_at
                 <= query_binding.accepted_at
+                <= loaded.trusted_read_at
                 <= source.started_at
             )
             or source.finished_at is None
@@ -2973,11 +2836,6 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             )
         ):
             raise ValueError("search ToolCall/query binding closure mismatch")
-        if not set(self.current_query_binding_refs).issubset(
-            expected_unit.input_binding_refs
-        ):
-            raise ValueError("query binding refs must belong to current RequestUnit")
-
         validate_search_candidate_set_observation_closure(
             candidate_set=candidate_set,
             observation=observation,
@@ -3698,10 +3556,9 @@ class ShipmentNotReceivedClaimReadClosure(_StrictRuntimePrivateRecord):
 
 
 class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
-    """Owner-reader's complete current graph for deterministic Assessment."""
+    """Typed graph loaded by the owner reader for deterministic Assessment."""
 
     owner_scope: TrustedOwnerScope
-    owner_read_snapshot: TrustedCycle2OwnerReadSnapshot
     trusted_conversation_record: ConversationRecord
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
@@ -3729,7 +3586,6 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
-                "owner_read_snapshot": TrustedCycle2OwnerReadSnapshot,
                 "trusted_conversation_record": ConversationRecord,
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
@@ -3758,7 +3614,6 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         unit = self.current_request_unit_record
         observation = self.current_observation_record
         conversation = self.trusted_conversation_record
-        snapshot = self.owner_read_snapshot
         _task_and_request_unit_form_current_pair(
             owner_scope=self.owner_scope,
             task_record=task,
@@ -3778,18 +3633,6 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             != self.verified_order_target_ref
         ):
             raise ValueError("Shipment Assessment Observation binding mismatch")
-        if (
-            snapshot.owner_customer_id != self.owner_scope.customer_id
-            or snapshot.task_id != task.task_id
-            or snapshot.request_unit_id != unit.request_unit_id
-            or snapshot.task_state_version != task.state_version
-            or snapshot.read_at < max(task.updated_at, unit.updated_at)
-            or snapshot.read_at > self.trusted_assessed_at
-            or set(fact.binding_ref for fact in snapshot.binding_facts)
-            != set(unit.input_binding_refs)
-            or len(snapshot.binding_facts) != len(unit.input_binding_refs)
-        ):
-            raise ValueError("Shipment Assessment owner-reader snapshot mismatch")
         if not (
             observation.observed_at
             <= self.trusted_assessed_at
@@ -3806,10 +3649,7 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         }
         if (
             len(shipment_by_ref) != len(shipment_records)
-            or set(shipment_by_ref) != set(snapshot.shipment_observation_refs)
-            or not set(snapshot.shipment_observation_refs).issubset(
-                unit.observation_refs
-            )
+            or not set(shipment_by_ref).issubset(unit.observation_refs)
             or any(
                 not _owner_matches_private_scope(
                     self.owner_scope,
@@ -3847,44 +3687,17 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         }:
             raise ValueError("Shipment Observation current/supersession graph mismatch")
 
-        provided_binding_facts = tuple(
-            Cycle2CurrentBindingReadFact(
-                binding_ref=binding.binding_id,
-                family=Cycle2CurrentBindingFamily.ORDER_ID,
-            )
-            for binding in self.current_input_binding_records
+        binding_refs = tuple(
+            binding.binding_id for binding in self.current_input_binding_records
         ) + tuple(
-            Cycle2CurrentBindingReadFact(
-                binding_ref=binding.binding_ref,
-                family=Cycle2CurrentBindingFamily.PRODUCT_DESCRIPTION,
-            )
-            for binding in self.current_query_bindings
+            binding.binding_ref for binding in self.current_query_bindings
         ) + tuple(
-            Cycle2CurrentBindingReadFact(
-                binding_ref=binding.binding_ref,
-                family=Cycle2CurrentBindingFamily.CANDIDATE_ORDINAL,
-            )
-            for binding in self.current_ordinal_bindings
-        ) + tuple(
-            Cycle2CurrentBindingReadFact(
-                binding_ref=binding.binding_ref,
-                family=Cycle2CurrentBindingFamily.SHIPMENT_NOT_RECEIVED,
-            )
-            for binding in self.current_claim_bindings
-        )
-        binding_refs = tuple(fact.binding_ref for fact in provided_binding_facts)
+            binding.binding_ref for binding in self.current_ordinal_bindings
+        ) + tuple(binding.binding_ref for binding in self.current_claim_bindings)
         if (
             len(binding_refs) != len(set(binding_refs))
             or len(binding_refs) != len(unit.input_binding_refs)
             or set(binding_refs) != set(unit.input_binding_refs)
-            or {
-                fact.binding_ref: fact.family
-                for fact in provided_binding_facts
-            }
-            != {
-                fact.binding_ref: fact.family
-                for fact in snapshot.binding_facts
-            }
         ):
             raise ValueError("complete current InputBinding partition mismatch")
         for query in self.current_query_bindings:
@@ -3920,10 +3733,6 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             ):
                 raise ValueError("current Claim binding closure mismatch")
         previous = self.current_assessment_record
-        if snapshot.current_assessment_ref != (
-            None if previous is None else previous.assessment_id
-        ):
-            raise ValueError("complete current Shipment Assessment set mismatch")
         if previous is not None and (
             previous.private_owner_scope_ref != self.owner_scope.customer_id
             or previous.task_id != task.task_id
@@ -3938,6 +3747,20 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("current Shipment Assessment context mismatch")
         return self
+
+    def require_same_persisted_graph(
+        self,
+        current: ShipmentAssessmentReadClosure,
+    ) -> None:
+        """Fail when the Port's in-transaction re-read differs in any field."""
+
+        rebuilt = _require_exact_cycle2_model(
+            current,
+            ShipmentAssessmentReadClosure,
+            field_name="current Shipment Assessment read closure",
+        )
+        if rebuilt != self:
+            raise ValueError("Shipment Assessment persisted read fence mismatch")
 
     @property
     def current_claim_binding_ref(self) -> UUID | None:
