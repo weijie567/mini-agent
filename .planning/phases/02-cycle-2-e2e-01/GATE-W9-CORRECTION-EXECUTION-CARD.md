@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_EVAL_MACHINERY_CONFIRMED / 02-15R0_PLANNING_REVIEW`
+状态：`B_C2_W9_SEED_CONTRACT_CONFIRMED / 02-15R1_PLANNING_REVIEW`
 
 ## Exact input
 
@@ -9,6 +9,9 @@
 - PR #268/#269 已reviewed批准W9在原wave内串行`02-15R0→R1→R2→02-15`，
   32 slots / 16 wave labels。
 - Case lifecycle仍为`CONTRACT_DEFINED`；Phase 2 Harness dispatch与Result为零。
+- PR #270/#271已reviewed完成R0；真实
+  `B_C2_W9_SEED_CONTRACT = 95b2acf3be79bba1d6e40ba8a56bffc9109b54d6` /
+  tree `466e07a4aec381967c5bc59c248207f111bb97f3`。R0禁止W9预置Runtime graph。
 
 ## Ordered dispatch
 
@@ -29,4 +32,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R0`单文件Spec correction planning/review；R1/R2/02-15尚未冻结。
+当前只允许`02-15R1` exact-six-file Application correction planning/review；R2/02-15尚未冻结。
