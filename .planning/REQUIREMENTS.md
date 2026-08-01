@@ -22,7 +22,9 @@
   `01b33357...`。W4 exit三组回归`726/877/398 passed`；PR #247/#248随后reviewed
   完成W5 `02-10`并形成`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`。
   W6 preflight确认Application Port owner缺口；用户授权`02-07R`与
-  slots `26→27`，PR #250已reviewed merge。这不推进任一Case lifecycle。
+  slots `26→27`，PR #250已reviewed merge；PR #251/#252随后reviewed完成
+  `02-07R`并冻结`B_C2_BUSINESS_READ_PORTS = c775ef45...` / tree `c598651b...`。
+  `02-07/02-11`已从该successor重冻结并正在planning review。这不推进任一Case lifecycle。
   Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
@@ -34,7 +36,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_PHYSICAL / W6 02-07R PLANNING）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_BUSINESS_READ_PORTS / W6 ADAPTER PLANNING）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
