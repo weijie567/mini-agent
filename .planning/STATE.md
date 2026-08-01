@@ -4,14 +4,14 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "w3r_owner_ruling_review"
-status: "phase_2_w3r_owner_ruling_review"
+current_plan: "02-02R"
+status: "phase_2_w3r_02_02r_planning_review"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — W4 preflight确认三项跨owner blocker；用户授权先修复再开始W4；owner ruling candidate已形成"
+last_activity: "2026-08-01 — owner-ruling PR #221 reviewed merge；从真实 successor 签发02-02R exact Plan"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 7
+  total_plans: 8
   completed_plans: 6
   percent: 32
 ---
@@ -29,35 +29,36 @@ See: [PROJECT.md](PROJECT.md)
 
 **Current focus:** W1–W3 `02-01..05` 已 reviewed merge；PR #218/#219 关闭 W3 并
 冻结 exact `B_C2_APP_CONTRACT = 86d1b835...`。W4 preflight 已确认三项跨 owner
-blocker；用户授权先修复再开始 W4。当前只审 owner ruling；其 merge 后才从真实 SHA
-签发 `02-02R`，随后签发 `02-04R/02-05R`。W4 Worktree 尚未创建。
+blocker；用户授权先修复再开始 W4。owner-ruling PR #221 已 reviewed merge 为
+`B_C2_W3R_RULING = ed61f4d...` / tree `02c06f70...`；当前只审 `02-02R` exact
+Plan，随后才创建其 implementation Worktree。W4 Worktree 尚未创建。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: w3r_owner_ruling_review
+Current Plan: 02-02R
 Total Phases: 6
-Total Plans in Phase: 7
-Status: Phase 2 W3R / owner ruling review
+Total Plans in Phase: 8
+Status: Phase 2 W3R / 02-02R planning review
 Last Activity: 2026-08-01
 Last Activity Description: W4 preflight确认 InputBinding / atomic ordinal selection / selected-target Gateway blocker；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R ruling；Plan files 7/22、completed slots 6/22、functional implementation 5/21；1/6 phases
+Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R 02-02R planning；Plan files 8/22、completed slots 6/22、functional implementation 5/21；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 22 USER-AUTHORIZED SLOTS / 02-00..02-05 COMPLETE / W3R OWNER RULING REVIEW`
-Status: `CONTRACT_ACTIVE / W3_COMPLETE / W3R_REMEDIATION_RULING / W4_BLOCKED`
-Last activity: 2026-08-01 — owner ruling candidate明确 InputBinding vocabulary、single-CAS ordinal selection、selected-target Gateway 与 canonical Claim name
-Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 implementation Packet complete；W3R ruling；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 22 USER-AUTHORIZED SLOTS / 02-00..02-05 COMPLETE / 02-02R PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / W3_COMPLETE / W3R_02_02R_PLANNING / W4_BLOCKED`
+Last activity: 2026-08-01 — PR #221 merge tree已核对；02-02R以真实barrier冻结
+Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 implementation Packet complete；W3R 02-02R planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 owner ruling exact diff 做一次有界 direct-owner review；`PASS` 后 merge。
-2. 从真实 ruling successor 冻结、审阅、实现并合并 `02-02R`；再从真实 Core
+1. 对 `02-02R` exact Plan 做一次有界 direct-owner review；`PASS`/merge 后创建实现 Worktree。
+2. 从 exact `B_C2_W3R_RULING` 实现、审阅并合并 `02-02R`；再从真实 Core
    successor 冻结 `02-04R/02-05R`，最多两个 writer、串行 merge。
 3. 冻结真实 `B_C2_W4_READY`，重签 `02-06/08/09/13`；旧 02-06 Plan 不可执行。
 4. planning gates 全部通过后按 `02-06 + 02-13`、再 `02-08 + 02-09` 两批实现；
@@ -159,8 +160,9 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；W3 merge tree 与 reviewed overlay
   tree 相等。原始 Codex review transcript 未作为 GitHub review object 持久化，PR body /
   merge message 是当前 durable review evidence。
-- `GATE / W3R_OWNER_RULING_REVIEW`: 用户已批准三个 correction slots 与 W3R；当前
-  owner ruling exact diff 必须由独立 reviewer 至 `PASS` 并 merge，随后才签发 02-02R。
+- `CONFIRMED / B_C2_W3R_RULING`: owner-ruling PR #221 已独立 review `PASS` 并
+  squash merge 为 `ed61f4d4da9c75386aa96857a5e77e06de4c4804`、tree
+  `02c06f70459cf9593946c599a2de33d1c5a15a91`；当前只签发 02-02R exact Plan。
 - `INVALIDATED / OLD_02_06_PLAN`: 旧 Plan 的 base/dependency/product blobs 不再成立；
   只保留历史，不得创建实现 branch。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
@@ -177,5 +179,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: W3R owner ruling exact review gate；remediation/W4 implementation not started
+Stopped At: W3R 02-02R exact planning review gate；remediation/W4 implementation not started
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)
