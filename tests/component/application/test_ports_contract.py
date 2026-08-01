@@ -2349,6 +2349,23 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         "current Search graph",
     ):
         assert required_term in search_write_doc
+    selection_write_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort
+            .apply_order_candidate_selection_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "command.require_live_target_issuance()",
+        "immediately before",
+        "copied",
+        "deserialized",
+        "reconstructed",
+        "replay-bound",
+        "zero writes",
+    ):
+        assert required_term in selection_write_doc
     assessment_write_doc = " ".join(
         (
             Cycle2RuntimeRecordPort.save_shipment_assessment_if_current.__doc__

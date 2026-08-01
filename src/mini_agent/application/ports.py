@@ -470,6 +470,9 @@ class Cycle2RuntimeRecordPort(Protocol):
     ) -> Cycle2WriteResult:
         """Commit ordinal binding and the complete selection effect in one CAS.
 
+        The adapter must call ``command.require_live_target_issuance()``
+        immediately before its in-transaction re-read; copied, deserialized,
+        reconstructed, or replay-bound commands fail closed with zero writes.
         APPLIED atomically inserts InputBindingV2 and SelectionRecord, appends
         the RequestUnit binding ref, records the independent UUID target,
         closes the exact pending question, and advances Task/RequestUnit once.

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Annotated, Literal, Self, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import (
     BaseModel,
@@ -3443,30 +3443,141 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         return self.trusted_conversation_record.conversation_id
 
 
+_ISSUED_SELECTED_TARGET_FACTORY_TOKEN = object()
+_ORDER_SELECTION_COMMAND_FACTORY_TOKEN = object()
+_ISSUED_SELECTED_TARGET_REFS: dict[
+    int,
+    tuple[
+        weakref.ReferenceType["IssuedSelectedTargetRef"],
+        UUID,
+        weakref.ReferenceType["ApplyOrderCandidateSelectionV2Command"] | None,
+        str | None,
+    ],
+] = {}
+
+
+class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
+    """One Application-issued UUID capability for one selection command."""
+
+    selected_target_ref: UUID
+
+    @model_validator(mode="before")
+    @classmethod
+    def target_is_issued_in_process(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if (
+            (info.context or {}).get("issued_selected_target_factory_token")
+            is not _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
+        ):
+            raise ValueError(
+                "IssuedSelectedTargetRef must be created by fresh()"
+            )
+        return value
+
+    @field_validator("selected_target_ref")
+    @classmethod
+    def target_is_uuid4(cls, value: UUID) -> UUID:
+        if value.version != 4:
+            raise ValueError("issued selected target must be UUIDv4")
+        return value
+
+    @classmethod
+    def fresh(cls) -> Self:
+        """Generate a fresh target internally; callers cannot supply entropy."""
+
+        return cls.model_validate(
+            {"selected_target_ref": uuid4()},
+            context={
+                "issued_selected_target_factory_token": (
+                    _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
+                )
+            },
+        )
+
+    def model_post_init(self, context: Any, /) -> None:
+        if (
+            (context or {}).get("issued_selected_target_factory_token")
+            is not _ISSUED_SELECTED_TARGET_FACTORY_TOKEN
+        ):
+            return
+        issued_id = id(self)
+
+        def discard_if_same(
+            expired: weakref.ReferenceType[IssuedSelectedTargetRef],
+            *,
+            registered_id: int = issued_id,
+        ) -> None:
+            registered = _ISSUED_SELECTED_TARGET_REFS.get(registered_id)
+            if registered is not None and registered[0] is expired:
+                _ISSUED_SELECTED_TARGET_REFS.pop(registered_id, None)
+
+        _ISSUED_SELECTED_TARGET_REFS[issued_id] = (
+            weakref.ref(self, discard_if_same),
+            self.selected_target_ref,
+            None,
+            None,
+        )
+
+
 class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
     """CAS one exact ordinal selection and its Task/RequestUnit effect."""
 
     loaded_closure: OrderCandidateSelectionReadClosure
     ordinal_input_binding_record: InputBindingV2
-    selected_target_ref: UUID
+    issued_selected_target: IssuedSelectedTargetRef
     next_task_record: TaskRecord
     next_request_unit_record: RequestUnitRecord
     selection_record: OrderCandidateSelectionRecord
     closed_pending_candidate_set_ref: UUID
 
+    def require_live_target_issuance(self) -> None:
+        """Reject a command not returned by the live Application factory."""
+
+        _require_live_order_candidate_selection_v2_command(self)
+
+    @property
+    def selected_target_ref(self) -> UUID:
+        return self.issued_selected_target.selected_target_ref
+
     @model_validator(mode="before")
     @classmethod
-    def nested_records_are_exact(cls, value: object) -> object:
-        return _require_exact_cycle2_inputs(
-            value,
-            model_fields={
-                "loaded_closure": OrderCandidateSelectionReadClosure,
-                "ordinal_input_binding_record": InputBindingV2,
-                "next_task_record": TaskRecord,
-                "next_request_unit_record": RequestUnitRecord,
-                "selection_record": OrderCandidateSelectionRecord,
-            },
-        )
+    def nested_records_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if (
+            (info.context or {}).get("order_selection_command_factory_token")
+            is not _ORDER_SELECTION_COMMAND_FACTORY_TOKEN
+        ):
+            raise ValueError(
+                "selection command must be created by the Application factory"
+            )
+        if not isinstance(value, Mapping):
+            raise ValueError("selection command requires a mapping")
+        issued_target = value.get("issued_selected_target")
+        if type(issued_target) is not IssuedSelectedTargetRef:
+            raise ValueError(
+                "issued_selected_target must be an exact live issuance"
+            )
+        canonical = dict(value)
+        for field_name, expected_type in {
+            "loaded_closure": OrderCandidateSelectionReadClosure,
+            "ordinal_input_binding_record": InputBindingV2,
+            "next_task_record": TaskRecord,
+            "next_request_unit_record": RequestUnitRecord,
+            "selection_record": OrderCandidateSelectionRecord,
+        }.items():
+            canonical[field_name] = _require_exact_cycle2_model(
+                value.get(field_name),
+                expected_type,
+                field_name=field_name,
+            )
+        canonical["issued_selected_target"] = issued_target
+        return canonical
 
     @model_validator(mode="after")
     def selection_effect_is_exact(self) -> Self:
@@ -3586,7 +3697,91 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
             or self.next_request_unit_record.open_questions
         ):
             raise ValueError("successful selection must close pending question")
+        _bind_issued_selected_target_to_command(
+            self.issued_selected_target,
+            self,
+        )
         return self
+
+
+def _bind_issued_selected_target_to_command(
+    issued_target: IssuedSelectedTargetRef,
+    command: ApplyOrderCandidateSelectionV2Command,
+) -> None:
+    registered = _ISSUED_SELECTED_TARGET_REFS.get(id(issued_target))
+    if (
+        type(issued_target) is not IssuedSelectedTargetRef
+        or registered is None
+        or registered[0]() is not issued_target
+        or registered[1] != issued_target.selected_target_ref
+        or registered[2] is not None
+        or registered[3] is not None
+    ):
+        raise ValueError(
+            "selected target requires one fresh Application issuance"
+        )
+    _ISSUED_SELECTED_TARGET_REFS[id(issued_target)] = (
+        registered[0],
+        registered[1],
+        weakref.ref(command),
+        command.model_dump_json(),
+    )
+
+
+def _require_live_order_candidate_selection_v2_command(
+    command: ApplyOrderCandidateSelectionV2Command,
+) -> None:
+    if type(command) is not ApplyOrderCandidateSelectionV2Command:
+        raise ValueError(
+            "selection command lacks fresh Application target issuance"
+        )
+    issued_target = command.issued_selected_target
+    registered = _ISSUED_SELECTED_TARGET_REFS.get(id(issued_target))
+    if (
+        type(issued_target) is not IssuedSelectedTargetRef
+        or registered is None
+        or registered[0]() is not issued_target
+        or registered[1] != issued_target.selected_target_ref
+        or registered[2] is None
+        or registered[2]() is not command
+        or registered[3] != command.model_dump_json()
+    ):
+        raise ValueError(
+            "selection command lacks fresh Application target issuance"
+        )
+
+
+def build_order_candidate_selection_v2_command(
+    *,
+    loaded_closure: OrderCandidateSelectionReadClosure,
+    ordinal_input_binding_record: InputBindingV2,
+    issued_selected_target: IssuedSelectedTargetRef,
+    next_task_record: TaskRecord,
+    next_request_unit_record: RequestUnitRecord,
+    selection_record: OrderCandidateSelectionRecord,
+    closed_pending_candidate_set_ref: UUID,
+) -> ApplyOrderCandidateSelectionV2Command:
+    """Bind one fresh Application target to one exact selection command."""
+
+    return ApplyOrderCandidateSelectionV2Command.model_validate(
+        {
+            "loaded_closure": loaded_closure,
+            "ordinal_input_binding_record": ordinal_input_binding_record,
+            "issued_selected_target": issued_selected_target,
+            "next_task_record": next_task_record,
+            "next_request_unit_record": next_request_unit_record,
+            "selection_record": selection_record,
+            "closed_pending_candidate_set_ref": (
+                closed_pending_candidate_set_ref
+            ),
+        },
+        strict=True,
+        context={
+            "order_selection_command_factory_token": (
+                _ORDER_SELECTION_COMMAND_FACTORY_TOKEN
+            )
+        },
+    )
 
 
 class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):

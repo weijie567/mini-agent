@@ -51,6 +51,7 @@ from mini_agent.application.records import (
     FinalizeToolAttemptV2Command,
     InterruptToolCallForRecoveryCommand,
     InitialToolCallV2ReadClosure,
+    IssuedSelectedTargetRef,
     MarkRunIncompleteForRecoveryCommand,
     MessageDirection,
     MessageRecord,
@@ -77,6 +78,7 @@ from mini_agent.application.records import (
     ToolCallRecoveryAggregate,
     TransitionRunCommand,
     TrustedOwnerScope,
+    build_order_candidate_selection_v2_command,
 )
 from mini_agent.core.common import ContractVisibility
 from mini_agent.core.control_gateway import (
@@ -8882,7 +8884,8 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         trusted_now=selected_at,
     )
     selected = candidate_set.ordered_candidates[1]
-    selected_target_ref = uuid4()
+    issued_selected_target = IssuedSelectedTargetRef.fresh()
+    selected_target_ref = issued_selected_target.selected_target_ref
     selection = OrderCandidateSelectionRecord(
         selection_id=uuid4(),
         private_owner_scope_ref=owner.customer_id,
@@ -8905,7 +8908,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         result_task_state_version=5,
         selected_at=selected_at,
     )
-    command = ApplyOrderCandidateSelectionV2Command(
+    command = build_order_candidate_selection_v2_command(
         loaded_closure=closure,
         ordinal_input_binding_record=_input_binding_v2(
             binding_id=ordinal_ref,
@@ -8915,7 +8918,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
             created_at=selected_at,
             updated_at=selected_at,
         ),
-        selected_target_ref=selected_target_ref,
+        issued_selected_target=issued_selected_target,
         next_task_record=_c2_project(
             current_task,
             status=TaskStatus.ACTIVE,
@@ -8936,6 +8939,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
     assert command.selection_record.owner_scoped_order_target_ref == "owner-order:2"
     assert command.selection_record.selected_target_ref == str(selected_target_ref)
     assert UUID(command.selection_record.selected_target_ref) == selected_target_ref
+    command.require_live_target_issuance()
 
     closure_values = {
         field_name: getattr(closure, field_name)
@@ -8955,8 +8959,88 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         field_name: getattr(command, field_name)
         for field_name in type(command).model_fields
     }
-    with pytest.raises(ValidationError, match="append exactly"):
+
+    digest = sha256(
+        closure.resolved_owner_scoped_order_target_ref.encode("utf-8")
+    ).digest()
+    derived_bytes = bytearray(digest[:16])
+    derived_bytes[6] = (derived_bytes[6] & 0x0F) | 0x40
+    derived_bytes[8] = (derived_bytes[8] & 0x3F) | 0x80
+    derived_target_ref = UUID(bytes=bytes(derived_bytes))
+    derived_selection = _c2_project(
+        selection,
+        selected_target_ref=str(derived_target_ref),
+    )
+    with pytest.raises(ValidationError, match="Application factory"):
         ApplyOrderCandidateSelectionV2Command(
+            **{
+                **command_values,
+                "issued_selected_target": (
+                    IssuedSelectedTargetRef.model_construct(
+                        selected_target_ref=derived_target_ref
+                    )
+                ),
+                "selection_record": derived_selection,
+            }
+        )
+    forged_issued_target = IssuedSelectedTargetRef.model_construct(
+        selected_target_ref=derived_target_ref
+    )
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(
+            **{
+                **command_values,
+                "issued_selected_target": forged_issued_target,
+                "selection_record": derived_selection,
+            }
+        )
+
+    with pytest.raises(ValidationError, match="created by fresh"):
+        IssuedSelectedTargetRef.model_validate(
+            issued_selected_target.model_dump(mode="python"),
+            strict=True,
+        )
+    with pytest.raises(ValidationError, match="created by fresh"):
+        IssuedSelectedTargetRef(
+            selected_target_ref=derived_target_ref,
+        )
+    inert_issued_targets = (
+        issued_selected_target.model_copy(),
+        issued_selected_target.model_copy(deep=True),
+        IssuedSelectedTargetRef.model_construct(
+            selected_target_ref=selected_target_ref
+        ),
+        pickle.loads(pickle.dumps(issued_selected_target)),
+    )
+    for inert_issued_target in inert_issued_targets:
+        with pytest.raises(ValidationError, match="fresh Application issuance"):
+            build_order_candidate_selection_v2_command(
+                **{
+                    **command_values,
+                    "issued_selected_target": inert_issued_target,
+                }
+            )
+    with pytest.raises(ValidationError, match="fresh Application issuance"):
+        build_order_candidate_selection_v2_command(**command_values)
+
+    with pytest.raises(ValidationError, match="Application factory"):
+        ApplyOrderCandidateSelectionV2Command.model_validate(
+            command.model_dump(mode="python"),
+            strict=True,
+        )
+    inert_commands = (
+        command.model_copy(),
+        command.model_copy(deep=True),
+        ApplyOrderCandidateSelectionV2Command.model_construct(**command_values),
+        pickle.loads(pickle.dumps(command)),
+    )
+    for inert_command in inert_commands:
+        with pytest.raises(ValueError, match="lacks fresh Application"):
+            inert_command.require_live_target_issuance()
+    command.require_live_target_issuance()
+
+    with pytest.raises(ValidationError, match="append exactly"):
+        build_order_candidate_selection_v2_command(
             **{
                 **command_values,
                 "next_request_unit_record": _c2_project(
@@ -8967,10 +9051,14 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         )
     version_five_target = UUID(int=selected_target_ref.int, version=5)
     with pytest.raises(ValidationError, match="fresh independent canonical UUID"):
-        ApplyOrderCandidateSelectionV2Command(
+        build_order_candidate_selection_v2_command(
             **{
                 **command_values,
-                "selected_target_ref": version_five_target,
+                "issued_selected_target": (
+                    IssuedSelectedTargetRef.model_construct(
+                        selected_target_ref=version_five_target
+                    )
+                ),
                 "selection_record": _c2_project(
                     selection,
                     selected_target_ref=str(version_five_target),
@@ -9018,10 +9106,10 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         selected_at=closure.trusted_now + timedelta(seconds=1),
     )
     with pytest.raises(ValidationError, match="trusted transaction time"):
-        ApplyOrderCandidateSelectionV2Command(
+        build_order_candidate_selection_v2_command(
             loaded_closure=closure,
             ordinal_input_binding_record=command.ordinal_input_binding_record,
-            selected_target_ref=selected_target_ref,
+            issued_selected_target=issued_selected_target,
             next_task_record=_c2_project(
                 current_task,
                 status=TaskStatus.ACTIVE,
