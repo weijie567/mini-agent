@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3 COMPLETE / W3R 02-05R PLANNING / W4 BLOCKED`；02-04R planning PR #224 与 implementation PR #225 已 reviewed merge 为 `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa88fab1ab99d2b076a1d731f63dced064a` / tree `3f9852e825a69c9ceb8a19e18c810263ef74349e`；当前只冻结 `02-05R`，`B_C2_W4_READY` 未形成且不得猜测 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3R COMPLETE / B_C2_W4_READY / W4 PLAN REFREEZE REVIEW`；02-05R planning PR #226 与 implementation PR #227 已reviewed merge为 `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de` / tree `174fbebcfa622336ffeade113cfae74a5611edae`；`02-06/08/09/13` 已从该product base重冻结，planning review/merge前不得创建implementation资源 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C

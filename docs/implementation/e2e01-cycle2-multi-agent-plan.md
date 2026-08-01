@@ -85,17 +85,17 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `02-00..05 + 02-02R + 02-04R COMPLETE / 02-05R NEXT / W4 PLANS MUST REFREEZE` |
-| Task Packets | `02-00..05 + 02-02R + 02-04R REVIEWED MERGE / 02-05R USER-AUTHORIZED CORRECTION / W4 NOT_DISPATCHED` |
+| Future GSD Plans | `02-00..05 + W3R COMPLETE / 02-06/08/09/13 REFROZEN / PLANNING REVIEW` |
+| Task Packets | `W1-W3R REVIEWED MERGE / B_C2_W4_READY CONFIRMED / W4 NOT_DISPATCHED` |
 | Proposed Plan / Packet slots / Waves | `22 / 14`（原 `02-00..18` + `02-02R/04R/05R` / 原 `W0..W12` + `W3R`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / B_C2_SELECTED_TARGET_GATEWAY` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / B_C2_W4_READY` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W3 + 02-02R + 02-04R COMPLETE；02-05R/W4 implementation 尚未创建` |
-| Writer assignments | `02-05R Application single writer；W4 后续重冻结` |
+| Integration / code feature branches / Worktrees | `W1..W3R COMPLETE；W4 implementation 尚未创建` |
+| Writer assignments | `W4 Plans refrozen；Batch A/B implementation pending planning review` |
 | Execution concurrency | approved ceiling `2` writers；当前 dispatch `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
@@ -926,7 +926,7 @@ barrier 与 release。
 
 ### Gate P2-A1 — W4 prerequisite remediation amendment
 
-状态：`USER_APPROVED / OWNER-RULING REVIEWED MERGED / CORRECTION SET IN PROGRESS / 02-05R PLANNING`。W4 preflight 证明旧
+状态：`USER_APPROVED / CORRECTION SET REVIEWED MERGED / B_C2_W4_READY CONFIRMED / W4 REFREEZE REVIEW`。W4 preflight 证明旧
 `02-06/08/09/13` freeze 假设无法形成可执行闭包；用户于 2026-08-01 授权先修复再
 开始 W4，并要求缩短 reviewer 周期。该授权只增加：
 
@@ -940,14 +940,14 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / 02-00..05 + 02-02R + 02-04R COMPLETE / W3R 02-05R PLANNING`。P2-A 通过后始终按
+状态：`IN_PROGRESS / W1-W3R COMPLETE / W4 FOUR-PLAN REFREEZE REVIEW`。P2-A 通过后始终按
 真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造 SHA。W3 reviewed
 merge 已真实形成 `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6`
 / tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；owner-ruling、02-02R 与 02-04R
-已依次形成 `B_C2_W3R_RULING`、`B_C2_INPUT_BINDING_V2` 和
-`B_C2_SELECTED_TARGET_GATEWAY`。当前只从真实 02-04R successor 冻结 `02-05R`；
-它的真实 reviewed merge successor 才能命名为 `B_C2_W4_READY` 并用于重冻结
-W4 `02-06/08/09/13`。
+已依次形成 `B_C2_W3R_RULING`、`B_C2_INPUT_BINDING_V2`、
+`B_C2_SELECTED_TARGET_GATEWAY` 与最终 `B_C2_W4_READY = 5f2fa6d...` / tree
+`174fbebc...`。W4 `02-06/08/09/13` 四份Plan已从该同一product base重冻结，等待
+独立exact-file planning review与planning provenance merge。
 
 用户需逐项或整组批准：
 

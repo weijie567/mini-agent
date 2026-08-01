@@ -265,15 +265,15 @@ B_C2_W4_READY
 = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de
 = tree 174fbebcfa622336ffeade113cfae74a5611edae
 = PR #227 reviewed 02-05R merge successor and exact W4 product base
-= future exact W4 product base; must not be guessed
+= exact W4 product base; planning-control and later serial feature successors do not replace it
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
 `B_C2_START` 已冻结为 `B_C2_OWNER_ALIGNED` exact SHA/tree，随后 reviewed 02-03/02-01
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
-`ecfad7e...` 未进入 ancestry。W2 `02-04` 与 W3 `02-05` 已依次完成；W4 四个
-四个 W4 implementation Packet 已固定到真实 `B_C2_W4_READY`；当前 planning-control
+`ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05` 与 W3R 已依次完成；四个
+W4 implementation Packet已固定到真实`B_C2_W4_READY`；当前 planning-control
 successor与后续串行 feature merge均不得替换其 product base。旧
 `B_C2_APP_CONTRACT` 与旧 02-06 literals 均不得作为 W4 dispatch base。
 
