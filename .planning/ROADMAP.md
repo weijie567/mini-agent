@@ -36,8 +36,8 @@ head在exact review发现两个shared dispatch-authority HIGH后保持local/unpu
 PR #241 owner ruling与PR #242/#243 planning/implementation形成
 `B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；PR #244/#245随后
 reviewed完成second-refrozen replacement `02-09`并形成`B_C2_LEAVES = fc3a603b...` /
-tree `01b33357...`。W4 exit三组回归全部通过；当前只冻结并review W5 `02-10`
-migration Packet，implementation尚未开始。
+tree `01b33357...`。W4 exit三组回归全部通过；PR #247/#248随后reviewed完成W5
+`02-10` migration并形成`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`；W6尚未开始。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -173,7 +173,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_LEAVES / W4_COMPLETE / W5_02-10_PLAN_REVIEW / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_PHYSICAL / W5_COMPLETE / W6_NOT_STARTED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -210,7 +210,7 @@ R1 PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2 PR #235/#236/#237 又形成
 第一次replacement `02-09` head因两个shared owner HIGH未发布；PR #241批准R4，
 PR #242/#243 reviewed merge形成真实dispatch-ready successor；PR #244/#245从该
 successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passed`；旧02-09
-base/head仍不得复用；W5 `02-10`当前仅进入exact planning review。
+base/head仍不得复用；W5 `02-10`已reviewed完成并冻结`B_C2_PHYSICAL`，W6尚未开始。
 
 **Branch mapping**:
 
@@ -334,6 +334,11 @@ B_C2_LEAVES
 = fc3a603b963ea54c597e00847ac816050bd007bf
 = tree 01b33357c15d16ee2c1dc15194254f86dd07252c
 = PR #244/#245 reviewed second-refrozen 02-09 successor; W4 exit 726/877/398 passed
+
+B_C2_PHYSICAL
+= bf8e88b2c0124aee82dffc7e54ae03ec0fdbea50
+= tree fccc5a1f87a0b00dd31ba61ee8c960901c7601da
+= PR #247/#248 reviewed 02-10 planning/implementation successor; W5 two-path migration gate passed
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -342,8 +347,8 @@ B_C2_LEAVES
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
 `ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05`、W3R 与 W4
 `02-06/13/08`、R1/R2/R3/R4与second-refrozen 02-09已依次完成。第一次replacement
-02-09 head保持quarantine；真实`B_C2_LEAVES`已冻结，W5只可从其actual successor
-planning provenance开始。旧 `B_C2_APP_CONTRACT`、
+02-09 head保持quarantine；真实`B_C2_PHYSICAL`已由reviewed W5 successor冻结，W6
+只可从该actual barrier分别冻结02-07/02-11 planning provenance。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -423,7 +428,7 @@ planning provenance开始。旧 `B_C2_APP_CONTRACT`、
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 17/26 | `W1-W4 complete；B_C2_LEAVES frozen；W4 exit 726/877/398 passed；W5 02-10 exact Plan review；no migration source；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 18/26 | `W1-W5 complete；B_C2_PHYSICAL frozen；W5 focused/neighbor 66/277 passed；two upgrade paths PASS；W6 not started；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
