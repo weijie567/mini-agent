@@ -743,6 +743,24 @@ finalize current ToolAttempt
   Observation、用户结果或 Task / RequestUnit 写入。若无法唯一证明 obsolete，则不得猜测
   `SUPERSEDED`，必须 fail closed。其他具体 Run terminal result 继续服从 Core
   Runtime / Application mapper owner。
+- recovery 的预算证据只能由 owner-scoped Application reader 从可信服务端时钟、
+  exact active Run `started_at` 与版本化 Run-budget policy 派生；模型、用户消息、
+  executor 参数或 caller-supplied `remaining_run_time_budget_ms` 都不是 authority。
+  recovery writer 必须在同一 CAS 内重读这些输入并重新计算；旧 closure 即使曾有正
+  预算，也不能在当前预算已耗尽时授予第二次 dispatch。
+- `ToolRetryRecoveryDecisionRecordV2` 是 `ToolCallRecordV2` 的 audit-only logical
+  child，不是新的 top-level business record。它只保存
+  `recovery_decision_id`、`tool_call_id`、`last_attempt_no`、Core decision、stable
+  reason、可选的 `candidate_next_attempt_no` 与可信 `decided_at`；禁止业务 payload、
+  Tool result、Observation、用户文本、raw owner scope 或 Action 字段。恢复追加
+  attempt 2 时，decision child 与第二个 durable dispatch fence 必须在一个 CAS 中
+  落盘；只有 `APPLIED` 授权一次 dispatch。
+- attempt 1 已永久保存 `RETRY_SCHEDULED`、但 CAS 时 Run budget 已耗尽时，不得改写
+  attempt 1。必须追加 `RUN_BUDGET_EXHAUSTED` recovery decision child，并以专用
+  `RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED` recovery disposition 把 parent 终止为原
+  attempt 对应的 `FAILED` 或 `TIMED_OUT`；failure code / timeout phase 原样投影，
+  `result_ref`、`interruption_reason` 保持 `null`。这不是新的 Tool attempt outcome，
+  也不能被解释成业务系统再次失败。
 - 恢复不能超过 active `ExecutionPolicy.max_attempts`，不能创建第二个同语义
   ToolCall 来绕过 attempt 预算，也不能对同一个确定性失败形成无进展循环。
 
