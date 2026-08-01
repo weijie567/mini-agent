@@ -1,6 +1,6 @@
 # Gate W5｜02-10 physical migration execution card
 
-状态：`W4_COMPLETE / B_C2_LEAVES_CONFIRMED / 02-10_PLAN_REVIEW`
+状态：`W5_COMPLETE / B_C2_PHYSICAL_FROZEN / W6_NOT_STARTED`
 
 ## Exact input
 
@@ -38,5 +38,23 @@ prevalidation/atomic cutover、physical admission、Phase1 byte identity和downg
 
 ## W5 exit
 
-只记录empty DB与Phase1 head两条upgrade path、focused/neighbor及downgrade fence；
-不运行canonical full，不启动W6实现，不推进Case lifecycle或Phase2 Eval Result。
+```text
+planning PR #247 merge = 848471a85744a701e409322b7285a979ad104c9d
+implementation PR #248 reviewed head = 54e50657edf4ab6e6e47e2025e0347c91bbbd38e
+implementation PR #248 merge / B_C2_PHYSICAL = bf8e88b2c0124aee82dffc7e54ae03ec0fdbea50
+B_C2_PHYSICAL tree = fccc5a1f87a0b00dd31ba61ee8c960901c7601da
+latest-integration overlay tree = fccc5a1f87a0b00dd31ba61ee8c960901c7601da
+focused = 66 passed
+neighbor = 277 passed
+empty DB -> head = PASS
+Phase 1 head -> Phase 2 head = PASS
+migration head / compile / diff / exact four-file allowlist = PASS
+exact-head review = PASS after one HIGH fix
+overlay review = PASS / 0 BLOCK / 0 HIGH
+canonical full = NOT RUN (W6 exit only)
+Case lifecycle / Phase 2 Harness / Eval Result = NOT ADVANCED / NOT RUN
+```
+
+初审发现downgrade未锁search/shipment evidence tables的TOCTOU HIGH；修订head在任何
+evidence check前以固定顺序`SHARE ROW EXCLUSIVE`同时锁四表，并以两类真实并发测试
+证明DML阻断与commit后fail-closed保留。复审确认finding关闭。
