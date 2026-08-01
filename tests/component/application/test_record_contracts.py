@@ -7904,27 +7904,80 @@ def test_cycle2_unique_search_closes_without_pending_question() -> None:
         )
 
 
-def test_cycle2_search_accepts_earlier_still_current_query_and_supersedes_set() -> None:
+def _c2_earlier_query_superseding_search_command() -> tuple[
+    ApplyOrderSearchOutcomeV2Command,
+    ToolCallRecordV2,
+    SearchOrdersObservation,
+    OrderCandidateSetRecord,
+]:
     command = _c2_multiple_search_command()
     values = {
         field_name: getattr(command, field_name)
         for field_name in type(command).model_fields
     }
 
-    previous_values = {
-        field_name: getattr(command.candidate_set_record, field_name)
-        for field_name in type(command.candidate_set_record).model_fields
-        if field_name != "candidate_set_version"
-    }
-    previous_values.update(
-        candidate_set_id=uuid4(),
-        base_task_state_version=2,
-        result_task_state_version=3,
-        selection_expected_task_state_version=3,
-        created_at=command.candidate_set_record.created_at - timedelta(seconds=1),
-        valid_until=command.candidate_set_record.valid_until - timedelta(seconds=1),
-        supersedes_candidate_set_ref=None,
+    previous_source = _c2_tool_call(
+        name=Cycle2ToolName.SEARCH_ORDERS,
+        task_id=command.expected_task_record.task_id,
+        request_unit_id=command.expected_request_unit_record.request_unit_id,
+        validated_task_state_version=2,
+        argument_binding_refs=command.current_query_binding_refs,
     )
+    previous_finished_at = UTC_NOW + timedelta(milliseconds=500)
+    previous_attempt = _c2_attempt(
+        tool_call_id=previous_source.tool_call_id,
+        finished_at=previous_finished_at,
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    previous_source = _c2_project(
+        previous_source,
+        attempts=(previous_attempt,),
+        attempt_count=1,
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=previous_finished_at,
+        result_ref=uuid4(),
+    )
+    current_observation = command.search_observation_record
+    previous_observation = SearchOrdersObservation(
+        observation_id=uuid4(),
+        private_owner_scope=command.owner_scope.customer_id,
+        source_tool="search_orders",
+        source_tool_call_id=previous_source.tool_call_id,
+        source_resource_ref="order-search-snapshot:previous",
+        source_version=(
+            "mock-order-search-snapshot-source-version.p0.v1:sha256:"
+            + "c" * 64
+        ),
+        candidate_target_bindings=current_observation.candidate_target_bindings,
+        normalized_type="ORDER_SEARCH_CANDIDATES",
+        normalized_value=current_observation.normalized_value,
+        observed_at=UTC_NOW,
+        recorded_at=previous_finished_at,
+        valid_until=previous_finished_at + timedelta(minutes=15),
+    )
+    previous_values: dict[str, object] = {
+        "candidate_set_id": uuid4(),
+        "private_owner_scope_ref": command.owner_scope.customer_id,
+        "conversation_id": command.candidate_set_record.conversation_id,
+        "task_id": command.expected_task_record.task_id,
+        "request_unit_id": command.expected_request_unit_record.request_unit_id,
+        "outcome": OrderCandidateSetOutcome.MULTIPLE,
+        "base_task_state_version": 2,
+        "result_task_state_version": 3,
+        "selection_expected_task_state_version": 3,
+        "query_binding_refs": command.current_query_binding_refs,
+        "source_tool_call_id": previous_source.tool_call_id,
+        "search_observation_ref": previous_observation.observation_id,
+        "search_observation_record_schema_version": (
+            previous_observation.record_schema_version
+        ),
+        "search_observation_source_version": previous_observation.source_version,
+        "ordered_candidates": command.candidate_set_record.ordered_candidates,
+        "created_at": previous_observation.recorded_at,
+        "valid_until": previous_observation.valid_until,
+        "supersedes_candidate_set_ref": None,
+    }
     previous_values["candidate_set_version"] = compute_order_candidate_set_version(
         **previous_values
     )
@@ -7968,13 +8021,75 @@ def test_cycle2_search_accepts_earlier_still_current_query_and_supersedes_set() 
             "previous_candidate_set_record": previous,
         }
     )
+    return rebuilt, previous_source, previous_observation, previous
+
+
+def test_cycle2_search_accepts_earlier_still_current_query_and_supersedes_set() -> None:
+    rebuilt, previous_source, previous_observation, previous = (
+        _c2_earlier_query_superseding_search_command()
+    )
 
     assert rebuilt.current_query_binding.accepted_task_state_version == 2
     assert rebuilt.current_query_binding.current_task_state_version == 3
+    assert previous.source_tool_call_id == previous_source.tool_call_id
+    assert previous.search_observation_ref == previous_observation.observation_id
+    assert previous.created_at == previous_observation.recorded_at
+    assert (
+        rebuilt.candidate_set_record.source_tool_call_id
+        != previous.source_tool_call_id
+    )
+    assert (
+        rebuilt.candidate_set_record.search_observation_ref
+        != previous.search_observation_ref
+    )
     assert (
         rebuilt.candidate_set_record.supersedes_candidate_set_ref
         == rebuilt.previous_candidate_set_record.candidate_set_id
     )
+
+
+def test_cycle2_search_rejects_same_outcome_as_previous_candidate_set() -> None:
+    command, _, _, previous = _c2_earlier_query_superseding_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    fake_previous_values = {
+        field_name: getattr(previous, field_name)
+        for field_name in type(previous).model_fields
+        if field_name != "candidate_set_version"
+    }
+    fake_previous_values.update(
+        candidate_set_id=uuid4(),
+        source_tool_call_id=command.source_tool_call_record.tool_call_id,
+        search_observation_ref=command.search_observation_record.observation_id,
+        search_observation_source_version=(
+            command.search_observation_record.source_version
+        ),
+    )
+    fake_previous_values["candidate_set_version"] = (
+        compute_order_candidate_set_version(**fake_previous_values)
+    )
+    fake_previous = OrderCandidateSetRecord.model_validate(fake_previous_values)
+    current_values = {
+        field_name: getattr(command.candidate_set_record, field_name)
+        for field_name in type(command.candidate_set_record).model_fields
+        if field_name != "candidate_set_version"
+    }
+    current_values["supersedes_candidate_set_ref"] = fake_previous.candidate_set_id
+    current_values["candidate_set_version"] = compute_order_candidate_set_version(
+        **current_values
+    )
+    current = OrderCandidateSetRecord.model_validate(current_values)
+
+    with pytest.raises(ValidationError, match="distinct Search outcomes"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "candidate_set_record": current,
+                "previous_candidate_set_record": fake_previous,
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -8108,22 +8223,19 @@ def test_cycle2_commands_reject_constructed_trusted_owner_scope() -> None:
 
 
 def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> None:
-    owner, task, unit, source, observation, candidate_set, query_ref, ordinal_ref = (
-        _c2_search_graph()
+    search_command, _, _, previous_candidate_set = (
+        _c2_earlier_query_superseding_search_command()
     )
-    current_task = _c2_project(
-        task,
-        status=TaskStatus.WAITING_USER,
-        state_version=4,
-        updated_at=observation.recorded_at,
-    )
+    owner = search_command.owner_scope
+    task = search_command.expected_task_record
+    unit = search_command.expected_request_unit_record
+    observation = search_command.search_observation_record
+    candidate_set = search_command.candidate_set_record
+    query_ref = search_command.current_query_binding.binding_ref
+    ordinal_ref = uuid4()
+    current_task = search_command.next_task_record
     current_unit = _c2_project(
-        unit,
-        status=TaskStatus.WAITING_USER,
-        state_version=4,
-        updated_at=observation.recorded_at,
-        open_questions=("请选择候选订单",),
-        observation_refs=(observation.observation_id,),
+        search_command.next_request_unit_record,
         input_binding_refs=(query_ref, ordinal_ref),
     )
     request = OrderCandidateSelectionRequest(
@@ -8131,10 +8243,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         ordinal_input_binding_ref=ordinal_ref,
         ordinal=2,
     )
-    conversation = _conversation(
-        conversation_id=candidate_set.conversation_id,
-        owner_customer_id=owner.customer_id,
-    )
+    conversation = search_command.trusted_conversation_record
     source_message = _message(
         message_id=request.source_message_ref,
         conversation_id=conversation.conversation_id,
@@ -8152,15 +8261,7 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         source_message_record=source_message,
         accepted_at=source_message.received_at,
     )
-    query_binding_seed = _c2_search_runtime_fields(
-        owner,
-        candidate_set,
-        source,
-        task,
-        unit,
-    )[
-        "current_query_binding"
-    ]
+    query_binding_seed = search_command.current_query_binding
     assert isinstance(
         query_binding_seed,
         AcceptedOrderSearchQueryBindingReadClosure,
@@ -8173,6 +8274,10 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
             },
             "current_task_state_version": current_task.state_version,
         }
+    )
+    assert query_binding.accepted_task_state_version == 2
+    assert candidate_set.supersedes_candidate_set_ref == (
+        previous_candidate_set.candidate_set_id
     )
     current_run = AgentRunRecordV2(
         run_id=uuid4(),

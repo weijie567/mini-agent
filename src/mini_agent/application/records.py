@@ -2864,6 +2864,14 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         else:
             if previous is None:
                 raise ValueError("CandidateSet supersession requires previous record")
+            if (
+                previous.source_tool_call_id == candidate_set.source_tool_call_id
+                or previous.search_observation_ref
+                == candidate_set.search_observation_ref
+            ):
+                raise ValueError(
+                    "CandidateSet supersession requires distinct Search outcomes"
+                )
             from mini_agent.core.task_state import validate_candidate_set_supersession
 
             validate_candidate_set_supersession(
@@ -3055,8 +3063,9 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             or query_binding.task_id != task.task_id
             or query_binding.request_unit_id != unit.request_unit_id
             or query_binding.accepted_task_state_version
-            != candidate_set.base_task_state_version
+            > candidate_set.base_task_state_version
             or query_binding.current_task_state_version != task.state_version
+            or query_binding.accepted_at > candidate_set.created_at
             or query_binding.accepted_at > self.trusted_now
         ):
             raise ValueError("current query InputBinding closure mismatch")
