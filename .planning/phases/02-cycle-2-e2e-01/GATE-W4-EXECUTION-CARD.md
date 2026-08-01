@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W3R_COMPLETE / B_C2_W4_READY_CONFIRMED / W4_PLAN_REFREEZE_REVIEW`
+状态：`W4_BATCH_A_AND_02_08_MERGED / 02-09_BLOCKED / 02-09R1_PLAN_REVIEW`
 
 ## Exact input
 
@@ -30,8 +30,22 @@
   `174fbebcfa622336ffeade113cfae74a5611edae` 与 reviewed overlay tree相等；focused
   `409 passed`、neighbor `363 passed`，full/migration/Runtime/Infrastructure/Eval
   lifecycle 均未运行或推进。
+- W4 planning provenance PR #228 已 merge 为
+  `2e85326ecace4840d5b88bf4d273e5753213a84e`；四个原 W4 Packet 都以
+  `B_C2_W4_READY` 为 product base，Case lifecycle 保持 `CONTRACT_DEFINED`。
+- 02-06 implementation PR #229 已 reviewed merge 为
+  `B_C2_CODEC = 6514c7d0ebdd7c34fb2ec531460053ee21095fdf` / tree
+  `8f901e3f7cf1d01fe2dc5e150bd7ef1738dd5cbe`；02-13 PR #230 随后 merge 为
+  `B_C2_EVAL_BUNDLE = 15d3bd41f83b0ae42e01aae48e0682d1d1ba66ed` / tree
+  `f91732eabf3672961681383a92cf578b999be604`。两次 merge tree 都与 reviewed
+  latest-integration overlay tree 相等。
+- 02-09 owner-gap ruling PR #231 已 reviewed merge 为
+  `B_C2_RECOVERY_OWNER_RULING = 0cc780ff34793a17c202fdae499b63601845a4ac` /
+  tree `bef2ce71b1a7f45ef99fbffd0ae16d29163a6692`。02-08 PR #232 再 merge 为
+  `B_C2_RU_ROUTING = d0f37e2d064689bfe1ba708db57b015ee8d2af29` / tree
+  `252a092b962327471facbf34b163536fc4d41ea3`，与 reviewed overlay tree 相等。
 
-## Confirmed W4 preflight blocker and owner ruling
+## Historical W4 preflight blocker and owner ruling
 
 W4 preflight 已确认旧 barrier 上没有 existing-Task continuation InputBinding writer；
 ordinal binding 若先落盘会推进 Task version 并使 CandidateSet expected version自失效；
@@ -54,6 +68,23 @@ name 同时存在 `shipment_not_received` / `not_received_claim` 漂移。
 `B_C2_W4_READY` 已形成；四个 W4 implementation Packet 均只能以该 exact SHA/tree作为
 product base，不能以当前 planning-control successor 或未来串行 merge successor替代。
 
+## Confirmed 02-09 recovery owner gap
+
+02-09 已从 exact `B_C2_W4_READY` 完成 preflight，但只读 owner review 证明现有
+`Cycle2RuntimeRecordPort` / command 与 Core closed matrix不能共同表达：
+
+- 保留 unfinished attempt 而只终止 parent ToolCall 的 restart closure；
+- durable `ToolRetryRecoveryDecisionRecordV2` 与 recovered second fence 的同一 CAS；
+- attempt 1 保持 `RETRY_SCHEDULED` 时的 `RUN_BUDGET_EXHAUSTED` parent terminal。
+
+02-09 Worktree 保持 clean、没有 source change 或 implementation commit；旧 02-09 Plan
+已标记 `BLOCKED / HISTORICAL W4 FREEZE`。PR #231 已裁决 decision 为 ToolCall v2
+logical child、budget evidence 来自 owner-scoped reader并在 CAS 内重算、budget terminal
+保留 attempt 1 并投影原 `FAILED / TIMED_OUT`。correction 必须按
+`02-09R1 → 02-09R2 → 02-09R3` single-writer 串行执行；每个后继 Plan 只能用前驱真实
+reviewed merge SHA/tree重冻结，不得预测。之后再从真实 `B_C2_02_09_READY` 重冻结
+02-09。
+
 ## Packet freeze 与批次
 
 旧 02-06 内容已从真实 barrier 完整重冻结；02-08/09/13 exact Plan亦由Integrator在
@@ -69,12 +100,15 @@ exact-file planning review `PASS`，并通过同一 planning PR 合并为 proven
 - owned-file intersections两两为零；new Cycle 2 Eval artifact paths在base为`NOT_FOUND`
 
 ```text
-Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader
-Batch B: 02-08 Request understanding/routing || 02-09 executor/recovery
+Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
+Batch B: 02-08 Request understanding/routing — MERGED
+W4R: 02-09R1 -> 02-09R2 -> 02-09R3 — SERIAL PLAN/IMPLEMENT/REVIEW
+W4 resumed: refrozen 02-09 executor/recovery
 ```
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
-- 建议串行 merge：`02-06 → 02-13 → 02-08 → 02-09`。
+- 实际/后续串行 merge：`02-06 → 02-13 → owner ruling → 02-08 → 02-09R1 →
+  02-09R2 → 02-09R3 → refrozen 02-09`。
 - 四个 implementation Packet 的 product `base_sha` 都必须重冻结为真实
   `B_C2_W4_READY`；不得继续使用 `B_C2_APP_CONTRACT` 或猜测 successor。每次 merge
   前必须在 latest integration 上形成 reviewed overlay。
@@ -87,6 +121,9 @@ Batch B: 02-08 Request understanding/routing || 02-09 executor/recovery
 | `02-08` | `TARGETED_SECURITY` | `NOT RUN` |
 | `02-09` | `TARGETED_HIGH_RISK` | `NOT RUN` |
 | `02-13` | `TARGETED_EVAL_INTEGRITY` | `NOT RUN` |
+| `02-09R1` | `TARGETED_CORE_RECOVERY` | `NOT RUN` |
+| `02-09R2` | `TARGETED_ATOMIC_RECOVERY_CONTRACT` | `NOT RUN` |
+| `02-09R3` | `TARGETED_CHILD_CODEC` | `NOT RUN` |
 
 每个 Packet 只审 exact base/head/ancestry/commit/allowlist、当前 diff、直接 owner、
 focused/neighbor tests 与 own security invariants。已 reviewed upstream barrier 作为
@@ -95,14 +132,16 @@ imported evidence，不重复 W3 式全量审计或 canonical full。finding rem
 
 ## Stop conditions
 
-本卡已记录的三项 correction、W3R 与 22-slot amendment 已由当前用户指令授权；它们
-不再是 stop condition。除此以外，出现新的 contract change、owner conflict、allowlist
+本卡已记录的 W3R 与 W4R correction、25-slot / 15-wave-label amendment 已由当前用户
+“有问题先修复”指令收口；它们不再是 stop condition。除此以外，出现新的 contract
+change、owner conflict、allowlist
 扩大、Wave/Packet 数量变化、无法在原 Packet 内关闭的 BLOCK/HIGH、exact barrier
 不一致、02-06 conversion 无法唯一表达、02-13 lifecycle activation 证据不足或任一
 W4 allowlist overlap，立即停止。
 
 ## W4 exit
 
-四个 reviewed PR 全部串行合并后才冻结 `B_C2_LEAVES`。只运行 W4
+原四个 reviewed implementation 中的 02-06/13/08、W4R 三个 correction 与最终
+refrozen 02-09 全部串行合并后才冻结 `B_C2_LEAVES`。只运行 W4
 integration-focused/neighbor checks 与 Phase 1 直接相关回归；不运行 canonical full、
 Phase 级全面深审、Phase 2 Harness/Eval Result，也不推进 Case lifecycle。
