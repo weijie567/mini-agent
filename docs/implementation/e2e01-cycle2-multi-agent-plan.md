@@ -922,7 +922,7 @@ barrier 与 release。
 
 ### Gate P2-A1 — W4 prerequisite remediation amendment
 
-状态：`USER_APPROVED / EXACT-HEAD OWNER-RULING REVIEW PENDING`。W4 preflight 证明旧
+状态：`USER_APPROVED / OWNER-RULING REVIEWED MERGED / CORRECTION SET IN PROGRESS / 02-05R PLANNING`。W4 preflight 证明旧
 `02-06/08/09/13` freeze 假设无法形成可执行闭包；用户于 2026-08-01 授权先修复再
 开始 W4，并要求缩短 reviewer 周期。该授权只增加：
 
