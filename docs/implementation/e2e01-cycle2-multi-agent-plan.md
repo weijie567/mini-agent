@@ -2,7 +2,7 @@
 
 更新日期：2026-08-01
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / W3R_REMEDIATION_RULING_REVIEW`
+状态：`NON_NORMATIVE / PLAN_APPROVED / W3R_02_05R_PLANNING_REVIEW`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -81,17 +81,17 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `02-00..05 + 02-02R COMPLETE / 02-04R NEXT / 02-05R SERIAL DEPENDENT / W4 PLANS MUST REFREEZE` |
-| Task Packets | `02-00..05 + 02-02R REVIEWED MERGE / 02-04R/05R USER-AUTHORIZED CORRECTION SET / W4 NOT_DISPATCHED` |
+| Future GSD Plans | `02-00..05 + 02-02R + 02-04R COMPLETE / 02-05R NEXT / W4 PLANS MUST REFREEZE` |
+| Task Packets | `02-00..05 + 02-02R + 02-04R REVIEWED MERGE / 02-05R USER-AUTHORIZED CORRECTION / W4 NOT_DISPATCHED` |
 | Proposed Plan / Packet slots / Waves | `22 / 14`（原 `02-00..18` + `02-02R/04R/05R` / 原 `W0..W12` + `W3R`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / B_C2_INPUT_BINDING_V2` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / B_C2_SELECTED_TARGET_GATEWAY` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W3 + 02-02R COMPLETE；02-04R/05R/W4 implementation 尚未创建` |
-| Writer assignments | `02-04R Tool/Gateway single writer；02-05R waits for its successor；W4 后续重冻结` |
+| Integration / code feature branches / Worktrees | `W1..W3 + 02-02R + 02-04R COMPLETE；02-05R/W4 implementation 尚未创建` |
+| Writer assignments | `02-05R Application single writer；W4 后续重冻结` |
 | Execution concurrency | approved ceiling `2` writers；当前 dispatch `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
@@ -321,7 +321,8 @@ post-activation verification。
   - `src/mini_agent/core/control_gateway.py`
   - `tests/component/core/test_tool_system_contract.py`
   - `tests/component/core/test_control_gateway.py`
-- **Depends on:** reviewed `02-02R` barrier。
+- **Depends on:** reviewed `02-02R` barrier；planning PR #224 与 implementation PR #225
+  已 bounded review `PASS` 并形成 `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa...`。
 - **Acceptance:** selected-target 路径只接受 exact
   `argument_binding_refs=[ordinal_input_binding_ref]` + 独立
   `verified_target_ref=selected_target_ref`、current result version 和匹配 `order_id`；
@@ -343,10 +344,10 @@ post-activation verification。
   - `src/mini_agent/application/ports.py`
   - `tests/component/application/test_record_contracts.py`
   - `tests/component/application/test_ports_contract.py`
-- **Depends on:** reviewed `02-04R` merge successor。只读 preflight 已确认该 Packet
-  需要 exact import `GateDecisionV2 / AuthorizedToolCommandV2`；因此不得再从
-  `02-02R` barrier 与 `02-04R` 并行实现。它必须在真实
-  `B_C2_SELECTED_TARGET_GATEWAY` 后重新冻结 base/tree/blobs 并独立 focused-green。
+- **Depends on:** reviewed `02-04R` merge successor
+  `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa88fab1ab99d2b076a1d731f63dced064a` /
+  tree `3f9852e825a69c9ceb8a19e18c810263ef74349e`。该 Packet 已从真实 successor
+  重新冻结 base/tree/blobs，仍须独立 planning/focused/overlay review-green。
 - **Acceptance:** continuation write 需要 current owner/Task/RequestUnit/message；
   ordinal 路径禁止 pre-CAS binding write/version bump；CAS 冲突无半写；selection
   command 允许且只允许 exact binding-ref/open-question/target/version delta；v2
@@ -609,7 +610,9 @@ W3 Application contracts
   ↓
 W3R accepted-binding Core correction
   ↓
-W3R Gateway selected-target || Application atomic continuation correction
+W3R Gateway selected-target correction
+  ↓
+W3R Application atomic continuation correction
   ↓
 W4 codecs + RU + retry + Eval bundle
   ↓
@@ -919,7 +922,7 @@ barrier 与 release。
 
 ### Gate P2-A1 — W4 prerequisite remediation amendment
 
-状态：`USER_APPROVED / EXACT-HEAD OWNER-RULING REVIEW PENDING`。W4 preflight 证明旧
+状态：`USER_APPROVED / OWNER-RULING REVIEWED MERGED / CORRECTION SET IN PROGRESS / 02-05R PLANNING`。W4 preflight 证明旧
 `02-06/08/09/13` freeze 假设无法形成可执行闭包；用户于 2026-08-01 授权先修复再
 开始 W4，并要求缩短 reviewer 周期。该授权只增加：
 
@@ -933,14 +936,14 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / 02-00..05 + 02-02R COMPLETE / W3R 02-04R PLANNING`。P2-A 通过后始终按
+状态：`IN_PROGRESS / 02-00..05 + 02-02R + 02-04R COMPLETE / W3R 02-05R PLANNING`。P2-A 通过后始终按
 真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造 SHA。W3 reviewed
 merge 已真实形成 `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6`
-/ tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；owner-ruling 与 02-02R 已依次
-形成 `B_C2_W3R_RULING` 和 `B_C2_INPUT_BINDING_V2`。当前只从真实 02-02R successor
-冻结 `02-04R`；02-05R 必须等待 `GateDecisionV2 / AuthorizedToolCommandV2` reviewed
-merge successor 后再单独冻结，不得回到同一 base 并行。三者串行 merge 形成的
-真实 successor 才能命名为 `B_C2_W4_READY` 并用于重冻结 W4 `02-06/08/09/13`。
+/ tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；owner-ruling、02-02R 与 02-04R
+已依次形成 `B_C2_W3R_RULING`、`B_C2_INPUT_BINDING_V2` 和
+`B_C2_SELECTED_TARGET_GATEWAY`。当前只从真实 02-04R successor 冻结 `02-05R`；
+它的真实 reviewed merge successor 才能命名为 `B_C2_W4_READY` 并用于重冻结
+W4 `02-06/08/09/13`。
 
 用户需逐项或整组批准：
 

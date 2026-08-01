@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-04R"
-status: "phase_2_w3r_02_04r_planning_review"
+current_plan: "02-05R"
+status: "phase_2_w3r_02_05r_planning_review"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — 02-02R PR #222/#223 reviewed merge；从真实 successor 签发02-04R exact Plan"
+last_activity: "2026-08-01 — 02-04R PR #224/#225 reviewed merge；从真实 successor 签发02-05R exact Plan"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 9
-  completed_plans: 7
-  percent: 32
+  total_plans: 8
+  completed_plans: 8
+  percent: 36
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -31,38 +31,39 @@ See: [PROJECT.md](PROJECT.md)
 冻结 exact `B_C2_APP_CONTRACT = 86d1b835...`。W4 preflight 已确认三项跨 owner
 blocker；用户授权先修复再开始 W4。owner-ruling PR #221 已 reviewed merge 为
 `B_C2_W3R_RULING = ed61f4d...` / tree `02c06f70...`。02-02R PR #222/#223 已
-reviewed merge 为 `B_C2_INPUT_BINDING_V2 = 5efd8fa...` / tree `5a5b308...`；当前
-只审 `02-04R` exact Plan。02-05R 串行等待其真实 successor；W4 Worktree 尚未创建。
+reviewed merge 为 `B_C2_INPUT_BINDING_V2 = 5efd8fa...` / tree `5a5b308...`。02-04R
+planning PR #224 与 implementation PR #225 已 reviewed merge 为
+`B_C2_SELECTED_TARGET_GATEWAY = 53e36aa...` / tree `3f9852e8...`；当前只审
+`02-05R` exact Plan；W4 Worktree 尚未创建。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-04R
+Current Plan: 02-05R
 Total Phases: 6
-Total Plans in Phase: 9
-Status: Phase 2 W3R / 02-04R planning review
+Total Plans in Phase: 8
+Status: Phase 2 W3R / 02-05R planning review
 Last Activity: 2026-08-01
 Last Activity Description: W4 preflight确认 InputBinding / atomic ordinal selection / selected-target Gateway blocker；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R 02-04R planning；Plan files 9/22、completed slots 7/22、functional implementation 6/21；1/6 phases
+Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R 02-05R planning；tracked Plan files 8、authorized slots 22、completed slots 8/22、functional implementation 7/21；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 22 USER-AUTHORIZED SLOTS / 02-00..02-05 + 02-02R COMPLETE / 02-04R PLANNING REVIEW`
-Status: `CONTRACT_ACTIVE / W3_COMPLETE / W3R_02_04R_PLANNING / W4_BLOCKED`
-Last activity: 2026-08-01 — PR #223 merge tree已核对；02-04R以真实barrier冻结
-Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 + 02-02R implementation Packet complete；W3R 02-04R planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 22 USER-AUTHORIZED SLOTS / 02-00..02-05 + 02-02R + 02-04R COMPLETE / 02-05R PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / W3_COMPLETE / W3R_02_05R_PLANNING / W4_BLOCKED`
+Last activity: 2026-08-01 — PR #225 merge tree已核对；02-05R以真实barrier冻结
+Progress: Phase 1 100% complete；Phase 2 W1/W2/W3 + 02-02R + 02-04R implementation Packet complete；W3R 02-05R planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 `02-04R` exact Plan 做一次有界 direct-owner review；`PASS`/merge 后创建实现 Worktree。
-2. 从 exact `B_C2_INPUT_BINDING_V2` 实现、审阅并合并 `02-04R`；再从真实 Tool/Gateway
-   successor 单独冻结、实现并合并 `02-05R`，不复制 Tool owner type。
-3. 冻结真实 `B_C2_W4_READY`，重签 `02-06/08/09/13`；旧 02-06 Plan 不可执行。
-4. planning gates 全部通过后按 `02-06 + 02-13`、再 `02-08 + 02-09` 两批实现；
+1. 对 `02-05R` exact Plan 做一次有界 direct-owner review；`PASS`/merge 后创建实现 Worktree。
+2. 从 exact `B_C2_SELECTED_TARGET_GATEWAY` 实现、审阅并合并 `02-05R`，不复制 Core owner type。
+3. 以实际 reviewed 02-05R merge successor 冻结 `B_C2_W4_READY`，重签 `02-06/08/09/13`；旧 02-06 Plan 不可执行。
+4. 四个 W4 planning gates 全部通过后按 `02-06 + 02-13`、再 `02-08 + 02-09` 两批实现；
    最多两个 writer、独立 worktree、串行 overlay review/merge。
 5. W4 四个 reviewed merge 后冻结 `B_C2_LEAVES`，只运行 integration-focused /
    neighbor 与 Phase 1 直接回归；不运行 canonical full，不推进 Case lifecycle。
@@ -167,13 +168,17 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / B_C2_INPUT_BINDING_V2`: 02-02R planning PR #222 与 implementation
   PR #223 已 feature/overlay review `PASS` 并串行 merge；successor 为
   `5efd8fabc5c7af5100e10535e983c424e3fd7ad4`、tree
-  `5a5b3081bb816f5b276b53de9922173290c9f9ca`；当前只签发 02-04R exact Plan。
+  `5a5b3081bb816f5b276b53de9922173290c9f9ca`；这是 02-04R 的历史 exact base。
+- `CONFIRMED / B_C2_SELECTED_TARGET_GATEWAY`: 02-04R planning PR #224 与 implementation
+  PR #225 已 bounded feature/residual/latest-integration overlay review `PASS` 并串行
+  merge；successor 为 `53e36aa88fab1ab99d2b076a1d731f63dced064a`、tree
+  `3f9852e825a69c9ceb8a19e18c810263ef74349e`，与 reviewed overlay tree 相等；当前只签发 02-05R exact Plan。
 - `INVALIDATED / OLD_02_06_PLAN`: 旧 Plan 的 base/dependency/product blobs 不再成立；
   只保留历史，不得创建实现 branch。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: `02-04R/02-05R` exact Plan/implementation、`B_C2_W4_READY`、重冻结
+- `OPEN`: `02-05R` exact Plan/implementation、`B_C2_W4_READY`、重冻结
   W4 `02-06/08/09/13` 与四个 W4 implementation、`B_C2_LEAVES`；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
@@ -184,5 +189,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: W3R 02-04R exact planning review gate；02-05R/W4 implementation not started
+Stopped At: W3R 02-05R exact planning review gate；02-05R/W4 implementation not started
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)
