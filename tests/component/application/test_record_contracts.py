@@ -7904,6 +7904,79 @@ def test_cycle2_unique_search_closes_without_pending_question() -> None:
         )
 
 
+def test_cycle2_search_accepts_earlier_still_current_query_and_supersedes_set() -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+
+    previous_values = {
+        field_name: getattr(command.candidate_set_record, field_name)
+        for field_name in type(command.candidate_set_record).model_fields
+        if field_name != "candidate_set_version"
+    }
+    previous_values.update(
+        candidate_set_id=uuid4(),
+        base_task_state_version=2,
+        result_task_state_version=3,
+        selection_expected_task_state_version=3,
+        created_at=command.candidate_set_record.created_at - timedelta(seconds=1),
+        valid_until=command.candidate_set_record.valid_until - timedelta(seconds=1),
+        supersedes_candidate_set_ref=None,
+    )
+    previous_values["candidate_set_version"] = compute_order_candidate_set_version(
+        **previous_values
+    )
+    previous = OrderCandidateSetRecord.model_validate(previous_values)
+
+    current_values = {
+        field_name: getattr(command.candidate_set_record, field_name)
+        for field_name in type(command.candidate_set_record).model_fields
+        if field_name != "candidate_set_version"
+    }
+    current_values["supersedes_candidate_set_ref"] = previous.candidate_set_id
+    current_values["candidate_set_version"] = compute_order_candidate_set_version(
+        **current_values
+    )
+    current = OrderCandidateSetRecord.model_validate(current_values)
+    query = AcceptedOrderSearchQueryBindingReadClosure(
+        **{
+            **{
+                field_name: getattr(command.current_query_binding, field_name)
+                for field_name in type(command.current_query_binding).model_fields
+            },
+            "accepted_task_state_version": previous.base_task_state_version,
+        }
+    )
+    loaded = OrderSearchCurrentReadClosure(
+        **{
+            **{
+                field_name: getattr(command.loaded_read_closure, field_name)
+                for field_name in type(command.loaded_read_closure).model_fields
+            },
+            "current_query_binding": query,
+        }
+    )
+
+    rebuilt = ApplyOrderSearchOutcomeV2Command(
+        **{
+            **values,
+            "loaded_read_closure": loaded,
+            "current_query_binding": query,
+            "candidate_set_record": current,
+            "previous_candidate_set_record": previous,
+        }
+    )
+
+    assert rebuilt.current_query_binding.accepted_task_state_version == 2
+    assert rebuilt.current_query_binding.current_task_state_version == 3
+    assert (
+        rebuilt.candidate_set_record.supersedes_candidate_set_ref
+        == rebuilt.previous_candidate_set_record.candidate_set_id
+    )
+
+
 @pytest.mark.parametrize(
     ("field_name", "replacement"),
     [

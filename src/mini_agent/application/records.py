@@ -2781,8 +2781,6 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or query_binding.conversation_id != conversation.conversation_id
             or query_binding.task_id != expected_task.task_id
             or query_binding.request_unit_id != expected_unit.request_unit_id
-            or query_binding.accepted_task_state_version
-            != expected_task.state_version
             or query_binding.current_task_state_version
             != expected_task.state_version
             or query_binding.accepted_at > observation.recorded_at
