@@ -14,9 +14,11 @@ from mini_agent.application.ports import (
     ExactRunEvidencePort,
     EvalResultPort,
     GetOrderPort,
+    GetShipmentPort,
     ModelProviderV2,
     RestartRecoveryPort,
     RuntimeRecordPort,
+    SearchOrdersPort,
     SessionAuthPort,
 )
 from mini_agent.application.records import (
@@ -71,11 +73,13 @@ from mini_agent.application.records import (
     TrustedOwnerScope,
     ToolRetryRecoveryReadClosureV2,
 )
+from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
 )
+from mini_agent.core.shipment import GetShipmentQuery, GetShipmentResult
 from mini_agent.core.task_state import OrderCandidateSelectionRequest
 
 
@@ -84,6 +88,20 @@ class CandidateOnlyProvider:
         raise NotImplementedError
 
     async def plan_presentation(self, request: object) -> object:
+        raise NotImplementedError
+
+
+class BusinessReadAdapterShape:
+    async def search_orders(
+        self,
+        query: SearchOrdersQuery,
+    ) -> SearchOrdersResult:
+        raise NotImplementedError
+
+    async def get_shipment(
+        self,
+        query: GetShipmentQuery,
+    ) -> GetShipmentResult:
         raise NotImplementedError
 
 
@@ -1514,10 +1532,51 @@ def test_ports_are_protocols_owned_by_application() -> None:
     assert AgentRunHandler._is_protocol
     assert SessionAuthPort._is_protocol
     assert GetOrderPort._is_protocol
+    assert SearchOrdersPort._is_protocol
+    assert GetShipmentPort._is_protocol
     assert ConversationRecordPort._is_protocol
     assert RuntimeRecordPort._is_protocol
     assert EvalResultPort._is_protocol
     assert RestartRecoveryPort._is_protocol
+
+
+def test_cycle2_business_read_ports_have_exact_async_dto_surface() -> None:
+    _assert_signature(
+        SearchOrdersPort.search_orders,
+        parameters=("query",),
+        type_hints={
+            "query": SearchOrdersQuery,
+            "return": SearchOrdersResult,
+        },
+    )
+    _assert_signature(
+        GetShipmentPort.get_shipment,
+        parameters=("query",),
+        type_hints={
+            "query": GetShipmentQuery,
+            "return": GetShipmentResult,
+        },
+    )
+    assert inspect.iscoroutinefunction(SearchOrdersPort.search_orders)
+    assert inspect.iscoroutinefunction(GetShipmentPort.get_shipment)
+
+    adapter = BusinessReadAdapterShape()
+    assert isinstance(adapter, SearchOrdersPort)
+    assert isinstance(adapter, GetShipmentPort)
+
+    for method in (
+        SearchOrdersPort.search_orders,
+        GetShipmentPort.get_shipment,
+    ):
+        parameters = inspect.signature(method).parameters
+        assert tuple(parameters) == ("self", "query")
+        assert {
+            "customer_id",
+            "owner_customer_id",
+            "owner_scope",
+            "order_id",
+            "product_description",
+        }.isdisjoint(parameters)
 
 
 def test_runtime_record_port_preserves_only_safe_append_causality_records() -> None:
