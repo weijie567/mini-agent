@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-09"
-status: "phase_2_w4_read_executor_refrozen_plan_review"
+current_plan: "02-09R4"
+status: "phase_2_w4_dispatch_grant_contract_plan_review"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — 02-09R3 PR #238/#239 reviewed merge；冻结真实 B_C2_02_09_READY 并重冻结原 02-09"
+last_activity: "2026-08-01 — first 02-09 exact-head review发现2 HIGH；PR #241 owner ruling reviewed merge；重冻结02-09R4"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 25
+  total_plans: 26
   completed_plans: 15
-  percent: 60
+  percent: 58
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -27,41 +27,41 @@ See: [PROJECT.md](PROJECT.md)
 
 **Core value:** 在不制造第二套项目定义的前提下，把 canonical P0 目标转成可隔离、可审查、可验证的执行阶段。
 
-**Current focus:** W1–W3R 与 W4 `02-06/13/08` 已 reviewed merge。`02-09`
-preflight 暴露的 recovery owner gap 已由 `02-09R1/R2/R3` 串行关闭；R3 PR #238/#239
-reviewed merge 后，当前 exact integration / `B_C2_02_09_READY` 为
-`cdf8c194ff80c9f47d6587bef9b5b386f29e5341`、tree
-`2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`。历史 02-09 Worktree仍 clean且无源码
-commit；当前从该真实 successor重冻结 replacement 02-09 Packet并等待独立 planning review。
+**Current focus:** W1–W3R 与 W4 `02-06/13/08`、`02-09R1/R2/R3` 已reviewed merge。
+第一次replacement 02-09 head在exact review发现initial current-state TOCTOU与recovered
+pre-CAS budget两个HIGH，保持local clean且未发布。PR #241 owner ruling reviewed merge后，
+当前 exact integration / `B_C2_DISPATCH_GRANT_OWNER_RULING` 为
+`47644f4052f838819d268a12535a06423ccf9e5c`、tree
+`397ad50f095d3356ed0583af3bc9ea31042ac39e`；当前只重冻结02-09R4并等待planning review。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-09
+Current Plan: 02-09R4
 Total Phases: 6
-Total Plans in Phase: 25
-Status: Phase 2 W4 / refrozen 02-09 exact Plan review
+Total Plans in Phase: 26
+Status: Phase 2 W4R2 / 02-09R4 exact Plan review
 Last Activity: 2026-08-01
-Last Activity Description: 02-09R3 reviewed merge；真实 B_C2_02_09_READY 已核对；原 02-09 从该 successor重冻结；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1–W3R + W4 02-06/13/08 + R1/R2/R3 complete；tracked Plan files 15、authorized slots 25、completed slots 15/25；1/6 phases
+Last Activity Description: first 02-09 head 2 HIGH且未发布；PR #241 reviewed merge；02-09R4从真实owner-ruling barrier重冻结；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1–W3R + W4 02-06/13/08 + R1/R2/R3 complete；tracked Plan files 16、authorized slots 26、completed slots 15/26；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 25 USER-AUTHORIZED SLOTS / W1-W3R + 02-06/13/08 + R1/R2/R3 COMPLETE / REFROZEN 02-09 PLAN REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_02_09_READY_CONFIRMED / 02-09_REFROZEN_PLANNING`
-Last activity: 2026-08-01 — PR #239 merge tree已核对；原 02-09 以该真实barrier重冻结
-Progress: Phase 1 100% complete；Phase 2 completed slots 15/25；W4 resumed planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 26 USER-AUTHORIZED SLOTS / W1-W3R + 02-06/13/08 + R1/R2/R3 COMPLETE / 02-09R4 PLAN REVIEW`
+Status: `CONTRACT_ACTIVE / B_C2_DISPATCH_GRANT_OWNER_RULING_CONFIRMED / 02-09_QUARANTINED / 02-09R4_PLANNING`
+Last activity: 2026-08-01 — PR #241 merge tree已核对；R4以该真实barrier重冻结
+Progress: Phase 1 100% complete；Phase 2 completed slots 15/26；W4R2 planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对 refrozen `02-09` 做 bounded exact-file planning review；`PASS` 后只合并该 planning provenance。
-2. 从 exact `B_C2_02_09_READY = cdf8c194...` 创建 replacement implementation Worktree，限定 executor/recovery四文件。
-3. 完成 feature / residual / latest-integration overlay bounded review与串行merge；任何 shared owner需求都 BLOCK，不在service内补私有Port/record/codec。
-4. `02-09` reviewed merge 后冻结 `B_C2_LEAVES`，只运行 integration-focused / neighbor 与 Phase 1 直接回归；不运行 canonical full，不推进 Case lifecycle。
+1. 对 `02-09R4` 做 bounded exact-file planning review；`PASS` 后只合并该 planning provenance。
+2. 从 exact `B_C2_DISPATCH_GRANT_OWNER_RULING = 47644f40...` 创建R4四文件Worktree，完成grant/wrapper/Port contract与component tests。
+3. R4 reviewed merge后冻结真实`B_C2_02_09_DISPATCH_READY`，再第二次重冻结02-09；旧local head不得push/rebase。
+4. 第二次02-09 reviewed merge后冻结`B_C2_LEAVES`，只运行integration-focused/neighbor与Phase1直接回归；不运行canonical full，不推进Case lifecycle。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
@@ -205,13 +205,21 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `cdf8c194ff80c9f47d6587bef9b5b386f29e5341`、tree
   `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3` 与 reviewed overlay tree相等；
   focused 243、neighbor 560、compile/diff通过，global/v1 codec未扩张。
-- `REFROZEN / 02-09_PLAN_REVIEW`: 原 02-09 已从真实 `B_C2_02_09_READY` 重冻结；
-  replacement branch为 `codex/e2e01-cycle2-read-executor-recovery-r1`，只拥有四个
-  executor/recovery文件，尚无 implementation commit。
+- `QUARANTINED / FIRST_02_09_HEAD`: 第一次replacement branch
+  `codex/e2e01-cycle2-read-executor-recovery-r1` local head
+  `aeaf29d4a5f4fee2a09ba0bd3335c9d6887eeffa`只改四个owned files，focused70 /
+  neighbor1092通过；exact review关闭caller-budget HIGH后又确认initial TOCTOU与
+  recovered pre-CAS budget两个shared-owner HIGH，因此未push/PR且不得重用。
+- `CONFIRMED / B_C2_DISPATCH_GRANT_OWNER_RULING`: PR #241 reviewed merge为
+  `47644f4052f838819d268a12535a06423ccf9e5c`、tree
+  `397ad50f095d3356ed0583af3bc9ea31042ac39e`；批准02-09R4/W4R2、26 slots /
+  16 wave labels，Case lifecycle不变。
+- `REFROZEN / 02-09R4_PLAN_REVIEW`: R4只拥有Application records/ports及其两份
+  contract tests；未来02-09 dispatch-ready barrier尚不可填写。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: 重冻结后的 `02-09`、`B_C2_LEAVES`；
+- `OPEN`: `02-09R4`、第二次重冻结后的`02-09`、`B_C2_LEAVES`；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -221,5 +229,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: refrozen 02-09 exact Plan review；历史 02-09 Worktree clean且不可重用
+Stopped At: 02-09R4 exact Plan review；first 02-09 head clean/quarantined/unpublished
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)

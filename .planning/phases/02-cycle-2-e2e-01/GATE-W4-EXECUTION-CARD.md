@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W4_BATCH_A_AND_02_08_AND_R1_R2_R3_MERGED / B_C2_02_09_READY / 02-09_REFROZEN_PLAN_REVIEW`
+状态：`W4_02-06_13_08_AND_R1_R2_R3_MERGED / FIRST_02-09_QUARANTINED / 02-09R4_PLAN_REVIEW`
 
 ## Exact input
 
@@ -61,6 +61,16 @@
   `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree
   `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`，与 reviewed overlay tree相等；
   focused `243 passed`、neighbor `560 passed`、compile/diff通过，full未运行。
+- 第一次replacement 02-09 local head `aeaf29d4...` 保持clean且未发布：focused
+  `70 passed`、neighbor `1092 passed`、compile/diff通过。bounded review先发现并关闭
+  caller-supplied budget HIGH，residual review又确认两个跨shared owner HIGH：initial
+  bare ToolCall CAS未在fence时重验Task/bindings；recovered fence只返回enum导致executor
+  使用pre-CAS budget。该head不是实现证据，不得push/rebase/merge。
+- dispatch-grant owner ruling PR #241 已reviewed merge为
+  `B_C2_DISPATCH_GRANT_OWNER_RULING = 47644f4052f838819d268a12535a06423ccf9e5c` /
+  tree `397ad50f095d3356ed0583af3bc9ea31042ac39e`。裁决增加`02-09R4/W4R2`、
+  Application-private non-persistent grant、initial/recovered same-CAS identity+timeout；
+  当前26 slots / 16 wave labels / max2 writers，Case仍`CONTRACT_DEFINED`。
 
 ## Historical W4 preflight blocker and owner ruling
 
@@ -100,7 +110,8 @@ logical child、budget evidence 来自 owner-scoped reader并在 CAS 内重算�
 保留 attempt 1 并投影原 `FAILED / TIMED_OUT`。correction 必须按
 `02-09R1 → 02-09R2 → 02-09R3` single-writer 串行执行；每个后继 Plan 只能用前驱真实
 reviewed merge SHA/tree重冻结，不得预测。该链现已完成；原 02-09 已从真实
-`B_C2_02_09_READY` 重冻结，等待独立 planning review。
+`B_C2_02_09_READY` 第一次重冻结，但上述两个HIGH使该head quarantine。只有R4
+reviewed merge并形成真实`B_C2_02_09_DISPATCH_READY`后才能第二次重冻结02-09。
 
 ## Packet freeze 与批次
 
@@ -124,14 +135,17 @@ exact-file planning review `PASS`，并通过同一 planning PR 合并为 proven
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
 Batch B: 02-08 Request understanding/routing — MERGED
 W4R: 02-09R1 + 02-09R2 + 02-09R3 — MERGED
-W4 resumed: refrozen 02-09 executor/recovery — PLAN REVIEW
+W4R2: 02-09R4 dispatch-grant contract — PLAN REVIEW
+W4 resumed: second-refrozen 02-09 executor/recovery — BLOCKED UNTIL R4 MERGE
 ```
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
 - 实际/后续串行 merge：`02-06 → 02-13 → owner ruling → 02-08 → 02-09R1 →
-  02-09R2 → 02-09R3 → refrozen 02-09`。
-- 02-06/13/08 保留各自已 reviewed 的历史 product base；最终 02-09 只使用真实
-  `B_C2_02_09_READY`，不得复用 `B_C2_W4_READY`、planning-control SHA 或猜测 successor。
+  02-09R2 → 02-09R3 → first refrozen 02-09 (quarantined) → owner ruling →
+  02-09R4 → second-refrozen 02-09`。
+- 02-06/13/08 保留各自已 reviewed 的历史 product base；R4只使用真实
+  `B_C2_DISPATCH_GRANT_OWNER_RULING`，最终02-09只使用未来真实R4 successor；不得复用
+  `B_C2_W4_READY`、`B_C2_02_09_READY`、planning-control SHA或猜测successor。
   merge 前必须在 latest integration 上形成 reviewed overlay。
 
 ## Review profiles
@@ -145,6 +159,7 @@ W4 resumed: refrozen 02-09 executor/recovery — PLAN REVIEW
 | `02-09R1` | `TARGETED_CORE_RECOVERY` | `NOT RUN` |
 | `02-09R2` | `TARGETED_ATOMIC_RECOVERY_CONTRACT` | `NOT RUN` |
 | `02-09R3` | `TARGETED_CHILD_CODEC` | `NOT RUN` |
+| `02-09R4` | `TARGETED_DISPATCH_GRANT_CONTRACT` | `NOT RUN` |
 
 每个 Packet 只审 exact base/head/ancestry/commit/allowlist、当前 diff、直接 owner、
 focused/neighbor tests 与 own security invariants。已 reviewed upstream barrier 作为
@@ -153,7 +168,7 @@ imported evidence，不重复 W3 式全量审计或 canonical full。finding rem
 
 ## Stop conditions
 
-本卡已记录的 W3R 与 W4R correction、25-slot / 15-wave-label amendment 已由当前用户
+本卡已记录的 W3R、W4R 与 W4R2 correction、26-slot / 16-wave-label amendment 已由当前用户
 “有问题先修复”指令收口；它们不再是 stop condition。除此以外，出现新的 contract
 change、owner conflict、allowlist
 扩大、Wave/Packet 数量变化、无法在原 Packet 内关闭的 BLOCK/HIGH、exact barrier
@@ -162,7 +177,7 @@ W4 allowlist overlap，立即停止。
 
 ## W4 exit
 
-原四个 reviewed implementation 中的 02-06/13/08、W4R 三个 correction 与最终
-refrozen 02-09 全部串行合并后才冻结 `B_C2_LEAVES`。只运行 W4
+原四个 reviewed implementation 中的 02-06/13/08、W4R三项、W4R2 R4 与最终
+second-refrozen 02-09 全部串行合并后才冻结 `B_C2_LEAVES`。只运行 W4
 integration-focused/neighbor checks 与 Phase 1 直接相关回归；不运行 canonical full、
 Phase 级全面深审、Phase 2 Harness/Eval Result，也不推进 Case lifecycle。

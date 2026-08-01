@@ -16,11 +16,12 @@
 - Cycle 2 scoped 契约：[E2E-01 Cycle 2 Implementation Spec](../docs/implementation/e2e01-cycle2-implementation-spec.md)。
 - Phase 1 已完成的 historical Task Packet、ownership 与集成顺序：[Codex 多 Agent 实施计划](../docs/implementation/e2e01-thin-slice-multi-agent-plan.md)。
 - Phase 2 当前 Task Packet：W1–W3R、W4 `02-06/02-13/02-08` 与 `02-09R1/R2/R3`
-  已 reviewed merge。当前 integration / `B_C2_02_09_READY =
-  cdf8c194ff80c9f47d6587bef9b5b386f29e5341`，tree
-  `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`。历史 02-09 source Worktree仍
-  clean且无 commit；当前只从该真实 R3 successor冻结并审阅 replacement `02-09` Plan，
-  不复用旧 branch/base；
+  已 reviewed merge。第一次 replacement 02-09 head在 exact review发现两个shared
+  dispatch-authority HIGH后保持local且未发布；PR #241 owner ruling已merge，当前
+  integration / `B_C2_DISPATCH_GRANT_OWNER_RULING =
+  47644f4052f838819d268a12535a06423ccf9e5c`，tree
+  `397ad50f095d3356ed0583af3bc9ea31042ac39e`。当前只冻结并审阅`02-09R4`；R4
+  reviewed merge前不得第二次重冻结或执行02-09；
   writer 上限仍为 2。
   `integration/e2e01-cycle2` 已启用 PR-required、enforce-admins、linear-history、
   conversation-resolution 保护，并禁用 force-push / deletion；dispatch 与 merge 前
@@ -54,8 +55,9 @@
   `B_C2_RU_ROUTING`；owner-ruling PR #231 关闭 02-09 recovery contract 冲突，
   R1 PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2 Plan/勘误/implementation
   PR #235/#236/#237 又形成 `B_C2_RECOVERY_APP_CONTRACT = 46a0b1f...`；R3
-  PR #238/#239 形成 `B_C2_02_09_READY = cdf8c194...`。02-09 old Plan 已正确
-  fail-closed；当前只允许从该真实 successor重冻结的 replacement planning provenance。
+  PR #238/#239 形成 `B_C2_02_09_READY = cdf8c194...`。第一次replacement 02-09
+  exact-head review发现initial current-state TOCTOU与recovered pre-CAS budget HIGH，
+  head未发布；PR #241批准`02-09R4/W4R2`，当前只允许R4 planning provenance。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
@@ -91,7 +93,7 @@
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W3R；W4 的 02-06/13/08 与 recovery R1/R2/R3 也已 reviewed merge，当前 integration 为 `B_C2_02_09_READY = cdf8c194...`。历史 02-09 Worktree保持 clean且无源码 commit，当前处于 replacement `02-09` exact Plan review。Case仍为`CONTRACT_DEFINED`；canonical full延至W6，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W3R；W4 的 02-06/13/08 与 recovery R1/R2/R3 也已 reviewed merge，当前 integration 为 `B_C2_DISPATCH_GRANT_OWNER_RULING = 47644f40...`。第一次02-09 head因两个HIGH保持local/unpublished，当前处于`02-09R4` exact Plan review；26 slots / 16 waves。Case仍为`CONTRACT_DEFINED`；canonical full延至W6，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
 
 ## 不属于 GSD 派生层的事项
 
