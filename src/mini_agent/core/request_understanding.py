@@ -213,6 +213,27 @@ class Cycle2InputCandidate(ModelVisibleModel):
         return self
 
 
+class Cycle2InitialTaskDeltaCandidateV2(ModelVisibleModel):
+    """One first-turn Goal proposal containing only a product Claim."""
+
+    candidate_id: UUID
+    operation: Literal[TaskDeltaOperation.ADD_GOAL]
+    goal_patch: NonEmptyString
+    input_candidates: Annotated[
+        tuple[Cycle2InputCandidate, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def exact_one_product_description_claim(self) -> Self:
+        if self.input_candidates[0].name != "product_description":
+            raise ValueError(
+                "Cycle 2 initial Goal requires one product_description Claim"
+            )
+        return self
+
+
 class ReferenceSourceKindV2(StrEnum):
     CURRENT_MESSAGE = "CURRENT_MESSAGE"
     RECENT_MESSAGE = "RECENT_MESSAGE"
@@ -306,6 +327,66 @@ class QueryContextualizationCandidateV2(ModelVisibleModel):
         ):
             raise ValueError(
                 "uncertainty source refs must be in source_message_refs"
+            )
+        return self
+
+
+class Cycle2InitialRequestUnderstandingOutputV2(ModelVisibleModel):
+    """Closed first-turn Cycle 2 proposal with no trusted business authority."""
+
+    schema_version: Literal["e2e01-cycle2-initial.p0.v1"]
+    message_ref: UUID
+    contextualization: QueryContextualizationCandidateV2
+    task_delta_candidates: Annotated[
+        tuple[Cycle2InitialTaskDeltaCandidateV2, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    next_move_candidate: NextMove
+
+    @model_validator(mode="after")
+    def first_turn_graph_is_exact_and_claim_only(self) -> Self:
+        if (
+            self.contextualization.source_message_refs != (self.message_ref,)
+            or self.contextualization.resolved_reference_candidates
+            or self.contextualization.uncertainties
+        ):
+            raise ValueError(
+                "Cycle 2 initial contextualization must use only current message"
+            )
+        delta = self.task_delta_candidates[0]
+        candidate = delta.input_candidates[0]
+        move = self.next_move_candidate
+        arguments = move.arguments
+        if candidate.source_ref != self.message_ref:
+            raise ValueError(
+                "Cycle 2 initial Claim must reference current message"
+            )
+        try:
+            normalized_candidate = normalize_product_description(
+                candidate.candidate_value
+            )
+            argument = (
+                arguments.get("product_description")
+                if arguments is not None
+                else None
+            )
+            normalized_argument = normalize_product_description(argument)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Cycle 2 initial next move requires normalized product_description"
+            ) from None
+        if (
+            move.kind is not NextMoveKind.CALL_TOOL
+            or move.requested_tool_name != "search_orders"
+            or arguments is None
+            or set(arguments) != {"product_description"}
+            or type(argument) is not str
+            or argument != normalized_argument
+            or normalized_argument != normalized_candidate
+            or move.base_task_state_version is not None
+        ):
+            raise ValueError(
+                "Cycle 2 initial next move must exactly propose search_orders"
             )
         return self
 
