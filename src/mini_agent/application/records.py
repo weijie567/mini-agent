@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime
@@ -13,7 +14,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -37,8 +37,14 @@ from mini_agent.core.memory import (
     validate_shipment_observation_supersession,
 )
 from mini_agent.core.request_processing import _normalize_order_id
-from mini_agent.core.request_understanding import UncertaintyV2
-from mini_agent.core.shipment import ShipmentAssessment, assess_shipment
+from mini_agent.core.request_understanding import InputAuthority, UncertaintyV2
+from mini_agent.core.shipment import (
+    GetShipmentOutcome,
+    GetShipmentResult,
+    ShipmentAssessment,
+    assess_shipment,
+    shipment_snapshot_is_fresh_at_acceptance,
+)
 from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
@@ -105,11 +111,17 @@ class _StrictUserVisibleRecord(UserVisibleModel):
     model_config = ConfigDict(strict=True)
 
 
+_OWNER_SCOPE_FACTORY_TOKEN = object()
+_TRUSTED_OWNER_SCOPE_INSTANCES: dict[
+    int,
+    weakref.ReferenceType["TrustedOwnerScope"],
+] = {}
+
+
 class TrustedOwnerScope(_StrictRuntimePrivateRecord):
     """Minimum persistence scope derived by Application from trusted auth."""
 
     customer_id: NonEmptyString
-    _derivation_context: CustomerContext | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -120,7 +132,11 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
     ) -> object:
         validation_context = info.context or {}
         customer_context = validation_context.get("customer_context")
-        if not isinstance(customer_context, CustomerContext):
+        if (
+            validation_context.get("owner_scope_factory_token")
+            is not _OWNER_SCOPE_FACTORY_TOKEN
+            or type(customer_context) is not CustomerContext
+        ):
             raise ValueError("TrustedOwnerScope must be derived from CustomerContext")
         if not isinstance(value, Mapping):
             raise ValueError("TrustedOwnerScope requires a mapping projection")
@@ -130,37 +146,49 @@ class TrustedOwnerScope(_StrictRuntimePrivateRecord):
 
     @classmethod
     def from_customer_context(cls, context: CustomerContext) -> Self:
+        canonical_context = _strict_rebuild_exact_write_contract_model(
+            context,
+            CustomerContext,
+            error_message="CustomerContext must be recursively canonical",
+        )
         return cls.model_validate(
-            {"customer_id": context.customer_id},
-            context={"customer_context": context},
+            {"customer_id": canonical_context.customer_id},
+            context={
+                "customer_context": canonical_context,
+                "owner_scope_factory_token": _OWNER_SCOPE_FACTORY_TOKEN,
+            },
         )
 
     def model_post_init(self, context: Any, /) -> None:
         validation_context = context or {}
         customer_context = validation_context.get("customer_context")
         if (
-            type(customer_context) is CustomerContext
+            validation_context.get("owner_scope_factory_token")
+            is _OWNER_SCOPE_FACTORY_TOKEN
+            and type(customer_context) is CustomerContext
             and customer_context.customer_id == self.customer_id
         ):
-            self._derivation_context = customer_context
+            instance_id = id(self)
+
+            def discard_if_same(
+                expired: weakref.ReferenceType[TrustedOwnerScope],
+                *,
+                registered_id: int = instance_id,
+            ) -> None:
+                if _TRUSTED_OWNER_SCOPE_INSTANCES.get(registered_id) is expired:
+                    _TRUSTED_OWNER_SCOPE_INSTANCES.pop(registered_id, None)
+
+            _TRUSTED_OWNER_SCOPE_INSTANCES[instance_id] = weakref.ref(
+                self,
+                discard_if_same,
+            )
 
     def require_trusted_derivation(self) -> None:
         """Reject objects that bypassed the trusted CustomerContext factory."""
 
-        context = self._derivation_context
-        if type(context) is not CustomerContext:
+        registered = _TRUSTED_OWNER_SCOPE_INSTANCES.get(id(self))
+        if registered is None or registered() is not self:
             raise ValueError("TrustedOwnerScope lacks CustomerContext derivation")
-        try:
-            rebuilt = CustomerContext.model_validate(
-                context.model_dump(mode="python"),
-                strict=True,
-            )
-        except ValidationError as error:
-            raise ValueError(
-                "TrustedOwnerScope CustomerContext must be canonical"
-            ) from error
-        if rebuilt != context or context.customer_id != self.customer_id:
-            raise ValueError("TrustedOwnerScope CustomerContext derivation mismatch")
 
 
 class AgentRunCommand(_StrictRuntimePrivateRecord):
@@ -2324,31 +2352,31 @@ def _require_exact_cycle2_model(
     expected_type: type[BaseModel],
     *,
     field_name: str,
-) -> None:
-    """Reject mappings, subclasses, and ``model_construct`` bypasses at the fence."""
+) -> BaseModel:
+    """Reject sidecars/bypasses and return a freshly validated canonical instance."""
 
     if type(value) is not expected_type:
         raise ValueError(f"{field_name} must be an exact {expected_type.__name__}")
     if expected_type is TrustedOwnerScope:
-        value.require_trusted_derivation()
-        return
+        return _require_exact_trusted_owner_scope(value)
+    error_message = f"{field_name} must be recursively canonical"
     try:
         if expected_type.__module__ == __name__:
-            projection = {
-                name: getattr(value, name)
-                for name in expected_type.model_fields
-            }
-            projection.update(value.model_extra or {})
+            projection = _canonical_model_field_projection(
+                value,
+                expected_type,
+                error_message=error_message,
+            )
             rebuilt = expected_type.model_validate(projection, strict=True)
         else:
-            rebuilt = expected_type.model_validate(
-                value.model_dump(mode="python"),
-                strict=True,
+            rebuilt = _strict_rebuild_exact_write_contract_model(
+                value,
+                expected_type,
+                error_message=error_message,
             )
-    except ValidationError as error:
-        raise ValueError(f"{field_name} must be recursively canonical") from error
-    if rebuilt != value:
-        raise ValueError(f"{field_name} must be recursively canonical")
+    except (ValidationError, ValueError) as error:
+        raise ValueError(error_message) from error
+    return rebuilt
 
 
 def _require_exact_cycle2_inputs(
@@ -2360,8 +2388,9 @@ def _require_exact_cycle2_inputs(
 ) -> object:
     if not isinstance(value, Mapping):
         raise ValueError("Cycle 2 Application contract requires a mapping")
+    canonical = dict(value)
     for field_name, expected_type in model_fields.items():
-        _require_exact_cycle2_model(
+        canonical[field_name] = _require_exact_cycle2_model(
             value.get(field_name),
             expected_type,
             field_name=field_name,
@@ -2369,7 +2398,7 @@ def _require_exact_cycle2_inputs(
     for field_name, expected_type in (optional_model_fields or {}).items():
         item = value.get(field_name)
         if item is not None:
-            _require_exact_cycle2_model(
+            canonical[field_name] = _require_exact_cycle2_model(
                 item,
                 expected_type,
                 field_name=field_name,
@@ -2378,13 +2407,15 @@ def _require_exact_cycle2_inputs(
         items = value.get(field_name, ())
         if type(items) is not tuple:
             raise ValueError(f"{field_name} must be an exact tuple")
-        for item in items:
+        canonical[field_name] = tuple(
             _require_exact_cycle2_model(
                 item,
                 expected_type,
                 field_name=field_name,
             )
-    return value
+            for item in items
+        )
+    return canonical
 
 
 def _owner_matches_private_scope(
@@ -2500,10 +2531,60 @@ class Cycle2DispatchFenceWriteResult(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class AcceptedOrderSearchQueryBindingReadClosure(_StrictRuntimePrivateRecord):
+    """Exact owner-reader projection of one still-current search query Claim."""
+
+    binding_ref: UUID
+    binding_name: Literal["product_description"] = "product_description"
+    normalized_query: NonEmptyString
+    authority: Literal[InputAuthority.USER_CLAIM] = InputAuthority.USER_CLAIM
+    validation_status: Literal[InputValidationStatus.ACCEPTED] = (
+        InputValidationStatus.ACCEPTED
+    )
+    private_owner_scope_ref: NonEmptyString
+    conversation_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    accepted_task_state_version: PositiveStateVersion
+    current_task_state_version: PositiveStateVersion
+    source_message_record: MessageRecord
+    accepted_at: datetime
+    superseded_by_binding_ref: Literal[None] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_record_is_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={"source_message_record": MessageRecord},
+        )
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="accepted_at")
+
+    @model_validator(mode="after")
+    def source_is_one_saved_user_message(self) -> Self:
+        message = self.source_message_record
+        if (
+            message.direction is not MessageDirection.USER
+            or message.conversation_id != self.conversation_id
+            or self.accepted_at < message.received_at
+            or self.current_task_state_version
+            < self.accepted_task_state_version
+        ):
+            raise ValueError("search query binding requires exact current USER Claim")
+        return self
+
+
 class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
     """Atomic Search Observation, CandidateSet and Task/RequestUnit effect."""
 
     owner_scope: TrustedOwnerScope
+    trusted_conversation_record: ConversationRecord
+    source_run_record: AgentRunRecordV2
+    current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
     expected_task_record: TaskRecord
     next_task_record: TaskRecord
     expected_request_unit_record: RequestUnitRecord
@@ -2523,6 +2604,11 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
+                "trusted_conversation_record": ConversationRecord,
+                "source_run_record": AgentRunRecordV2,
+                "current_query_binding": (
+                    AcceptedOrderSearchQueryBindingReadClosure
+                ),
                 "expected_task_record": TaskRecord,
                 "next_task_record": TaskRecord,
                 "expected_request_unit_record": RequestUnitRecord,
@@ -2553,6 +2639,9 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         source = self.source_tool_call_record
         observation = self.search_observation_record
         candidate_set = self.candidate_set_record
+        conversation = self.trusted_conversation_record
+        run = self.source_run_record
+        query_binding = self.current_query_binding
 
         _task_and_request_unit_form_current_pair(
             owner_scope=owner,
@@ -2564,6 +2653,29 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or expected_unit.open_questions
         ):
             raise ValueError("order search requires ACTIVE Task with no open question")
+        if (
+            conversation.owner_customer_id != owner.customer_id
+            or candidate_set.conversation_id != conversation.conversation_id
+            or run.conversation_id != conversation.conversation_id
+            or run.status
+            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            or run.started_at > observation.recorded_at
+            or conversation.created_at > run.started_at
+        ):
+            raise ValueError("search outcome Conversation/Run closure mismatch")
+        if (
+            query_binding.binding_ref not in expected_unit.input_binding_refs
+            or query_binding.private_owner_scope_ref != owner.customer_id
+            or query_binding.conversation_id != conversation.conversation_id
+            or query_binding.task_id != expected_task.task_id
+            or query_binding.request_unit_id != expected_unit.request_unit_id
+            or query_binding.accepted_task_state_version
+            != expected_task.state_version
+            or query_binding.current_task_state_version
+            != expected_task.state_version
+            or query_binding.accepted_at > observation.recorded_at
+        ):
+            raise ValueError("search current query InputBinding closure mismatch")
         if (
             source.status is not ToolCallStatus.SUCCEEDED
             or source.effect is not ToolEffect.READ
@@ -2591,10 +2703,16 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             raise ValueError("search outcome source graph mismatch")
         if candidate_set.base_task_state_version != expected_task.state_version:
             raise ValueError("CandidateSet base version must equal current Task version")
-        if not (
-            source.argument_binding_refs
-            == candidate_set.query_binding_refs
-            == self.current_query_binding_refs
+        if (
+            len(source.argument_binding_refs) != 1
+            or len(candidate_set.query_binding_refs) != 1
+            or len(self.current_query_binding_refs) != 1
+            or not (
+                source.argument_binding_refs
+                == candidate_set.query_binding_refs
+                == self.current_query_binding_refs
+                == (query_binding.binding_ref,)
+            )
         ):
             raise ValueError("search ToolCall/query binding closure mismatch")
         if not set(self.current_query_binding_refs).issubset(
@@ -2668,16 +2786,63 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class AcceptedOrdinalBindingReadClosure(_StrictRuntimePrivateRecord):
+    """Exact owner-reader projection of one current accepted ordinal Claim."""
+
+    binding_ref: UUID
+    binding_name: Literal["candidate_ordinal"] = "candidate_ordinal"
+    normalized_ordinal: Annotated[int, Field(ge=1)]
+    authority: Literal[InputAuthority.USER_CLAIM] = InputAuthority.USER_CLAIM
+    validation_status: Literal[InputValidationStatus.ACCEPTED] = (
+        InputValidationStatus.ACCEPTED
+    )
+    private_owner_scope_ref: NonEmptyString
+    conversation_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    task_state_version: PositiveStateVersion
+    source_message_record: MessageRecord
+    accepted_at: datetime
+    superseded_by_binding_ref: Literal[None] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_record_is_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={"source_message_record": MessageRecord},
+        )
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="accepted_at")
+
+    @model_validator(mode="after")
+    def source_is_one_saved_user_message(self) -> Self:
+        message = self.source_message_record
+        if (
+            message.direction is not MessageDirection.USER
+            or message.conversation_id != self.conversation_id
+            or self.accepted_at < message.received_at
+        ):
+            raise ValueError("ordinal binding requires one exact saved USER Message")
+        return self
+
+
 class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
     """One owner-scoped exact current CandidateSet/Observation read closure."""
 
     owner_scope: TrustedOwnerScope
-    conversation_id: UUID
+    trusted_conversation_record: ConversationRecord
+    current_run_record: AgentRunRecordV2
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
     current_candidate_set_record: OrderCandidateSetRecord
     search_observation_record: SearchOrdersObservation
     selection_request: OrderCandidateSelectionRequest
+    ordinal_binding_closure: AcceptedOrdinalBindingReadClosure
+    current_query_binding: AcceptedOrderSearchQueryBindingReadClosure
     pending_candidate_set_ref: UUID
     current_query_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
     resolved_owner_scoped_order_target_ref: NonEmptyString
@@ -2692,11 +2857,17 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
+                "trusted_conversation_record": ConversationRecord,
+                "current_run_record": AgentRunRecordV2,
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
                 "current_candidate_set_record": OrderCandidateSetRecord,
                 "search_observation_record": SearchOrdersObservation,
                 "selection_request": OrderCandidateSelectionRequest,
+                "ordinal_binding_closure": AcceptedOrdinalBindingReadClosure,
+                "current_query_binding": (
+                    AcceptedOrderSearchQueryBindingReadClosure
+                ),
             },
             tuple_model_fields={
                 "existing_selection_records": OrderCandidateSelectionRecord,
@@ -2713,6 +2884,10 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         task = self.current_task_record
         unit = self.current_request_unit_record
         candidate_set = self.current_candidate_set_record
+        conversation = self.trusted_conversation_record
+        run = self.current_run_record
+        binding = self.ordinal_binding_closure
+        query_binding = self.current_query_binding
         _task_and_request_unit_form_current_pair(
             owner_scope=self.owner_scope,
             task_record=task,
@@ -2720,10 +2895,49 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
         )
         if task.status is not TaskStatus.WAITING_USER:
             raise ValueError("ordinal selection requires WAITING_USER Task")
-        if self.selection_request.ordinal_input_binding_ref not in (
-            unit.input_binding_refs
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or candidate_set.conversation_id != conversation.conversation_id
+            or run.conversation_id != conversation.conversation_id
+            or run.status
+            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            or run.started_at > self.trusted_now
+            or conversation.created_at > run.started_at
         ):
-            raise ValueError("ordinal InputBinding ref must belong to RequestUnit")
+            raise ValueError("ordinal selection Conversation/Run closure mismatch")
+        request = self.selection_request
+        if (
+            binding.binding_ref != request.ordinal_input_binding_ref
+            or binding.normalized_ordinal != request.ordinal
+            or binding.source_message_record.message_id != request.source_message_ref
+            or binding.private_owner_scope_ref != self.owner_scope.customer_id
+            or binding.conversation_id != conversation.conversation_id
+            or binding.task_id != task.task_id
+            or binding.request_unit_id != unit.request_unit_id
+            or binding.task_state_version != task.state_version
+            or binding.binding_ref not in unit.input_binding_refs
+            or binding.accepted_at > self.trusted_now
+        ):
+            raise ValueError("ordinal InputBinding closure mismatch")
+        if (
+            len(self.current_query_binding_refs) != 1
+            or self.current_query_binding_refs
+            != candidate_set.query_binding_refs
+            or self.current_query_binding_refs != (query_binding.binding_ref,)
+            or not set(self.current_query_binding_refs).issubset(
+                unit.input_binding_refs
+            )
+            or query_binding.private_owner_scope_ref
+            != self.owner_scope.customer_id
+            or query_binding.conversation_id != conversation.conversation_id
+            or query_binding.task_id != task.task_id
+            or query_binding.request_unit_id != unit.request_unit_id
+            or query_binding.accepted_task_state_version
+            != candidate_set.base_task_state_version
+            or query_binding.current_task_state_version != task.state_version
+            or query_binding.accepted_at > self.trusted_now
+        ):
+            raise ValueError("current query InputBinding closure mismatch")
         if len(self.superseded_candidate_set_refs) != len(
             set(self.superseded_candidate_set_refs)
         ):
@@ -2733,7 +2947,7 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             observation=self.search_observation_record,
             request=self.selection_request,
             trusted_owner_scope_ref=self.owner_scope.customer_id,
-            conversation_id=self.conversation_id,
+            conversation_id=conversation.conversation_id,
             task_id=task.task_id,
             request_unit_id=unit.request_unit_id,
             pending_candidate_set_ref=self.pending_candidate_set_ref,
@@ -2746,7 +2960,52 @@ class OrderCandidateSelectionReadClosure(_StrictRuntimePrivateRecord):
             superseded_candidate_set_refs=self.superseded_candidate_set_refs,
             existing_selection_records=self.existing_selection_records,
         )
+        for existing in self.existing_selection_records:
+            matching_entries = tuple(
+                entry
+                for entry in candidate_set.ordered_candidates
+                if entry.observation_candidate_ref
+                == existing.observation_candidate_ref
+                and entry.candidate_source_version
+                == existing.candidate_source_version
+            )
+            matching_targets = tuple(
+                target
+                for target in self.search_observation_record.candidate_target_bindings
+                if target.observation_candidate_ref
+                == existing.observation_candidate_ref
+                and target.candidate_source_version
+                == existing.candidate_source_version
+            )
+            if (
+                existing.private_owner_scope_ref != self.owner_scope.customer_id
+                or existing.conversation_id != conversation.conversation_id
+                or existing.task_id != task.task_id
+                or existing.request_unit_id != unit.request_unit_id
+                or existing.candidate_set_ref != candidate_set.candidate_set_id
+                or existing.candidate_set_version != candidate_set.candidate_set_version
+                or existing.search_observation_ref
+                != self.search_observation_record.observation_id
+                or existing.search_observation_record_schema_version
+                != self.search_observation_record.record_schema_version
+                or existing.base_task_state_version != task.state_version
+                or existing.result_task_state_version != task.state_version + 1
+                or existing.selected_at < candidate_set.created_at
+                or len(matching_entries) != 1
+                or len(matching_targets) != 1
+                or matching_targets[0].owner_scoped_order_ref
+                != existing.owner_scoped_order_target_ref
+                or existing.selected_target_ref
+                != existing.owner_scoped_order_target_ref
+            ):
+                raise ValueError("existing selection record graph mismatch")
+        if self.existing_selection_records:
+            raise ValueError("current CandidateSet capability is already consumed")
         return self
+
+    @property
+    def conversation_id(self) -> UUID:
+        return self.trusted_conversation_record.conversation_id
 
 
 class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
@@ -3012,7 +3271,11 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
     """Insert one fresh Shipment Observation after exact successful ToolCall."""
 
     owner_scope: TrustedOwnerScope
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
     source_tool_call_record: ToolCallRecordV2
+    source_result_ref: UUID
+    source_result: GetShipmentResult
     observation_record: ShipmentObservation
     trusted_acceptance_now: datetime
     previous_observation_record: ShipmentObservation | None = None
@@ -3024,7 +3287,10 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
                 "source_tool_call_record": ToolCallRecordV2,
+                "source_result": GetShipmentResult,
                 "observation_record": ShipmentObservation,
             },
             optional_model_fields={
@@ -3040,8 +3306,16 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
     @model_validator(mode="after")
     def source_graph_is_exact(self) -> Self:
         owner = self.owner_scope
+        task = self.current_task_record
+        unit = self.current_request_unit_record
         source = self.source_tool_call_record
+        result = self.source_result
         observation = self.observation_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=owner,
+            task_record=task,
+            request_unit_record=unit,
+        )
         if (
             source.status is not ToolCallStatus.SUCCEEDED
             or source.effect is not ToolEffect.READ
@@ -3054,7 +3328,12 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("Shipment Observation owner scope mismatch")
         if (
-            observation.source_tool_call_id != source.tool_call_id
+            source.task_id != task.task_id
+            or source.request_unit_id != unit.request_unit_id
+            or source.validated_task_state_version != task.state_version
+            or source.result_ref != self.source_result_ref
+            or result.outcome is not GetShipmentOutcome.FOUND
+            or observation.source_tool_call_id != source.tool_call_id
             or observation.task_id != source.task_id
             or observation.request_unit_id != source.request_unit_id
             or observation.verified_order_target_ref
@@ -3066,8 +3345,22 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("Shipment Observation source graph mismatch")
         if (
+            result.shipment_summary != observation.normalized_value
+            or result.source_resource_ref != observation.source_resource_ref
+            or result.source_version != observation.source_version
+            or result.observed_at != observation.observed_at
+            or (
+                observation.raw_result_ref is not None
+                and observation.raw_result_ref != str(self.source_result_ref)
+            )
+        ):
+            raise ValueError("Shipment Observation/result projection mismatch")
+        if (
             self.trusted_acceptance_now != observation.recorded_at
-            or self.trusted_acceptance_now >= observation.valid_until
+            or not shipment_snapshot_is_fresh_at_acceptance(
+                result,
+                trusted_acceptance_now=self.trusted_acceptance_now,
+            )
         ):
             raise ValueError("Shipment Observation must be fresh at acceptance")
         previous = self.previous_observation_record
@@ -3084,16 +3377,63 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class ShipmentNotReceivedClaimReadClosure(_StrictRuntimePrivateRecord):
+    """Exact owner-reader projection of one current not-received user Claim."""
+
+    binding_ref: UUID
+    binding_name: Literal["shipment_not_received"] = "shipment_not_received"
+    normalized_value: Literal[True] = True
+    authority: Literal[InputAuthority.USER_CLAIM] = InputAuthority.USER_CLAIM
+    validation_status: Literal[InputValidationStatus.ACCEPTED] = (
+        InputValidationStatus.ACCEPTED
+    )
+    private_owner_scope_ref: NonEmptyString
+    conversation_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    task_state_version: PositiveStateVersion
+    verified_order_target_ref: NonEmptyString
+    source_message_record: MessageRecord
+    accepted_at: datetime
+    superseded_by_binding_ref: Literal[None] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_record_is_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={"source_message_record": MessageRecord},
+        )
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="accepted_at")
+
+    @model_validator(mode="after")
+    def source_is_one_saved_user_message(self) -> Self:
+        message = self.source_message_record
+        if (
+            message.direction is not MessageDirection.USER
+            or message.conversation_id != self.conversation_id
+            or self.accepted_at < message.received_at
+        ):
+            raise ValueError("Shipment Claim requires one exact saved USER Message")
+        return self
+
+
 class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
     """Owner-scoped exact fresh inputs for one deterministic Assessment."""
 
     owner_scope: TrustedOwnerScope
+    trusted_conversation_record: ConversationRecord
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
     current_observation_record: ShipmentObservation
+    current_observation_ref: UUID
     verified_order_target_ref: NonEmptyString
     trusted_assessed_at: datetime
-    current_claim_binding_ref: UUID | None = None
+    current_claim_binding: ShipmentNotReceivedClaimReadClosure | None = None
     current_assessment_record: ShipmentAssessment | None = None
 
     @model_validator(mode="before")
@@ -3103,11 +3443,13 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
+                "trusted_conversation_record": ConversationRecord,
                 "current_task_record": TaskRecord,
                 "current_request_unit_record": RequestUnitRecord,
                 "current_observation_record": ShipmentObservation,
             },
             optional_model_fields={
+                "current_claim_binding": ShipmentNotReceivedClaimReadClosure,
                 "current_assessment_record": ShipmentAssessment,
             },
         )
@@ -3122,13 +3464,17 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         task = self.current_task_record
         unit = self.current_request_unit_record
         observation = self.current_observation_record
+        conversation = self.trusted_conversation_record
         _task_and_request_unit_form_current_pair(
             owner_scope=self.owner_scope,
             task_record=task,
             request_unit_record=unit,
         )
         if (
-            not _owner_matches_private_scope(
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or self.current_observation_ref != observation.observation_id
+            or observation.observation_id not in unit.observation_refs
+            or not _owner_matches_private_scope(
                 self.owner_scope,
                 observation.private_owner_scope,
             )
@@ -3144,11 +3490,18 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
             < observation.valid_until
         ):
             raise ValueError("Shipment Assessment requires a fresh Observation")
-        if (
-            self.current_claim_binding_ref is not None
-            and self.current_claim_binding_ref not in unit.input_binding_refs
+        claim = self.current_claim_binding
+        if claim is not None and (
+            claim.binding_ref not in unit.input_binding_refs
+            or claim.private_owner_scope_ref != self.owner_scope.customer_id
+            or claim.conversation_id != conversation.conversation_id
+            or claim.task_id != task.task_id
+            or claim.request_unit_id != unit.request_unit_id
+            or claim.task_state_version != task.state_version
+            or claim.verified_order_target_ref != self.verified_order_target_ref
+            or claim.accepted_at > self.trusted_assessed_at
         ):
-            raise ValueError("current Claim binding must belong to RequestUnit")
+            raise ValueError("current Claim binding closure mismatch")
         previous = self.current_assessment_record
         if previous is not None and (
             previous.private_owner_scope_ref != self.owner_scope.customer_id
@@ -3157,6 +3510,12 @@ class ShipmentAssessmentReadClosure(_StrictRuntimePrivateRecord):
         ):
             raise ValueError("current Shipment Assessment context mismatch")
         return self
+
+    @property
+    def current_claim_binding_ref(self) -> UUID | None:
+        if self.current_claim_binding is None:
+            return None
+        return self.current_claim_binding.binding_ref
 
 
 class SaveShipmentAssessmentV2Command(_StrictRuntimePrivateRecord):
@@ -3215,13 +3574,16 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
     """Exact owner-scoped no-result fence proving an active Run is obsolete."""
 
     owner_scope: TrustedOwnerScope
+    trusted_conversation_record: ConversationRecord
     expected_active_run_record: AgentRunRecordV2
     expected_active_link_record: RunTaskLinkRecordV2
     current_authoritative_run_record: AgentRunRecordV2
     current_authoritative_link_record: RunTaskLinkRecordV2
     current_task_record: TaskRecord
     current_request_unit_record: RequestUnitRecord
+    trusted_current_evidence_at: datetime
     invalidation_kind: SupersededRunInvalidationKind
+    obsolete_binding_refs: tuple[UUID, ...] = ()
     invalidated_binding_refs: tuple[UUID, ...] = ()
 
     @model_validator(mode="before")
@@ -3231,6 +3593,7 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
+                "trusted_conversation_record": ConversationRecord,
                 "expected_active_run_record": AgentRunRecordV2,
                 "expected_active_link_record": RunTaskLinkRecordV2,
                 "current_authoritative_run_record": AgentRunRecordV2,
@@ -3240,6 +3603,11 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
             },
         )
 
+    @field_validator("trusted_current_evidence_at")
+    @classmethod
+    def evidence_time_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="trusted_current_evidence_at")
+
     @model_validator(mode="after")
     def obsolete_fence_is_closed(self) -> Self:
         run = self.expected_active_run_record
@@ -3248,6 +3616,7 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
         current_link = self.current_authoritative_link_record
         current_task = self.current_task_record
         current_unit = self.current_request_unit_record
+        conversation = self.trusted_conversation_record
         if run.status not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}:
             raise ValueError("obsolete fence requires active v2 Run")
         if (
@@ -3268,35 +3637,76 @@ class SupersededRunReadClosure(_StrictRuntimePrivateRecord):
         if (
             current_run.run_id == run.run_id
             or current_run.status
-            not in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+            not in {
+                AgentRunStatusV2.CREATED,
+                AgentRunStatusV2.RUNNING,
+                AgentRunStatusV2.COMPLETED,
+            }
             or current_run.started_at < run.started_at
         ):
-            raise ValueError("obsolete fence requires a newer authoritative active Run")
-        if (
-            current_link.run_id != current_run.run_id
-            or current_link.task_id != current_task.task_id
-            or current_link.base_task_state_version != current_task.state_version
-            or current_link.result_task_state_version is not None
+            raise ValueError("obsolete fence requires a newer authoritative Run")
+        if current_link.run_id != current_run.run_id or (
+            current_link.task_id != current_task.task_id
         ):
             raise ValueError(
-                "authoritative RunTaskLink must match current Run and Task version"
+                "authoritative RunTaskLink must match current Run and Task"
+            )
+        if current_run.status in {
+            AgentRunStatusV2.CREATED,
+            AgentRunStatusV2.RUNNING,
+        }:
+            if (
+                current_link.base_task_state_version != current_task.state_version
+                or current_link.result_task_state_version is not None
+            ):
+                raise ValueError(
+                    "active authoritative RunTaskLink must match current Task version"
+                )
+        elif (
+            current_link.result_task_state_version != current_task.state_version
+            or current_link.base_task_state_version is None
+            or current_link.base_task_state_version
+            > current_link.result_task_state_version
+        ):
+            raise ValueError(
+                "completed authoritative RunTaskLink must close current Task version"
             )
         if (
-            run.conversation_id is not None
-            and current_run.conversation_id != run.conversation_id
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or run.conversation_id is None
+            or run.conversation_id != conversation.conversation_id
+            or current_run.conversation_id != conversation.conversation_id
         ):
             raise ValueError("obsolete and authoritative Runs must share Conversation")
+        evidence_floor = max(
+            current_task.updated_at,
+            current_unit.updated_at,
+            current_run.started_at,
+            conversation.created_at,
+            *(
+                ()
+                if current_run.completed_at is None
+                else (current_run.completed_at,)
+            ),
+        )
+        if self.trusted_current_evidence_at < evidence_floor:
+            raise ValueError("obsolete fence evidence time precedes current graph")
+        if len(self.obsolete_binding_refs) != len(set(self.obsolete_binding_refs)):
+            raise ValueError("obsolete binding refs must be unique")
         if len(self.invalidated_binding_refs) != len(
             set(self.invalidated_binding_refs)
         ):
             raise ValueError("invalidated binding refs must be unique")
         if self.invalidation_kind is SupersededRunInvalidationKind.TASK_VERSION_ADVANCED:
-            if self.invalidated_binding_refs:
+            if self.obsolete_binding_refs or self.invalidated_binding_refs:
                 raise ValueError(
                     "Task-version invalidation cannot carry binding evidence"
                 )
         else:
-            if not self.invalidated_binding_refs:
+            if (
+                not self.obsolete_binding_refs
+                or self.invalidated_binding_refs != self.obsolete_binding_refs
+            ):
                 raise ValueError("binding invalidation requires exact binding refs")
             if set(self.invalidated_binding_refs).intersection(
                 current_unit.input_binding_refs
@@ -3343,6 +3753,8 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
             or terminal.incomplete_reason is not None
         ):
             raise ValueError("OA-10 requires exact SUPERSEDED terminal Run")
+        if terminal.completed_at < closure.trusted_current_evidence_at:
+            raise ValueError("OA-10 terminal time precedes current invalidation evidence")
         if any(
             getattr(active, field_name) != getattr(terminal, field_name)
             for field_name in (
@@ -3366,17 +3778,21 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
             or trace.stop_reason is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
         ):
             raise ValueError("OA-10 requires exact audit-only RunStopped trace")
-        forbidden_trace_payloads = (
-            trace.message_ref,
-            trace.accepted_delta_ref,
-            trace.input_binding_ref,
-            trace.model_call_id,
-            trace.context_manifest_id,
-            trace.tool_call_id,
-            trace.observation_ref,
-            trace.presentation_plan_ref,
-        )
-        if any(value is not None for value in forbidden_trace_payloads):
+        allowed_trace_fields = {
+            "trace_event_id",
+            "event_type",
+            "occurred_at",
+            "run_id",
+            "task_id",
+            "request_unit_id",
+            "user_outcome",
+            "stop_reason",
+        }
+        if any(
+            getattr(trace, field_name) != field.default
+            for field_name, field in TraceEventV2.model_fields.items()
+            if field_name not in allowed_trace_fields
+        ):
             raise ValueError("OA-10 audit Trace cannot carry outbound or mutation refs")
         return self
 

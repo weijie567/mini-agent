@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 import mini_agent.application.records as application_records_module
 from mini_agent.application.records import (
+    AcceptedOrderSearchQueryBindingReadClosure,
+    AcceptedOrdinalBindingReadClosure,
     AgentRunCommand,
     AgentRunResult,
     AppendToolAttemptV2Command,
@@ -65,6 +67,7 @@ from mini_agent.application.records import (
     SaveRequestUnderstandingV2NoTaskCommand,
     TaskRecoveryAggregate,
     ShipmentAssessmentReadClosure,
+    ShipmentNotReceivedClaimReadClosure,
     SupersededRunReadClosure,
     SupersededRunInvalidationKind,
     ToolCallRecoveryAggregate,
@@ -155,6 +158,8 @@ from mini_agent.core.trace import (
     TraceEventType,
 )
 from mini_agent.core.shipment import (
+    GetShipmentOutcome,
+    GetShipmentResult,
     ShipmentAssessment,
     ShipmentEventCode,
     ShipmentStatus,
@@ -1627,12 +1632,12 @@ def test_trusted_owner_scope_is_a_minimal_application_projection() -> None:
     assert "session_ref_hash" not in owner_scope.model_dump()
     with pytest.raises(ValidationError, match="derived from CustomerContext"):
         TrustedOwnerScope(customer_id="customer-A")
-    with pytest.raises(ValidationError, match="must match CustomerContext"):
+    with pytest.raises(ValidationError, match="derived from CustomerContext"):
         TrustedOwnerScope.model_validate(
             {"customer_id": "customer-B"},
             context={"customer_context": context},
         )
-    with pytest.raises(ValidationError, match="Extra inputs"):
+    with pytest.raises(ValidationError, match="derived from CustomerContext"):
         TrustedOwnerScope.model_validate(
             {
                 "customer_id": "customer-A",
@@ -1640,6 +1645,15 @@ def test_trusted_owner_scope_is_a_minimal_application_projection() -> None:
             },
             context={"customer_context": context},
         )
+    forged = TrustedOwnerScope.model_construct(
+        customer_id="customer-A",
+        _derivation_context=context,
+    )
+    with pytest.raises(ValueError, match="lacks CustomerContext derivation"):
+        forged.require_trusted_derivation()
+    malformed_context = CustomerContext.model_construct(customer_id="customer-A")
+    with pytest.raises(ValueError, match="recursively canonical"):
+        TrustedOwnerScope.from_customer_context(malformed_context)
 
 
 def test_message_content_is_non_empty_and_bounded_at_4000_characters() -> None:
@@ -7639,12 +7653,49 @@ def _c2_search_graph() -> tuple[
     )
 
 
+def _c2_search_runtime_fields(
+    owner: TrustedOwnerScope,
+    candidate_set: OrderCandidateSetRecord,
+) -> dict[str, object]:
+    conversation = _conversation(
+        conversation_id=candidate_set.conversation_id,
+        owner_customer_id=owner.customer_id,
+    )
+    source_message = _message(
+        conversation_id=conversation.conversation_id,
+        content="查找最近买的示例鞋",
+    )
+    return {
+        "trusted_conversation_record": conversation,
+        "source_run_record": AgentRunRecordV2(
+            run_id=uuid4(),
+            conversation_id=conversation.conversation_id,
+            status=AgentRunStatusV2.RUNNING,
+            provider_lane="scripted",
+            started_at=UTC_NOW,
+        ),
+        "current_query_binding": AcceptedOrderSearchQueryBindingReadClosure(
+            binding_ref=candidate_set.query_binding_refs[0],
+            normalized_query="示例鞋",
+            private_owner_scope_ref=owner.customer_id,
+            conversation_id=conversation.conversation_id,
+            task_id=candidate_set.task_id,
+            request_unit_id=candidate_set.request_unit_id,
+            accepted_task_state_version=candidate_set.base_task_state_version,
+            current_task_state_version=candidate_set.base_task_state_version,
+            source_message_record=source_message,
+            accepted_at=source_message.received_at,
+        ),
+    }
+
+
 def _c2_multiple_search_command() -> ApplyOrderSearchOutcomeV2Command:
     owner, task, unit, source, observation, candidate_set, query_ref, _ = (
         _c2_search_graph()
     )
     return ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
+        **_c2_search_runtime_fields(owner, candidate_set),
         expected_task_record=task,
         next_task_record=_c2_project(
             task,
@@ -7724,6 +7775,7 @@ def _c2_unique_search_command() -> ApplyOrderSearchOutcomeV2Command:
     candidate_set = OrderCandidateSetRecord.model_validate(candidate_values)
     return ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
+        **_c2_search_runtime_fields(owner, candidate_set),
         expected_task_record=task,
         next_task_record=_c2_project(
             task,
@@ -7786,6 +7838,7 @@ def test_cycle2_search_outcome_closes_multiple_atomically() -> None:
     )
     command = ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
+        **_c2_search_runtime_fields(owner, candidate_set),
         expected_task_record=task,
         next_task_record=next_task,
         expected_request_unit_record=unit,
@@ -7949,7 +8002,7 @@ def test_cycle2_commands_reject_constructed_trusted_owner_scope() -> None:
     }
     constructed = TrustedOwnerScope.model_construct(customer_id="customer-A")
 
-    with pytest.raises(ValidationError, match="lacks CustomerContext derivation"):
+    with pytest.raises(ValidationError, match="exact trusted projection"):
         ApplyOrderSearchOutcomeV2Command(
             **{**values, "owner_scope": constructed}
         )
@@ -7978,14 +8031,60 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
         ordinal_input_binding_ref=ordinal_ref,
         ordinal=2,
     )
+    conversation = _conversation(
+        conversation_id=candidate_set.conversation_id,
+        owner_customer_id=owner.customer_id,
+    )
+    source_message = _message(
+        message_id=request.source_message_ref,
+        conversation_id=conversation.conversation_id,
+        content="第二个",
+        received_at=observation.recorded_at + timedelta(seconds=1),
+    )
+    ordinal_binding = AcceptedOrdinalBindingReadClosure(
+        binding_ref=ordinal_ref,
+        normalized_ordinal=2,
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=current_task.task_id,
+        request_unit_id=current_unit.request_unit_id,
+        task_state_version=current_task.state_version,
+        source_message_record=source_message,
+        accepted_at=source_message.received_at,
+    )
+    query_binding_seed = _c2_search_runtime_fields(owner, candidate_set)[
+        "current_query_binding"
+    ]
+    assert isinstance(
+        query_binding_seed,
+        AcceptedOrderSearchQueryBindingReadClosure,
+    )
+    query_binding = AcceptedOrderSearchQueryBindingReadClosure(
+        **{
+            **{
+                field_name: getattr(query_binding_seed, field_name)
+                for field_name in AcceptedOrderSearchQueryBindingReadClosure.model_fields
+            },
+            "current_task_state_version": current_task.state_version,
+        }
+    )
     closure = OrderCandidateSelectionReadClosure(
         owner_scope=owner,
-        conversation_id=candidate_set.conversation_id,
+        trusted_conversation_record=conversation,
+        current_run_record=AgentRunRecordV2(
+            run_id=uuid4(),
+            conversation_id=conversation.conversation_id,
+            status=AgentRunStatusV2.RUNNING,
+            provider_lane="scripted",
+            started_at=source_message.received_at,
+        ),
         current_task_record=current_task,
         current_request_unit_record=current_unit,
         current_candidate_set_record=candidate_set,
         search_observation_record=observation,
         selection_request=request,
+        ordinal_binding_closure=ordinal_binding,
+        current_query_binding=query_binding,
         pending_candidate_set_ref=candidate_set.candidate_set_id,
         current_query_binding_refs=(query_ref,),
         resolved_owner_scoped_order_target_ref="owner-order:2",
@@ -8068,8 +8167,34 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
                 **closure_values,
                 "current_task_record": version_five_task,
                 "current_request_unit_record": version_five_unit,
-            }
-        )
+                    "ordinal_binding_closure": AcceptedOrdinalBindingReadClosure(
+                    **{
+                        **{
+                            field_name: getattr(
+                                closure.ordinal_binding_closure,
+                                field_name,
+                            )
+                            for field_name in AcceptedOrdinalBindingReadClosure.model_fields
+                        },
+                        "task_state_version": 5,
+                        }
+                    ),
+                    "current_query_binding": (
+                        AcceptedOrderSearchQueryBindingReadClosure(
+                            **{
+                                **{
+                                    field_name: getattr(
+                                        closure.current_query_binding,
+                                        field_name,
+                                    )
+                                    for field_name in AcceptedOrderSearchQueryBindingReadClosure.model_fields
+                                },
+                                "current_task_state_version": 5,
+                            }
+                        )
+                    ),
+                }
+            )
 
 
 def test_cycle2_tool_attempt_fences_preserve_append_only_evidence() -> None:
@@ -8139,6 +8264,7 @@ def _c2_shipment_inputs() -> tuple[
     TaskRecord,
     RequestUnitRecord,
     ToolCallRecordV2,
+    GetShipmentResult,
     ShipmentObservation,
 ]:
     owner = _owner_scope()
@@ -8149,6 +8275,7 @@ def _c2_shipment_inputs() -> tuple[
         name=Cycle2ToolName.GET_SHIPMENT,
         task_id=task.task_id,
         request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
         verified_target_ref=target_ref,
     )
     successful_attempt = _c2_attempt(
@@ -8186,23 +8313,41 @@ def _c2_shipment_inputs() -> tuple[
         recorded_at=UTC_NOW + timedelta(seconds=1),
         valid_until=UTC_NOW + timedelta(minutes=5),
     )
-    return owner, task, unit, source, observation
+    result = GetShipmentResult(
+        outcome=GetShipmentOutcome.FOUND,
+        shipment_summary=observation.normalized_value,
+        source_resource_ref=observation.source_resource_ref,
+        source_version=observation.source_version,
+        observed_at=observation.observed_at,
+    )
+    unit = _c2_project(
+        unit,
+        observation_refs=(observation.observation_id,),
+    )
+    return owner, task, unit, source, result, observation
 
 
 def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -> None:
-    owner, task, unit, source, observation = _c2_shipment_inputs()
+    owner, task, unit, source, result, observation = _c2_shipment_inputs()
     SaveShipmentObservationV2Command(
         owner_scope=owner,
+        current_task_record=task,
+        current_request_unit_record=unit,
         source_tool_call_record=source,
+        source_result_ref=source.result_ref,
+        source_result=result,
         observation_record=observation,
         trusted_acceptance_now=observation.recorded_at,
     )
     assessed_at = UTC_NOW + timedelta(minutes=2)
+    conversation = _conversation(owner_customer_id=owner.customer_id)
     closure = ShipmentAssessmentReadClosure(
         owner_scope=owner,
+        trusted_conversation_record=conversation,
         current_task_record=task,
         current_request_unit_record=unit,
         current_observation_record=observation,
+        current_observation_ref=observation.observation_id,
         verified_order_target_ref=observation.verified_order_target_ref,
         trusted_assessed_at=assessed_at,
     )
@@ -8236,17 +8381,25 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
             loaded_closure=closure,
             assessment_record=wrong,
         )
-    with pytest.raises(ValidationError, match="owner scope mismatch"):
+    with pytest.raises(ValidationError, match="Task owner"):
         SaveShipmentObservationV2Command(
             owner_scope=_owner_scope("customer-B"),
+            current_task_record=task,
+            current_request_unit_record=unit,
             source_tool_call_record=source,
+            source_result_ref=source.result_ref,
+            source_result=result,
             observation_record=observation,
             trusted_acceptance_now=observation.recorded_at,
         )
     with pytest.raises(ValidationError, match="source graph mismatch"):
         SaveShipmentObservationV2Command(
             owner_scope=owner,
+            current_task_record=task,
+            current_request_unit_record=unit,
             source_tool_call_record=source,
+            source_result_ref=source.result_ref,
+            source_result=result,
             observation_record=_c2_project(
                 observation,
                 source_tool_call_id=uuid4(),
@@ -8256,19 +8409,38 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="fresh at acceptance"):
         SaveShipmentObservationV2Command(
             owner_scope=owner,
+            current_task_record=task,
+            current_request_unit_record=unit,
             source_tool_call_record=source,
+            source_result_ref=source.result_ref,
+            source_result=result,
             observation_record=observation,
             trusted_acceptance_now=observation.valid_until,
         )
     with pytest.raises(ValidationError, match="Claim binding"):
         ShipmentAssessmentReadClosure(
             owner_scope=owner,
+            trusted_conversation_record=conversation,
             current_task_record=task,
             current_request_unit_record=unit,
             current_observation_record=observation,
+            current_observation_ref=observation.observation_id,
             verified_order_target_ref=observation.verified_order_target_ref,
             trusted_assessed_at=assessed_at,
-            current_claim_binding_ref=uuid4(),
+            current_claim_binding=ShipmentNotReceivedClaimReadClosure(
+                binding_ref=uuid4(),
+                private_owner_scope_ref=owner.customer_id,
+                conversation_id=conversation.conversation_id,
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_order_target_ref=observation.verified_order_target_ref,
+                source_message_record=_message(
+                    conversation_id=conversation.conversation_id,
+                    content="我没有收到",
+                ),
+                accepted_at=UTC_NOW,
+            ),
         )
 
 
@@ -8299,8 +8471,13 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
         state_version=4,
         updated_at=UTC_NOW + timedelta(seconds=1),
     )
+    conversation = _conversation(
+        conversation_id=active.conversation_id,
+        owner_customer_id=owner.customer_id,
+    )
     closure = SupersededRunReadClosure(
         owner_scope=owner,
+        trusted_conversation_record=conversation,
         expected_active_run_record=active,
         expected_active_link_record=link,
         current_authoritative_run_record=current_run,
@@ -8316,6 +8493,7 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
             state_version=4,
             updated_at=UTC_NOW + timedelta(seconds=1),
         ),
+        trusted_current_evidence_at=UTC_NOW + timedelta(seconds=1),
         invalidation_kind=(
             SupersededRunInvalidationKind.TASK_VERSION_ADVANCED
         ),
@@ -8424,6 +8602,7 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
             "invalidation_kind": (
                 SupersededRunInvalidationKind.BINDING_INVALIDATED
             ),
+            "obsolete_binding_refs": (invalidated_ref,),
             "invalidated_binding_refs": (invalidated_ref,),
         }
     )
@@ -8434,6 +8613,9 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
                 **closure_values,
                 "invalidation_kind": (
                     SupersededRunInvalidationKind.BINDING_INVALIDATED
+                ),
+                "obsolete_binding_refs": (
+                    closure.current_request_unit_record.input_binding_refs[0],
                 ),
                 "invalidated_binding_refs": (
                     closure.current_request_unit_record.input_binding_refs[0],
@@ -8460,6 +8642,7 @@ def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
     with pytest.raises(ValidationError, match="recursively canonical"):
         ApplyOrderSearchOutcomeV2Command(
             owner_scope=owner,
+            **_c2_search_runtime_fields(owner, candidate_set),
             expected_task_record=task,
             next_task_record=_c2_project(
                 task,
@@ -8481,4 +8664,317 @@ def test_cycle2_commands_reject_constructed_nested_bypass() -> None:
             candidate_set_record=malformed,
             current_query_binding_refs=(query_ref,),
             pending_candidate_set_ref=candidate_set.candidate_set_id,
+        )
+
+
+def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversation() -> None:
+    command = _c2_multiple_search_command()
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    query_refs = command.expected_request_unit_record.input_binding_refs
+    source = _c2_project(
+        command.source_tool_call_record,
+        argument_binding_refs=query_refs,
+    )
+    candidate_values = command.candidate_set_record.model_dump(mode="python")
+    candidate_values.pop("candidate_set_version")
+    candidate_values["query_binding_refs"] = query_refs
+    candidate_values["ordered_candidates"] = (
+        command.candidate_set_record.ordered_candidates
+    )
+    candidate_values["candidate_set_version"] = compute_order_candidate_set_version(
+        **candidate_values
+    )
+    candidate_set = OrderCandidateSetRecord.model_validate(candidate_values)
+
+    with pytest.raises(ValidationError, match="query binding closure"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "source_tool_call_record": source,
+                "candidate_set_record": candidate_set,
+                "current_query_binding_refs": query_refs,
+            }
+        )
+    with pytest.raises(ValidationError, match="Conversation/Run closure"):
+        ApplyOrderSearchOutcomeV2Command(
+            **{
+                **values,
+                "trusted_conversation_record": _conversation(
+                    owner_customer_id=command.owner_scope.customer_id,
+                ),
+            }
+        )
+
+
+def test_cycle2_shipment_rejects_result_drift_and_sanitizes_constructed_closure() -> None:
+    owner, task, unit, source, result, observation = _c2_shipment_inputs()
+    command_values = {
+        "owner_scope": owner,
+        "current_task_record": task,
+        "current_request_unit_record": unit,
+        "source_tool_call_record": source,
+        "source_result_ref": source.result_ref,
+        "source_result": result,
+        "observation_record": observation,
+        "trusted_acceptance_now": observation.recorded_at,
+    }
+    with pytest.raises(ValidationError, match="result projection mismatch"):
+        SaveShipmentObservationV2Command(
+            **{
+                **command_values,
+                "source_result": GetShipmentResult(
+                    **{
+                        **result.model_dump(mode="python"),
+                        "source_resource_ref": "shipment:other",
+                    }
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        SaveShipmentObservationV2Command(
+            **{
+                **command_values,
+                "current_task_record": _c2_project(task, state_version=2),
+                "current_request_unit_record": _c2_project(unit, state_version=2),
+            }
+        )
+
+    conversation = _conversation(owner_customer_id=owner.customer_id)
+    assessed_at = UTC_NOW + timedelta(minutes=2)
+    closure = ShipmentAssessmentReadClosure(
+        owner_scope=owner,
+        trusted_conversation_record=conversation,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_observation_record=observation,
+        current_observation_ref=observation.observation_id,
+        verified_order_target_ref=observation.verified_order_target_ref,
+        trusted_assessed_at=assessed_at,
+    )
+    assessment = assess_shipment(
+        assessment_id=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        verified_order_target_ref=observation.verified_order_target_ref,
+        shipment_observation_ref=observation.observation_id,
+        shipment_observation_source_version=observation.source_version,
+        shipment_summary=observation.normalized_value,
+        observation_observed_at=observation.observed_at,
+        observation_valid_until=observation.valid_until,
+        assessed_at=assessed_at,
+    )
+    constructed = ShipmentAssessmentReadClosure.model_construct(
+        **{
+            field_name: getattr(closure, field_name)
+            for field_name in ShipmentAssessmentReadClosure.model_fields
+        }
+    )
+    sanitized = SaveShipmentAssessmentV2Command(
+        loaded_closure=constructed,
+        assessment_record=assessment,
+    )
+    assert sanitized.loaded_closure is not constructed
+    constructed.__dict__["hidden_authority"] = True
+    with pytest.raises(ValidationError, match="recursively canonical"):
+        SaveShipmentAssessmentV2Command(
+            loaded_closure=constructed,
+            assessment_record=assessment,
+        )
+
+
+def test_cycle2_assessment_requires_current_exact_claim_binding() -> None:
+    owner, task, unit, _, _, observation = _c2_shipment_inputs()
+    conversation = _conversation(owner_customer_id=owner.customer_id)
+    claim_ref = uuid4()
+    unit = _c2_project(
+        unit,
+        input_binding_refs=(*unit.input_binding_refs, claim_ref),
+    )
+    source_message = _message(
+        conversation_id=conversation.conversation_id,
+        content="物流显示签收，但我没有收到",
+    )
+    claim = ShipmentNotReceivedClaimReadClosure(
+        binding_ref=claim_ref,
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        verified_order_target_ref=observation.verified_order_target_ref,
+        source_message_record=source_message,
+        accepted_at=source_message.received_at,
+    )
+    delivered_observation = _c2_project(
+        observation,
+        normalized_value=ShipmentSummaryProjection(
+            shipment_status=ShipmentStatus.DELIVERED,
+            latest_event_code=ShipmentEventCode.DELIVERED,
+            latest_event_at=UTC_NOW - timedelta(hours=1),
+            delivered_at=UTC_NOW - timedelta(hours=1),
+        ),
+    )
+    assessed_at = UTC_NOW + timedelta(minutes=2)
+    closure = ShipmentAssessmentReadClosure(
+        owner_scope=owner,
+        trusted_conversation_record=conversation,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_observation_record=delivered_observation,
+        current_observation_ref=delivered_observation.observation_id,
+        verified_order_target_ref=delivered_observation.verified_order_target_ref,
+        trusted_assessed_at=assessed_at,
+        current_claim_binding=claim,
+    )
+    assessment = assess_shipment(
+        assessment_id=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        verified_order_target_ref=delivered_observation.verified_order_target_ref,
+        shipment_observation_ref=delivered_observation.observation_id,
+        shipment_observation_source_version=delivered_observation.source_version,
+        shipment_summary=delivered_observation.normalized_value,
+        observation_observed_at=delivered_observation.observed_at,
+        observation_valid_until=delivered_observation.valid_until,
+        assessed_at=assessed_at,
+        claim_binding_ref=claim_ref,
+    )
+    saved = SaveShipmentAssessmentV2Command(
+        loaded_closure=closure,
+        assessment_record=assessment,
+    )
+    assert saved.assessment_record.claim_binding_ref == claim_ref
+
+    wrong_target_claim = ShipmentNotReceivedClaimReadClosure(
+        **{
+            **{
+                field_name: getattr(claim, field_name)
+                for field_name in ShipmentNotReceivedClaimReadClosure.model_fields
+            },
+            "verified_order_target_ref": "owner-order:wrong",
+        }
+    )
+    with pytest.raises(ValidationError, match="Claim binding closure mismatch"):
+        ShipmentAssessmentReadClosure(
+            **{
+                **{
+                    field_name: getattr(closure, field_name)
+                    for field_name in ShipmentAssessmentReadClosure.model_fields
+                },
+                "current_claim_binding": wrong_target_claim,
+            }
+        )
+
+
+def test_cycle2_oa10_accepts_completed_replacement_and_rejects_trace_sidecar() -> None:
+    owner = _owner_scope()
+    conversation = _conversation(owner_customer_id=owner.customer_id)
+    old_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=UTC_NOW,
+    )
+    task_id = uuid4()
+    old_link = RunTaskLinkRecordV2(
+        run_id=old_run.run_id,
+        task_id=task_id,
+        base_task_state_version=3,
+    )
+    replacement_completed_at = UTC_NOW + timedelta(seconds=2)
+    replacement = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="scripted",
+        started_at=UTC_NOW + timedelta(seconds=1),
+        completed_at=replacement_completed_at,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    task = _task(
+        task_id=task_id,
+        state_version=4,
+        updated_at=replacement_completed_at,
+    )
+    unit = _request_unit(
+        task_id=task_id,
+        state_version=4,
+        updated_at=replacement_completed_at,
+    )
+    closure = SupersededRunReadClosure(
+        owner_scope=owner,
+        trusted_conversation_record=conversation,
+        expected_active_run_record=old_run,
+        expected_active_link_record=old_link,
+        current_authoritative_run_record=replacement,
+        current_authoritative_link_record=RunTaskLinkRecordV2(
+            run_id=replacement.run_id,
+            task_id=task_id,
+            base_task_state_version=3,
+            result_task_state_version=4,
+        ),
+        current_task_record=task,
+        current_request_unit_record=unit,
+        trusted_current_evidence_at=replacement_completed_at,
+        invalidation_kind=SupersededRunInvalidationKind.TASK_VERSION_ADVANCED,
+    )
+    terminal_at = replacement_completed_at + timedelta(seconds=1)
+    terminal = AgentRunRecordV2(
+        **{
+            **old_run.model_dump(mode="python"),
+            "status": AgentRunStatusV2.SUPERSEDED,
+            "completed_at": terminal_at,
+            "stop_reason": StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+        }
+    )
+    trace = TraceEventV2(
+        trace_event_id=uuid4(),
+        event_type=TraceEventType.RUN_STOPPED,
+        occurred_at=terminal_at,
+        run_id=old_run.run_id,
+        task_id=task_id,
+        request_unit_id=unit.request_unit_id,
+        user_outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    FinalizeSupersededRunV2Command(
+        loaded_closure=closure,
+        superseded_run_record=terminal,
+        no_result_link_record=old_link,
+        run_stopped_trace_record=trace,
+    )
+    with pytest.raises(ValidationError, match="outbound or mutation refs"):
+        FinalizeSupersededRunV2Command(
+            loaded_closure=closure,
+            superseded_run_record=terminal,
+            no_result_link_record=old_link,
+            run_stopped_trace_record=_c2_project(
+                trace,
+                provider_name="must-not-cross-oa10",
+            ),
+        )
+    with pytest.raises(ValidationError, match="terminal time precedes"):
+        FinalizeSupersededRunV2Command(
+            loaded_closure=closure,
+            superseded_run_record=AgentRunRecordV2(
+                **{
+                    **old_run.model_dump(mode="python"),
+                    "status": AgentRunStatusV2.SUPERSEDED,
+                    "completed_at": UTC_NOW + timedelta(seconds=1),
+                    "stop_reason": StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+                }
+            ),
+            no_result_link_record=old_link,
+            run_stopped_trace_record=_c2_project(
+                trace,
+                occurred_at=UTC_NOW + timedelta(seconds=1),
+            ),
         )
