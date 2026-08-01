@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-11"
-status: "phase_2_w6_02_11_third_refreeze_planning_review"
+current_plan: "02-12"
+status: "phase_2_w7_runtime_planning_review"
 last_updated: "2026-08-02"
-last_activity: "2026-08-02 — PR #260/#261 reviewed完成02-11R并冻结B_C2_RECORD_HISTORY_PHYSICAL"
+last_activity: "2026-08-02 — PR #262/#263完成02-11；W6 full 2840 passed；冻结B_C2_INFRA"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 29
-  completed_plans: 22
-  percent: 76
+  completed_plans: 23
+  percent: 79
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -48,38 +48,40 @@ snapshot承载；用户授权按建议修正，PR #254 reviewed批准`02-10R`、
 Task/RequestUnit graph没有物理承载；checkpoint `da8ee981...`保持clean/unpublished且
 fail closed。PR #259 reviewed批准`02-11R` immutable history correction，slots
 `28→29`且不新增wave；PR #260/#261随后reviewed完成planning/implementation并冻结
-`B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc5...` / tree `8e4a9392...`。当前第三次重冻结
-`02-11`并准备回放checkpoint；Case仍为`CONTRACT_DEFINED`。
+`B_C2_RECORD_HISTORY_PHYSICAL = 5d408fc5...` / tree `8e4a9392...`。PR #262/#263又
+reviewed完成third-refreeze与`02-11`回放，真实`B_C2_INFRA = 6217b221...` /
+tree `7de3e6db...`；W6唯一canonical full为`2840 passed, 1 deselected, 12 warnings`。
+W6已完成，当前冻结W7 `02-12` exact Plan；Case仍为`CONTRACT_DEFINED`。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-11
+Current Plan: 02-12
 Total Phases: 6
 Total Plans in Phase: 29
-Status: Phase 2 W6 / 02-11 third-refreeze planning review
+Status: Phase 2 W7 / 02-12 Runtime planning review
 Last Activity: 2026-08-02
-Last Activity Description: PR #260/#261 reviewed完成02-11R；append-only HIGH已关闭；02-11 checkpoint仍未发布
-Progress: Phase 1 complete；Phase 2 W1–W5 + corrections + 02-07 complete；tracked Plan files 22、authorized slots 29、completed slots 22/29；1/6 phases
+Last Activity Description: PR #262/#263 reviewed完成02-11；W6 full 2840 passed并冻结B_C2_INFRA
+Progress: Phase 1 complete；Phase 2 W1–W6 complete；tracked Plan files 23、authorized slots 29、completed slots 23/29；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 29 USER-AUTHORIZED SLOTS / 02-11R COMPLETE / 02-11 THIRD-REFREEZE REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_RECORD_HISTORY_PHYSICAL_CONFIRMED / W6_POSTGRES_REPLAY`
-Last activity: 2026-08-02 — PR #260/#261 reviewed；current integration 5d408fc5 / 8e4a9392
-Progress: Phase 1 100% complete；Phase 2 completed slots 22/29；W6 PostgreSQL replay planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 29 USER-AUTHORIZED SLOTS / W6 COMPLETE / 02-12 PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / B_C2_INFRA_CONFIRMED / W7_RUNTIME_PLANNING`
+Last activity: 2026-08-02 — PR #262/#263 + W6 full PASS；current integration 6217b221 / 7de3e6db
+Progress: Phase 1 100% complete；Phase 2 completed slots 23/29；W7 Runtime planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 完成 third-refrozen `02-11` exact Plan与Gate W6 independent bounded review/merge；未合并前不dispatch。
-2. 从exact `5d408fc5... / 8e4a9392...`创建新的`-r2`五文件Worktree，回放checkpoint并补全同事务pre-image write/exact history read。
-3. 完成focused/neighbor、30秒exact-head review与latest integration identity/overlay后串行merge。
-4. `02-11` reviewed merge后，运行W6 exit唯一一次canonical full并冻结`B_C2_INFRA`。
-5. 全程不推进Case lifecycle/Harness/Result；真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
+1. 完成 `02-12` exact Plan与Gate W7 independent bounded review/merge；未合并前不dispatch。
+2. 从exact `6217b221... / 7de3e6db...`创建八文件Runtime Worktree，实现effective Mapper、Cycle2 orchestration与safe Renderer。
+3. 完成focused/neighbor/compile、30秒exact-head review与latest integration identity/overlay后串行merge，冻结`B_C2_RUNTIME`。
+4. W7不运行canonical full，不推进Case lifecycle/Harness/Result；随后仅从真实Runtime barrier冻结W8。
+5. 真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
 
 ## Current Decisions
 
@@ -281,8 +283,13 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `8e4a9392424f7bf1f3c007d74f9a54c257414e5b`；focused `92 passed`、neighbor
   `459 passed`、migration-head/compile/diff PASS；append-only HIGH由DB级mutation
   rejection关闭，canonical full未运行。
-- `OPEN`: `02-11` refreeze/replay、latest overlay/identity、serial merge、
-  W6 canonical full、Phase 2 Harness/Eval Result；
+- `CONFIRMED / B_C2_INFRA / W6_EXIT`: PR #262/#263 reviewed merge；current
+  integration `6217b2213d576dab052dc70e223f8cf02c9c577b` / tree
+  `7de3e6db75ebc58fcf4d15c46538ded424564d8c`；02-11 focused `114 passed`、neighbor
+  `1358 passed`、compile/diff/review PASS；W6唯一canonical full为
+  `2840 passed, 1 deselected, 12 warnings`。
+- `OPEN`: `02-12` planning/implementation、latest overlay/identity、serial merge、
+  Phase 2 Harness/Eval Result；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -292,5 +299,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-02
-Stopped At: W6 `02-11` third-refreeze planning review；blocked checkpoint clean/unpublished
-Resume File: [phases/02-cycle-2-e2e-01/GATE-W6-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W6-EXECUTION-CARD.md)
+Stopped At: W7 `02-12` exact planning review；W6 complete
+Resume File: [phases/02-cycle-2-e2e-01/GATE-W7-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W7-EXECUTION-CARD.md)

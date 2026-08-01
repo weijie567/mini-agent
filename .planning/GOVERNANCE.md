@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / 02-11R COMPLETE / B_C2_RECORD_HISTORY_PHYSICAL / 02-11 REPLAY PLANNING`；真实 current integration `5d408fc567417a416804e8fd5413f108451c1c32` / tree `8e4a9392424f7bf1f3c007d74f9a54c257414e5b`；PR #260/#261 reviewed完成`02-11R`，focused `92 passed`、neighbor `459 passed`、append-only HIGH已由DB级mutation rejection关闭；02-11 checkpoint保持unpublished/fail closed，当前第三次重冻结exact Plan；Case仍为`CONTRACT_DEFINED`，canonical full仍只由W6 exit拥有 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W6 COMPLETE / B_C2_INFRA / W7 02-12 PLANNING`；真实 current integration `6217b2213d576dab052dc70e223f8cf02c9c577b` / tree `7de3e6db75ebc58fcf4d15c46538ded424564d8c`；PR #262/#263 reviewed完成`02-11`，focused `114 passed`、neighbor `1358 passed`；W6唯一canonical full为`2840 passed, 1 deselected, 12 warnings`；当前冻结W7 Runtime exact Plan；Case仍为`CONTRACT_DEFINED`，W7不运行full或推进Harness/Result |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
