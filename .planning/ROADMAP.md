@@ -22,8 +22,10 @@ Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
 merge 后冻结 `B_C2_CORE_123` 并关闭 W1。PR #216/#217 随后完成 W2 planning、
 02-04 feature/overlay 独立审阅与串行 merge，冻结 `B_C2_TOOL = f9a2a75...`。
 PR #218/#219 又完成 W3 `02-05` planning、implementation、feature/overlay review 与
-串行 merge，冻结 `B_C2_APP_CONTRACT = 86d1b835...`。当前逐个冻结 W4
-`02-06/08/09/13` exact Plan/Packet；各自 `PASS`/merge 前不创建对应实现分支。Phase 3–6
+串行 merge，冻结 `B_C2_APP_CONTRACT = 86d1b835...`。W4 preflight 随后确认
+InputBinding / atomic ordinal selection / selected-target Gateway 缺口；用户授权先
+完成 `02-02R/02-04R/02-05R` 再开始 W4。旧 02-06 Plan 不可执行；真实
+`B_C2_W4_READY` 形成前不创建 W4 实现分支。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
@@ -158,7 +160,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W3_COMPLETE / W4_02-06_PLANNING_REVIEW / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W3R_REMEDIATION_RULING_REVIEW / W4_BLOCKED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -172,16 +174,18 @@ Plans:
 2. `E2E01-05` 与确实需要 `get_shipment` 的配对 Case 在同一可用工具集中验证。
 3. 第一版 Trajectory / E2E Baseline 依 canonical Eval owner 运行并保存结果。
 
-**Plans**: master Plan 的 `19` 个一对一 Plan / Task Packet slots
+**Plans**: 原 master Plan 的 `19` 个一对一 Plan / Task Packet slots
 （`02-00..18`）、`W0..W12`、最大并发 `2` 已获 Gate P2-A 批准并由 PR #203
-合并。`02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
+合并。当前用户又批准 `02-02R/02-04R/02-05R` 与 `W3R`，因此目标为 22 slots /
+14 wave labels，最大并发仍为 `2`。`02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
 `B_C2_TOOL = f9a2a75...`。PR #218/#219 完成 W3 02-05 并冻结
-`B_C2_APP_CONTRACT = 86d1b835...`；旧 `ecfad7e...` head 保持 quarantined。当前新增
-`02-06` exact Plan/Packet candidate，并按同一 exact product base 串行准备
-`02-08/09/13`；每份全新 planning review `PASS`/merge 前不创建对应 implementation
-branch。
+`B_C2_APP_CONTRACT = 86d1b835...`；旧 `ecfad7e...` head 保持 quarantined。当前先
+完成 owner ruling，再从真实 successor 签发 `02-02R`，其 reviewed merge 后签发
+`02-04R/02-05R`。三者形成 `B_C2_W4_READY` 后，重新冻结
+`02-06/08/09/13`；每份全新 planning review `PASS`/merge 前不创建对应 implementation
+branch。旧 02-06 Plan 仅保留为历史 planning artifact。
 
 **Branch mapping**:
 
@@ -233,7 +237,11 @@ B_C2_TOOL
 B_C2_APP_CONTRACT
 = 86d1b8357f817882b017e5c4306ec855e0b288e6
 = tree b27f5f805c85e8ce76c30be254a004cb5f127b4e
-= PR #219 reviewed merge successor and exact W4 product base
+= PR #219 reviewed merge successor and exact pre-remediation product barrier
+
+B_C2_W4_READY
+= OPEN; only the actual reviewed serial-merge successor of 02-02R/02-04R/02-05R
+= future exact W4 product base; must not be guessed
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -241,8 +249,8 @@ B_C2_APP_CONTRACT
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
 `ecfad7e...` 未进入 ancestry。W2 `02-04` 与 W3 `02-05` 已依次完成；W4 四个
-implementation Packet 的 product base 固定为 exact `B_C2_APP_CONTRACT`，planning
-control head 可以由逐个 reviewed planning PR 串行推进，但不得替换该 product base。
+implementation Packet 必须等 W3R 完成后固定到真实 `B_C2_W4_READY`。旧
+`B_C2_APP_CONTRACT` 与旧 02-06 Plan 均不得作为 W4 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
@@ -321,7 +329,7 @@ control head 可以由逐个 reviewed planning PR 串行推进，但不得替换
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 6/19 | `02-00..05 complete；B_C2_APP_CONTRACT frozen；W3 durable review evidence recorded；02-06 Plan/Packet candidate in fresh-review gate；functional implementation 5/18；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 6/22 | `02-00..05 complete；B_C2_APP_CONTRACT frozen；W3 durable review evidence recorded；W3R owner ruling review；functional implementation 5/21；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |

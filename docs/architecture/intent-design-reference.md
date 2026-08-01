@@ -658,6 +658,24 @@ InputBinding
 
 该规则不把 RequestUnit 变成固定 Slot 表，也不让 InputBinding 决定允许调用哪些 Tool；它只证明本次候选参数来自当前目标的有效受控来源。
 
+#### 10.4.1 Cycle 2 durable InputBinding version boundary
+
+Phase 1 的 `input_binding_record.p0.v1` owner model 只接受 exact `order_id` string。
+Cycle 2 需要 string / strict integer / strict boolean 的 name-value closed matrix，属于
+durable shape 与 closure 的 breaking change，必须使用
+`input_binding_record.p0.v2` / `InputBindingV2`；不得原地扩大 v1 model 后继续写 v1
+envelope。v1→v2 只允许已通过 exact v1 owner model 的 order-id payload 保持 identity、
+value、authority、provenance、validation、confirmation、时间与 supersession 不变的
+deterministic conversion；新 name 没有 v1 source，只能在 exact-version atomic
+cutover 后创建。
+
+InputBinding v2 仍是 Claim，不保存业务事实。本轮 ordinal selection 形成的 verified
+order target 继续作为独立 `verified_target_ref` 传播，不写入或“升级”原 ordinal
+binding；该切片的有限 name/value matrix、CAS 与 conversion/rollback 细节由 active
+[Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
+收窄。Runtime 不允许 v1/v2 mixed-active、request-time/read-time fallback 或静默
+downgrade。
+
 ### 10.5 P0 输入词汇
 
 P0 只支持当前两条 E2E 所需的有限输入词汇：
