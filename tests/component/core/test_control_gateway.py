@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from inspect import signature
 from uuid import UUID, uuid4
 
 import pytest
@@ -1056,7 +1057,45 @@ def test_cycle2_gate_seal_issuer_and_matcher_have_no_module_level_bypass() -> No
         control_gateway_module,
         "_build_cycle2_authorized_tool_command_impl",
     )
+    assert not hasattr(control_gateway_module, "_evaluate_cycle2_gate_decision")
     assert not hasattr(control_gateway_module, "_build_cycle2_gateway_authorizer")
+
+
+def test_cycle2_public_closures_expose_no_injectable_authorization_seam() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        selected_get_order=True,
+    )
+    gate = _evaluate_cycle2(candidate, loaded)
+    replacement = freeze_json_value({"order_id": "O-9999"})
+    forged_gate = gate.model_copy(update={"validated_arguments": replacement})
+    forged_candidate = candidate.model_copy(
+        update={"candidate_arguments": replacement}
+    )
+    public_callables = (
+        evaluate_cycle2_control_gateway,
+        build_cycle2_authorized_tool_command,
+    )
+    prohibited_parameters = {
+        "_authorization_seal_matches",
+        "_issue_authorization_seal",
+    }
+
+    for public_callable in public_callables:
+        for cell in public_callable.__closure__ or ():
+            closure_value = cell.cell_contents
+            if callable(closure_value):
+                assert prohibited_parameters.isdisjoint(
+                    signature(closure_value).parameters
+                )
+
+    with pytest.raises(ValueError, match="exact typed inputs"):
+        build_cycle2_authorized_tool_command(
+            gate_decision=forged_gate,
+            candidate=forged_candidate,
+            registry_snapshot_ref="cycle2-snapshot-ref",
+            trusted_context_ref="cycle2-trusted-context-ref",
+        )
 
 
 def test_cycle2_command_rejects_inert_gate_without_authorization_arguments() -> None:
