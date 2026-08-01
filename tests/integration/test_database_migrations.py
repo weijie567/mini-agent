@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, sleep
 from uuid import UUID, uuid4
@@ -10,12 +11,14 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy import Engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from mini_agent.application.persistence import (
     P0_RECORD_SCHEMA_VERSION_CATALOG,
+    P0RecordCode,
 )
+from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, AgentRunRecordV2
 from mini_agent.infrastructure.persistence import models as persistence_models
 from mini_agent.infrastructure.persistence.database import (
     DEFAULT_LOCAL_DATABASE_URL,
@@ -32,6 +35,8 @@ from mini_agent.infrastructure.persistence.migrations import (
 from mini_agent.infrastructure.persistence.models import (
     Base,
     MockOrderModel,
+    MockOrderSearchDocumentModel,
+    MockShipmentModel,
     P0RecordModel,
     P0RecordReferenceModel,
 )
@@ -51,6 +56,12 @@ _LIBPQ_ROUTING_ENVIRONMENT_CASES = [
 
 _MIGRATION_REVISION = "20260728_0003"
 _PREVIOUS_MIGRATION_REVISION = "20260727_0002"
+_CYCLE2_MIGRATION_REVISION = "20260731_0004"
+_CYCLE2_PREVIOUS_MIGRATION_REVISION = _MIGRATION_REVISION
+_CYCLE2_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic/versions/20260731_0004_cycle2_records_v2.py"
+)
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "alembic/versions/20260728_0003_request_understanding_v2_expand.py"
@@ -60,8 +71,10 @@ _MODELS_PATH = (
     / "src/mini_agent/infrastructure/persistence/models.py"
 )
 _DOWNGRADE_BLOCKED_MESSAGE = (
-    "cannot downgrade request understanding v2 physical schema while "
-    "v2 records exist"
+    "cannot downgrade request understanding v2 physical schema while v2 records exist"
+)
+_CYCLE2_DOWNGRADE_BLOCKED_MESSAGE = (
+    "cannot downgrade cycle2 physical schema after v2-only evidence"
 )
 _V1_CODE_VERSION_PAIRS = (
     ("agent_run_record", "agent_run_record.p0.v1"),
@@ -98,13 +111,30 @@ _EXPANDED_CODE_VERSION_PAIRS = (
         "request_understanding_record.p0.v2",
     ),
 )
+_CYCLE2_CODE_VERSION_PAIRS = (
+    *_EXPANDED_CODE_VERSION_PAIRS,
+    ("order_search_observation_record", "order_search_observation_record.p0.v1"),
+    ("order_candidate_set_record", "order_candidate_set_record.p0.v1"),
+    (
+        "order_candidate_selection_record",
+        "order_candidate_selection_record.p0.v1",
+    ),
+    ("shipment_observation_record", "shipment_observation_record.p0.v1"),
+    ("shipment_assessment_record", "shipment_assessment_record.p0.v1"),
+    ("input_binding_record", "input_binding_record.p0.v2"),
+    ("gate_decision_record", "gate_decision_record.p0.v2"),
+    ("tool_call_record", "tool_call_record.p0.v2"),
+    ("agent_run_record", "agent_run_record.p0.v2"),
+    ("run_task_link_record", "run_task_link_record.p0.v2"),
+    ("trace_event_record", "trace_event_record.p0.v2"),
+)
 _REQUEST_UNDERSTANDING_V1_PAIR = (
     "request_understanding_record",
     "request_understanding_record.p0.v1",
 )
 _ACTIVE_CODE_VERSION_PAIRS = tuple(
     pair
-    for pair in _EXPANDED_CODE_VERSION_PAIRS
+    for pair in _CYCLE2_CODE_VERSION_PAIRS
     if pair != _REQUEST_UNDERSTANDING_V1_PAIR
 )
 
@@ -197,21 +227,62 @@ def _insert_physical_probe(
     return stored_id
 
 
+def _insert_agent_run_envelope(
+    connection,
+    record: AgentRunRecord,
+    *,
+    scope_owner_customer_id: str,
+) -> tuple[UUID, dict[str, object]]:
+    logical_identity = [["run_id", str(record.run_id)]]
+    raw_envelope: dict[str, object] = {
+        "record_code": P0RecordCode.AGENT_RUN_RECORD.value,
+        "record_schema_version": "agent_run_record.p0.v1",
+        "logical_identity": logical_identity,
+        "direct_owner_customer_id": None,
+        "record_references": [],
+        "payload": {
+            "data": record.model_dump(mode="json", warnings="error"),
+            "record_code": P0RecordCode.AGENT_RUN_RECORD.value,
+            "record_schema_version": "agent_run_record.p0.v1",
+            "logical_children": [],
+        },
+    }
+    record_id = uuid4()
+    connection.execute(
+        P0RecordModel.__table__.insert().values(
+            record_id=record_id,
+            record_code=P0RecordCode.AGENT_RUN_RECORD.value,
+            record_schema_version="agent_run_record.p0.v1",
+            logical_identity=logical_identity,
+            direct_owner_customer_id=None,
+            scope_owner_customer_id=scope_owner_customer_id,
+            conversation_id=record.conversation_id,
+            run_id=record.run_id,
+            lifecycle_status=record.status.value,
+            recovery_sort_at=record.started_at,
+            envelope=raw_envelope,
+        )
+    )
+    return record_id, raw_envelope
+
+
 def _record_row(engine: Engine, record_id: UUID) -> dict[str, object]:
     with engine.connect() as connection:
-        row = connection.execute(
-            select(P0RecordModel.__table__).where(
-                P0RecordModel.record_id == record_id
+        row = (
+            connection.execute(
+                select(P0RecordModel.__table__).where(
+                    P0RecordModel.record_id == record_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         return dict(row)
 
 
 def _migration_revision(engine: Engine) -> str:
     with engine.connect() as connection:
-        revision = connection.scalar(
-            text("SELECT version_num FROM alembic_version")
-        )
+        revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     assert isinstance(revision, str)
     return revision
 
@@ -233,10 +304,7 @@ def _schema_structure(engine: Engine) -> tuple[object, ...]:
             )
         )
         checks = tuple(
-            sorted(
-                item["name"]
-                for item in inspector.get_check_constraints(table_name)
-            )
+            sorted(item["name"] for item in inspector.get_check_constraints(table_name))
         )
         indexes = tuple(
             sorted(
@@ -315,6 +383,7 @@ def _wait_for_real_downgrade_lock(
     engine: Engine,
     *,
     schema: str,
+    relation_name: str = "p0_records",
     timeout_seconds: float = 5.0,
 ) -> None:
     lock_observed = text(
@@ -327,7 +396,7 @@ def _wait_for_real_downgrade_lock(
             JOIN pg_namespace AS namespace
               ON namespace.oid = relation.relnamespace
             WHERE namespace.nspname = :schema
-              AND relation.relname = 'p0_records'
+              AND relation.relname = :relation_name
               AND held.mode = 'ShareRowExclusiveLock'
               AND held.granted
               AND EXISTS (
@@ -344,13 +413,62 @@ def _wait_for_real_downgrade_lock(
     deadline = monotonic() + timeout_seconds
     while monotonic() < deadline:
         with engine.connect() as connection:
-            if connection.scalar(lock_observed, {"schema": schema}) is True:
+            if (
+                connection.scalar(
+                    lock_observed,
+                    {"schema": schema, "relation_name": relation_name},
+                )
+                is True
+            ):
                 return
         sleep(0.01)
     pytest.fail(
         "real downgrade did not hold ShareRowExclusiveLock "
-        "while waiting for constraint DDL"
+        f"on {relation_name} while waiting for destructive DDL"
     )
+
+
+def _wait_for_pending_table_lock(
+    engine: Engine,
+    *,
+    schema: str,
+    relation_name: str,
+    mode: str,
+    timeout_seconds: float = 5.0,
+) -> None:
+    pending_lock = text(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_locks AS waiting
+            JOIN pg_class AS relation
+              ON relation.oid = waiting.relation
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = :schema
+              AND relation.relname = :relation_name
+              AND waiting.mode = :mode
+              AND NOT waiting.granted
+        )
+        """
+    )
+    deadline = monotonic() + timeout_seconds
+    while monotonic() < deadline:
+        with engine.connect() as connection:
+            if (
+                connection.scalar(
+                    pending_lock,
+                    {
+                        "schema": schema,
+                        "relation_name": relation_name,
+                        "mode": mode,
+                    },
+                )
+                is True
+            ):
+                return
+        sleep(0.01)
+    pytest.fail(f"downgrade did not wait for {mode} on {relation_name}")
 
 
 def test_request_understanding_v2_expand_migration_source_is_self_contained() -> None:
@@ -395,10 +513,7 @@ def test_request_understanding_v2_expand_migration_source_is_self_contained() ->
     )
 
     assert _module_literal(tree, "revision") == _MIGRATION_REVISION
-    assert (
-        _module_literal(tree, "down_revision")
-        == _PREVIOUS_MIGRATION_REVISION
-    )
+    assert _module_literal(tree, "down_revision") == _PREVIOUS_MIGRATION_REVISION
     assert _module_literal(tree, "branch_labels") is None
     assert _module_literal(tree, "depends_on") is None
     assert _literal_pair_tuple(tree, "_V1_CODE_VERSION_PAIRS") == (
@@ -487,10 +602,178 @@ def test_request_understanding_v2_expand_is_single_linear_alembic_head() -> None
         )
     )
 
-    assert tuple(script.get_heads()) == (_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_CYCLE2_MIGRATION_REVISION,)
     revision = script.get_revision(_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREVIOUS_MIGRATION_REVISION
+
+
+def test_cycle2_physical_revision_is_single_linear_alembic_head() -> None:
+    assert _CYCLE2_MIGRATION_PATH.is_file()
+    script = ScriptDirectory.from_config(
+        alembic_config(DEFAULT_LOCAL_TEST_DATABASE_URL, testing=True)
+    )
+
+    revision = script.get_revision(_CYCLE2_MIGRATION_REVISION)
+    assert revision is not None
+    assert revision.down_revision == _CYCLE2_PREVIOUS_MIGRATION_REVISION
+    assert tuple(script.get_heads()) == (_CYCLE2_MIGRATION_REVISION,)
+
+
+def test_phase1_head_upgrade_converts_exact_v1_record_and_downgrades_losslessly(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("cycle2-convert-round-trip")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    source = AgentRunRecord(
+        run_id=uuid4(),
+        status=AgentRunStatus.CREATED,
+        provider_lane="migration-test-provider",
+        started_at=datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc),
+    )
+    try:
+        command.downgrade(config, _CYCLE2_PREVIOUS_MIGRATION_REVISION)
+        with engine.begin() as connection:
+            record_id, original_envelope = _insert_agent_run_envelope(
+                connection,
+                source,
+                scope_owner_customer_id="customer-migration",
+            )
+
+        command.upgrade(config, _CYCLE2_MIGRATION_REVISION)
+        converted = _record_row(engine, record_id)
+        assert converted["record_schema_version"] == "agent_run_record.p0.v2"
+        converted_record = AgentRunRecordV2.model_validate(
+            converted["envelope"]["payload"]["data"]
+        )
+        assert converted_record.run_id == source.run_id
+        assert converted["scope_owner_customer_id"] == "customer-migration"
+
+        command.downgrade(config, _CYCLE2_PREVIOUS_MIGRATION_REVISION)
+        restored = _record_row(engine, record_id)
+        assert restored["record_schema_version"] == "agent_run_record.p0.v1"
+        assert restored["envelope"] == original_envelope
+        assert restored["scope_owner_customer_id"] == "customer-migration"
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_cycle2_upgrade_prevalidates_whole_set_before_any_v2_write(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("cycle2-atomic-prevalidation")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    source = AgentRunRecord(
+        run_id=uuid4(),
+        status=AgentRunStatus.CREATED,
+        provider_lane="atomicity-test-provider",
+        started_at=datetime(2026, 7, 31, 8, 1, tzinfo=timezone.utc),
+    )
+    try:
+        command.downgrade(config, _CYCLE2_PREVIOUS_MIGRATION_REVISION)
+        with engine.begin() as connection:
+            record_id, original_envelope = _insert_agent_run_envelope(
+                connection,
+                source,
+                scope_owner_customer_id="customer-atomicity",
+            )
+            invalid_id = _insert_physical_probe(
+                connection,
+                "gate_decision_record",
+                "gate_decision_record.p0.v1",
+                marker="must-not-leak-from-invalid-graph",
+            )
+
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _CYCLE2_MIGRATION_REVISION)
+
+        assert str(captured.value) == (
+            "cycle2 record migration graph is not exactly convertible"
+        )
+        assert "must-not-leak-from-invalid-graph" not in str(captured.value)
+        assert _migration_revision(engine) == _CYCLE2_PREVIOUS_MIGRATION_REVISION
+        unchanged = _record_row(engine, record_id)
+        assert unchanged["record_schema_version"] == "agent_run_record.p0.v1"
+        assert unchanged["envelope"] == original_envelope
+        assert _record_row(engine, invalid_id)["record_schema_version"] == (
+            "gate_decision_record.p0.v1"
+        )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_cycle2_downgrade_blocks_new_top_level_evidence_before_mutation(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("cycle2-downgrade-fence")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        with engine.begin() as connection:
+            record_id = _insert_physical_probe(
+                connection,
+                "shipment_assessment_record",
+                "shipment_assessment_record.p0.v1",
+                marker="must-not-leak-from-v2-only-evidence",
+            )
+        before = _record_row(engine, record_id)
+
+        with pytest.raises(RuntimeError) as captured:
+            command.downgrade(config, _CYCLE2_PREVIOUS_MIGRATION_REVISION)
+
+        assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
+        assert "must-not-leak-from-v2-only-evidence" not in str(captured.value)
+        assert _migration_revision(engine) == _CYCLE2_MIGRATION_REVISION
+        assert _record_row(engine, record_id) == before
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_empty_and_phase1_head_upgrade_paths_converge_to_exact_structure(
+    postgres_namespace_factory,
+) -> None:
+    empty_path = postgres_namespace_factory.create("cycle2-empty-path")
+    phase1_path = postgres_namespace_factory.create("cycle2-phase1-path")
+    empty_engine = empty_path.build_engine()
+    phase1_engine = phase1_path.build_engine()
+    phase1_config = alembic_config(
+        phase1_path.database_url,
+        schema=phase1_path.schema,
+        testing=True,
+    )
+    try:
+        empty_structure = _schema_structure(empty_engine)
+        command.downgrade(
+            phase1_config,
+            _CYCLE2_PREVIOUS_MIGRATION_REVISION,
+        )
+        command.upgrade(phase1_config, _CYCLE2_MIGRATION_REVISION)
+
+        assert _migration_revision(empty_engine) == _CYCLE2_MIGRATION_REVISION
+        assert _migration_revision(phase1_engine) == _CYCLE2_MIGRATION_REVISION
+        assert _schema_structure(phase1_engine) == empty_structure
+    finally:
+        empty_engine.dispose()
+        phase1_engine.dispose()
+        postgres_namespace_factory.drop(empty_path)
+        postgres_namespace_factory.drop(phase1_path)
 
 
 def _extension_schema(database_url: str) -> str | None:
@@ -648,18 +931,26 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
         inspector = inspect(engine)
         assert set(inspector.get_table_names()) == {
             "alembic_version",
+            "mock_order_search_documents",
             "mock_orders",
+            "mock_shipments",
             "p0_record_references",
             "p0_records",
         }
         assert set(Base.metadata.tables) == {
+            "mock_order_search_documents",
             "mock_orders",
+            "mock_shipments",
             "p0_record_references",
             "p0_records",
         }
         assert P0RecordModel.__tablename__ == "p0_records"
         assert P0RecordReferenceModel.__tablename__ == "p0_record_references"
         assert MockOrderModel.__tablename__ == "mock_orders"
+        assert MockOrderSearchDocumentModel.__tablename__ == (
+            "mock_order_search_documents"
+        )
+        assert MockShipmentModel.__tablename__ == "mock_shipments"
 
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT current_schema()")) == (
@@ -667,13 +958,12 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == (_MIGRATION_REVISION)
+            ) == (_CYCLE2_MIGRATION_REVISION)
     finally:
         engine.dispose()
 
 
-def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
-) -> None:
+def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set() -> None:
     models_source = _MODELS_PATH.read_text()
     models_tree = ast.parse(models_source)
     application_catalog_name = "P0_RECORD_SCHEMA_VERSION_CATALOG"
@@ -692,8 +982,7 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 roots.update(
-                    alias.name.split(".", maxsplit=1)[0]
-                    for alias in node.names
+                    alias.name.split(".", maxsplit=1)[0] for alias in node.names
                 )
             elif isinstance(node, ast.ImportFrom) and node.module is not None:
                 roots.add(node.module.split(".", maxsplit=1)[0])
@@ -710,8 +999,7 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         or (
             isinstance(node, ast.Import)
             and any(
-                alias.name.startswith("mini_agent.application")
-                for alias in node.names
+                alias.name.startswith("mini_agent.application") for alias in node.names
             )
         )
     ]
@@ -719,38 +1007,27 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
     application_import = application_imports[0]
     assert isinstance(application_import, ast.ImportFrom)
     assert application_import.module == "mini_agent.application.persistence"
-    assert [
-        (alias.name, alias.asname)
-        for alias in application_import.names
-    ] == [("P0RecordCode", None)]
+    assert [(alias.name, alias.asname) for alias in application_import.names] == [
+        ("P0RecordCode", None)
+    ]
 
     assert not any(
         (
             isinstance(node, ast.ImportFrom)
             and node.module == "mini_agent.application.persistence"
-            and any(
-                alias.name == application_catalog_name
-                for alias in node.names
-            )
+            and any(alias.name == application_catalog_name for alias in node.names)
         )
-        or (
-            isinstance(node, ast.Name)
-            and node.id == application_catalog_name
-        )
-        or (
-            isinstance(node, ast.Attribute)
-            and node.attr == application_catalog_name
-        )
-        or (
-            folded_string(node) == application_catalog_name
-        )
+        or (isinstance(node, ast.Name) and node.id == application_catalog_name)
+        or (isinstance(node, ast.Attribute) and node.attr == application_catalog_name)
+        or (folded_string(node) == application_catalog_name)
         for node in ast.walk(models_tree)
     )
     assert not {
         node.id
         for node in ast.walk(models_tree)
         if isinstance(node, ast.Name)
-        and node.id in {
+        and node.id
+        in {
             "__import__",
             "eval",
             "exec",
@@ -764,7 +1041,8 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         node.attr
         for node in ast.walk(models_tree)
         if isinstance(node, ast.Attribute)
-        and node.attr in {
+        and node.attr
+        in {
             "__dict__",
             "__globals__",
             "__module__",
@@ -787,8 +1065,8 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         models_tree,
         "_PHYSICAL_CODE_VERSION_PAIRS",
     )
-    assert physical_literal == _EXPANDED_CODE_VERSION_PAIRS
-    assert len(physical_literal) == len(set(physical_literal)) == 18
+    assert physical_literal == _CYCLE2_CODE_VERSION_PAIRS
+    assert len(physical_literal) == len(set(physical_literal)) == 29
 
     code_version_assignments = [
         node
@@ -810,12 +1088,12 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         include_attributes=False,
     ) == ast.dump(expected_derivation, include_attributes=False)
 
-    assert len(persistence_models._RECORD_CODES) == 17
+    assert len(persistence_models._RECORD_CODES) == 22
     assert set(persistence_models._RECORD_CODES) == {
-        code for code, _ in _V1_CODE_VERSION_PAIRS
+        code for code, _ in _CYCLE2_CODE_VERSION_PAIRS
     }
     physical_pairs = persistence_models._CODE_VERSION_PAIRS
-    assert physical_pairs == tuple(sorted(_EXPANDED_CODE_VERSION_PAIRS))
+    assert physical_pairs == tuple(sorted(_CYCLE2_CODE_VERSION_PAIRS))
 
     catalog_pairs = tuple(
         sorted(
@@ -824,15 +1102,11 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set(
         )
     )
     active_pairs = tuple(sorted(_ACTIVE_CODE_VERSION_PAIRS))
-    request_understanding_v1_pair = {
-        _REQUEST_UNDERSTANDING_V1_PAIR
-    }
+    request_understanding_v1_pair = {_REQUEST_UNDERSTANDING_V1_PAIR}
 
     assert catalog_pairs in {active_pairs, physical_pairs}
     assert set(active_pairs) < set(physical_pairs)
-    assert set(physical_pairs) - set(active_pairs) == (
-        request_understanding_v1_pair
-    )
+    assert set(physical_pairs) - set(active_pairs) == (request_understanding_v1_pair)
     assert frozenset(set(physical_pairs) - set(catalog_pairs)) in {
         frozenset(),
         frozenset(request_understanding_v1_pair),
@@ -864,8 +1138,7 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "stored_at",
         }
         assert {
-            column["name"]
-            for column in inspector.get_columns("p0_record_references")
+            column["name"] for column in inspector.get_columns("p0_record_references")
         } == {
             "reference_id",
             "source_record_code",
@@ -879,6 +1152,29 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "customer_id",
             "order_id",
             "order_payload",
+            "stored_at",
+        }
+        assert {
+            column["name"]
+            for column in inspector.get_columns("mock_order_search_documents")
+        } == {
+            "customer_id",
+            "order_id",
+            "line_ordinal",
+            "ordered_at",
+            "order_number",
+            "product_name",
+            "quantity",
+            "product_category",
+            "search_aliases",
+        }
+        assert {
+            column["name"] for column in inspector.get_columns("mock_shipments")
+        } == {
+            "customer_id",
+            "order_id",
+            "package_id",
+            "shipment_payload",
             "stored_at",
         }
 
@@ -919,9 +1215,7 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
         }
         assert {
             item["name"]
-            for item in inspector.get_check_constraints(
-                "p0_record_references"
-            )
+            for item in inspector.get_check_constraints("p0_record_references")
         } == {"ck_p0_record_references_ordinal_nonnegative"}
         assert {
             item["name"]
@@ -936,17 +1230,19 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "fk_p0_record_references_source",
             "fk_p0_record_references_target",
         }
-        assert foreign_keys["fk_p0_record_references_source"][
-            "referred_columns"
-        ] == ["record_code", "logical_identity"]
+        assert foreign_keys["fk_p0_record_references_source"]["referred_columns"] == [
+            "record_code",
+            "logical_identity",
+        ]
         assert foreign_keys["fk_p0_record_references_source"]["options"] == {
             "ondelete": "CASCADE",
             "initially": "DEFERRED",
             "deferrable": True,
         }
-        assert foreign_keys["fk_p0_record_references_target"][
-            "referred_columns"
-        ] == ["record_code", "logical_identity"]
+        assert foreign_keys["fk_p0_record_references_target"]["referred_columns"] == [
+            "record_code",
+            "logical_identity",
+        ]
         assert foreign_keys["fk_p0_record_references_target"]["options"] == {
             "ondelete": "RESTRICT",
             "initially": "DEFERRED",
@@ -956,6 +1252,152 @@ def test_p0_schema_columns_constraints_indexes_and_foreign_keys(
             "customer_id",
             "order_id",
         ]
+        assert inspector.get_pk_constraint("mock_order_search_documents")[
+            "constrained_columns"
+        ] == ["customer_id", "order_id", "line_ordinal"]
+        assert inspector.get_pk_constraint("mock_shipments")["constrained_columns"] == [
+            "customer_id",
+            "order_id",
+            "package_id",
+        ]
+        search_foreign_keys = inspector.get_foreign_keys("mock_order_search_documents")
+        shipment_foreign_keys = inspector.get_foreign_keys("mock_shipments")
+        assert len(search_foreign_keys) == len(shipment_foreign_keys) == 1
+        assert search_foreign_keys[0]["constrained_columns"] == [
+            "customer_id",
+            "order_id",
+        ]
+        assert shipment_foreign_keys[0]["constrained_columns"] == [
+            "customer_id",
+            "order_id",
+        ]
+        assert search_foreign_keys[0]["options"] == {"ondelete": "CASCADE"}
+        assert shipment_foreign_keys[0]["options"] == {"ondelete": "CASCADE"}
+        assert {
+            item["name"]
+            for item in inspector.get_check_constraints("mock_order_search_documents")
+        } == {
+            "ck_mock_order_search_documents_line_ordinal_positive",
+            "ck_mock_order_search_documents_quantity_positive",
+            "ck_mock_order_search_documents_search_aliases_array",
+        }
+        assert {
+            item["name"] for item in inspector.get_check_constraints("mock_shipments")
+        } == {"ck_mock_shipments_payload_object"}
+        assert {
+            item["name"]
+            for item in inspector.get_indexes("mock_order_search_documents")
+            if not item.get("duplicates_constraint")
+        } == {"ix_mock_order_search_documents_owner_window"}
+        assert {
+            item["name"]
+            for item in inspector.get_indexes("mock_shipments")
+            if not item.get("duplicates_constraint")
+        } == {"ix_mock_shipments_owner_order"}
+    finally:
+        engine.dispose()
+
+
+def test_cycle2_mock_tables_enforce_owner_order_shape_and_allow_two_packages(
+    postgres_namespace,
+) -> None:
+    engine = postgres_namespace.build_engine()
+    ordered_at = datetime(2026, 7, 20, 2, 15, tzinfo=timezone.utc)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.insert().values(
+                    customer_id="customer-A",
+                    order_id="O-1001",
+                    order_payload={"order_number": "O-1001"},
+                )
+            )
+            connection.execute(
+                MockOrderSearchDocumentModel.__table__.insert().values(
+                    customer_id="customer-A",
+                    order_id="O-1001",
+                    line_ordinal=1,
+                    ordered_at=ordered_at,
+                    order_number="O-1001",
+                    product_name="轻量跑鞋",
+                    quantity=1,
+                    product_category="running-shoes",
+                    search_aliases=["跑鞋", "轻量跑鞋"],
+                )
+            )
+            connection.execute(
+                MockShipmentModel.__table__.insert(),
+                (
+                    {
+                        "customer_id": "customer-A",
+                        "order_id": "O-1001",
+                        "package_id": "PKG-1",
+                        "shipment_payload": {"status": "IN_TRANSIT"},
+                    },
+                    {
+                        "customer_id": "customer-A",
+                        "order_id": "O-1001",
+                        "package_id": "PKG-2",
+                        "shipment_payload": {"status": "DELIVERED"},
+                    },
+                ),
+            )
+
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(select(func.count()).select_from(MockShipmentModel))
+                == 2
+            )
+
+        invalid_search_values = (
+            {"line_ordinal": 0, "quantity": 1, "search_aliases": []},
+            {"line_ordinal": 2, "quantity": 0, "search_aliases": []},
+            {"line_ordinal": 2, "quantity": 1, "search_aliases": {}},
+        )
+        for values in invalid_search_values:
+            with pytest.raises(IntegrityError):
+                with engine.begin() as connection:
+                    connection.execute(
+                        MockOrderSearchDocumentModel.__table__.insert().values(
+                            customer_id="customer-A",
+                            order_id="O-1001",
+                            ordered_at=ordered_at,
+                            order_number="O-1001",
+                            product_name="invalid",
+                            product_category="invalid",
+                            **values,
+                        )
+                    )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    MockShipmentModel.__table__.insert().values(
+                        customer_id="customer-B",
+                        order_id="O-1001",
+                        package_id="PKG-foreign",
+                        shipment_payload={},
+                    )
+                )
+
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.delete().where(
+                    MockOrderModel.customer_id == "customer-A",
+                    MockOrderModel.order_id == "O-1001",
+                )
+            )
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(func.count()).select_from(MockOrderSearchDocumentModel)
+                )
+                == 0
+            )
+            assert (
+                connection.scalar(select(func.count()).select_from(MockShipmentModel))
+                == 0
+            )
     finally:
         engine.dispose()
 
@@ -967,7 +1409,7 @@ def test_expanded_physical_constraint_accepts_only_exact_catalog_pairs(
     engine = namespace.build_engine()
     try:
         with engine.begin() as connection:
-            for record_code, schema_version in _EXPANDED_CODE_VERSION_PAIRS:
+            for record_code, schema_version in _CYCLE2_CODE_VERSION_PAIRS:
                 _insert_physical_probe(
                     connection,
                     record_code,
@@ -975,7 +1417,7 @@ def test_expanded_physical_constraint_accepts_only_exact_catalog_pairs(
                 )
 
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM p0_records")) == 18
+            assert connection.scalar(text("SELECT count(*) FROM p0_records")) == 29
 
         unsupported_pairs = (
             (
@@ -1050,6 +1492,7 @@ def test_expand_downgrade_upgrade_without_v2_rows_changes_only_check_body(
         testing=True,
     )
     try:
+        command.downgrade(config, _MIGRATION_REVISION)
         expanded_structure = _schema_structure(engine)
         expanded_checks = _record_check_definitions(engine)
         assert _migration_revision(engine) == _MIGRATION_REVISION
@@ -1097,6 +1540,7 @@ def test_expand_downgrade_with_v2_row_fails_closed_and_atomically(
     )
     record_id = uuid4()
     try:
+        command.downgrade(config, _MIGRATION_REVISION)
         with engine.begin() as connection:
             _insert_physical_probe(
                 connection,
@@ -1139,6 +1583,275 @@ def test_expand_downgrade_with_v2_row_fails_closed_and_atomically(
         postgres_namespace_factory.drop(namespace)
 
 
+def test_cycle2_downgrade_locks_both_evidence_tables_against_all_dml(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("cycle2-evidence-lock-contract")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    marker = "must-not-cross-cycle2-downgrade-lock"
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.insert().values(
+                    customer_id="customer-lock",
+                    order_id="O-7001",
+                    order_payload={"order_number": "O-7001"},
+                )
+            )
+
+        ddl_barrier_connection = engine.connect()
+        ddl_barrier_transaction = ddl_barrier_connection.begin()
+        downgrade_executor = ThreadPoolExecutor(max_workers=1)
+        downgrade_future = None
+        try:
+            assert (
+                ddl_barrier_connection.scalar(
+                    text("SELECT count(*) FROM mock_shipments")
+                )
+                == 0
+            )
+            downgrade_future = downgrade_executor.submit(
+                command.downgrade,
+                config,
+                _CYCLE2_PREVIOUS_MIGRATION_REVISION,
+            )
+            _wait_for_real_downgrade_lock(
+                engine,
+                schema=namespace.schema,
+                relation_name="mock_shipments",
+            )
+
+            blocked_statements = (
+                (
+                    text(
+                        """
+                        INSERT INTO mock_order_search_documents (
+                            customer_id, order_id, line_ordinal, ordered_at,
+                            order_number, product_name, quantity,
+                            product_category, search_aliases
+                        ) VALUES (
+                            :customer_id, :order_id, 1, :ordered_at,
+                            :order_number, :marker, 1, :marker,
+                            CAST(:search_aliases AS jsonb)
+                        )
+                        """
+                    ),
+                    {
+                        "customer_id": "customer-lock",
+                        "order_id": "O-7001",
+                        "ordered_at": datetime(
+                            2026,
+                            7,
+                            31,
+                            8,
+                            0,
+                            tzinfo=timezone.utc,
+                        ),
+                        "order_number": "O-7001",
+                        "marker": marker,
+                        "search_aliases": '["blocked"]',
+                    },
+                ),
+                (
+                    text(
+                        "UPDATE mock_order_search_documents "
+                        "SET product_name = :marker "
+                        "WHERE customer_id = :customer_id"
+                    ),
+                    {"marker": marker, "customer_id": "customer-lock"},
+                ),
+                (
+                    text(
+                        "DELETE FROM mock_order_search_documents "
+                        "WHERE customer_id = :customer_id"
+                    ),
+                    {"customer_id": "customer-lock"},
+                ),
+                (
+                    text(
+                        """
+                        INSERT INTO mock_shipments (
+                            customer_id, order_id, package_id, shipment_payload
+                        ) VALUES (
+                            :customer_id, :order_id, :package_id,
+                            CAST(:shipment_payload AS jsonb)
+                        )
+                        """
+                    ),
+                    {
+                        "customer_id": "customer-lock",
+                        "order_id": "O-7001",
+                        "package_id": "PKG-blocked",
+                        "shipment_payload": '{"marker":"blocked"}',
+                    },
+                ),
+                (
+                    text(
+                        "UPDATE mock_shipments "
+                        "SET shipment_payload = CAST(:shipment_payload AS jsonb) "
+                        "WHERE customer_id = :customer_id"
+                    ),
+                    {
+                        "shipment_payload": '{"marker":"blocked"}',
+                        "customer_id": "customer-lock",
+                    },
+                ),
+                (
+                    text("DELETE FROM mock_shipments WHERE customer_id = :customer_id"),
+                    {"customer_id": "customer-lock"},
+                ),
+            )
+            for statement, parameters in blocked_statements:
+                _assert_lock_timeout(
+                    engine,
+                    statement,
+                    parameters=parameters,
+                )
+
+            assert (
+                ddl_barrier_connection.scalar(
+                    text("SELECT count(*) FROM mock_order_search_documents")
+                )
+                == 0
+            )
+            assert (
+                ddl_barrier_connection.scalar(
+                    text("SELECT count(*) FROM mock_shipments")
+                )
+                == 0
+            )
+        finally:
+            ddl_barrier_transaction.rollback()
+            ddl_barrier_connection.close()
+            downgrade_executor.shutdown(wait=True)
+
+        assert downgrade_future is not None
+        assert downgrade_future.result(timeout=10) is None
+        assert _migration_revision(engine) == _CYCLE2_PREVIOUS_MIGRATION_REVISION
+        inspector = inspect(engine)
+        assert "mock_order_search_documents" not in inspector.get_table_names()
+        assert "mock_shipments" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM mock_orders "
+                        "WHERE customer_id = 'customer-lock' "
+                        "AND order_id = 'O-7001'"
+                    )
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    "evidence_table",
+    ("mock_order_search_documents", "mock_shipments"),
+)
+def test_cycle2_downgrade_waits_for_prior_evidence_insert_then_fails_bounded(
+    postgres_namespace_factory,
+    evidence_table: str,
+) -> None:
+    namespace = postgres_namespace_factory.create(f"cycle2-prior-{evidence_table}")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    marker = f"must-not-leak-{evidence_table}"
+    writer_connection = None
+    writer_transaction = None
+    downgrade_executor = ThreadPoolExecutor(max_workers=1)
+    downgrade_future = None
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MockOrderModel.__table__.insert().values(
+                    customer_id="customer-prior-writer",
+                    order_id="O-7002",
+                    order_payload={"order_number": "O-7002"},
+                )
+            )
+
+        writer_connection = engine.connect()
+        writer_transaction = writer_connection.begin()
+        if evidence_table == "mock_order_search_documents":
+            writer_connection.execute(
+                MockOrderSearchDocumentModel.__table__.insert().values(
+                    customer_id="customer-prior-writer",
+                    order_id="O-7002",
+                    line_ordinal=1,
+                    ordered_at=datetime(
+                        2026,
+                        7,
+                        31,
+                        8,
+                        1,
+                        tzinfo=timezone.utc,
+                    ),
+                    order_number="O-7002",
+                    product_name=marker,
+                    quantity=1,
+                    product_category="migration-lock-test",
+                    search_aliases=["blocked"],
+                )
+            )
+        else:
+            writer_connection.execute(
+                MockShipmentModel.__table__.insert().values(
+                    customer_id="customer-prior-writer",
+                    order_id="O-7002",
+                    package_id="PKG-prior-writer",
+                    shipment_payload={"marker": marker},
+                )
+            )
+
+        downgrade_future = downgrade_executor.submit(
+            command.downgrade,
+            config,
+            _CYCLE2_PREVIOUS_MIGRATION_REVISION,
+        )
+        _wait_for_pending_table_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name=evidence_table,
+            mode="ShareRowExclusiveLock",
+        )
+
+        writer_transaction.commit()
+        writer_connection.close()
+        writer_transaction = None
+        writer_connection = None
+
+        with pytest.raises(RuntimeError) as captured:
+            downgrade_future.result(timeout=10)
+        assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
+        assert marker not in str(captured.value)
+        assert _migration_revision(engine) == _CYCLE2_MIGRATION_REVISION
+        assert evidence_table in inspect(engine).get_table_names()
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(text(f"SELECT count(*) FROM {evidence_table}")) == 1
+            )
+    finally:
+        if writer_transaction is not None:
+            writer_transaction.rollback()
+        if writer_connection is not None:
+            writer_connection.close()
+        downgrade_executor.shutdown(wait=True)
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
 def test_real_downgrade_share_row_exclusive_lock_blocks_insert_and_update(
     postgres_namespace_factory,
 ) -> None:
@@ -1152,6 +1865,7 @@ def test_real_downgrade_share_row_exclusive_lock_blocks_insert_and_update(
     existing_id = uuid4()
     recovery_id = uuid4()
     try:
+        command.downgrade(config, _MIGRATION_REVISION)
         with engine.begin() as connection:
             _insert_physical_probe(
                 connection,
@@ -1168,10 +1882,7 @@ def test_real_downgrade_share_row_exclusive_lock_blocks_insert_and_update(
         try:
             assert (
                 ddl_barrier_connection.scalar(
-                    text(
-                        "SELECT 1 FROM p0_records "
-                        "WHERE record_id = :record_id"
-                    ),
+                    text("SELECT 1 FROM p0_records WHERE record_id = :record_id"),
                     {"record_id": existing_id},
                 )
                 == 1
@@ -1205,16 +1916,17 @@ def test_real_downgrade_share_row_exclusive_lock_blocks_insert_and_update(
             )
 
             assert (
-                ddl_barrier_connection.scalar(
-                    text("SELECT count(*) FROM p0_records")
-                )
+                ddl_barrier_connection.scalar(text("SELECT count(*) FROM p0_records"))
                 == 1
             )
-            assert ddl_barrier_connection.scalar(
-                select(P0RecordModel.lifecycle_status).where(
-                    P0RecordModel.record_id == existing_id
+            assert (
+                ddl_barrier_connection.scalar(
+                    select(P0RecordModel.lifecycle_status).where(
+                        P0RecordModel.record_id == existing_id
+                    )
                 )
-            ) is None
+                is None
+            )
         finally:
             ddl_barrier_transaction.rollback()
             ddl_barrier_connection.close()
@@ -1263,22 +1975,26 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
         inspector = inspect(engine)
         assert set(inspector.get_table_names()) == {"alembic_version"}
         with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            ) == "20260726_0001"
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "20260726_0001"
+            )
 
         command.upgrade(config, "head")
         inspector.clear_cache()
         assert set(inspector.get_table_names()) == {
             "alembic_version",
+            "mock_order_search_documents",
             "mock_orders",
+            "mock_shipments",
             "p0_record_references",
             "p0_records",
         }
         with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            ) == _MIGRATION_REVISION
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == _CYCLE2_MIGRATION_REVISION
+            )
     finally:
         engine.dispose()
         postgres_namespace_factory.drop(namespace)

@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event, update
+from alembic import command
+from sqlalchemy import event, text, update
 from sqlalchemy.exc import OperationalError
 
 from mini_agent.core.order import (
@@ -15,6 +16,7 @@ from mini_agent.core.order import (
 )
 from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
 from mini_agent.infrastructure.persistence.database import build_session_factory
+from mini_agent.infrastructure.persistence.migrations import alembic_config
 from mini_agent.infrastructure.persistence.models import MockOrderModel
 
 UTC_NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -71,9 +73,7 @@ def _bob_summary() -> OrderSummaryProjection:
     return OrderSummaryProjection(
         order_number="O-2001",
         status=OrderStatus.FULFILLING,
-        line_items=(
-            OrderLineSummary(product_name="合成隔离测试商品", quantity=2),
-        ),
+        line_items=(OrderLineSummary(product_name="合成隔离测试商品", quantity=2),),
         ordered_at=BOB_ORDERED_AT,
         status_updated_at=BOB_STATUS_UPDATED_AT,
     )
@@ -339,5 +339,64 @@ async def test_source_version_ignores_forbidden_stored_at_version_source(
 
         assert before.source_version == SOURCE_VERSION_A
         assert after.source_version == before.source_version
+    finally:
+        engine.dispose()
+
+
+async def test_cycle2_migration_preserves_phase1_order_payload_and_source_bytes(
+    eval_postgres_namespace,
+) -> None:
+    config = alembic_config(
+        eval_postgres_namespace.database_url,
+        schema=eval_postgres_namespace.schema,
+        testing=True,
+    )
+    command.downgrade(config, "20260728_0003")
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresGetOrderAdapter(build_session_factory(engine))
+
+    def payload_bytes() -> bytes:
+        with engine.connect() as connection:
+            payload = connection.scalar(
+                text(
+                    """
+                    SELECT order_payload::text
+                    FROM mock_orders
+                    WHERE customer_id = :customer_id
+                      AND order_id = :order_id
+                    """
+                ),
+                {"customer_id": "customer-A", "order_id": "O-1001"},
+            )
+        assert isinstance(payload, str)
+        return payload.encode("utf-8")
+
+    try:
+        await adapter.seed_mock_order(
+            customer_id="customer-A",
+            order_summary=_alice_summary(),
+        )
+        before = await adapter.get_order(
+            GetOrderQuery(customer_id="customer-A", order_id="O-1001")
+        )
+        before_payload = payload_bytes()
+        before_projection = before.model_dump_json()
+
+        command.upgrade(config, "20260731_0004")
+
+        after_upgrade = await adapter.get_order(
+            GetOrderQuery(customer_id="customer-A", order_id="O-1001")
+        )
+        assert payload_bytes() == before_payload
+        assert after_upgrade.model_dump_json() == before_projection
+        assert after_upgrade.source_version == before.source_version == SOURCE_VERSION_A
+
+        command.downgrade(config, "20260728_0003")
+        after_downgrade = await adapter.get_order(
+            GetOrderQuery(customer_id="customer-A", order_id="O-1001")
+        )
+        assert payload_bytes() == before_payload
+        assert after_downgrade.model_dump_json() == before_projection
+        assert after_downgrade.source_version == SOURCE_VERSION_A
     finally:
         engine.dispose()

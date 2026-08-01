@@ -58,6 +58,20 @@ _PHYSICAL_CODE_VERSION_PAIRS = (
         "request_understanding_record",
         "request_understanding_record.p0.v2",
     ),
+    ("order_search_observation_record", "order_search_observation_record.p0.v1"),
+    ("order_candidate_set_record", "order_candidate_set_record.p0.v1"),
+    (
+        "order_candidate_selection_record",
+        "order_candidate_selection_record.p0.v1",
+    ),
+    ("shipment_observation_record", "shipment_observation_record.p0.v1"),
+    ("shipment_assessment_record", "shipment_assessment_record.p0.v1"),
+    ("input_binding_record", "input_binding_record.p0.v2"),
+    ("gate_decision_record", "gate_decision_record.p0.v2"),
+    ("tool_call_record", "tool_call_record.p0.v2"),
+    ("agent_run_record", "agent_run_record.p0.v2"),
+    ("run_task_link_record", "run_task_link_record.p0.v2"),
+    ("trace_event_record", "trace_event_record.p0.v2"),
 )
 _CODE_VERSION_PAIRS = tuple(sorted(_PHYSICAL_CODE_VERSION_PAIRS))
 _CODE_VERSION_CHECK = " OR ".join(
@@ -145,20 +159,14 @@ class P0RecordModel(Base):
     logical_identity: Mapped[list[list[Any]]] = mapped_column(JSONB, nullable=False)
     direct_owner_customer_id: Mapped[str | None] = mapped_column(String)
     scope_owner_customer_id: Mapped[str | None] = mapped_column(String)
-    conversation_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    conversation_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     task_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
-    request_unit_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    request_unit_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     lifecycle_status: Mapped[str | None] = mapped_column(String)
     state_version: Mapped[int | None] = mapped_column(BigInteger)
     attempt_count: Mapped[int | None] = mapped_column(Integer)
-    recovery_sort_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    recovery_sort_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     envelope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     stored_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -232,13 +240,92 @@ class P0RecordReferenceModel(Base):
 
 class MockOrderModel(Base):
     __tablename__ = "mock_orders"
-    __table_args__ = (
-        PrimaryKeyConstraint("customer_id", "order_id"),
-    )
+    __table_args__ = (PrimaryKeyConstraint("customer_id", "order_id"),)
 
     customer_id: Mapped[str] = mapped_column(String, nullable=False)
     order_id: Mapped[str] = mapped_column(String, nullable=False)
     order_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    stored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class MockOrderSearchDocumentModel(Base):
+    __tablename__ = "mock_order_search_documents"
+    __table_args__ = (
+        PrimaryKeyConstraint("customer_id", "order_id", "line_ordinal"),
+        ForeignKeyConstraint(
+            ("customer_id", "order_id"),
+            ("mock_orders.customer_id", "mock_orders.order_id"),
+            name="fk_mock_order_search_documents_order",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "line_ordinal > 0",
+            name="ck_mock_order_search_documents_line_ordinal_positive",
+        ),
+        CheckConstraint(
+            "quantity > 0",
+            name="ck_mock_order_search_documents_quantity_positive",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(search_aliases) = 'array'",
+            name="ck_mock_order_search_documents_search_aliases_array",
+        ),
+        Index(
+            "ix_mock_order_search_documents_owner_window",
+            "customer_id",
+            "ordered_at",
+            "order_number",
+            "order_id",
+            "line_ordinal",
+        ),
+    )
+
+    customer_id: Mapped[str] = mapped_column(String, nullable=False)
+    order_id: Mapped[str] = mapped_column(String, nullable=False)
+    line_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    ordered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    order_number: Mapped[str] = mapped_column(String, nullable=False)
+    product_name: Mapped[str] = mapped_column(String, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_category: Mapped[str] = mapped_column(String, nullable=False)
+    search_aliases: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+
+
+class MockShipmentModel(Base):
+    __tablename__ = "mock_shipments"
+    __table_args__ = (
+        PrimaryKeyConstraint("customer_id", "order_id", "package_id"),
+        ForeignKeyConstraint(
+            ("customer_id", "order_id"),
+            ("mock_orders.customer_id", "mock_orders.order_id"),
+            name="fk_mock_shipments_order",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(shipment_payload) = 'object'",
+            name="ck_mock_shipments_payload_object",
+        ),
+        Index(
+            "ix_mock_shipments_owner_order",
+            "customer_id",
+            "order_id",
+        ),
+    )
+
+    customer_id: Mapped[str] = mapped_column(String, nullable=False)
+    order_id: Mapped[str] = mapped_column(String, nullable=False)
+    package_id: Mapped[str] = mapped_column(String, nullable=False)
+    shipment_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
     stored_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
