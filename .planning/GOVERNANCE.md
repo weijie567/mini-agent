@@ -59,8 +59,20 @@ Stock GSD 1.38.3 的 Worktree / lifecycle 模型与本项目不兼容，因此�
 - `canonical_inputs`、`dependencies`、`required_checks` 及预期结果；
 - `done_when`、`handoff_to` 与 `handoff_format`；
 - `contract_changes`、`security_impact`、`eval_impact` 与 `rollback`。
+- `review_profile`，至少逐项冻结 `planning_review`、`implementation_review`、
+  `targeted_risk_checks`、`focused_tests`、`neighbor_tests`、`full_suite_gate` 与
+  `phase_end_deep_audit`；不得用笼统的“按需 review / test”代替。
 
 启动前必须逐字段记录实际值。没有依赖、禁止文件、契约变化或某类影响时也必须显式写 `NONE`；不得留空、继承隐含默认值或由 Agent 猜测。同一 Wave 内一个文件只有一个 writer。
+
+Phase 2 从 W4 起采用风险分级审阅：每个 Packet 仍需 independent exact-head code
+review，但默认只审当前 Packet diff、直接 canonical owner、focused / neighbor tests
+与 Packet 自己拥有的安全不变量。未修改的 reviewed upstream barrier 作为 imported
+evidence；完整 canonical suite、Phase 级 Eval / Security / UAT 与跨 Wave 全量深审只在
+对应 `review_profile.full_suite_gate` / `phase_end_deep_audit` 指定的 barrier 运行。
+finding remediation 只重跑受影响 focused / neighbor；最终候选稳定后再做 final
+exact-head review。任何 contract change、allowlist 扩大、ownership 越界、Wave / Packet
+数量变化或无法在原 Packet 内关闭的 BLOCK / HIGH 仍须停止并请求裁决。
 
 所有写入型 specialized workflow 还必须执行 containment check：
 
@@ -100,13 +112,13 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `RESERVED / NOT_CREATED`；`B_C2_PLAN_APPROVED = planning PR merge successor` → `B_C2_OWNER_ALIGNED = 02-00 merge successor` → branch 从 exact `B_C2_OWNER_ALIGNED` 创建 → 创建时 exact head/tree 冻结为 `B_C2_START = initial implementation base` |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3 COMPLETE / W4 PLANNING`；历史链为 `B_C2_PLAN_APPROVED → B_C2_OWNER_ALIGNED = B_C2_START`，当前 exact product barrier 为 `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6` / tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e` |
 
-`.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只是当前
-Phase 2 的 reserved mapping。它不证明该 branch 存在，也不授权 GSD 或 Agent
-创建 branch / Worktree、冻结 Task Packet 或写功能代码。Gate P2-C 前仍必须保持
-branch `NOT_CREATED`；创建后必须证明 `B_C2_START` 与
-`B_C2_OWNER_ALIGNED` 的 SHA / tree 相同。
+`.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
+mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
+已完成且历史证据证明 `B_C2_START` 与 `B_C2_OWNER_ALIGNED` SHA / tree 相同；后续每个
+Packet 仍必须从真实 reviewed dependency barrier 冻结 product base，并在 GitHub
+远端重新核验当前 integration head 与 branch protection。
 
 执行规则：
 

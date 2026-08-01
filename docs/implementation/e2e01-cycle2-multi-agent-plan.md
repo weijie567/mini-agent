@@ -1,8 +1,8 @@
 # E2E-01 Cycle 2｜Codex 多 Agent 实施计划
 
-更新日期：2026-07-31
+更新日期：2026-08-01
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / GATE_P2_B_IN_PROGRESS / 02-00_EXACT_PACKET_PROPOSED / IMPLEMENTATION_NOT_AUTHORIZED`
+状态：`NON_NORMATIVE / PLAN_APPROVED / W3_COMPLETE / W4_PACKET_FREEZE_IN_PROGRESS`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -17,14 +17,16 @@ squash merge；`B_C2_PLAN_APPROVED =
 > 回滚顺序；不拥有产品、架构、业务、Tool、Memory、Eval 或 Case lifecycle 语义。
 >
 > 本文不是任一 implementation Task Packet。本文已通过独立 exact-head review、
-> 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 现按真实 dependency barrier
-> 分批准备“一份 GSD Plan + 一个 exact Task Packet”。首份
-> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 只是 Gate
-> P2-B proposal，尚未获批或执行。
+> 用户 Gate P2-A 批准并经 planning PR 合并；Integrator 按真实 dependency barrier
+> 分批准备“一份 GSD Plan + 一个 exact Task Packet”。历史首份
+> [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 与 W1–W3
+> `02-01..05` 均已 reviewed merge；当前从 exact `B_C2_APP_CONTRACT` 逐个冻结 W4
+> `02-06/08/09/13`。
 >
-> 在用户进一步批准当前可签发 Task Packet、对应 Wave、initial exact
-> implementation base 与执行上限前，不创建 `integration/e2e01-cycle2`、任何
-> 代码 feature branch / Worktree、migration、测试、Eval artifact 或功能代码。
+> `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
+> 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
+> 才创建对应 feature branch / Worktree；Plan、artifact 或测试的存在不推进 Case
+> lifecycle。
 
 ## 1. Authority and scope
 
@@ -77,17 +79,17 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `02-00 PROPOSED / 02-01..18 NOT_CREATED` |
-| Task Packets | `02-00 EXACT PROPOSAL / NOT_APPROVED / NOT_EXECUTED` |
+| Future GSD Plans | `02-00..05 COMPLETE / 02-06 FREEZE CANDIDATE / 02-07..18 NOT_CREATED` |
+| Task Packets | `02-00..05 REVIEWED MERGE / 02-06 PLANNING REVIEW / 02-08/09/13 NEXT W4 FREEZE` |
 | Proposed Plan / Packet slots / Waves | `19 / 13`（`02-00..18` / `W0..W12`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
-| Initial implementation base | `NOT_FROZEN`；等待 `02-00` merge successor |
-| Integration branch | `PROPOSED integration/e2e01-cycle2 / NOT_CREATED` |
-| GSD config branch mapping | `integration/e2e01-cycle2 / RESERVED_MAPPING_ONLY` |
-| `02-00` execution branch / Worktree | `NOT_CREATED / USER APPROVAL REQUIRED` |
-| Integration / code feature branches / Worktrees | `NOT_CREATED / PROHIBITED` |
-| Writer assignments | role proposed; person / Agent `NOT_FROZEN` |
+| Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / current W4 product barrier B_C2_APP_CONTRACT` |
+| GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
+| `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
+| Integration / code feature branches / Worktrees | `W1..W3 COMPLETE；W4 implementation 尚未创建` |
+| Writer assignments | `02-06 proposed Runtime Engineer；其余 W4 在各自 Plan 冻结` |
 | Execution concurrency | approved ceiling `2` writers；当前 dispatch `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
@@ -107,10 +109,11 @@ Gate P2-A planning PR #203 只包含以下七个文件：
 `B_C2_PLAN_APPROVED`。`.planning/ACTIVATION.md`、Phase 1 Plans / Summaries、
 canonical contract、源码、
 测试、migration、Eval artifact 与 Case lifecycle 均不得修改。Phase 1 的
-`integration/e2e01-thin` 记录保持历史原文；Phase 2 mapping 不声明 branch
-protection 已配置，因为 `integration/e2e01-cycle2` 当前尚不存在。
+`integration/e2e01-thin` 记录保持历史原文；本段最后一句只描述 Gate P2-A 当时
+状态。后续 Gate P2-C 已创建 `integration/e2e01-cycle2`，当前保护配置仍需每次
+dispatch / merge 通过 GitHub API 机械复核。
 
-## 3. Approved base decision and remaining pre-activation correction
+## 3. Approved base decision and historical pre-activation correction
 
 ### `C2-BLOCK-01` — branch and base strategy
 
@@ -133,10 +136,11 @@ history 均属于 Phase 1。Gate P2-A 已批准：
 7. 后续 Packet 不共享一个陈旧 base；每个 Wave 从已 reviewed、已串行 merge 的最新
    barrier 单独冻结 `base_sha`。
 
-该 base chain 已获 Gate P2-A 批准；但 `02-00`、`B_C2_OWNER_ALIGNED` 与
-`B_C2_START` 尚未完成。`.planning/config.json` 的 Phase 2 branch mapping 仍只是
-reserved governance mapping，不证明分支存在，也不授权 Task Packet execution、
-branch activation 或代码执行。
+该 base chain 后续已完成：`02-00` reviewed merge 形成
+`B_C2_OWNER_ALIGNED = B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8`
+/ tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7`，并据此创建
+`integration/e2e01-cycle2`。本段保留原批准顺序作为历史治理证据，不再表示当前
+branch 或 implementation 未激活。
 
 ### `C2-BLOCK-02` — Eval model script path
 
@@ -149,12 +153,10 @@ correction，把 Cycle 2 路径更正为 underscore 版本。该修正必须：
 - 不创建 Eval artifact、loader、测试或 lifecycle 结果；
 - 合并后的 exact SHA 成为后续 Eval Packet dependency。
 
-当前 [`02-00` exact Plan / Task Packet
-proposal](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 仍需独立
-exact-head review、用户批准与 planning PR merge；本次准备没有修改 scoped Spec。
-
-本 Plan 使用符号 `$C2_MODEL_SCRIPTS_PATH`，在 `02-00` 合并前不把任一拼写写入
-Eval implementation allowlist。
+[`02-00` exact Plan / Task Packet](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md)
+及其 zero-code owner correction 已 reviewed merge，scoped Spec 与仓库 loader 统一为
+`evals/model_scripts/`。后续 02-13 必须把 exact artifact path 冻结为
+`evals/model_scripts/e2e01-cycle2.v1.json`，不得继续使用变量或目录级 allowlist。
 
 ## 4. Collaboration model
 
@@ -408,7 +410,7 @@ correction；`02-01..18` 覆盖实现、lifecycle 与 post-activation verificati
   - `src/mini_agent/evaluation/scripted_provider.py`
   - `evals/cases/e2e01-cycle2.v1.json`
   - `evals/fixtures/e2e01-cycle2.v1.json`
-  - `$C2_MODEL_SCRIPTS_PATH`
+  - `evals/model_scripts/e2e01-cycle2.v1.json`
   - `evals/manifests/e2e01-cycle2.v1.json`
   - `evals/lanes/e2e01-cycle2.v1.json`
   - `tests/component/evaluation/test_e2e01_artifact_consistency.py`
@@ -612,6 +614,9 @@ master Plan 获批后，Integrator 逐 slot 创建 exact GSD Plan / Task Packet 
   acceptance criteria；
 - focused、neighbor、migration、integration、full verification；
 - `contract_changes`、`security_impact`、`eval_impact`；
+- `review_profile`：`planning_review`、`implementation_review`、
+  `targeted_risk_checks`、`focused_tests`、`neighbor_tests`、`full_suite_gate`、
+  `phase_end_deep_audit`；
 - rollback、handoff、output barrier；
 - branch protection / PR base、exact-head review 和 latest-integration overlay
   requirement。
@@ -630,7 +635,42 @@ master Plan 获批后，Integrator 逐 slot 创建 exact GSD Plan / Task Packet 
 
 ## 9. Verification strategy
 
-### 9.1 Per-slot minimum
+### 9.1 W4 起的风险分级审阅
+
+从 W4 开始，Packet review 使用“普通 exact-head 审阅 + 风险专项验证，Phase 末统一
+全面深审”。每个 Packet 仍必须由独立 reviewer 检查 exact base/head、parent、
+ancestry、commit/allowlist、当前 Packet diff、直接 canonical owner、focused / neighbor
+tests 与本 Packet 明确拥有的安全不变量。reviewer 不重复阅读全部 canonical 文档、
+审计全部历史 Wave、复现 Phase 2 全部攻击向量、运行完整仓库套件或提前执行 Phase
+级 Eval / Security / UAT；未修改的 reviewed barrier 作为 imported evidence，只检查当前
+Packet 是否正确消费其公开合同。
+
+同一 exact SHA 已有有效 transcript 时不得无理由重复测试。finding remediation 只运行
+对应 focused / neighbor tests；最终候选稳定后再做 final exact-head review。BLOCK /
+HIGH 必须关闭；MEDIUM 必须修复或有证据接受；LOW / INFO 必须记录。finding 若要求
+contract change、扩大 allowlist、改变 Wave / Packet 数量或跨 ownership boundary，立即
+停止并请求裁决。
+
+W4 profile 固定为：
+
+- `02-06 = TARGETED_CONTRACT`：unknown/mixed version、logical child mismatch、
+  conversion ambiguity、no read-time fallback 与 Phase 1 codec compatibility；
+- `02-08 = TARGETED_SECURITY`：current/unique/unexpired ordinal binding、stale /
+  wrong-version/task/target prohibition、Claim/Observation 分离、trusted/private binding
+  不可由模型替换、旧 Task 不复活；
+- `02-09 = TARGETED_HIGH_RISK`：append-only max-two attempts、exact retryability、
+  second fence、restart/obsolete Run/OA-10 no-result closure，且绝不进入 Action 域；
+- `02-13 = TARGETED_EVAL_INTEGRITY`：27 IDs、bundle/digest/lane identity、strict loader、
+  evidence non-fabrication、artifact 不推进 lifecycle，且绝不包含 Action 域。
+
+Wave / Phase full gates 固定为：W4 只做 integration-focused / neighbor 与 Phase 1
+直接相关回归；W5 只做 migration 两条升级路径；W6 合并完成后运行一次 canonical full
+suite；W7–W11 依各自专项 focused / neighbor / owner evidence 审阅；W12 纵向实现完成后
+启动 Phase 2 唯一一次全面深审，并运行 canonical repository full gate、Eval review、
+Security audit 与 Controlled UAT。Phase 末 finding 修复期间只跑 focused / neighbor，
+最终候选 head 稳定后只再运行一次 canonical full suite。
+
+### 9.2 Per-slot minimum
 
 - TDD 可适用的 DTO、state、mapper、algorithm、API 全部使用 RED → GREEN →
   focused hardening。
@@ -640,7 +680,7 @@ master Plan 获批后，Integrator 逐 slot 创建 exact GSD Plan / Task Packet 
 - independent exact-head code review。
 - latest integration overlay 保持 owned blobs / patch语义。
 
-### 9.2 Migration / persistence
+### 9.3 Migration / persistence
 
 - empty database → head。
 - Phase 1 migration head → Phase 2 head。
@@ -649,7 +689,7 @@ master Plan 获批后，Integrator 逐 slot 创建 exact GSD Plan / Task Packet 
 - CandidateSet / selection / attempt / no-result原子性和 crash-point tests。
 - downgrade 在 v2-only evidence 前有界；其后明确 fail closed。
 
-### 9.3 Eval / E2E
+### 9.4 Eval / E2E
 
 - `02-13/14/15` exact-head review完成前保持 `CONTRACT_DEFINED`；`02-15`
   只通过 direct non-Harness integration 建立可复现 execution seam，Harness
@@ -666,7 +706,7 @@ master Plan 获批后，Integrator 逐 slot 创建 exact GSD Plan / Task Packet 
   toolset / provider mapping。
 - 真实 HTTP SUT 和 owner-scoped exact-Run reader；禁止 Synthetic SUT。
 
-### 9.4 Canonical repository gate
+### 9.5 Canonical repository gate
 
 从仓库根目录运行：
 
@@ -682,7 +722,11 @@ uv run pytest
 
 ## 10. Post-execution quality gates
 
-`B_C2_VERTICAL` 只表示实现集成完成，不推进 Case 或 Phase。之后依序：
+`B_C2_VERTICAL` 只表示实现集成完成，不推进 Case 或 Phase。W12 后只启动一次 Phase 2
+全面深度审计，统一覆盖跨 Wave contract alignment、identity / owner scope、
+CandidateSet / ordinal、Shipment freshness、retry / recovery / `SUPERSEDED`、Mapper /
+Renderer / `CF-13`、Trace / PII、Eval artifact / Harness / lifecycle、Component /
+Trajectory / HTTP E2E 与 canonical repository full gate。之后依序：
 
 1. exact-integration-SHA code review；
 2. findings 只通过新的 exact fix Packet关闭；
@@ -784,14 +828,11 @@ barrier 与 release。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS`。P2-A 通过后按真实 dependency barrier 分批准备；不得给尚未
-产生的 barrier 填造 SHA。当前只有 `02-00` 能以 `B_C2_PLAN_APPROVED` 为 exact
-base 签发；`02-01..18` 在各自前置 barrier 形成前继续为 `NOT_CREATED`。
-
-因此 Gate P2-B 分两步裁决：先批准 `02-00` 的 exact Packet；待其 reviewed merge
-真实形成 `B_C2_OWNER_ALIGNED` 后，再冻结并批准该 SHA / tree 为唯一
-`B_C2_START` 候选，同时签发当时 launchable 的下一批 Packet。前一步不得虚构后一步
-evidence。
+状态：`IN_PROGRESS / 02-00..05 COMPLETE / W4 PACKET FREEZE`。P2-A 通过后始终按
+真实 dependency barrier 分批准备；不得给尚未产生的 barrier 填造 SHA。W3 reviewed
+merge 已真实形成 `B_C2_APP_CONTRACT = 86d1b8357f817882b017e5c4306ec855e0b288e6`
+/ tree `b27f5f805c85e8ce76c30be254a004cb5f127b4e`；当前只可从该 exact product barrier
+冻结 W4 `02-06/08/09/13`，其余 slot 继续等待各自前置 barrier。
 
 用户需逐项或整组批准：
 
@@ -803,6 +844,9 @@ evidence。
 - Wave dispatch 上限。
 
 ### Gate P2-C — Implementation activation
+
+状态：`PASSED / HISTORICAL`。以下保留 activation 输入与顺序；W4 不重复创建
+integration branch，而是继续使用受保护的 `integration/e2e01-cycle2`。
 
 仅当以下全部成立：
 
