@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -15,6 +16,7 @@ from mini_agent.application.deterministic_renderer import (
 )
 from mini_agent.application.ports import (
     ConversationRecordPort,
+    Cycle2RuntimeRecordPort,
     ModelProviderV2,
     ModelVisibleToolsetArtifactPort,
     RuntimeRecordPort,
@@ -28,6 +30,8 @@ from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     ApplyTaskTransitionCommand,
+    ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderSearchOutcomeV2Command,
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
@@ -37,6 +41,8 @@ from mini_agent.application.records import (
     CreateRunTaskLinkCommand,
     CreateTaskCommand,
     FinalizeRunCommand,
+    FinalizeStateInvalidatedToolRecoveryV2Command,
+    FinalizeSupersededRunV2Command,
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
@@ -45,8 +51,17 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     SaveInputBindingCommand,
     SaveRequestUnderstandingV2AcceptedCommand,
+    SaveShipmentAssessmentV2Command,
+    ShipmentAssessmentReadClosure,
     TransitionRunCommand,
     TrustedOwnerScope,
+    Cycle2WriteResult,
+)
+from mini_agent.application.run_result_mapper import (
+    Cycle2MapperSignal,
+    Cycle2ResultMapping,
+    ImportedMapperReference,
+    RunResultMapper,
 )
 from mini_agent.core.control_gateway import (
     evaluate_control_gateway,
@@ -54,12 +69,20 @@ from mini_agent.core.control_gateway import (
 )
 from mini_agent.core.memory import (
     ContextManifest,
+    OrderObservation,
     TaskStateRefAndVersion,
     TokenCounts,
     VersionedRecordRef,
+    project_search_orders_observation_safe,
 )
 from mini_agent.core.order import GetOrderOutcome
-from mini_agent.core.presentation import PresentationInput, PresentationPurpose
+from mini_agent.core.presentation import (
+    CandidatePresentationPlan,
+    PresentationInput,
+    PresentationPlan,
+    PresentationPurpose,
+    ShipmentPresentationPlan,
+)
 from mini_agent.core.presentation_policy import (
     PresentationPolicyError,
     validate_presentation_plan,
@@ -73,6 +96,7 @@ from mini_agent.core.request_processing import (
 )
 from mini_agent.core.request_understanding import RequestUnderstandingInput
 from mini_agent.core.task_state import (
+    OrderCandidateSetOutcome,
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
@@ -80,6 +104,7 @@ from mini_agent.core.task_state import (
     TaskStateTransition,
     TaskStatus,
 )
+from mini_agent.core.shipment import assess_shipment
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
     GateDecision,
@@ -87,6 +112,8 @@ from mini_agent.core.tool_system import (
     RegistrySnapshot,
     ToolCallStatus,
     ToolResultOutcome,
+    Cycle2ToolName,
+    ToolCallRecordV2,
 )
 from mini_agent.core.trace import (
     AgentRunRecord,
@@ -1260,3 +1287,310 @@ class AgentRunService:
             failure_state.committed_result = result
             failure_state.running_run = None
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class Cycle2RuntimeStep:
+    """One bounded Cycle 2 outbound result or private continuation."""
+
+    mapping: Cycle2ResultMapping | None = None
+    outbound_result: AgentRunResult | None = None
+    verified_target_ref: str | None = None
+
+
+class Cycle2AgentRunService:
+    """Consume reviewed exact closures without manufacturing authority."""
+
+    def __init__(
+        self,
+        *,
+        runtime_record_port: Cycle2RuntimeRecordPort,
+        deterministic_renderer: DeterministicRenderer,
+        uuid_factory: Callable[[], UUID],
+        result_mapper: RunResultMapper | None = None,
+    ) -> None:
+        self._runtime_record_port = runtime_record_port
+        self._deterministic_renderer = deterministic_renderer
+        self._uuid_factory = uuid_factory
+        self._result_mapper = result_mapper or RunResultMapper()
+
+    @property
+    def result_mapper(self) -> RunResultMapper:
+        return self._result_mapper
+
+    def map_imported_phase1(
+        self,
+        reference: ImportedMapperReference,
+    ) -> ImportedMapperReference:
+        return self._result_mapper.import_reference(reference)
+
+    def _outbound_step(
+        self,
+        *,
+        run_id: UUID,
+        signal: Cycle2MapperSignal,
+        rendered_message: str | None = None,
+    ) -> Cycle2RuntimeStep:
+        mapping = self._result_mapper.map_cycle2(signal)
+        return Cycle2RuntimeStep(
+            mapping=mapping,
+            outbound_result=self._deterministic_renderer.map_cycle2_result(
+                run_id=run_id,
+                mapping=mapping,
+                rendered_message=rendered_message,
+            ),
+        )
+
+    async def apply_search_outcome(
+        self,
+        *,
+        run_id: UUID,
+        command: ApplyOrderSearchOutcomeV2Command,
+        candidate_plan: CandidatePresentationPlan | None = None,
+    ) -> Cycle2RuntimeStep:
+        """Apply UNIQUE/MULTIPLE atomically and expose no private mapping."""
+
+        if type(command) is not ApplyOrderSearchOutcomeV2Command:
+            raise AgentRunExecutionError("exact search outcome command required")
+        outcome = command.candidate_set_record.outcome
+        if outcome is OrderCandidateSetOutcome.MULTIPLE:
+            if type(candidate_plan) is not CandidatePresentationPlan:
+                raise AgentRunExecutionError(
+                    "MULTIPLE requires canonical candidate presentation plan"
+                )
+            candidate_rendered = (
+                self._deterministic_renderer.render_candidate_summary(
+                    projection=project_search_orders_observation_safe(
+                        command.search_observation_record
+                    ),
+                    plan=candidate_plan,
+                )
+            )
+        elif candidate_plan is not None:
+            raise AgentRunExecutionError(
+                "UNIQUE search cannot carry candidate presentation plan"
+            )
+        else:
+            candidate_rendered = None
+        applied = await (
+            self._runtime_record_port.apply_order_search_outcome_if_current(
+                command
+            )
+        )
+        if applied is not Cycle2WriteResult.APPLIED:
+            return self._outbound_step(
+                run_id=run_id,
+                signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+            )
+        if outcome is OrderCandidateSetOutcome.MULTIPLE:
+            return self._outbound_step(
+                run_id=run_id,
+                signal=Cycle2MapperSignal.SEARCH_MULTIPLE,
+                rendered_message=candidate_rendered,
+            )
+        if outcome is not OrderCandidateSetOutcome.UNIQUE:
+            raise AgentRunExecutionError("unsupported search outcome aggregate")
+        target = command.resolved_owner_scoped_order_target_ref
+        if type(target) is not str or not target:
+            raise AgentRunExecutionError(
+                "UNIQUE search lacks reviewed private target"
+            )
+        return Cycle2RuntimeStep(verified_target_ref=target)
+
+    async def apply_ordinal_selection(
+        self,
+        *,
+        run_id: UUID,
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> Cycle2RuntimeStep:
+        """Apply one current ordinal CAS; this path never re-runs search."""
+
+        if type(command) is not ApplyOrderCandidateSelectionV2Command:
+            raise AgentRunExecutionError("exact ordinal selection command required")
+        applied = await (
+            self._runtime_record_port.apply_order_candidate_selection_if_current(
+                command
+            )
+        )
+        if applied is not Cycle2WriteResult.APPLIED:
+            return self._outbound_step(
+                run_id=run_id,
+                signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+            )
+        return Cycle2RuntimeStep(
+            verified_target_ref=str(command.selected_target_ref)
+        )
+
+    def complete_order_only(
+        self,
+        *,
+        run_id: UUID,
+        observation: OrderObservation,
+        plan: PresentationPlan,
+    ) -> AgentRunResult:
+        """Preserve imported Phase 1 success and perform no Shipment operation."""
+
+        self.map_imported_phase1(ImportedMapperReference.ORDER_SUCCESS)
+        rendered = self._deterministic_renderer.render_order_summary(
+            observation=observation,
+            plan=plan,
+        )
+        return self._deterministic_renderer.map_result(
+            run_id=run_id,
+            stop_reason=StopReason.GOAL_COMPLETED,
+            rendered_message=rendered,
+        )
+
+    async def assess_and_render_shipment(
+        self,
+        *,
+        run_id: UUID,
+        closure: ShipmentAssessmentReadClosure,
+        plan: ShipmentPresentationPlan,
+    ) -> Cycle2RuntimeStep:
+        """Persist and render only a fresh exact deterministic Assessment."""
+
+        if type(closure) is not ShipmentAssessmentReadClosure:
+            raise AgentRunExecutionError(
+                "exact Shipment Assessment closure required"
+            )
+        observation = closure.current_observation_record
+        assessment = assess_shipment(
+            assessment_id=self._uuid_factory(),
+            private_owner_scope_ref=closure.owner_scope.customer_id,
+            task_id=closure.current_task_record.task_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+            task_state_version=closure.current_task_record.state_version,
+            verified_order_target_ref=closure.verified_order_target_ref,
+            shipment_observation_ref=observation.observation_id,
+            shipment_observation_source_version=observation.source_version,
+            shipment_summary=observation.normalized_value,
+            observation_observed_at=observation.observed_at,
+            observation_valid_until=observation.valid_until,
+            assessed_at=closure.trusted_assessed_at,
+            claim_binding_ref=closure.current_claim_binding_ref,
+            supersedes_assessment_ref=(
+                None
+                if closure.current_assessment_record is None
+                else closure.current_assessment_record.assessment_id
+            ),
+        )
+        rendered = self._deterministic_renderer.render_shipment_assessment(
+            observation=observation,
+            assessment=assessment,
+            plan=plan,
+        )
+        written = await (
+            self._runtime_record_port.save_shipment_assessment_if_current(
+                SaveShipmentAssessmentV2Command(
+                    loaded_closure=closure,
+                    assessment_record=assessment,
+                )
+            )
+        )
+        if written is not Cycle2WriteResult.APPLIED:
+            return self._outbound_step(
+                run_id=run_id,
+                signal=Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+            )
+        return self._outbound_step(
+            run_id=run_id,
+            signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+            rendered_message=rendered,
+        )
+
+    async def finalize_obsolete_run(
+        self,
+        *,
+        command: FinalizeSupersededRunV2Command,
+    ) -> Cycle2RuntimeStep:
+        """Apply an ordinary OA-10 closure and never construct an outbound result."""
+
+        if type(command) is not FinalizeSupersededRunV2Command:
+            raise AgentRunExecutionError("exact OA-10 command required")
+        written = await (
+            self._runtime_record_port.finalize_superseded_run_if_current(
+                command
+            )
+        )
+        signal = (
+            Cycle2MapperSignal.CONTRADICTORY_INTERRUPTION_EVIDENCE
+            if written is not Cycle2WriteResult.APPLIED
+            else Cycle2MapperSignal.ORDINARY_OBSOLETE_RUN
+        )
+        return Cycle2RuntimeStep(mapping=self._result_mapper.map_cycle2(signal))
+
+    async def finalize_retry_recovery_obsolete(
+        self,
+        *,
+        command: FinalizeStateInvalidatedToolRecoveryV2Command,
+    ) -> Cycle2RuntimeStep:
+        """Consume only the exact retry-scheduled recovery OA-10 aggregate."""
+
+        if type(command) is not FinalizeStateInvalidatedToolRecoveryV2Command:
+            raise AgentRunExecutionError(
+                "exact state-invalidated recovery command required"
+            )
+        written = await (
+            self._runtime_record_port
+            .finalize_state_invalidated_tool_recovery_if_current(command)
+        )
+        signal = (
+            Cycle2MapperSignal.CONTRADICTORY_INTERRUPTION_EVIDENCE
+            if written is not Cycle2WriteResult.APPLIED
+            else Cycle2MapperSignal.RETRY_RECOVERY_OBSOLETE_RUN
+        )
+        return Cycle2RuntimeStep(mapping=self._result_mapper.map_cycle2(signal))
+
+    def map_cycle2_tool_terminal(
+        self,
+        tool_call: ToolCallRecordV2,
+    ) -> Cycle2ResultMapping | None:
+        """Map terminal Cycle 2 Tool evidence; success needs business result."""
+
+        if type(tool_call) is not ToolCallRecordV2:
+            raise AgentRunExecutionError("exact ToolCallRecordV2 required")
+        if tool_call.canonical_tool_name not in {
+            Cycle2ToolName.SEARCH_ORDERS,
+            Cycle2ToolName.GET_SHIPMENT,
+        }:
+            raise AgentRunExecutionError(
+                "Phase 1 get_order terminal stays imported"
+            )
+        if tool_call.status is ToolCallStatus.SUCCEEDED:
+            return None
+        if tool_call.status is ToolCallStatus.INTERRUPTED:
+            return self._result_mapper.map_cycle2(
+                Cycle2MapperSignal.CONTRADICTORY_INTERRUPTION_EVIDENCE
+            )
+        if tool_call.status not in {
+            ToolCallStatus.FAILED,
+            ToolCallStatus.TIMED_OUT,
+        }:
+            raise AgentRunExecutionError("terminal ToolCall required")
+        signal_by_code = {
+            "ORDER_SEARCH_UNAVAILABLE": Cycle2MapperSignal.ORDER_SEARCH_UNAVAILABLE,
+            "SHIPMENT_SERVICE_UNAVAILABLE": (
+                Cycle2MapperSignal.SHIPMENT_SERVICE_UNAVAILABLE
+            ),
+            "SHIPMENT_RELATION_CARDINALITY_VIOLATION": (
+                Cycle2MapperSignal.SHIPMENT_RELATION_CARDINALITY
+            ),
+            "ORDER_SEARCH_SOURCE_INTEGRITY": (
+                Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+            ),
+            "SHIPMENT_SOURCE_INTEGRITY": (
+                Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+            ),
+            "SHIPMENT_SOURCE_VERSION_INVALID": (
+                Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+            ),
+            "ORDER_SEARCH_TRANSIENT": Cycle2MapperSignal.RETRY_EXHAUSTED,
+            "SHIPMENT_SERVICE_TRANSIENT": Cycle2MapperSignal.RETRY_EXHAUSTED,
+            "TOOL_CALL_TIMEOUT": Cycle2MapperSignal.RETRY_EXHAUSTED,
+        }
+        signal = signal_by_code.get(
+            tool_call.failure_code,
+            Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+        )
+        return self._result_mapper.map_cycle2(signal)

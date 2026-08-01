@@ -7,21 +7,42 @@ from mini_agent.application.deterministic_renderer import (
     DeterministicRenderer,
     RendererInvariantError,
 )
+from mini_agent.application.run_result_mapper import (
+    Cycle2MapperSignal,
+    RunResultMapper,
+)
 from mini_agent.core.memory import (
     ObservationVisibility,
     OrderObservation,
+    SearchOrdersObservationSafeCandidate,
+    SearchOrdersObservationSafeProjection,
+    ShipmentObservation,
 )
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
 )
+from mini_agent.core.order_search import (
+    OrderCandidateMatchingItem,
+    OrderCandidatePublicSummary,
+)
 from mini_agent.core.presentation import (
+    CandidatePresentationPlan,
     ClosingVariant,
     OpeningVariant,
     PresentationField,
     PresentationPlan,
     PresentationTone,
+    ShipmentPresentationPlan,
+)
+from mini_agent.core.shipment import (
+    ShipmentAssessment,
+    ShipmentAssessmentReason,
+    ShipmentAssessmentResult,
+    ShipmentEventCode,
+    ShipmentStatus,
+    ShipmentSummaryProjection,
 )
 from mini_agent.core.trace import AgentOutcome, StopReason
 
@@ -184,3 +205,139 @@ def test_goal_completed_requires_a_nonempty_deterministic_message() -> None:
     )
     assert result.outcome is AgentOutcome.COMPLETED
     assert result.message == "订单号：O-1001"
+
+
+def _candidate_projection() -> SearchOrdersObservationSafeProjection:
+    return SearchOrdersObservationSafeProjection(
+        matching_rule_version="order-search-matching.p0.v1",
+        ordered_candidates=(
+            SearchOrdersObservationSafeCandidate(
+                ordinal=1,
+                public_summary=OrderCandidatePublicSummary(
+                    order_number="O-1001",
+                    ordered_on_utc=NOW.date(),
+                    status=OrderStatus.SHIPPED,
+                    matching_items=(
+                        OrderCandidateMatchingItem(
+                            product_name="轻量跑鞋", quantity=2
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        truncated=False,
+    )
+
+
+def test_candidate_renderer_uses_exact_safe_whitelist_only() -> None:
+    message = DeterministicRenderer().render_candidate_summary(
+        projection=_candidate_projection(),
+        plan=CandidatePresentationPlan(
+            tone=PresentationTone.NEUTRAL,
+            opening_variant=OpeningVariant.DIRECT,
+            closing_variant=ClosingVariant.OFFER_FOLLOW_UP,
+        ),
+    )
+
+    assert "1. O-1001｜2030-01-01｜已发货｜轻量跑鞋 × 2" in message
+    assert "order-search-matching" not in message
+    assert "source_version" not in message
+    assert "customer" not in message
+
+
+def _shipment_pair() -> tuple[ShipmentObservation, ShipmentAssessment]:
+    observation_id = uuid4()
+    summary = ShipmentSummaryProjection(
+        shipment_status=ShipmentStatus.IN_TRANSIT,
+        latest_event_code=ShipmentEventCode.IN_TRANSIT,
+        latest_event_at=NOW - timedelta(hours=121),
+        promised_delivery_at=NOW - timedelta(hours=1),
+    )
+    observation = ShipmentObservation(
+        observation_id=observation_id,
+        private_owner_scope="customer-A",
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        verified_order_target_ref="selected-target-ref",
+        source_tool="get_shipment",
+        source_tool_call_id=uuid4(),
+        source_resource_ref="private-package-ref",
+        source_version=(
+            "mock-shipment-source-version.p0.v1:sha256:" + "a" * 64
+        ),
+        normalized_type="SHIPMENT_SUMMARY",
+        normalized_value=summary,
+        observed_at=NOW,
+        recorded_at=NOW,
+        valid_until=NOW + timedelta(minutes=5),
+        visibility=ObservationVisibility.AUDIT_ONLY,
+    )
+    assessment = ShipmentAssessment(
+        assessment_id=uuid4(),
+        private_owner_scope_ref="customer-A",
+        task_id=observation.task_id,
+        request_unit_id=observation.request_unit_id,
+        task_state_version=2,
+        verified_order_target_ref="selected-target-ref",
+        shipment_observation_ref=observation_id,
+        shipment_observation_source_version=observation.source_version,
+        primary_result=ShipmentAssessmentResult.STALLED,
+        reason_codes=(
+            ShipmentAssessmentReason.NO_TRACKING_UPDATE_FOR_120_HOURS,
+            ShipmentAssessmentReason.PROMISED_DELIVERY_TIME_PASSED,
+        ),
+        assessed_at=NOW + timedelta(minutes=1),
+    )
+    return observation, assessment
+
+
+def test_shipment_renderer_uses_safe_facts_and_deterministic_primary_only() -> None:
+    observation, assessment = _shipment_pair()
+    message = DeterministicRenderer().render_shipment_assessment(
+        observation=observation,
+        assessment=assessment,
+        plan=ShipmentPresentationPlan(
+            tone=PresentationTone.WARM,
+            opening_variant=OpeningVariant.ACKNOWLEDGE,
+            closing_variant=ClosingVariant.NONE,
+        ),
+    )
+
+    assert "配送状态：运输中" in message
+    assert "物流较长时间没有更新" in message
+    assert "customer-A" not in message
+    assert "private-package-ref" not in message
+    assert "NO_TRACKING_UPDATE" not in message
+    assert observation.source_version not in message
+
+
+def test_shipment_renderer_rejects_assessment_not_bound_to_safe_observation() -> None:
+    observation, assessment = _shipment_pair()
+    mismatched = assessment.model_copy(
+        update={"verified_order_target_ref": "different-private-target"}
+    )
+
+    with pytest.raises(ValueError, match="derivation"):
+        DeterministicRenderer().render_shipment_assessment(
+            observation=observation,
+            assessment=mismatched,
+            plan=ShipmentPresentationPlan(
+                tone=PresentationTone.NEUTRAL,
+                opening_variant=OpeningVariant.DIRECT,
+                closing_variant=ClosingVariant.NONE,
+            ),
+        )
+
+
+def test_cycle2_non_outbound_rows_never_create_agent_result() -> None:
+    renderer = DeterministicRenderer()
+    mapper = RunResultMapper()
+    for signal in (
+        Cycle2MapperSignal.INTERNAL_RETRY_AUTHORIZED,
+        Cycle2MapperSignal.ORDINARY_OBSOLETE_RUN,
+        Cycle2MapperSignal.RETRY_RECOVERY_OBSOLETE_RUN,
+        Cycle2MapperSignal.CONTRADICTORY_INTERRUPTION_EVIDENCE,
+    ):
+        assert renderer.map_cycle2_result(
+            run_id=uuid4(), mapping=mapper.map_cycle2(signal)
+        ) is None

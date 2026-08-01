@@ -8,7 +8,9 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator
 
 from .common import ModelVisibleModel
+from .memory import SearchOrdersObservationSafeProjection
 from .order import OrderSummaryProjection
+from .shipment import ShipmentSummaryProjection
 
 PRESENTATION_PLAN_SCHEMA_VERSION = "presentation-plan-v1"
 
@@ -71,3 +73,53 @@ class PresentationPlan(ModelVisibleModel):
                 "field_order must contain every approved presentation field once"
             )
         return value
+
+
+CANDIDATE_PRESENTATION_PLAN_SCHEMA_VERSION = "candidate-presentation-plan-v1"
+SHIPMENT_PRESENTATION_PLAN_SCHEMA_VERSION = "shipment-presentation-plan-v1"
+
+
+class CandidatePresentationInput(ModelVisibleModel):
+    """Exact safe search projection; no private Observation metadata."""
+
+    purpose: Literal["CANDIDATE_SUMMARY"] = "CANDIDATE_SUMMARY"
+    candidates: SearchOrdersObservationSafeProjection
+    allowed_plan_schema_version: Literal[
+        "candidate-presentation-plan-v1"
+    ] = CANDIDATE_PRESENTATION_PLAN_SCHEMA_VERSION
+
+
+class CandidatePresentationPlan(ModelVisibleModel):
+    """Fact-free style controls for deterministic candidate rendering."""
+
+    schema_version: Literal["candidate-presentation-plan-v1"] = (
+        CANDIDATE_PRESENTATION_PLAN_SCHEMA_VERSION
+    )
+    template_id: Literal["CANDIDATE_SUMMARY_V1"] = "CANDIDATE_SUMMARY_V1"
+    tone: PresentationTone
+    opening_variant: OpeningVariant
+    closing_variant: ClosingVariant
+
+
+class ShipmentPresentationInput(ModelVisibleModel):
+    """Only the approved Shipment fact projection crosses the model boundary."""
+
+    purpose: Literal["SHIPMENT_ASSESSMENT"] = "SHIPMENT_ASSESSMENT"
+    shipment_summary: ShipmentSummaryProjection
+    allowed_plan_schema_version: Literal[
+        "shipment-presentation-plan-v1"
+    ] = SHIPMENT_PRESENTATION_PLAN_SCHEMA_VERSION
+
+
+class ShipmentPresentationPlan(ModelVisibleModel):
+    """Fact-free style controls for deterministic Shipment rendering."""
+
+    schema_version: Literal["shipment-presentation-plan-v1"] = (
+        SHIPMENT_PRESENTATION_PLAN_SCHEMA_VERSION
+    )
+    template_id: Literal["SHIPMENT_ASSESSMENT_V1"] = (
+        "SHIPMENT_ASSESSMENT_V1"
+    )
+    tone: PresentationTone
+    opening_variant: OpeningVariant
+    closing_variant: ClosingVariant

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -6,13 +6,20 @@ import pytest
 from mini_agent.core.memory import (
     ObservationVisibility,
     OrderObservation,
+    SearchOrdersObservationSafeCandidate,
+    SearchOrdersObservationSafeProjection,
 )
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
 )
+from mini_agent.core.order_search import (
+    OrderCandidateMatchingItem,
+    OrderCandidatePublicSummary,
+)
 from mini_agent.core.presentation import (
+    CandidatePresentationPlan,
     ClosingVariant,
     OpeningVariant,
     PresentationField,
@@ -22,6 +29,7 @@ from mini_agent.core.presentation import (
 from mini_agent.core.presentation_policy import (
     PresentationPolicyError,
     validate_presentation_plan,
+    validate_candidate_presentation_plan,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -156,3 +164,57 @@ def test_only_exact_safe_get_order_observation_provenance_is_accepted(
 ) -> None:
     with pytest.raises(PresentationPolicyError, match="safe Observation"):
         validate_presentation_plan(plan=_plan(), observation=observation)
+
+
+def _candidate_projection() -> SearchOrdersObservationSafeProjection:
+    return SearchOrdersObservationSafeProjection(
+        matching_rule_version="order-search-matching.p0.v1",
+        ordered_candidates=(
+            SearchOrdersObservationSafeCandidate(
+                ordinal=1,
+                public_summary=OrderCandidatePublicSummary(
+                    order_number="O-1001",
+                    ordered_on_utc=NOW.date(),
+                    status=OrderStatus.SHIPPED,
+                    matching_items=(
+                        OrderCandidateMatchingItem(
+                            product_name="轻量跑鞋", quantity=1
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        truncated=False,
+    )
+
+
+def test_candidate_policy_accepts_only_fact_free_plan_and_exact_projection() -> None:
+    plan = CandidatePresentationPlan(
+        tone=PresentationTone.NEUTRAL,
+        opening_variant=OpeningVariant.DIRECT,
+        closing_variant=ClosingVariant.NONE,
+    )
+    assert validate_candidate_presentation_plan(
+        plan=plan, projection=_candidate_projection()
+    ) == plan
+
+    contaminated = plan.model_copy(update={"customer_id": "customer-B"})
+    with pytest.raises(PresentationPolicyError, match="fact-free"):
+        validate_candidate_presentation_plan(
+            plan=contaminated, projection=_candidate_projection()
+        )
+
+
+def test_candidate_policy_rejects_bypassed_private_projection_field() -> None:
+    projection = _candidate_projection().model_copy(
+        update={"source_version": "private-version"}
+    )
+    with pytest.raises(PresentationPolicyError, match="safe candidate"):
+        validate_candidate_presentation_plan(
+            plan=CandidatePresentationPlan(
+                tone=PresentationTone.WARM,
+                opening_variant=OpeningVariant.ACKNOWLEDGE,
+                closing_variant=ClosingVariant.OFFER_FOLLOW_UP,
+            ),
+            projection=projection,
+        )
