@@ -22,6 +22,7 @@ from mini_agent.application.ports import (
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendRecoveredToolAttemptV2Command,
     AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
@@ -41,9 +42,13 @@ from mini_agent.application.records import (
     EvalResultRecord,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    FinalizeBudgetExhaustedToolRecoveryV2Command,
+    FinalizeCreatedToolRecoveryV2Command,
+    FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
+    FinalizeUnfinishedToolRecoveryV2Command,
     InsertOnlyWriteResult,
     InitialToolCallV2ReadClosure,
     NonEmptyString,
@@ -64,6 +69,7 @@ from mini_agent.application.records import (
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
+    ToolRetryRecoveryReadClosureV2,
 )
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
@@ -2078,6 +2084,12 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         "insert_initial_tool_call_v2_if_current",
         "append_tool_attempt_if_current",
         "finalize_tool_attempt_if_current",
+        "load_tool_retry_recovery_closure_for_owner",
+        "append_recovered_tool_attempt_if_current",
+        "finalize_unfinished_tool_recovery_if_current",
+        "finalize_created_tool_recovery_if_current",
+        "finalize_budget_exhausted_tool_recovery_if_current",
+        "finalize_state_invalidated_tool_recovery_if_current",
         "save_shipment_observation_if_current",
         "load_shipment_assessment_closure_for_owner",
         "save_shipment_assessment_if_current",
@@ -2136,6 +2148,37 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         },
     )
     _assert_signature(
+        Cycle2RuntimeRecordPort.append_recovered_tool_attempt_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": AppendRecoveredToolAttemptV2Command,
+            "return": Cycle2DispatchFenceWriteResult,
+        },
+    )
+    for method, command_type in (
+        (
+            Cycle2RuntimeRecordPort.finalize_created_tool_recovery_if_current,
+            FinalizeCreatedToolRecoveryV2Command,
+        ),
+        (
+            Cycle2RuntimeRecordPort.finalize_unfinished_tool_recovery_if_current,
+            FinalizeUnfinishedToolRecoveryV2Command,
+        ),
+        (
+            Cycle2RuntimeRecordPort.finalize_budget_exhausted_tool_recovery_if_current,
+            FinalizeBudgetExhaustedToolRecoveryV2Command,
+        ),
+        (
+            Cycle2RuntimeRecordPort.finalize_state_invalidated_tool_recovery_if_current,
+            FinalizeStateInvalidatedToolRecoveryV2Command,
+        ),
+    ):
+        _assert_signature(
+            method,
+            parameters=("command",),
+            type_hints={"command": command_type, "return": Cycle2WriteResult},
+        )
+    _assert_signature(
         Cycle2RuntimeRecordPort.save_shipment_observation_if_current,
         parameters=("command",),
         type_hints={
@@ -2162,6 +2205,15 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
 
 
 def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_tool_retry_recovery_closure_for_owner,
+        parameters=("owner_scope", "tool_call_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "tool_call_id": UUID,
+            "return": ToolRetryRecoveryReadClosureV2 | None,
+        },
+    )
     _assert_signature(
         Cycle2RuntimeRecordPort.load_continuation_input_binding_closure_for_owner,
         parameters=(
@@ -2279,6 +2331,7 @@ def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
         Cycle2RuntimeRecordPort.load_initial_tool_call_v2_closure_for_owner,
         Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
         Cycle2RuntimeRecordPort.load_superseded_run_closure_for_owner,
+        Cycle2RuntimeRecordPort.load_tool_retry_recovery_closure_for_owner,
     ):
         assert all(
             parameter.kind is inspect.Parameter.KEYWORD_ONLY
@@ -2396,3 +2449,53 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         "ResponseRendered",
     ):
         assert forbidden_write in oa10_doc
+    recovery_read_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort
+            .load_tool_retry_recovery_closure_for_owner.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "trusted server time",
+        "versioned Run-budget policy",
+        "no caller remaining-budget",
+        "mixed-version",
+        "fails closed",
+    ):
+        assert required_term in recovery_read_doc
+    recovered_append_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort
+            .append_recovered_tool_attempt_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "Same-CAS",
+        "re-read",
+        "recompute",
+        "decision-child plus attempt-2 fence",
+        "Only APPLIED",
+        "zero-write",
+        "zero-dispatch",
+    ):
+        assert required_term in recovered_append_doc
+    created_doc = " ".join(
+        (
+            Cycle2RuntimeRecordPort
+            .finalize_created_tool_recovery_if_current.__doc__
+            or ""
+        ).split()
+    )
+    for required_term in (
+        "Same-CAS",
+        "re-reads the exact owner/current closure",
+        "CREATED zero-attempt",
+        "only the exact INTERRUPTED parent",
+        "no recovery decision child",
+        "recovery metadata/ref",
+        "zero-write",
+        "zero-dispatch",
+    ):
+        assert required_term in created_doc
