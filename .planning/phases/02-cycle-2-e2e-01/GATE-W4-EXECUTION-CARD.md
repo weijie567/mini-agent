@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W4_BATCH_A_AND_02_08_AND_R1_R2_MERGED / 02-09_BLOCKED / 02-09R3_PLAN_REVIEW`
+状态：`W4_BATCH_A_AND_02_08_AND_R1_R2_R3_MERGED / B_C2_02_09_READY / 02-09_REFROZEN_PLAN_REVIEW`
 
 ## Exact input
 
@@ -31,8 +31,9 @@
   `409 passed`、neighbor `363 passed`，full/migration/Runtime/Infrastructure/Eval
   lifecycle 均未运行或推进。
 - W4 planning provenance PR #228 已 merge 为
-  `2e85326ecace4840d5b88bf4d273e5753213a84e`；四个原 W4 Packet 都以
-  `B_C2_W4_READY` 为 product base，Case lifecycle 保持 `CONTRACT_DEFINED`。
+  `2e85326ecace4840d5b88bf4d273e5753213a84e`；当时四个原 W4 Packet 都以
+  `B_C2_W4_READY` 为 product base。02-09 的该历史 freeze 已被当前 R1/R2/R3 correction
+  与真实 successor refreeze替换；Case lifecycle始终保持 `CONTRACT_DEFINED`。
 - 02-06 implementation PR #229 已 reviewed merge 为
   `B_C2_CODEC = 6514c7d0ebdd7c34fb2ec531460053ee21095fdf` / tree
   `8f901e3f7cf1d01fe2dc5e150bd7ef1738dd5cbe`；02-13 PR #230 随后 merge 为
@@ -54,6 +55,12 @@
   `9c58a0885c93146017d352a5df11b48f5f9240af`，与 reviewed overlay tree相等；
   初审发现的 CREATED/no-attempt shared v2 Port BLOCK 已修复并 residual `PASS`，
   focused `416 passed`、neighbor `576 passed`、compile/diff通过，full未运行。
+- 02-09R3 planning PR #238 与 implementation PR #239 已 reviewed merge；R3 初审
+  发现 decision spec 泄漏到 unversioned global catalog，修复后仅保留
+  `tool_call_record.p0.v2` version-keyed registration，legacy counts恢复为3/8。真实
+  `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree
+  `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`，与 reviewed overlay tree相等；
+  focused `243 passed`、neighbor `560 passed`、compile/diff通过，full未运行。
 
 ## Historical W4 preflight blocker and owner ruling
 
@@ -87,13 +94,13 @@ product base，不能以当前 planning-control successor 或未来串行 merge 
 - durable `ToolRetryRecoveryDecisionRecordV2` 与 recovered second fence 的同一 CAS；
 - attempt 1 保持 `RETRY_SCHEDULED` 时的 `RUN_BUDGET_EXHAUSTED` parent terminal。
 
-02-09 Worktree 保持 clean、没有 source change 或 implementation commit；旧 02-09 Plan
-已标记 `BLOCKED / HISTORICAL W4 FREEZE`。PR #231 已裁决 decision 为 ToolCall v2
+历史 02-09 Worktree 保持 clean、没有 source change 或 implementation commit；旧 02-09
+Plan 曾正确标记 `BLOCKED / HISTORICAL W4 FREEZE`。PR #231 已裁决 decision 为 ToolCall v2
 logical child、budget evidence 来自 owner-scoped reader并在 CAS 内重算、budget terminal
 保留 attempt 1 并投影原 `FAILED / TIMED_OUT`。correction 必须按
 `02-09R1 → 02-09R2 → 02-09R3` single-writer 串行执行；每个后继 Plan 只能用前驱真实
-reviewed merge SHA/tree重冻结，不得预测。之后再从真实 `B_C2_02_09_READY` 重冻结
-02-09。
+reviewed merge SHA/tree重冻结，不得预测。该链现已完成；原 02-09 已从真实
+`B_C2_02_09_READY` 重冻结，等待独立 planning review。
 
 ## Packet freeze 与批次
 
@@ -102,26 +109,30 @@ dedicated planning-status Worktree逐个单写。四份 Plan 必须分别取得�
 exact-file planning review `PASS`，并通过同一 planning PR 合并为 provenance；此前不得
 创建对应实现 branch / Worktree。
 
-四个 Packet 的 frozen product input 统一为：
+前三个原 W4 Packet 的历史 frozen product input 为：
 
 - `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de`
 - tree `174fbebcfa622336ffeade113cfae74a5611edae`
-- implementation branches在本次 refreeze preflight均为 local / remote `NOT_FOUND`
-- owned-file intersections两两为零；new Cycle 2 Eval artifact paths在base为`NOT_FOUND`
+- 最终 02-09 的当前 frozen product input 独立为
+  `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree
+  `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`
+- 02-09 replacement implementation branch
+  `codex/e2e01-cycle2-read-executor-recovery-r1` 在 refreeze preflight 为 local / remote
+  `NOT_FOUND`；owned-file overlap仍为零
 
 ```text
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
 Batch B: 02-08 Request understanding/routing — MERGED
-W4R: 02-09R1 + 02-09R2 — MERGED; 02-09R3 — PLAN/IMPLEMENT/REVIEW
-W4 resumed: refrozen 02-09 executor/recovery
+W4R: 02-09R1 + 02-09R2 + 02-09R3 — MERGED
+W4 resumed: refrozen 02-09 executor/recovery — PLAN REVIEW
 ```
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
 - 实际/后续串行 merge：`02-06 → 02-13 → owner ruling → 02-08 → 02-09R1 →
   02-09R2 → 02-09R3 → refrozen 02-09`。
-- 四个 implementation Packet 的 product `base_sha` 都必须重冻结为真实
-  `B_C2_W4_READY`；不得继续使用 `B_C2_APP_CONTRACT` 或猜测 successor。每次 merge
-  前必须在 latest integration 上形成 reviewed overlay。
+- 02-06/13/08 保留各自已 reviewed 的历史 product base；最终 02-09 只使用真实
+  `B_C2_02_09_READY`，不得复用 `B_C2_W4_READY`、planning-control SHA 或猜测 successor。
+  merge 前必须在 latest integration 上形成 reviewed overlay。
 
 ## Review profiles
 

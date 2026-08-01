@@ -13,10 +13,11 @@
   W1–W3R 已 reviewed merge。W4 `02-06/13/08` 又由 PR #229/#230/#232 依次
   reviewed merge。`02-09R1` PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2
   PR #235/#236/#237 又形成真实 `B_C2_RECOVERY_APP_CONTRACT = 46a0b1f...` / tree
-  `9c58a088...`。`02-09` preflight 暴露的 recovery owner gap 已由 PR #231 owner
-  ruling拆为 `02-09R1/R2/R3`；原 `02-09` 保持 clean、blocked。当前只把
-  `02-09R3` 从真实 R2 successor重冻结并送独立 planning review；不得猜测重冻结后
-  `02-09` 的未来 SHA。Phase 3–6 只保留 Coverage
+  `9c58a088...`；R3 PR #238/#239 形成真实 `B_C2_02_09_READY = cdf8c194...` /
+  tree `2e82f1b...`。`02-09` preflight 暴露的 recovery owner gap 已由 PR #231 owner
+  ruling拆为 `02-09R1/R2/R3` 并全部 reviewed merge；历史 `02-09` Worktree保持
+  clean且无源码 commit，replacement Packet只从该真实 R3 successor重冻结并送独立
+  planning review。Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
@@ -27,7 +28,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_RECOVERY_APP_CONTRACT / 02-09R3 PLANNING）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / B_C2_02_09_READY / 02-09 REFROZEN PLANNING）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
@@ -41,8 +42,8 @@ Cycle 2 scoped contract 已激活；W1–W3R 与 W4 `02-06/13/08` 已 reviewed m
 `B_C2_RU_ROUTING = d0f37e2d...`。旧 `02-02` head `ecfad7e...` 保持隔离。Core /
 Tool / Application contracts 与这些 W4 leaf contracts 均不构成四个 Case 的执行
 证据或 lifecycle 推进。`02-09` 的 recovery owner gap 已由 PR #231 规范化为
-`02-09R1/R2/R3` 前置链；R1/R2 已 reviewed merge并冻结
-`B_C2_RECOVERY_APP_CONTRACT`，当前仅 `02-09R3` exact Plan 进入 review，原
+`02-09R1/R2/R3` 前置链；三者已 reviewed merge并冻结
+`B_C2_02_09_READY`，当前仅 replacement `02-09` exact Plan进入 review，历史
 `02-09` 没有源码 commit。四个 Case继续保持`CONTRACT_DEFINED`，
 上方 checkbox 继续未勾选；当前没有 Phase 2 Eval artifact、Case activation、完整
 E2E-01 evidence，也没有 Runtime / Tool composition cutover。
@@ -79,10 +80,10 @@ E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 |---|---:|---|---|
 | `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
-| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RECOVERY_APP_CONTRACT / 02-09R3_PLANNING` |
-| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RECOVERY_APP_CONTRACT / 02-09R3_PLANNING` |
-| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RECOVERY_APP_CONTRACT / 02-09R3_PLANNING` |
-| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_RECOVERY_APP_CONTRACT / 02-09R3_PLANNING` |
+| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_READY / 02-09_REFROZEN_PLANNING` |
+| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_READY / 02-09_REFROZEN_PLANNING` |
+| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_READY / 02-09_REFROZEN_PLANNING` |
+| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / B_C2_02_09_READY / 02-09_REFROZEN_PLANNING` |
 | `E2E02-01` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-02` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-03` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |

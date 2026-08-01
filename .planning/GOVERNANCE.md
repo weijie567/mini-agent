@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W4 02-06+13+08+02-09R1+R2 MERGED / 02-09 BLOCKED / W4R 02-09R3 PLAN REVIEW`；真实 current integration / `B_C2_RECOVERY_APP_CONTRACT = 46a0b1f67153846dee6441ce47b7b5d5de4bc4d7` / tree `9c58a0885c93146017d352a5df11b48f5f9240af`；PR #237 已关闭 R2 shared Application recovery contract，当前只从该真实 predecessor重冻结 R3，最终02-09仍不得预测；Case仍为`CONTRACT_DEFINED` |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W4 02-06+13+08+02-09R1+R2+R3 MERGED / 02-09 REFROZEN PLAN REVIEW`；真实 current integration / `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`；PR #239 已关闭 versioned child codec gap，replacement 02-09 只从该真实 successor重冻结且仍无源码 commit；Case仍为`CONTRACT_DEFINED` |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
