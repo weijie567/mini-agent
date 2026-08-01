@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    AppendToolAttemptV2Command,
+    ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    Cycle2DispatchFenceWriteResult,
+    Cycle2WriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateInitialTaskGraphV2Command,
@@ -21,20 +27,28 @@ from mini_agent.application.records import (
     EvalResultRecord,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
+    FinalizeToolAttemptV2Command,
     InsertOnlyWriteResult,
     MessageRecord,
     NonEmptyString,
     ObservationWriteResult,
+    OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     PositiveAttempt,
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
+    SaveShipmentAssessmentV2Command,
+    SaveShipmentObservationV2Command,
     SaveRequestUnderstandingV2NoTaskCommand,
     SaveObservationCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
+    ShipmentAssessmentReadClosure,
+    SupersededRunReadClosure,
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import ContextManifest, OrderObservation
@@ -49,6 +63,7 @@ from mini_agent.core.request_understanding import (
 )
 from mini_agent.core.task_state import (
     InputBinding,
+    OrderCandidateSelectionRequest,
     RequestUnitRecord,
     TaskRecord,
 )
@@ -344,6 +359,162 @@ class RuntimeRecordPort(Protocol):
         run_id: UUID,
     ) -> tuple[TraceEvent, ...]:
         """Return an empty tuple for absent or unauthorized Runs."""
+        ...
+
+
+@runtime_checkable
+class Cycle2RuntimeRecordPort(Protocol):
+    """Inactive exact-v2 aggregate boundary; it does not extend v1 Ports.
+
+    Every method is exact-version-only. A compliant Adapter must use one
+    transactionally consistent owner-scoped snapshot for each read closure.
+    Read closures are typed records, not caller-signed trust tokens. Every write
+    must re-read and exact-compare its declared current graph in the same atomic
+    CAS boundary, so a caller cannot replace, relabel, replay, or narrow it.
+    The Adapter must use one atomic CAS transaction for each write command.
+    Normal absent and
+    unauthorized states are indistinguishable; once an owner root is selected,
+    dangling, duplicate, wrong-owner, partial, mixed-version, or contradictory
+    evidence fails closed rather than degrading to absence.
+
+    ``APPLIED`` means the complete command aggregate committed. Every other
+    result means zero writes. These declarations do not grant Tool dispatch,
+    business-fact authority, or user-visible result authority.
+    """
+
+    async def load_order_search_current_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        run_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        trusted_read_at: datetime,
+    ) -> OrderSearchCurrentReadClosure | None:
+        """Load current query, roots, and any current Search aggregate.
+
+        ``None`` represents absent and unauthorized equivalently. More than one
+        current query, CandidateSet, or Search aggregate, any unknown binding
+        family, or a partial graph fails closed.
+        """
+        ...
+
+    async def apply_order_search_outcome_if_current(
+        self,
+        command: ApplyOrderSearchOutcomeV2Command,
+    ) -> Cycle2WriteResult:
+        """Re-read exact roots/query/current Search graph, then commit atomically.
+
+        The in-transaction read must equal ``command.loaded_read_closure`` through
+        ``require_same_persisted_graph``. A mismatch returns zero writes.
+        """
+        ...
+
+    async def load_order_candidate_selection_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        conversation_id: UUID,
+        task_id: UUID,
+        request_unit_id: UUID,
+        selection_request: OrderCandidateSelectionRequest,
+        trusted_now: datetime,
+    ) -> OrderCandidateSelectionReadClosure | None:
+        """Load one exact current CandidateSet/Observation/target closure.
+
+        ``None`` represents both absent and unauthorized. Integrity failure in a
+        selected owner graph raises the bounded persistence-integrity error.
+        """
+        ...
+
+    async def apply_order_candidate_selection_if_current(
+        self,
+        command: ApplyOrderCandidateSelectionV2Command,
+    ) -> Cycle2WriteResult:
+        """CAS SelectionRecord, selected target, and pending-question closure."""
+        ...
+
+    async def append_tool_attempt_if_current(
+        self,
+        command: AppendToolAttemptV2Command,
+    ) -> Cycle2DispatchFenceWriteResult:
+        """Append one unfinished attempt under CAS before external dispatch.
+
+        Only ``APPLIED`` grants exactly one dispatch. Replay, conflict, and
+        not-applicable results never grant dispatch, including after recovery.
+        """
+        ...
+
+    async def finalize_tool_attempt_if_current(
+        self,
+        command: FinalizeToolAttemptV2Command,
+    ) -> Cycle2WriteResult:
+        """Replace the exact unfinished child and project its parent atomically."""
+        ...
+
+    async def save_shipment_observation_if_current(
+        self,
+        command: SaveShipmentObservationV2Command,
+    ) -> Cycle2WriteResult:
+        """Commit one fresh exact-source Observation and current supersession."""
+        ...
+
+    async def load_shipment_assessment_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task_id: UUID,
+        request_unit_id: UUID,
+        verified_order_target_ref: NonEmptyString,
+        trusted_assessed_at: datetime,
+    ) -> ShipmentAssessmentReadClosure | None:
+        """Load the complete durable Observation and InputBinding partitions.
+
+        ``None`` represents both absent and unauthorized. Stale or contradictory
+        selected graphs fail closed and cannot be returned as current facts. The
+        caller cannot select, relabel, or omit a binding, Observation, or current
+        Assessment; the owner-scoped reader determines and attests the complete
+        current RequestUnit graph atomically.
+        """
+        ...
+
+    async def save_shipment_assessment_if_current(
+        self,
+        command: SaveShipmentAssessmentV2Command,
+    ) -> Cycle2WriteResult:
+        """Re-read the complete graph, then commit deterministic derivation.
+
+        The same write transaction must load every current typed binding, every
+        Shipment Observation/supersession record, and the current Assessment,
+        then exact-compare it with ``command.loaded_closure`` through
+        ``require_same_persisted_graph``. Missing, relabeled, replayed, or newly
+        added records return zero writes; caller-provided completeness is never
+        trusted.
+        """
+        ...
+
+    async def load_superseded_run_closure_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        obsolete_run_id: UUID,
+        replacement_run_id: UUID,
+        request_unit_id: UUID,
+    ) -> SupersededRunReadClosure | None:
+        """Load the unique exact current evidence that an active Run is obsolete."""
+        ...
+
+    async def finalize_superseded_run_if_current(
+        self,
+        command: FinalizeSupersededRunV2Command,
+    ) -> Cycle2WriteResult:
+        """Atomically write OA-10 Run/link/audit Trace and no outbound result.
+
+        The closed command has no Task, RequestUnit, Message, AgentRunResult, or
+        ResponseRendered write projection. Contradictory or no-longer-current
+        evidence means zero writes and never guesses a terminal state.
+        """
         ...
 
 
