@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from inspect import signature
 from pathlib import Path
 from uuid import UUID, uuid4
 from zoneinfo import TZPATH, ZoneInfo
@@ -7,17 +8,32 @@ from zoneinfo import TZPATH, ZoneInfo
 import pytest
 
 from mini_agent.application.read_tool_executor import (
+    Cycle2ReadToolExecutor,
     ReadToolExecutionError,
     ReadToolExecutor,
 )
 from mini_agent.application.records import (
     ConditionalWriteResult,
+    Cycle2DispatchFenceWriteResult,
+    Cycle2ReadDispatchGrant,
+    Cycle2RunBudgetPolicyEvidence,
+    Cycle2WriteResult,
     InsertOnlyWriteResult,
     ObservationWriteResult,
+    RunTaskLinkRecordV2,
     ToolDispatchFenceWriteResult,
+    ToolRetryRecoveryReadClosureV2,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
+from mini_agent.core.request_understanding import InputAuthority
+from mini_agent.core.task_state import (
+    InputBindingV2,
+    InputValidationStatus,
+    RequestUnitRecord,
+    TaskRecord,
+    TaskStatus,
+)
 from mini_agent.core.order import (
     GetOrderOutcome,
     GetOrderQuery,
@@ -28,14 +44,25 @@ from mini_agent.core.order import (
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
+    Cycle2ToolName,
     ExecutionPolicy,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
+    ToolEffect,
     ToolResultOutcome,
+    ToolResult,
+    ToolRetryDecision,
     ToolTimeoutPhase,
 )
-from mini_agent.core.trace import TraceEvent, TraceEventType
+from mini_agent.core.trace import (
+    AgentRunRecordV2,
+    AgentRunStatusV2,
+    TraceEvent,
+    TraceEventType,
+)
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 SYNTHETIC_SOURCE_VERSION = "mock-order-source-version.p0.v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1138,3 +1165,621 @@ def test_read_executor_has_no_retry_parallel_or_action_execution_surface() -> No
         forbidden not in public_methods
         for forbidden in ("retry", "execute_action", "parallel")
     )
+
+
+class Cycle2RuntimeSpy:
+    def __init__(
+        self,
+        *,
+        created: ToolCallRecordV2,
+        owner_scope: TrustedOwnerScope,
+        initial_result: Cycle2DispatchFenceWriteResult = (
+            Cycle2DispatchFenceWriteResult.APPLIED
+        ),
+        recovered_result: Cycle2DispatchFenceWriteResult = (
+            Cycle2DispatchFenceWriteResult.APPLIED
+        ),
+        initial_grant_mutation: str | None = None,
+        recovered_grant_mutation: str | None = None,
+        initial_timeout_ms: int = 137,
+        recovered_timeout_ms: int = 211,
+        finalize_result: Cycle2WriteResult = Cycle2WriteResult.APPLIED,
+        closure_available: bool = True,
+        run_budget_ms: int = 10_000,
+        trusted_read_times: list[datetime] | None = None,
+        current_state_version: int | None = None,
+    ) -> None:
+        self.tool_call = created
+        self.owner_scope = owner_scope
+        self.initial_result = initial_result
+        self.recovered_result = recovered_result
+        self.initial_grant_mutation = initial_grant_mutation
+        self.recovered_grant_mutation = recovered_grant_mutation
+        self.initial_timeout_ms = initial_timeout_ms
+        self.recovered_timeout_ms = recovered_timeout_ms
+        self.finalize_result = finalize_result
+        self.closure_available = closure_available
+        self.run_budget_ms = run_budget_ms
+        self.trusted_read_times = list(trusted_read_times or [])
+        self.closure_loads = 0
+        self.initial_append_commands: list[object] = []
+        self.recovered_append_commands: list[object] = []
+        self.finalize_commands: list[object] = []
+        binding_id = created.argument_binding_refs[0]
+        self.binding = InputBindingV2(
+            binding_id=binding_id,
+            name="order_id",
+            normalized_value="O-1001",
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(uuid4(),),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        state_version = current_state_version or created.validated_task_state_version
+        state_updated_at = NOW + timedelta(
+            seconds=state_version - created.validated_task_state_version
+        )
+        self.task = TaskRecord(
+            task_id=created.task_id,
+            owner_customer_id=owner_scope.customer_id,
+            status=TaskStatus.ACTIVE,
+            state_version=state_version,
+            created_at=NOW,
+            updated_at=state_updated_at,
+        )
+        self.unit = RequestUnitRecord(
+            request_unit_id=created.request_unit_id,
+            task_id=created.task_id,
+            goal_text="查询订单",
+            goal_source_refs=(uuid4(),),
+            input_binding_refs=(binding_id,),
+            status=TaskStatus.ACTIVE,
+            state_version=state_version,
+            created_at=NOW,
+            updated_at=state_updated_at,
+        )
+        self.run = AgentRunRecordV2(
+            run_id=created.run_id,
+            conversation_id=uuid4(),
+            status=AgentRunStatusV2.RUNNING,
+            provider_lane="scripted",
+            started_at=NOW,
+        )
+
+    @staticmethod
+    def _grant(
+        *,
+        result: Cycle2DispatchFenceWriteResult,
+        command: object,
+        timeout_ms: int,
+        mutation: str | None,
+        recovered: bool,
+    ) -> Cycle2ReadDispatchGrant:
+        if result is not Cycle2DispatchFenceWriteResult.APPLIED:
+            return Cycle2ReadDispatchGrant(write_result=result)
+        append = command.attempt_append_command if recovered else command.attempt_append_command
+        attempt = append.started_attempt
+        tool_call_id = append.expected_record.tool_call_id
+        attempt_no = attempt.attempt_no
+        trusted_fenced_at = attempt.started_at
+        if mutation == "tool_call_id":
+            tool_call_id = uuid4()
+        elif mutation == "attempt_no":
+            attempt_no = 2 if attempt_no == 1 else 1
+        elif mutation == "trusted_fenced_at":
+            trusted_fenced_at = attempt.started_at - timedelta(microseconds=1)
+        return Cycle2ReadDispatchGrant(
+            write_result=result,
+            tool_call_id=tool_call_id,
+            attempt_no=attempt_no,
+            trusted_fenced_at=trusted_fenced_at,
+            effective_timeout_ms=timeout_ms,
+        )
+
+    async def append_initial_tool_attempt_if_current(self, command):
+        self.initial_append_commands.append(command)
+        grant = self._grant(
+            result=self.initial_result,
+            command=command,
+            timeout_ms=self.initial_timeout_ms,
+            mutation=self.initial_grant_mutation,
+            recovered=False,
+        )
+        if self.initial_result is Cycle2DispatchFenceWriteResult.APPLIED:
+            self.tool_call = command.attempt_append_command.next_running_record
+        return grant
+
+    async def finalize_tool_attempt_if_current(self, command):
+        self.finalize_commands.append(command)
+        if self.finalize_result is Cycle2WriteResult.APPLIED:
+            self.tool_call = command.next_record
+        return self.finalize_result
+
+    async def load_tool_retry_recovery_closure_for_owner(self, **_kwargs):
+        self.closure_loads += 1
+        if not self.closure_available:
+            return None
+        evidence_times = [
+            self.run.started_at,
+            self.task.updated_at,
+            self.unit.updated_at,
+            self.binding.updated_at,
+            self.tool_call.started_at,
+        ]
+        if self.tool_call.attempts:
+            last = self.tool_call.attempts[-1]
+            evidence_times.append(last.started_at)
+            if last.finished_at is not None:
+                evidence_times.append(last.finished_at)
+        trusted_read_at = (
+            self.trusted_read_times.pop(0)
+            if self.trusted_read_times
+            else max(evidence_times)
+        )
+        return ToolRetryRecoveryReadClosureV2(
+            owner_scope=self.owner_scope,
+            active_run_record=self.run,
+            active_run_task_link_record=RunTaskLinkRecordV2(
+                run_id=self.run.run_id,
+                task_id=self.task.task_id,
+                base_task_state_version=self.tool_call.validated_task_state_version,
+            ),
+            current_task_record=self.task,
+            current_request_unit_record=self.unit,
+            current_input_binding_records=(self.binding,),
+            tool_call_record=self.tool_call,
+            recovery_decision_records=(),
+            trusted_read_at=trusted_read_at,
+            run_budget_policy=Cycle2RunBudgetPolicyEvidence(
+                policy_version="cycle2-test-budget.v1",
+                run_time_budget_ms=self.run_budget_ms,
+            ),
+        )
+
+    async def append_recovered_tool_attempt_if_current(self, command):
+        self.recovered_append_commands.append(command)
+        grant = self._grant(
+            result=self.recovered_result,
+            command=command,
+            timeout_ms=self.recovered_timeout_ms,
+            mutation=self.recovered_grant_mutation,
+            recovered=True,
+        )
+        if self.recovered_result is Cycle2DispatchFenceWriteResult.APPLIED:
+            self.tool_call = command.attempt_append_command.next_running_record
+        return grant
+
+
+class Cycle2HandlerSpy:
+    def __init__(
+        self,
+        results: list[tuple[ToolResultOutcome, str | None, datetime]],
+    ) -> None:
+        self.results = results
+        self.calls: list[tuple[ToolCallRecordV2, ToolAttemptRecordV2, int]] = []
+
+    async def __call__(self, record, attempt, timeout_ms):
+        self.calls.append((record, attempt, timeout_ms))
+        outcome, error_code, completed_at = self.results.pop(0)
+        return ToolResult(
+            tool_call_id=record.tool_call_id,
+            canonical_tool_name=record.canonical_tool_name.value,
+            outcome=outcome,
+            error_code=error_code,
+            retryable=True,
+            completed_at=completed_at,
+        )
+
+
+def _cycle2_created_tool(
+    name: Cycle2ToolName = Cycle2ToolName.SEARCH_ORDERS,
+) -> tuple[TrustedOwnerScope, ToolCallRecordV2]:
+    owner = _owner_scope()
+    return owner, ToolCallRecordV2(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        gate_decision_id=uuid4(),
+        canonical_tool_name=name,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref=owner.customer_id,
+        validated_task_state_version=3,
+        argument_binding_refs=(uuid4(),),
+        verified_target_ref=(uuid4() if name is Cycle2ToolName.GET_SHIPMENT else None),
+        effect=ToolEffect.READ,
+        attempt_count=0,
+        attempts=(),
+        status=ToolCallStatus.CREATED,
+        started_at=NOW,
+    )
+
+
+def test_cycle2_grants_control_both_dispatch_timeouts_and_preserve_attempt_one() -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        initial_timeout_ms=73,
+        recovered_timeout_ms=41,
+        run_budget_ms=9_000,
+    )
+    handler = Cycle2HandlerSpy(
+        [
+            (ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SEARCH_TRANSIENT", NOW + timedelta(seconds=1)),
+            (ToolResultOutcome.SUCCESS, None, NOW + timedelta(seconds=2)),
+        ]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert terminal.status is ToolCallStatus.SUCCEEDED
+    assert terminal.tool_call_id == created.tool_call_id
+    assert terminal.attempt_count == 2
+    assert [call[2] for call in handler.calls] == [73, 41]
+    assert terminal.attempts[0].outcome is ToolResultOutcome.SYSTEM_FAILURE
+    assert terminal.attempts[0].retry_decision is ToolRetryDecision.RETRY_SCHEDULED
+    assert terminal.attempts[1].outcome is ToolResultOutcome.SUCCESS
+    assert len(runtime.initial_append_commands) == 1
+    assert len(runtime.recovered_append_commands) == 1
+    assert len(runtime.finalize_commands) == 2
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        Cycle2DispatchFenceWriteResult.ALREADY_APPLIED,
+        Cycle2DispatchFenceWriteResult.PROJECTION_CONFLICT,
+        Cycle2DispatchFenceWriteResult.NOT_APPLICABLE,
+    ],
+)
+def test_cycle2_non_applied_initial_grant_has_zero_dispatch_and_further_write(
+    result: Cycle2DispatchFenceWriteResult,
+) -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        initial_result=result,
+    )
+    handler = Cycle2HandlerSpy([(ToolResultOutcome.SUCCESS, None, NOW)])
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned == created
+    assert handler.calls == []
+    assert len(runtime.initial_append_commands) == 1
+    assert runtime.finalize_commands == []
+    assert runtime.recovered_append_commands == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["tool_call_id", "attempt_no", "trusted_fenced_at"],
+)
+def test_cycle2_malformed_applied_initial_grant_has_zero_dispatch_and_further_write(
+    mutation: str,
+) -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        initial_grant_mutation=mutation,
+    )
+    handler = Cycle2HandlerSpy([(ToolResultOutcome.SUCCESS, None, NOW)])
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned == created
+    assert handler.calls == []
+    assert len(runtime.initial_append_commands) == 1
+    assert runtime.finalize_commands == []
+    assert runtime.recovered_append_commands == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        Cycle2DispatchFenceWriteResult.ALREADY_APPLIED,
+        Cycle2DispatchFenceWriteResult.PROJECTION_CONFLICT,
+        Cycle2DispatchFenceWriteResult.NOT_APPLICABLE,
+    ],
+)
+def test_cycle2_non_applied_recovered_grant_stops_before_attempt_two_dispatch(
+    result: Cycle2DispatchFenceWriteResult,
+) -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        recovered_result=result,
+    )
+    handler = Cycle2HandlerSpy(
+        [(ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SEARCH_TRANSIENT", NOW + timedelta(seconds=1))]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned.status is ToolCallStatus.RUNNING
+    assert returned.attempt_count == 1
+    assert returned.attempts[0].retry_decision is ToolRetryDecision.RETRY_SCHEDULED
+    assert len(handler.calls) == 1
+    assert len(runtime.finalize_commands) == 1
+    assert len(runtime.recovered_append_commands) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["tool_call_id", "attempt_no", "trusted_fenced_at"],
+)
+def test_cycle2_malformed_applied_recovered_grant_stops_before_attempt_two_dispatch(
+    mutation: str,
+) -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        recovered_grant_mutation=mutation,
+    )
+    handler = Cycle2HandlerSpy(
+        [(ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SEARCH_TRANSIENT", NOW + timedelta(seconds=1))]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned.status is ToolCallStatus.RUNNING
+    assert returned.attempt_count == 1
+    assert len(handler.calls) == 1
+    assert len(runtime.finalize_commands) == 1
+    assert len(runtime.recovered_append_commands) == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "outcome", "failure_code"),
+    [
+        (Cycle2ToolName.SEARCH_ORDERS, ToolResultOutcome.BUSINESS_FAILURE, "NO_MATCH"),
+        (Cycle2ToolName.GET_ORDER, ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SERVICE_UNAVAILABLE"),
+    ],
+)
+def test_cycle2_deterministic_failure_and_get_order_never_retry(
+    tool_name: Cycle2ToolName,
+    outcome: ToolResultOutcome,
+    failure_code: str,
+) -> None:
+    owner, created = _cycle2_created_tool(tool_name)
+    runtime = Cycle2RuntimeSpy(created=created, owner_scope=owner)
+    handler = Cycle2HandlerSpy([(outcome, failure_code, NOW + timedelta(seconds=1))])
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert terminal.status is ToolCallStatus.FAILED
+    assert terminal.attempt_count == 1
+    assert terminal.attempts[0].retry_decision is ToolRetryDecision.NOT_RETRYABLE
+    assert len(handler.calls) == 1
+    assert runtime.recovered_append_commands == []
+
+
+def test_cycle2_get_shipment_retries_once_and_never_attempt_three() -> None:
+    owner, created = _cycle2_created_tool(Cycle2ToolName.GET_SHIPMENT)
+    runtime = Cycle2RuntimeSpy(created=created, owner_scope=owner)
+    handler = Cycle2HandlerSpy(
+        [
+            (ToolResultOutcome.SYSTEM_FAILURE, "SHIPMENT_SERVICE_TRANSIENT", NOW + timedelta(seconds=1)),
+            (ToolResultOutcome.SYSTEM_FAILURE, "SHIPMENT_SERVICE_TRANSIENT", NOW + timedelta(seconds=2)),
+        ]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert terminal.status is ToolCallStatus.FAILED
+    assert terminal.attempt_count == 2
+    assert [attempt.retry_decision for attempt in terminal.attempts] == [
+        ToolRetryDecision.RETRY_SCHEDULED,
+        ToolRetryDecision.MAX_ATTEMPTS_REACHED,
+    ]
+    assert len(handler.calls) == 2
+    assert len(runtime.recovered_append_commands) == 1
+
+
+def test_cycle2_non_applied_finalize_never_recovers_or_dispatches_attempt_two() -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        finalize_result=Cycle2WriteResult.PROJECTION_CONFLICT,
+    )
+    handler = Cycle2HandlerSpy(
+        [(ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SEARCH_TRANSIENT", NOW + timedelta(seconds=1))]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned.status is ToolCallStatus.RUNNING
+    assert returned.attempts[0].finished_at is None
+    assert len(handler.calls) == 1
+    assert len(runtime.finalize_commands) == 1
+    assert runtime.recovered_append_commands == []
+
+
+def test_cycle2_result_unknown_is_rejected_without_finalize_or_retry() -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(created=created, owner_scope=owner)
+    handler = Cycle2HandlerSpy(
+        [(ToolResultOutcome.RESULT_UNKNOWN, None, NOW + timedelta(seconds=1))]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    with pytest.raises(ReadToolExecutionError, match="invalid Cycle 2 handler result"):
+        asyncio.run(
+            executor._execute_created(owner_scope=owner, created_record=created)
+        )
+
+    assert len(handler.calls) == 1
+    assert runtime.finalize_commands == []
+    assert runtime.recovered_append_commands == []
+
+
+def test_cycle2_missing_initial_closure_has_zero_fence_and_dispatch() -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        closure_available=False,
+    )
+    handler = Cycle2HandlerSpy([(ToolResultOutcome.SUCCESS, None, NOW)])
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned == created
+    assert runtime.initial_append_commands == []
+    assert handler.calls == []
+
+
+@pytest.mark.parametrize(
+    "runtime_kwargs",
+    [
+        {"run_budget_ms": 500, "trusted_read_times": [NOW + timedelta(seconds=1)]},
+        {"current_state_version": 4},
+    ],
+    ids=["zero-budget-at-fence", "state-drift-at-fence"],
+)
+def test_cycle2_writer_non_applied_revalidation_has_zero_dispatch(
+    runtime_kwargs: dict[str, object],
+) -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        initial_result=Cycle2DispatchFenceWriteResult.NOT_APPLICABLE,
+        **runtime_kwargs,
+    )
+    handler = Cycle2HandlerSpy([(ToolResultOutcome.SUCCESS, None, NOW)])
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    returned = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert returned == created
+    assert len(runtime.initial_append_commands) == 1
+    assert handler.calls == []
+    assert runtime.finalize_commands == []
+
+
+def test_cycle2_retry_decision_uses_post_dispatch_trusted_budget() -> None:
+    owner, created = _cycle2_created_tool()
+    runtime = Cycle2RuntimeSpy(
+        created=created,
+        owner_scope=owner,
+        run_budget_ms=500,
+        trusted_read_times=[NOW, NOW + timedelta(seconds=1)],
+        initial_timeout_ms=37,
+    )
+    handler = Cycle2HandlerSpy(
+        [(ToolResultOutcome.SYSTEM_FAILURE, "ORDER_SEARCH_TRANSIENT", NOW + timedelta(seconds=1))]
+    )
+    executor = Cycle2ReadToolExecutor(
+        runtime_record_port=runtime,
+        handler=handler,
+        uuid_factory=UuidSequence(),
+    )
+
+    terminal = asyncio.run(
+        executor._execute_created(owner_scope=owner, created_record=created)
+    )
+
+    assert terminal.status is ToolCallStatus.FAILED
+    assert terminal.attempts[0].retry_decision is ToolRetryDecision.RUN_BUDGET_EXHAUSTED
+    assert [call[2] for call in handler.calls] == [37]
+    assert runtime.recovered_append_commands == []
+
+
+def test_cycle2_executor_surface_has_no_clock_budget_retry_or_action_inputs() -> None:
+    public_methods = {
+        name for name in dir(Cycle2ReadToolExecutor) if not name.startswith("_")
+    }
+
+    assert public_methods == {"execute"}
+    assert set(signature(Cycle2ReadToolExecutor.execute).parameters) == {
+        "self",
+        "create_command",
+    }
+    constructor_inputs = set(signature(Cycle2ReadToolExecutor).parameters)
+    assert "clock" not in constructor_inputs
+    assert "remaining_run_time_budget_ms" not in constructor_inputs
+    assert all(name not in public_methods for name in ("retry", "execute_action"))
