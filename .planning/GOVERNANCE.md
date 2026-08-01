@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3 COMPLETE / W3R 02-04R PLANNING / W4 BLOCKED`；02-02R PR #223 已 reviewed merge 为 `B_C2_INPUT_BINDING_V2 = 5efd8fabc5c7af5100e10535e983c424e3fd7ad4` / tree `5a5b3081bb816f5b276b53de9922173290c9f9ca`；当前只冻结 `02-04R`，`02-05R` 因 exact Tool v2 type dependency 必须等待其真实 reviewed successor，`B_C2_W4_READY` 未形成且不得猜测 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3 COMPLETE / W3R 02-05R PLANNING / W4 BLOCKED`；02-04R planning PR #224 与 implementation PR #225 已 reviewed merge 为 `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa88fab1ab99d2b076a1d731f63dced064a` / tree `3f9852e825a69c9ceb8a19e18c810263ef74349e`；当前只冻结 `02-05R`，`B_C2_W4_READY` 未形成且不得猜测 |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C

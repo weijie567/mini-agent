@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_02_04R_PLANNING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
+状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_02_05R_PLANNING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
 
 ## Exact input
 
@@ -19,6 +19,10 @@
 - 02-02R planning PR #222 与 implementation PR #223 已 reviewed merge；真实
   `B_C2_INPUT_BINDING_V2 = 5efd8fabc5c7af5100e10535e983c424e3fd7ad4`，tree
   `5a5b3081bb816f5b276b53de9922173290c9f9ca` 与 reviewed overlay tree 相等。
+- 02-04R planning PR #224 与 implementation PR #225 已 bounded
+  feature/residual/latest-integration overlay review `PASS` 并 merge；真实
+  `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa88fab1ab99d2b076a1d731f63dced064a`，
+  tree `3f9852e825a69c9ceb8a19e18c810263ef74349e` 与 reviewed overlay tree 相等。
 
 ## Confirmed W4 preflight blocker and owner ruling
 
@@ -39,11 +43,10 @@ name 同时存在 `shipment_not_received` / `not_received_claim` 漂移。
 - Claim canonical name 统一为 `shipment_not_received`；
 - 增加 `02-02R/02-04R/02-05R` 与 `W3R`，最大 writer 仍为 2。
 
-当前只允许从 exact `B_C2_INPUT_BINDING_V2` 签发并审阅 `02-04R`；其 Plan review/merge
-前不得创建 implementation Worktree。只读 preflight 已确认 `02-05R` 需要
-`GateDecisionV2 / AuthorizedToolCommandV2` exact type，必须等待 02-04R reviewed
-successor 后重新冻结，不得继续假设同 base 并行。三个 correction Packet 逐个 reviewed merge 并冻结
-真实 `B_C2_W4_READY` 后，才可重冻结或创建 W4 implementation Worktree。
+02-04R 已关闭 exact Tool v2 type dependency。当前只允许从 exact
+`B_C2_SELECTED_TARGET_GATEWAY` 签发并审阅 `02-05R`；其 Plan review/merge 前不得创建
+implementation Worktree。02-05R reviewed merge 的实际 successor 才能冻结为真实
+`B_C2_W4_READY`；此前不得重冻结或创建 W4 implementation Worktree。
 
 ## Packet freeze 与批次
 
