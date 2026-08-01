@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W3R COMPLETE / B_C2_W4_READY / W4 PLAN REFREEZE REVIEW`；02-05R planning PR #226 与 implementation PR #227 已reviewed merge为 `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de` / tree `174fbebcfa622336ffeade113cfae74a5611edae`；`02-06/08/09/13` 已从该product base重冻结，planning review/merge前不得创建implementation资源 |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W4 02-06+13+08 MERGED / 02-09 BLOCKED / W4R 02-09R1 PLAN REVIEW`；真实 current integration / `B_C2_RU_ROUTING = d0f37e2d064689bfe1ba708db57b015ee8d2af29` / tree `252a092b962327471facbf34b163536fc4d41ea3`；PR #231 已关闭 recovery owner ruling，02-09 source保持clean，必须按 `02-09R1→R2→R3` 真实 predecessor串行重冻结后再执行；Case仍为`CONTRACT_DEFINED` |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C
