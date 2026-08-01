@@ -26,12 +26,22 @@ from mini_agent.application.records import (
     MessageDirection,
     MessageRecord,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
+    FinalizeSupersededRunV2Command,
+    ToolRetryRecoveryDecisionRecordV2,
+)
+from mini_agent.application.run_result_mapper import (
+    Cycle2MapperSignal,
+    MapperDisposition,
+    ResponsePolicy,
 )
 from mini_agent.core.common import AuditOnlyModel
 from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
     OrderObservation,
+    SearchOrdersObservation,
+    ShipmentObservation,
 )
 from mini_agent.core.order import OrderStatus
 from mini_agent.core.request_understanding import (
@@ -41,6 +51,9 @@ from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     InputBinding,
+    InputBindingV2,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSetRecord,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
     TaskRecord,
@@ -53,6 +66,7 @@ from mini_agent.core.tool_system import (
     GateReasonCode,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
+    ToolCallRecordV2,
     ToolCallRecord,
     ToolCallStatus,
     ToolEffect,
@@ -64,10 +78,15 @@ from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
     AgentRunStatus,
+    AgentRunRecordV2,
+    AgentRunStatusV2,
     StopReason,
+    StopReasonV2,
     TraceEvent,
+    TraceEventV2,
     TraceEventType,
 )
+from mini_agent.core.shipment import ShipmentAssessment
 
 
 GRADER_NAMES = (
@@ -85,6 +104,32 @@ GRADER_NAMES = (
     "PersistenceGrader",
     "ToolsetReplayGrader",
 )
+
+# Phase 1's public identity remains stable.  Cycle 2 is deliberately a
+# separate profile: sharing a name does not make the corresponding grader
+# implementation or evidence contract interchangeable.
+PHASE1_GRADER_NAMES = GRADER_NAMES
+CYCLE2_GRADER_NAMES = (
+    "SchemaGrader",
+    "IdentityBoundaryGrader",
+    "RequestUnderstandingGrader",
+    "InputBindingGrader",
+    "TaskStateGrader",
+    "ToolCallGrader",
+    "CandidateSetGrader",
+    "ObservationGrader",
+    "ShipmentAssessmentGrader",
+    "RetryRecoveryGrader",
+    "DisclosureGrader",
+    "RendererFactGrader",
+    "TraceCompletenessGrader",
+    "PersistenceGrader",
+    "ToolsetReplayGrader",
+)
+if set(PHASE1_GRADER_NAMES).intersection(CYCLE2_GRADER_NAMES) != (
+    set(PHASE1_GRADER_NAMES) - {"ErrorMappingGrader"}
+):
+    raise RuntimeError("grader profile identity overlap is not the reviewed set")
 
 
 class GradingConfigurationError(ValueError):
@@ -346,6 +391,183 @@ class EvalEvidence(AuditOnlyModel):
                     "v2 accepted children must reference durable candidates"
                 )
         return self
+
+
+_CYCLE2_REQUIRED_PREDICATE_ARITY: Mapping[str, int] = MappingProxyType(
+    {
+        "REQ_BINDING": 3,
+        "REQ_TOOL": 5,
+        "REQ_ATTEMPT": 6,
+        "REQ_UNFINISHED_ATTEMPT": 2,
+        "REQ_OBSERVATION": 4,
+        "REQ_CANDIDATE_SET": 4,
+        "REQ_SELECTION": 4,
+        "REQ_ASSESSMENT": 3,
+        "REQ_PAIR": 5,
+        "REQ_RECOVERY": 5,
+        "REQ_STOP": 2,
+        "REQ_RUN_NO_RESULT_CLOSURE": 4,
+    }
+)
+
+
+class Cycle2Predicate(AuditOnlyModel):
+    """One already-authenticated Cycle 2 predicate, without an oracle value."""
+
+    name: str
+    operands: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def predicate_shape_is_exact(self) -> "Cycle2Predicate":
+        arity = _CYCLE2_REQUIRED_PREDICATE_ARITY.get(self.name)
+        if (
+            arity is None
+            or len(self.operands) != arity
+            or any(type(value) is not str or not value for value in self.operands)
+        ):
+            raise ValueError("Cycle 2 predicate identity or arity is invalid")
+        return self
+
+
+class Cycle2EvalExpectations(AuditOnlyModel):
+    """Authenticated Cycle 2 rubric input, kept separate from actual evidence."""
+
+    case_id: str
+    trusted_customer_id: str
+    expected_http_status: Annotated[int, Field(ge=100, le=599)]
+    expected_outcome: AgentOutcome
+    expected_stop_reason: StopReasonV2
+    expected_response_policy: str
+    required_predicates: tuple[Cycle2Predicate, ...]
+    forbidden_predicates: tuple[str, ...]
+    state_assertions: tuple[str, ...]
+    disclosure_assertions: tuple[str, ...]
+    applicable_critical_failures: tuple[CriticalFailureCode, ...]
+
+    @model_validator(mode="after")
+    def expectation_sets_are_closed(self) -> "Cycle2EvalExpectations":
+        identities = tuple(
+            (predicate.name, predicate.operands)
+            for predicate in self.required_predicates
+        )
+        if (
+            not self.case_id
+            or not self.trusted_customer_id
+            or not self.expected_response_policy
+            or not identities
+            or len(identities) != len(set(identities))
+            or len(self.forbidden_predicates)
+            != len(set(self.forbidden_predicates))
+            or len(self.applicable_critical_failures)
+            != len(set(self.applicable_critical_failures))
+        ):
+            raise ValueError("Cycle 2 expectations are incomplete or duplicated")
+        stop = tuple(
+            predicate
+            for predicate in self.required_predicates
+            if predicate.name == "REQ_STOP"
+        )
+        if stop != (
+            Cycle2Predicate(
+                name="REQ_STOP",
+                operands=(
+                    self.expected_outcome.value,
+                    self.expected_stop_reason.value,
+                ),
+            ),
+        ):
+            raise ValueError("Cycle 2 stop predicate contradicts expected outcome")
+        return self
+
+
+class Cycle2MapperEvidence(AuditOnlyModel):
+    """Actual mapper projection captured from the SUT; never recomputed here."""
+
+    signal: Cycle2MapperSignal
+    row_id: Annotated[str, Field(min_length=1)]
+    disposition: MapperDisposition
+    stop_reason: StopReasonV2 | None
+    outcome: AgentOutcome | None
+    response_policy: ResponsePolicy
+
+
+class Cycle2EvalEvidence(AuditOnlyModel):
+    """Actual typed records returned by a Cycle 2 SUT evidence reader.
+
+    The aggregate intentionally has no fixture, script, predicate, grader-result,
+    or boolean ``*_assertions_pass`` fields.  Those inputs therefore cannot be
+    used to manufacture a runtime fact.
+    """
+
+    case_id: str
+    http_status: Annotated[int, Field(ge=100, le=599)] | None = None
+    observed_outcome: AgentOutcome | None = None
+    response_policy: str
+    run_record: AgentRunRecordV2
+    mapper_evidence: Cycle2MapperEvidence | None = None
+    conversation_records: tuple[ConversationRecord, ...] = ()
+    agent_results: tuple[AgentRunResult, ...] = ()
+    message_records: tuple[MessageRecord, ...] = ()
+    input_bindings: tuple[InputBindingV2, ...] = ()
+    task_records: tuple[TaskRecord, ...] = ()
+    request_units: tuple[RequestUnitRecord, ...] = ()
+    run_task_links: tuple[RunTaskLinkRecordV2, ...] = ()
+    task_state_transitions: tuple[TaskStateTransition, ...] = ()
+    candidate_sets: tuple[OrderCandidateSetRecord, ...] = ()
+    candidate_selections: tuple[OrderCandidateSelectionRecord, ...] = ()
+    search_observations: tuple[SearchOrdersObservation, ...] = ()
+    shipment_observations: tuple[ShipmentObservation, ...] = ()
+    shipment_assessments: tuple[ShipmentAssessment, ...] = ()
+    tool_calls: tuple[ToolCallRecordV2, ...] = ()
+    recovery_decisions: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
+    superseded_run_finalizations: tuple[
+        FinalizeSupersededRunV2Command,
+        ...,
+    ] = ()
+    context_manifests: tuple[ContextManifest, ...] = ()
+    model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
+    trace_events: tuple[TraceEventV2, ...]
+
+    @model_validator(mode="after")
+    def actual_record_graph_has_unique_identities(self) -> "Cycle2EvalEvidence":
+        identity_sets: tuple[tuple[object, ...], ...] = (
+            tuple(record.conversation_id for record in self.conversation_records),
+            tuple(record.message_id for record in self.message_records),
+            tuple(record.binding_id for record in self.input_bindings),
+            tuple(record.task_id for record in self.task_records),
+            tuple(record.request_unit_id for record in self.request_units),
+            tuple((record.run_id, record.task_id) for record in self.run_task_links),
+            tuple(record.candidate_set_id for record in self.candidate_sets),
+            tuple(record.selection_id for record in self.candidate_selections),
+            tuple(record.observation_id for record in self.search_observations),
+            tuple(record.observation_id for record in self.shipment_observations),
+            tuple(record.assessment_id for record in self.shipment_assessments),
+            tuple(record.tool_call_id for record in self.tool_calls),
+            tuple(
+                record.recovery_decision_id
+                for record in self.recovery_decisions
+            ),
+            tuple(record.trace_event_id for record in self.trace_events),
+        )
+        if any(len(values) != len(set(values)) for values in identity_sets):
+            raise ValueError("Cycle 2 actual evidence identities must be unique")
+        if any(event.run_id != self.run_record.run_id for event in self.trace_events):
+            raise ValueError("Cycle 2 Trace must belong to the evidenced Run")
+        if any(link.run_id != self.run_record.run_id for link in self.run_task_links):
+            raise ValueError("Cycle 2 RunTaskLink must belong to the evidenced Run")
+        if any(call.run_id != self.run_record.run_id for call in self.tool_calls):
+            raise ValueError("Cycle 2 ToolCall must belong to the evidenced Run")
+        return self
+
+
+class Cycle2DeterministicGrader(Protocol):
+    name: str
+
+    def grade(
+        self,
+        evidence: Cycle2EvalEvidence,
+        expectations: Cycle2EvalExpectations,
+    ) -> EvalGraderResult: ...
 
 
 class DeterministicGrader(Protocol):
@@ -2762,6 +2984,585 @@ def _trace_references_match_typed_records(
     return True
 
 
+def _cycle2_input_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    if evidence.case_id != expectations.case_id:
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    stopped = tuple(
+        event
+        for event in evidence.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    if len(stopped) != 1:
+        return EvalGraderReasonCode.MISSING_RECORD
+    if (
+        stopped[0].stop_reason is not expectations.expected_stop_reason
+        or stopped[0].user_outcome is not expectations.expected_outcome
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    no_outbound = expectations.expected_response_policy == "NONE"
+    if no_outbound:
+        if (
+            evidence.http_status is not None
+            or evidence.observed_outcome is not None
+            or evidence.agent_results
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    elif (
+        evidence.http_status != expectations.expected_http_status
+        or evidence.observed_outcome is not expectations.expected_outcome
+        or len(evidence.agent_results) != 1
+        or evidence.agent_results[0].run_id != evidence.run_record.run_id
+        or evidence.agent_results[0].outcome is not expectations.expected_outcome
+        or evidence.response_policy != expectations.expected_response_policy
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_record_storage_is_exact(record: BaseModel) -> bool:
+    record_type = type(record)
+    fields = frozenset(record_type.model_fields)
+    return (
+        frozenset(vars(record)) == fields
+        and record.model_fields_set <= fields
+        and record.__pydantic_extra__ is None
+        and record.__pydantic_private__ is None
+    )
+
+
+def _nested_string_values(value: object) -> set[str]:
+    if type(value) is str:
+        return {value}
+    if isinstance(value, BaseModel):
+        return {
+            item
+            for field_name in type(value).model_fields
+            for item in _nested_string_values(getattr(value, field_name))
+        }
+    if isinstance(value, Mapping):
+        return {
+            item
+            for key, nested in value.items()
+            for item in (*_nested_string_values(key), *_nested_string_values(nested))
+        }
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return {item for nested in value for item in _nested_string_values(nested)}
+    return set()
+
+
+def _cycle2_raw_disclosure_tokens(evidence: Cycle2EvalEvidence) -> frozenset[str]:
+    tokens: set[str] = set()
+    tokens.update(record.owner_customer_id for record in evidence.conversation_records)
+    tokens.update(record.owner_customer_id for record in evidence.task_records)
+    tokens.update(record.content for record in evidence.message_records)
+    for binding in evidence.input_bindings:
+        tokens.update(_nested_string_values(binding.normalized_value))
+    for record in evidence.candidate_sets:
+        tokens.add(record.private_owner_scope_ref)
+        tokens.add(record.search_observation_source_version)
+        tokens.update(
+            candidate.candidate_source_version
+            for candidate in record.ordered_candidates
+        )
+    for record in evidence.candidate_selections:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                record.owner_scoped_order_target_ref,
+                record.selected_target_ref,
+                record.candidate_source_version,
+            }
+        )
+    for record in evidence.search_observations:
+        tokens.update(
+            {
+                record.private_owner_scope,
+                record.source_resource_ref,
+                record.source_version,
+            }
+        )
+        tokens.update(_nested_string_values(record.normalized_value))
+    for record in evidence.shipment_observations:
+        tokens.update(
+            {
+                record.private_owner_scope,
+                record.verified_order_target_ref,
+                record.source_resource_ref,
+                record.source_version,
+            }
+        )
+        if record.raw_result_ref is not None:
+            tokens.add(record.raw_result_ref)
+        tokens.update(_nested_string_values(record.normalized_value))
+    for record in evidence.shipment_assessments:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                record.verified_order_target_ref,
+                record.shipment_observation_source_version,
+            }
+        )
+    for record in evidence.tool_calls:
+        tokens.add(record.private_owner_scope_ref)
+    return frozenset(token for token in tokens if token)
+
+
+def _cycle2_outbound_private_tokens(
+    evidence: Cycle2EvalEvidence,
+) -> frozenset[str]:
+    tokens: set[str] = set()
+    tokens.update(record.owner_customer_id for record in evidence.conversation_records)
+    tokens.update(record.owner_customer_id for record in evidence.task_records)
+    for record in evidence.candidate_sets:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                record.search_observation_source_version,
+            }
+        )
+        tokens.update(item.candidate_source_version for item in record.ordered_candidates)
+    for record in evidence.candidate_selections:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                record.owner_scoped_order_target_ref,
+                record.selected_target_ref,
+                record.candidate_source_version,
+            }
+        )
+    for record in evidence.search_observations:
+        tokens.update(
+            {
+                record.private_owner_scope,
+                record.source_resource_ref,
+                record.source_version,
+            }
+        )
+    for record in evidence.shipment_observations:
+        tokens.update(
+            {
+                record.private_owner_scope,
+                record.verified_order_target_ref,
+                record.source_resource_ref,
+                record.source_version,
+            }
+        )
+        if record.raw_result_ref is not None:
+            tokens.add(record.raw_result_ref)
+    for record in evidence.shipment_assessments:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                record.verified_order_target_ref,
+                record.shipment_observation_source_version,
+            }
+        )
+    for record in evidence.tool_calls:
+        tokens.add(record.private_owner_scope_ref)
+    return frozenset(token for token in tokens if token)
+
+
+def raw_cycle2_trace_is_disclosure_safe(evidence: Cycle2EvalEvidence) -> bool:
+    """Inspect raw ordinary TraceEventV2 records before any safe projection."""
+
+    forbidden_values = _cycle2_raw_disclosure_tokens(evidence)
+    forbidden_fragments = (
+        "customer_id",
+        "session:",
+        "raw_payload",
+        "candidate_summary",
+        "source_version",
+        "source-version",
+        "source version",
+        "prompt",
+        "traceback",
+        "stack trace",
+        "raw exception",
+    )
+    for event in evidence.trace_events:
+        if event.event_type is TraceEventType.EVAL_CASE_GRADED:
+            continue
+        if not _cycle2_record_storage_is_exact(event):
+            return False
+        values = _nested_string_values(event)
+        if values.intersection(forbidden_values):
+            return False
+        folded = "\n".join(values).casefold()
+        if any(fragment in folded for fragment in forbidden_fragments):
+            return False
+    return True
+
+
+def _cycle2_schema_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    if (
+        not evidence.trace_events
+        or evidence.run_record.status
+        in {AgentRunStatusV2.CREATED, AgentRunStatusV2.RUNNING}
+        or any(
+            not _cycle2_record_storage_is_exact(record)
+            for family in (
+                evidence.trace_events,
+                evidence.tool_calls,
+                evidence.candidate_sets,
+                evidence.candidate_selections,
+                evidence.search_observations,
+                evidence.shipment_observations,
+                evidence.shipment_assessments,
+                evidence.recovery_decisions,
+            )
+            for record in family
+        )
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+    return None
+
+
+def _cycle2_identity_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    if any(
+        record.owner_customer_id != expectations.trusted_customer_id
+        for record in (*evidence.conversation_records, *evidence.task_records)
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_binding_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    binding_ids = {binding.binding_id for binding in evidence.input_bindings}
+    referenced = {
+        reference
+        for call in evidence.tool_calls
+        for reference in call.argument_binding_refs
+    } | {
+        reference
+        for record in evidence.candidate_sets
+        for reference in record.query_binding_refs
+    } | {
+        record.ordinal_input_binding_ref for record in evidence.candidate_selections
+    }
+    if not referenced <= binding_ids:
+        return EvalGraderReasonCode.MISSING_RECORD
+    return None
+
+
+def _cycle2_task_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    task_by_id = {record.task_id: record for record in evidence.task_records}
+    unit_by_id = {record.request_unit_id: record for record in evidence.request_units}
+    if any(link.task_id not in task_by_id for link in evidence.run_task_links):
+        return EvalGraderReasonCode.MISSING_RECORD
+    if any(call.task_id not in task_by_id or call.request_unit_id not in unit_by_id for call in evidence.tool_calls):
+        return EvalGraderReasonCode.MISSING_RECORD
+    return None
+
+
+def _cycle2_tool_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_binding_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    if any(call.attempt_count != len(call.attempts) for call in evidence.tool_calls):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_candidate_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    search_by_id = {record.observation_id: record for record in evidence.search_observations}
+    set_by_id = {record.candidate_set_id: record for record in evidence.candidate_sets}
+    for candidate_set in evidence.candidate_sets:
+        observation = search_by_id.get(candidate_set.search_observation_ref)
+        if observation is None:
+            return EvalGraderReasonCode.MISSING_RECORD
+        expected = tuple(
+            (item.observation_candidate_ref, item.candidate_source_version)
+            for item in observation.normalized_value.ordered_candidates
+        )
+        actual = tuple(
+            (item.observation_candidate_ref, item.candidate_source_version)
+            for item in candidate_set.ordered_candidates
+        )
+        if (
+            candidate_set.private_owner_scope_ref != observation.private_owner_scope
+            or candidate_set.search_observation_source_version != observation.source_version
+            or actual != expected
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    for selection in evidence.candidate_selections:
+        candidate_set = set_by_id.get(selection.candidate_set_ref)
+        if candidate_set is None:
+            return EvalGraderReasonCode.MISSING_RECORD
+        selected = tuple(
+            item for item in candidate_set.ordered_candidates
+            if item.observation_candidate_ref == selection.observation_candidate_ref
+        )
+        if (
+            len(selected) != 1
+            or selection.private_owner_scope_ref != candidate_set.private_owner_scope_ref
+            or selection.candidate_set_version != candidate_set.candidate_set_version
+            or selection.candidate_source_version != selected[0].candidate_source_version
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_observation_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    call_by_id = {call.tool_call_id: call for call in evidence.tool_calls}
+    for observation in (*evidence.search_observations, *evidence.shipment_observations):
+        call = call_by_id.get(observation.source_tool_call_id)
+        if call is None:
+            return EvalGraderReasonCode.MISSING_RECORD
+        if call.canonical_tool_name != observation.source_tool:
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_assessment_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    observation_by_id = {
+        observation.observation_id: observation
+        for observation in evidence.shipment_observations
+    }
+    for assessment in evidence.shipment_assessments:
+        observation = observation_by_id.get(assessment.shipment_observation_ref)
+        if observation is None:
+            return EvalGraderReasonCode.MISSING_RECORD
+        if (
+            assessment.private_owner_scope_ref != observation.private_owner_scope
+            or assessment.task_id != observation.task_id
+            or assessment.request_unit_id != observation.request_unit_id
+            or assessment.verified_order_target_ref
+            != observation.verified_order_target_ref
+            or assessment.shipment_observation_source_version
+            != observation.source_version
+            or assessment.assessed_at < observation.recorded_at
+            or assessment.assessed_at >= observation.valid_until
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_retry_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    call_by_id = {call.tool_call_id: call for call in evidence.tool_calls}
+    decision_by_id = {
+        decision.recovery_decision_id: decision
+        for decision in evidence.recovery_decisions
+    }
+    for decision in evidence.recovery_decisions:
+        call = call_by_id.get(decision.tool_call_id)
+        if call is None or decision.last_attempt_no > call.attempt_count:
+            return EvalGraderReasonCode.MISSING_RECORD
+    for call in evidence.tool_calls:
+        if call.recovery_decision_ref is not None:
+            decision = decision_by_id.get(call.recovery_decision_ref)
+            if decision is None or decision.tool_call_id != call.tool_call_id:
+                return EvalGraderReasonCode.MISSING_RECORD
+    return None
+
+
+def _cycle2_oa10_reason(
+    evidence: Cycle2EvalEvidence,
+) -> EvalGraderReasonCode | None:
+    if evidence.run_record.status is not AgentRunStatusV2.SUPERSEDED:
+        return None
+    if (
+        evidence.run_record.stop_reason
+        is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
+        or len(evidence.superseded_run_finalizations) != 1
+        or evidence.agent_results
+        or any(
+            message.direction is MessageDirection.ASSISTANT
+            for message in evidence.message_records
+        )
+        or any(
+            event.event_type is TraceEventType.RESPONSE_RENDERED
+            for event in evidence.trace_events
+        )
+        or evidence.task_state_transitions
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    finalization = evidence.superseded_run_finalizations[0]
+    if (
+        finalization.superseded_run_record != evidence.run_record
+        or finalization.no_result_link_record.result_task_state_version is not None
+        or finalization.no_result_link_record not in evidence.run_task_links
+        or finalization.run_stopped_trace_record not in evidence.trace_events
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_disclosure_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    if not raw_cycle2_trace_is_disclosure_safe(evidence):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    outbound = "\n".join(result.message for result in evidence.agent_results)
+    private_tokens = _cycle2_outbound_private_tokens(evidence)
+    if any(token in outbound for token in private_tokens):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return _cycle2_oa10_reason(evidence)
+
+
+def _cycle2_mapper_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    actual = evidence.mapper_evidence
+    if actual is None:
+        return None
+    no_outbound = expectations.expected_response_policy == "NONE"
+    if no_outbound:
+        if (
+            actual.disposition
+            not in {
+                MapperDisposition.SUPPRESS_OBSOLETE_RUN,
+                MapperDisposition.NO_STATE_MUTATION,
+            }
+            or actual.outcome is not None
+            or actual.response_policy is not ResponsePolicy.NONE
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+    elif (
+        actual.disposition is not MapperDisposition.EMIT
+        or actual.stop_reason is not expectations.expected_stop_reason
+        or actual.outcome is not expectations.expected_outcome
+        or actual.response_policy.value != expectations.expected_response_policy
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return None
+
+
+def _cycle2_trace_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    starts = tuple(
+        event for event in evidence.trace_events
+        if event.event_type is TraceEventType.RUN_STARTED
+    )
+    stops = tuple(
+        event for event in evidence.trace_events
+        if event.event_type is TraceEventType.RUN_STOPPED
+    )
+    if len(starts) != 1 or len(stops) != 1:
+        return EvalGraderReasonCode.MISSING_RECORD
+    if tuple(event.occurred_at for event in evidence.trace_events) != tuple(
+        sorted(event.occurred_at for event in evidence.trace_events)
+    ):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    return _cycle2_oa10_reason(evidence)
+
+
+def _cycle2_toolset_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_input_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    trace_hashes = {
+        event.model_visible_toolset_hash
+        for event in evidence.trace_events
+        if event.model_visible_toolset_hash is not None
+    }
+    artifact_hashes = {
+        artifact.model_visible_toolset_hash
+        for artifact in evidence.model_visible_toolset_artifacts
+    }
+    if trace_hashes and trace_hashes != artifact_hashes:
+        return EvalGraderReasonCode.MISSING_RECORD
+    return None
+
+
+class _Cycle2Grader:
+    def __init__(self, name: str, check: object) -> None:
+        self.name = name
+        self._check = check
+
+    def grade(
+        self,
+        evidence: Cycle2EvalEvidence,
+        expectations: Cycle2EvalExpectations,
+    ) -> EvalGraderResult:
+        reason = self._check(evidence, expectations)
+        return _passed(self.name) if reason is None else _failed(self.name, reason)
+
+
+class CandidateSetGrader(_Cycle2Grader):
+    def __init__(self) -> None:
+        super().__init__("CandidateSetGrader", _cycle2_candidate_reason)
+
+
+class ShipmentAssessmentGrader(_Cycle2Grader):
+    def __init__(self) -> None:
+        super().__init__("ShipmentAssessmentGrader", _cycle2_assessment_reason)
+
+
+class RetryRecoveryGrader(_Cycle2Grader):
+    def __init__(self) -> None:
+        super().__init__("RetryRecoveryGrader", _cycle2_retry_reason)
+
+
 class GradingOutcome(AuditOnlyModel):
     status: EvalResultStatus
     grader_results: tuple[EvalGraderResult, ...]
@@ -2814,6 +3615,84 @@ def grader_registry() -> Mapping[str, DeterministicGrader]:
     return _GRADER_REGISTRY
 
 
+def _cycle2_persistence_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    for check in (
+        _cycle2_mapper_reason,
+        _cycle2_task_reason,
+        _cycle2_candidate_reason,
+        _cycle2_observation_reason,
+        _cycle2_assessment_reason,
+        _cycle2_retry_reason,
+    ):
+        reason = check(evidence, expectations)
+        if reason is not None:
+            return reason
+    return _cycle2_oa10_reason(evidence)
+
+
+def _cycle2_renderer_reason(
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> EvalGraderReasonCode | None:
+    reason = _cycle2_mapper_reason(evidence, expectations)
+    if reason is None:
+        reason = _cycle2_disclosure_reason(evidence, expectations)
+    if reason is not None:
+        return reason
+    if expectations.expected_response_policy == "NONE":
+        return None
+    if len(evidence.agent_results) != 1:
+        return EvalGraderReasonCode.MISSING_RECORD
+    # Renderer output is never accepted as an oracle for a business fact.  This
+    # branch only checks that it does not expose Runtime-private exact tokens;
+    # assessment/Observation correctness is established by their typed graders.
+    return None
+
+
+_CYCLE2_GRADER_REGISTRY: Mapping[str, Cycle2DeterministicGrader] = (
+    MappingProxyType(
+        {
+            grader.name: grader
+            for grader in (
+                _Cycle2Grader("SchemaGrader", _cycle2_schema_reason),
+                _Cycle2Grader(
+                    "IdentityBoundaryGrader",
+                    _cycle2_identity_reason,
+                ),
+                _Cycle2Grader(
+                    "RequestUnderstandingGrader",
+                    _cycle2_binding_reason,
+                ),
+                _Cycle2Grader("InputBindingGrader", _cycle2_binding_reason),
+                _Cycle2Grader("TaskStateGrader", _cycle2_task_reason),
+                _Cycle2Grader("ToolCallGrader", _cycle2_tool_reason),
+                CandidateSetGrader(),
+                _Cycle2Grader("ObservationGrader", _cycle2_observation_reason),
+                ShipmentAssessmentGrader(),
+                RetryRecoveryGrader(),
+                _Cycle2Grader("DisclosureGrader", _cycle2_disclosure_reason),
+                _Cycle2Grader("RendererFactGrader", _cycle2_renderer_reason),
+                _Cycle2Grader(
+                    "TraceCompletenessGrader",
+                    _cycle2_trace_reason,
+                ),
+                _Cycle2Grader("PersistenceGrader", _cycle2_persistence_reason),
+                _Cycle2Grader("ToolsetReplayGrader", _cycle2_toolset_reason),
+            )
+        }
+    )
+)
+if tuple(_CYCLE2_GRADER_REGISTRY) != CYCLE2_GRADER_NAMES:
+    raise RuntimeError("closed Cycle 2 grader registry does not match rubric")
+
+
+def cycle2_grader_registry() -> Mapping[str, Cycle2DeterministicGrader]:
+    return _CYCLE2_GRADER_REGISTRY
+
+
 _CRITICAL_BY_GRADER: Mapping[str, tuple[CriticalFailureCode, ...]] = MappingProxyType(
     {
         "SchemaGrader": (CriticalFailureCode.CF_12,),
@@ -2838,10 +3717,26 @@ _CRITICAL_BY_GRADER: Mapping[str, tuple[CriticalFailureCode, ...]] = MappingProx
             CriticalFailureCode.CF_10,
             CriticalFailureCode.CF_14,
         ),
+        "CandidateSetGrader": (
+            CriticalFailureCode.CF_03,
+            CriticalFailureCode.CF_12,
+            CriticalFailureCode.CF_14,
+        ),
         "ObservationGrader": (
             CriticalFailureCode.CF_03,
             CriticalFailureCode.CF_04,
             CriticalFailureCode.CF_10,
+        ),
+        "ShipmentAssessmentGrader": (
+            CriticalFailureCode.CF_04,
+            CriticalFailureCode.CF_10,
+            CriticalFailureCode.CF_12,
+            CriticalFailureCode.CF_13,
+        ),
+        "RetryRecoveryGrader": (
+            CriticalFailureCode.CF_10,
+            CriticalFailureCode.CF_12,
+            CriticalFailureCode.CF_14,
         ),
         "DisclosureGrader": (
             CriticalFailureCode.CF_01,
@@ -2921,6 +3816,36 @@ def grade_evidence(
         _GRADER_REGISTRY[name].grade(evidence, expectations) for name in names
     )
     return derive_grading_outcome(results, expectations)
+
+
+def grade_cycle2_evidence(
+    configured_grader_names: Sequence[str],
+    evidence: Cycle2EvalEvidence,
+    expectations: Cycle2EvalExpectations,
+) -> GradingOutcome:
+    """Grade one actual Cycle 2 graph with the exact authenticated profile."""
+
+    if isinstance(configured_grader_names, (str, bytes)):
+        raise GradingConfigurationError("Cycle 2 grader plan must be a sequence")
+    names = tuple(configured_grader_names)
+    if names != CYCLE2_GRADER_NAMES:
+        raise GradingConfigurationError(
+            "Cycle 2 grader plan must equal the complete canonical profile"
+        )
+    if type(evidence) is not Cycle2EvalEvidence or type(
+        expectations
+    ) is not Cycle2EvalExpectations:
+        raise GradingConfigurationError("Cycle 2 grader inputs are not canonical")
+    results = tuple(
+        _CYCLE2_GRADER_REGISTRY[name].grade(evidence, expectations)
+        for name in names
+    )
+    critical = _derive_critical_failures(results, expectations)  # type: ignore[arg-type]
+    return GradingOutcome(
+        status=determine_result_status(results, critical),
+        grader_results=results,
+        critical_failures=critical,
+    )
 
 
 def determine_result_status(

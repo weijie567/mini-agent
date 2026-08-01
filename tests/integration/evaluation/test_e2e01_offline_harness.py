@@ -121,6 +121,7 @@ from mini_agent.evaluation.artifacts import (
     EvalCaseArtifact,
     LoadedE2E01Artifacts,
     load_e2e01_artifacts,
+    load_e2e01_cycle2_artifacts,
 )
 from mini_agent.evaluation.graders import (
     EvalCaseExpectations,
@@ -2790,6 +2791,79 @@ def test_derived_contract_defined_cases_fail_before_any_execution_stage(
     assert nonce_calls == 0
     assert grader_calls == 0
     assert traces.events == []
+
+
+def test_all_cycle2_contract_defined_cases_fail_as_one_predispatch_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="git:synthetic-cycle2-predispatch",
+        runtime_version="git:synthetic-cycle2-predispatch",
+    )
+    selected_ids = tuple(case.case_id for case in artifacts.cases)
+    assert len(selected_ids) == 27
+    assert all(case.lifecycle_status == "CONTRACT_DEFINED" for case in artifacts.cases)
+
+    sut = BoundaryProbeSut()
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    provider_calls = 0
+    nonce_calls = 0
+    grader_calls = 0
+
+    class ForbiddenCycle2Provider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("Cycle 2 lifecycle hold forbids Provider construction")
+
+    def forbidden_nonce() -> UUID:
+        nonlocal nonce_calls
+        nonce_calls += 1
+        raise AssertionError("Cycle 2 lifecycle hold forbids nonce issuance")
+
+    def forbidden_grader(*_args: object, **_kwargs: object) -> GradingOutcome:
+        nonlocal grader_calls
+        grader_calls += 1
+        raise AssertionError("Cycle 2 lifecycle hold forbids Grader execution")
+
+    monkeypatch.setattr(
+        harness_module,
+        "ScriptedModelProviderV2",
+        ForbiddenCycle2Provider,
+    )
+    harness, _sut, _traces, _port = _harness(
+        artifacts=artifacts,
+        sut=sut,
+        traces=traces,
+        port=port,
+        grader_runner=forbidden_grader,
+        nonce_factory=forbidden_nonce,
+    )
+
+    outcome = _run(harness, case_ids=selected_ids)
+
+    assert outcome.command_passed is False
+    assert outcome.results == ()
+    assert tuple(failure.case_id for failure in outcome.execution_failures) == (
+        selected_ids
+    )
+    assert all(
+        failure.failure_phase is EvalExecutionFailurePhase.CASE_SETUP
+        and failure.safe_error_code
+        is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+        and failure.trace_ref is None
+        for failure in outcome.execution_failures
+    )
+    assert tuple(port.failures) == outcome.execution_failures
+    assert port.results == {}
+    assert port.events == ["failure_append"] * len(selected_ids)
+    assert sut.received_calls == []
+    assert traces.events == []
+    assert provider_calls == 0
+    assert nonce_calls == 0
+    assert grader_calls == 0
 
 
 @pytest.mark.parametrize(

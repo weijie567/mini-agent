@@ -49,6 +49,7 @@ from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunStatus,
     StopReason,
+    StopReasonV2,
     TraceEvent,
     TraceEventType,
 )
@@ -60,6 +61,10 @@ from mini_agent.evaluation.artifacts import (
     ModelScriptArtifact,
 )
 from mini_agent.evaluation.graders import (
+    CYCLE2_GRADER_NAMES,
+    PHASE1_GRADER_NAMES,
+    Cycle2EvalExpectations,
+    Cycle2Predicate,
     EvalCaseExpectations,
     EvalEvidence,
     GradingConfigurationError,
@@ -104,6 +109,44 @@ class EvalCaseExecutionInput(AuditOnlyModel):
         Field(min_length=1, max_length=1),
     ]
     trusted_context_fixture_ref: Annotated[str, Field(min_length=1)]
+
+
+class Cycle2EvalCaseExecutionInput(AuditOnlyModel):
+    """Authenticated setup references only; never an expectation or oracle."""
+
+    execution_ref: UUID
+    messages: Annotated[
+        tuple[EvalExecutionMessage, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    trusted_context_fixture_ref: Annotated[str, Field(min_length=1)]
+    initial_state_fixture_refs: tuple[str, ...]
+    environment_fixture_refs: tuple[str, ...]
+    fault_ref: str | None = None
+
+    @model_validator(mode="after")
+    def setup_refs_are_unique_and_nonempty(self) -> "Cycle2EvalCaseExecutionInput":
+        refs = (
+            self.initial_state_fixture_refs,
+            self.environment_fixture_refs,
+        )
+        if any(
+            len(values) != len(set(values))
+            or any(type(value) is not str or not value for value in values)
+            for values in refs
+        ):
+            raise ValueError("Cycle 2 setup refs must be non-empty and unique")
+        if self.fault_ref is not None and (
+            type(self.fault_ref) is not str
+            or not self.fault_ref.startswith("fault:")
+        ):
+            raise ValueError("Cycle 2 fault ref is invalid")
+        return self
+
+
+class AuthenticatedGraderProfile(str, Enum):
+    PHASE1 = "e2e01-thin-slice"
+    CYCLE2 = "e2e01-cycle2-rubric-v1"
 
 
 class UnboundSafeCaseObservable(AuditOnlyModel):
@@ -813,6 +856,148 @@ def _normalized_selected_script_ref(
     ):
         raise ArtifactContractError("selected script is not bound to Case")
     return selected_script_ref
+
+
+def resolve_authenticated_grader_profile(
+    case: EvalCaseArtifact,
+) -> AuthenticatedGraderProfile:
+    """Resolve only from authenticated grading metadata, never Case identity."""
+
+    graders_value = case.grading.get("graders")
+    rubric_value = case.grading.get("rubric_version")
+    if not isinstance(graders_value, tuple):
+        raise GradingConfigurationError("authenticated grader plan is not a tuple")
+    names = tuple(graders_value)
+    if (
+        not names
+        or any(type(name) is not str or not name for name in names)
+        or len(names) != len(set(names))
+    ):
+        raise GradingConfigurationError("authenticated grader plan is invalid")
+    if rubric_value == AuthenticatedGraderProfile.CYCLE2.value:
+        if names != CYCLE2_GRADER_NAMES:
+            raise GradingConfigurationError(
+                "Cycle 2 rubric requires the exact complete grader profile"
+            )
+        return AuthenticatedGraderProfile.CYCLE2
+    if rubric_value is None:
+        expected_order = tuple(name for name in PHASE1_GRADER_NAMES if name in names)
+        if names != expected_order:
+            raise GradingConfigurationError(
+                "Phase 1 grader plan contains unknown or cross-profile identity"
+            )
+        return AuthenticatedGraderProfile.PHASE1
+    raise GradingConfigurationError("unknown authenticated grader rubric")
+
+
+def _parse_cycle2_predicate(value: object) -> Cycle2Predicate:
+    if type(value) is not str or not value.endswith(")"):
+        raise ArtifactContractError("Cycle 2 predicate is invalid")
+    name, separator, operand_text = value[:-1].partition("(")
+    if not separator or not name or not operand_text:
+        raise ArtifactContractError("Cycle 2 predicate is invalid")
+    try:
+        return Cycle2Predicate(
+            name=name,
+            operands=tuple(operand_text.split(",")),
+        )
+    except Exception:
+        raise ArtifactContractError("Cycle 2 predicate is invalid") from None
+
+
+def _trusted_customer_for_cycle2_case(
+    artifacts: LoadedE2E01Artifacts,
+    case: EvalCaseArtifact,
+) -> str:
+    fixture_ref = case.input.get("trusted_context_fixture_ref")
+    fixtures = artifacts.fixture.get("fixtures", ())
+    matches = tuple(
+        item
+        for item in fixtures
+        if isinstance(item, Mapping)
+        and item.get("fixture_ref") == fixture_ref
+        and item.get("fixture_kind") == "TRUSTED_SESSION"
+    )
+    if len(matches) != 1:
+        raise ArtifactContractError("Cycle 2 trusted fixture is not unique")
+    owner_scope = matches[0].get("owner_scope")
+    if type(owner_scope) is not str or not owner_scope:
+        raise ArtifactContractError("Cycle 2 trusted owner scope is invalid")
+    return owner_scope
+
+
+def build_authenticated_cycle2_expectations(
+    *,
+    artifacts: LoadedE2E01Artifacts,
+    case: EvalCaseArtifact,
+) -> Cycle2EvalExpectations:
+    if resolve_authenticated_grader_profile(case) is not (
+        AuthenticatedGraderProfile.CYCLE2
+    ):
+        raise GradingConfigurationError("Cycle 2 expectations require Cycle 2 rubric")
+    projection = case.expectations
+    try:
+        return Cycle2EvalExpectations(
+            case_id=case.case_id,
+            trusted_customer_id=_trusted_customer_for_cycle2_case(
+                artifacts,
+                case,
+            ),
+            expected_http_status=projection["expected_http_status"],
+            expected_outcome=AgentOutcome(projection["expected_user_outcome"]),
+            expected_stop_reason=StopReasonV2(projection["expected_stop_reason"]),
+            expected_response_policy=projection["response_policy"],
+            required_predicates=tuple(
+                _parse_cycle2_predicate(value)
+                for value in projection["required_events"]
+            ),
+            forbidden_predicates=tuple(projection["forbidden_events"]),
+            state_assertions=tuple(projection["state_assertions"]),
+            disclosure_assertions=tuple(projection["disclosure_assertions"]),
+            applicable_critical_failures=tuple(
+                CriticalFailureCode(value)
+                for value in projection["critical_failure_refs"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ArtifactContractError(
+            "authenticated Cycle 2 expectations are invalid"
+        ) from None
+
+
+def build_cycle2_execution_input(
+    case: EvalCaseArtifact,
+    *,
+    execution_ref: UUID,
+) -> Cycle2EvalCaseExecutionInput:
+    if resolve_authenticated_grader_profile(case) is not (
+        AuthenticatedGraderProfile.CYCLE2
+    ):
+        raise GradingConfigurationError("Cycle 2 execution input requires Cycle 2 rubric")
+    fault = case.input.get("fault_injection")
+    fault_ref = fault.get("fault_ref") if isinstance(fault, Mapping) else None
+    try:
+        return Cycle2EvalCaseExecutionInput(
+            execution_ref=execution_ref,
+            messages=(
+                EvalExecutionMessage(
+                    role="user",
+                    content=_trusted_message_content_for_case(case),
+                ),
+            ),
+            trusted_context_fixture_ref=case.input[
+                "trusted_context_fixture_ref"
+            ],
+            initial_state_fixture_refs=tuple(
+                case.input["initial_state_fixture_refs"]
+            ),
+            environment_fixture_refs=tuple(
+                case.input["environment_fixture_refs"]
+            ),
+            fault_ref=fault_ref,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ArtifactContractError("Cycle 2 execution setup is invalid") from None
 
 
 def build_authenticated_case_expectations(
