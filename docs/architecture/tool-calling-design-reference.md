@@ -541,17 +541,47 @@ Gate 通过后，Runtime 必须：
 3. 写入可恢复的 ToolCall 起始记录，并关联 Gate、参数绑定和已校验状态版本。
 4. 根据 ToolRegistration 解析 Handler。
 5. 从 RuntimePrivateContext 注入可信 `customer_id` 和授权范围。
-6. 计算不超过 Run 剩余预算的实际 deadline。
+6. 从 owner-scoped current Run、可信服务端时间与版本化 Run-budget policy 计算不超过
+   Run 剩余预算的实际 deadline；模型、用户、executor 参数或旧 reader 数字不是 authority。
 7. 对 Action 关联既有 `action_id / idempotency_key`。
 8. 在调用任何 Handler / Business Port / Adapter 前，提交一个原子事务或等价的 durable dispatch fence：
+   - 在同一 CAS 中重读并严格校验 owner、active Run / link、current Task /
+     RequestUnit、完整 argument bindings / verified target、可信服务端时间与版本化预算；
    - 以当前状态为条件把 ToolCall 从 `CREATED` 更新为 `RUNNING`；
    - 追加当前 `ToolAttemptRecord` 并使 `attempt_count` 与之匹配；
    - 对 Action 同时把同一幂等身份的 Action Record / attempt 更新为 `STARTED`。
-9. 只有该 fence 成功提交后，才允许向 Handler / Business Port / Adapter 发起调用；提交失败时不得 dispatch。
+9. 只有该 fence 成功提交并直接返回与本次 `tool_call_id + attempt_no` 绑定的
+   `APPLIED` dispatch grant 后，才允许向 Handler / Business Port / Adapter 发起一次调用；
+   提交失败、grant 过期或 identity 不匹配时不得 dispatch。
 
 模型参数不得覆盖服务端可信参数；发生同名字段时必须拒绝，而不是静默接受模型值。
 
 durable dispatch fence 是恢复语义的一部分，不只是物理事务优化。P0 模块化单体可以使用同一数据库事务；后续若拆成不同存储，也必须提供等价的原子性与恢复证据，不能留下“外部调用已经发生，但权威记录仍为 `CREATED`”的崩溃窗口。
+
+Cycle 2 READ 的 initial / recovered attempt 统一使用 Application-private、非持久化的
+`Cycle2ReadDispatchGrant` 返回能力：
+
+```text
+Cycle2ReadDispatchGrant
+  write_result: APPLIED | ALREADY_APPLIED | PROJECTION_CONFLICT | NOT_APPLICABLE
+  tool_call_id?
+  attempt_no?
+  trusted_fenced_at?
+  effective_timeout_ms?
+```
+
+- `APPLIED` 当且仅当四个 grant 字段全部存在，identity 精确等于本次 fence，且
+  `effective_timeout_ms = min(500, same-CAS authoritative remaining Run budget)`，范围
+  为 `1..500`；所有 non-`APPLIED` 结果必须使四字段全部为 `null`。
+- grant 不是 Record、logical child、capability token 或公开方法输入；没有
+  `schema_version`，不得编码、持久化、缓存、复制到模型上下文或跨 dispatch 重放。
+  Executor 只能直接消费当前 awaited Port 返回值一次。
+- 裸 `APPLIED` enum、CAS 前 reader 的 `remaining_run_time_budget_ms`、executor clock /
+  budget 参数或 reconstructed grant 都没有 dispatch authority。Adapter 必须从完成
+  fence 的同一事务返回 grant；Executor 必须 exact-check identity 后才使用其 timeout。
+- initial attempt 与 recovered attempt 2 使用相同 grant closed matrix。initial CAS 还
+  必须证明 Gate 授权所绑定的 Task state、argument bindings 和 verified target 在 fence
+  时仍 current；recovered CAS 还必须原子写 decision child 与 attempt 2 fence。
 
 ### 9.2 ToolCallRecord
 
@@ -747,14 +777,17 @@ finalize current ToolAttempt
   exact active Run `started_at` 与版本化 Run-budget policy 派生；模型、用户消息、
   executor 参数或 caller-supplied `remaining_run_time_budget_ms` 都不是 authority。
   recovery writer 必须在同一 CAS 内重读这些输入并重新计算；旧 closure 即使曾有正
-  预算，也不能在当前预算已耗尽时授予第二次 dispatch。
+  预算，也不能在当前预算已耗尽时授予第二次 dispatch。writer 必须把 same-CAS
+  计算出的 `effective_timeout_ms` 放入本次 `APPLIED` dispatch grant；只返回 enum 或让
+  executor 继续使用旧 closure 数字都不构成授权。
 - `ToolRetryRecoveryDecisionRecordV2` 是 `ToolCallRecordV2` 的 audit-only logical
   child，不是新的 top-level business record。它只保存
   `recovery_decision_id`、`tool_call_id`、`last_attempt_no`、Core decision、stable
   reason、可选的 `candidate_next_attempt_no` 与可信 `decided_at`；禁止业务 payload、
   Tool result、Observation、用户文本、raw owner scope 或 Action 字段。恢复追加
   attempt 2 时，decision child 与第二个 durable dispatch fence 必须在一个 CAS 中
-  落盘；只有 `APPLIED` 授权一次 dispatch。
+  落盘；只有与 attempt 2 identity 绑定且携带 same-CAS timeout 的 `APPLIED` dispatch
+  grant 授权一次 dispatch。
 - attempt 1 已永久保存 `RETRY_SCHEDULED`、但 CAS 时 Run budget 已耗尽时，不得改写
   attempt 1。必须追加 `RUN_BUDGET_EXHAUSTED` recovery decision child，并以专用
   `RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED` recovery disposition 把 parent 终止为原
