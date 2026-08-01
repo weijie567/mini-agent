@@ -10,9 +10,9 @@
 - Phase 1已满足上述证据前提并完成release transition：用户继续接受有界`RTA-D01`，reviewed PR #199已squash merge到`main`（`f15320e3...`），Integrator据此手工同步completion checkbox。
 - 禁止调用 `requirements.mark-complete` 或其他自动 lifecycle API；Roadmap / State progress 也只能由 Integrator 根据 Summary、PR 与硬证据手工同步。
 - Phase 2 已有 scoped active implementation owner、master Plan 与 exact Task Packet；
-  W1 `02-00/01/02/03` 与 W2 `02-04` 已 reviewed merge，分别冻结
-  `B_C2_CORE_123` 与 `B_C2_TOOL`。当前 W3 `02-05` 只处于 exact Plan/Packet review
-  gate，尚未形成 Application implementation evidence。Phase 3–6 只保留 Coverage
+  W1 `02-00/01/02/03`、W2 `02-04` 与 W3 `02-05` 已 reviewed merge，分别冻结
+  `B_C2_CORE_123`、`B_C2_TOOL` 与 `B_C2_APP_CONTRACT`。当前串行冻结 W4
+  `02-06/08/09/13` exact Plan/Packet，尚未形成 W4 implementation evidence。Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
 
@@ -23,7 +23,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / W2 COMPLETE / W3 PLANNING）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / W3 COMPLETE / W4 PLANNING）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
@@ -34,9 +34,10 @@
 
 Cycle 2 scoped contract 已激活，W1 `02-01/02/03` 与 W2 `02-04` reviewed
 implementation 已合入并分别冻结 `B_C2_CORE_123 = 241cf6b...` 与
-`B_C2_TOOL = f9a2a75...`；旧 `02-02` head `ecfad7e...` 保持隔离。Core / Tool
-contracts 不构成四个 Case 的执行证据或 lifecycle 推进；W3 `02-05` 当前只有
-Plan/Packet candidate，且 W2 Tool contract 仍未 activation。四个 Case 继续保持 `CONTRACT_DEFINED`，
+`B_C2_TOOL = f9a2a75...`；W3 `02-05` reviewed merge 又冻结
+`B_C2_APP_CONTRACT = 86d1b835...`。旧 `02-02` head `ecfad7e...` 保持隔离。Core /
+Tool / Application contracts 不构成四个 Case 的执行证据或 lifecycle 推进；W4 当前
+只有逐个冻结的 Plan/Packet candidate。四个 Case 继续保持 `CONTRACT_DEFINED`，
 上方 checkbox 继续未勾选；当前没有 Phase 2 Eval artifact、Case activation、完整
 E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 
@@ -72,10 +73,10 @@ E2E-01 evidence，也没有 Runtime / Tool composition cutover。
 |---|---:|---|---|
 | `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
-| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W2_TOOL_COMPLETE / W3_PLANNING` |
-| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W2_TOOL_COMPLETE / W3_PLANNING` |
-| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W2_TOOL_COMPLETE / W3_PLANNING` |
-| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W2_TOOL_COMPLETE / W3_PLANNING` |
+| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W3_APP_CONTRACT_COMPLETE / W4_PLANNING` |
+| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W3_APP_CONTRACT_COMPLETE / W4_PLANNING` |
+| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W3_APP_CONTRACT_COMPLETE / W4_PLANNING` |
+| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / W3_APP_CONTRACT_COMPLETE / W4_PLANNING` |
 | `E2E02-01` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-02` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-03` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |

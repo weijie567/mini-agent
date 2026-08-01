@@ -21,8 +21,9 @@ Phase 2 scoped contract 已在 owner-alignment 冲突审查后激活为
 形成 `B_C2_W1_GATE_REPAIRED`，PR #213 refreeze `02-02`，PR #214/#215 reviewed
 merge 后冻结 `B_C2_CORE_123` 并关闭 W1。PR #216/#217 随后完成 W2 planning、
 02-04 feature/overlay 独立审阅与串行 merge，冻结 `B_C2_TOOL = f9a2a75...`。
-当前 W3 `02-05` exact Plan/Packet candidate 等待全新任务 review；`PASS`/merge 前
-不创建 W3 实现分支，W3 reviewed merge 后按用户指令停止。Phase 3–6
+PR #218/#219 又完成 W3 `02-05` planning、implementation、feature/overlay review 与
+串行 merge，冻结 `B_C2_APP_CONTRACT = 86d1b835...`。当前逐个冻结 W4
+`02-06/08/09/13` exact Plan/Packet；各自 `PASS`/merge 前不创建对应实现分支。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
@@ -157,7 +158,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W2_COMPLETE / W3_02-05_PLANNING_REVIEW / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W3_COMPLETE / W4_02-06_PLANNING_REVIEW / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -176,9 +177,11 @@ Plans:
 合并。`02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
-`B_C2_TOOL = f9a2a75...`。旧 `ecfad7e...` head 保持 quarantined。当前新增 `02-05`
-exact Plan/Packet candidate；其全新任务 review `PASS`/merge 前不创建 W3
-implementation branch，其余 slot 继续等待各自前置 barrier。
+`B_C2_TOOL = f9a2a75...`。PR #218/#219 完成 W3 02-05 并冻结
+`B_C2_APP_CONTRACT = 86d1b835...`；旧 `ecfad7e...` head 保持 quarantined。当前新增
+`02-06` exact Plan/Packet candidate，并按同一 exact product base 串行准备
+`02-08/09/13`；每份全新 planning review `PASS`/merge 前不创建对应 implementation
+branch。
 
 **Branch mapping**:
 
@@ -226,15 +229,20 @@ B_C2_TOOL
 = f9a2a75135ba63347e81e13f2b981cf550977875
 = tree 59afeccec3705b7bae754c00b012f669a049a9ac
 = PR #217 reviewed merge successor and exact W3 product base
+
+B_C2_APP_CONTRACT
+= 86d1b8357f817882b017e5c4306ec855e0b288e6
+= tree b27f5f805c85e8ce76c30be254a004cb5f127b4e
+= PR #219 reviewed merge successor and exact W4 product base
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
 `B_C2_START` 已冻结为 `B_C2_OWNER_ALIGNED` exact SHA/tree，随后 reviewed 02-03/02-01
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
-`ecfad7e...` 未进入 ancestry。W2 `02-04` 已从 exact `B_C2_CORE_123` 完成；W3
-`02-05` implementation 必须等本 six-file planning PR exact-head review `PASS`/merge
-后，仍从 exact `B_C2_TOOL` 创建。
+`ecfad7e...` 未进入 ancestry。W2 `02-04` 与 W3 `02-05` 已依次完成；W4 四个
+implementation Packet 的 product base 固定为 exact `B_C2_APP_CONTRACT`，planning
+control head 可以由逐个 reviewed planning PR 串行推进，但不得替换该 product base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
