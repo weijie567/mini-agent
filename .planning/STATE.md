@@ -11,7 +11,7 @@ last_activity: "2026-08-01 — 02-04R PR #224/#225 reviewed merge；从真实 su
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 10
+  total_plans: 8
   completed_plans: 8
   percent: 36
 ---
@@ -42,11 +42,11 @@ Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
 Current Plan: 02-05R
 Total Phases: 6
-Total Plans in Phase: 10
+Total Plans in Phase: 8
 Status: Phase 2 W3R / 02-05R planning review
 Last Activity: 2026-08-01
 Last Activity Description: W4 preflight确认 InputBinding / atomic ordinal selection / selected-target Gateway blocker；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R 02-05R planning；Plan files 10/22、completed slots 8/22、functional implementation 7/21；1/6 phases
+Progress: Phase 1 complete；Phase 2 W1/W2/W3 complete / W3R 02-05R planning；tracked Plan files 8、authorized slots 22、completed slots 8/22、functional implementation 7/21；1/6 phases
 
 ## Current Position
 
