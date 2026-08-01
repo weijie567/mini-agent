@@ -4,7 +4,7 @@ import ast
 import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic, sleep
 from uuid import UUID, uuid4
@@ -13,13 +13,15 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, func, inspect, select, text
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 
 from mini_agent.application.persistence import (
     P0_RECORD_SCHEMA_VERSION_CATALOG,
     P0RecordCode,
+    encode_persistence_record,
 )
 from mini_agent.core.order import OrderStatus
+from mini_agent.core.task_state import RequestUnitRecord, TaskRecord, TaskStatus
 from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, AgentRunRecordV2
 from mini_agent.infrastructure.persistence import models as persistence_models
 from mini_agent.infrastructure.persistence.database import (
@@ -42,6 +44,7 @@ from mini_agent.infrastructure.persistence.models import (
     MockShipmentModel,
     P0RecordModel,
     P0RecordReferenceModel,
+    P0RecordStateHistoryModel,
 )
 
 _LIBPQ_ROUTING_ENVIRONMENT_CASES = [
@@ -63,6 +66,14 @@ _CYCLE2_MIGRATION_REVISION = "20260731_0004"
 _CYCLE2_PREVIOUS_MIGRATION_REVISION = _MIGRATION_REVISION
 _SEARCH_AUTHORITY_MIGRATION_REVISION = "20260802_0005"
 _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION = _CYCLE2_MIGRATION_REVISION
+_RECORD_HISTORY_MIGRATION_REVISION = "20260802_0006"
+_RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION = (
+    _SEARCH_AUTHORITY_MIGRATION_REVISION
+)
+_RECORD_HISTORY_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic/versions/20260802_0006_cycle2_record_state_history.py"
+)
 _SEARCH_AUTHORITY_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "alembic/versions/20260802_0005_cycle2_search_authority_correction.py"
@@ -90,6 +101,23 @@ _SEARCH_AUTHORITY_UPGRADE_BLOCKED_MESSAGE = (
 )
 _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE = (
     "cannot downgrade order search authority while durable evidence exists"
+)
+_RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE = (
+    "cannot downgrade record state history while durable evidence exists"
+)
+_RECORD_HISTORY_APPEND_ONLY_MESSAGE = "record state history is append-only"
+_RECORD_HISTORY_APPEND_ONLY_FUNCTION = (
+    "p0_record_state_history_reject_mutation"
+)
+_RECORD_HISTORY_ROW_MUTATION_TRIGGER = (
+    "trg_p0_record_state_history_reject_row_mutation"
+)
+_RECORD_HISTORY_TRUNCATE_TRIGGER = (
+    "trg_p0_record_state_history_reject_truncate"
+)
+_RECORD_HISTORY_CODE_VERSION_PAIRS = (
+    ("task_record", "task_record.p0.v1"),
+    ("request_unit_record", "request_unit_record.p0.v1"),
 )
 _ORDER_STATUS_VALUES = tuple(status.value for status in OrderStatus)
 _V1_CODE_VERSION_PAIRS = (
@@ -371,6 +399,52 @@ def _insert_agent_run_envelope(
         )
     )
     return record_id, raw_envelope
+
+
+def _history_probe_values(
+    record_code: P0RecordCode,
+    *,
+    identity: UUID | None = None,
+    owner_customer_id: str = "customer-history",
+    state_version: int = 1,
+    history_id: UUID | None = None,
+) -> dict[str, object]:
+    record_identity = identity or uuid4()
+    created_at = datetime(2026, 8, 2, 8, 0, tzinfo=timezone.utc)
+    if record_code is P0RecordCode.TASK_RECORD:
+        record = TaskRecord(
+            task_id=record_identity,
+            owner_customer_id=owner_customer_id,
+            status=TaskStatus.ACTIVE,
+            state_version=state_version,
+            created_at=created_at,
+            updated_at=created_at + timedelta(minutes=state_version - 1),
+        )
+    elif record_code is P0RecordCode.REQUEST_UNIT_RECORD:
+        record = RequestUnitRecord(
+            request_unit_id=record_identity,
+            task_id=uuid4(),
+            goal_text="history physical probe",
+            goal_source_refs=(uuid4(),),
+            input_binding_refs=(uuid4(),),
+            status=TaskStatus.ACTIVE,
+            state_version=state_version,
+            created_at=created_at,
+            updated_at=created_at + timedelta(minutes=state_version - 1),
+        )
+    else:
+        raise ValueError("history probe supports only Task or RequestUnit")
+    envelope = encode_persistence_record(record_code, record)
+    raw_envelope = envelope.model_dump(mode="json")
+    return {
+        "history_id": history_id or uuid4(),
+        "record_code": record_code.value,
+        "record_schema_version": envelope.record_schema_version,
+        "logical_identity": raw_envelope["logical_identity"],
+        "scope_owner_customer_id": owner_customer_id,
+        "state_version": state_version,
+        "envelope": raw_envelope,
+    }
 
 
 def _record_row(engine: Engine, record_id: UUID) -> dict[str, object]:
@@ -709,7 +783,7 @@ def test_request_understanding_v2_expand_is_single_linear_alembic_head() -> None
         )
     )
 
-    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
     revision = script.get_revision(_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREVIOUS_MIGRATION_REVISION
@@ -724,7 +798,7 @@ def test_cycle2_physical_revision_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_CYCLE2_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _CYCLE2_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
 
 
 def test_search_authority_correction_is_single_linear_alembic_head() -> None:
@@ -736,7 +810,42 @@ def test_search_authority_correction_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_SEARCH_AUTHORITY_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_SEARCH_AUTHORITY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+
+
+def test_record_history_correction_is_single_linear_alembic_head() -> None:
+    assert _RECORD_HISTORY_MIGRATION_PATH.is_file()
+    script = ScriptDirectory.from_config(
+        alembic_config(DEFAULT_LOCAL_TEST_DATABASE_URL, testing=True)
+    )
+
+    revision = script.get_revision(_RECORD_HISTORY_MIGRATION_REVISION)
+    assert revision is not None
+    assert revision.down_revision == _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION
+    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+
+
+def test_record_history_correction_source_is_self_contained_and_frozen() -> None:
+    source = _RECORD_HISTORY_MIGRATION_PATH.read_text()
+    tree = ast.parse(source)
+
+    assert "mini_agent" not in source
+    assert _module_literal(tree, "revision") == _RECORD_HISTORY_MIGRATION_REVISION
+    assert _module_literal(tree, "down_revision") == (
+        _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION
+    )
+    assert _module_literal(tree, "branch_labels") is None
+    assert _module_literal(tree, "depends_on") is None
+    assert _module_literal(tree, "_HISTORY_CODE_VERSION_PAIRS") == (
+        _RECORD_HISTORY_CODE_VERSION_PAIRS
+    )
+    assert _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE in source
+    assert _RECORD_HISTORY_APPEND_ONLY_MESSAGE in source
+    assert _RECORD_HISTORY_APPEND_ONLY_FUNCTION in source
+    assert _RECORD_HISTORY_ROW_MUTATION_TRIGGER in source
+    assert _RECORD_HISTORY_TRUNCATE_TRIGGER in source
+    assert "FROM p0_records" not in source
+    assert "INSERT INTO p0_record_state_history" not in source
 
 
 def test_search_authority_correction_source_is_self_contained_and_frozen() -> None:
@@ -879,7 +988,7 @@ def test_cycle2_downgrade_blocks_new_top_level_evidence_before_mutation(
 
         assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
         assert "must-not-leak-from-v2-only-evidence" not in str(captured.value)
-        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
         assert _record_row(engine, record_id) == before
     finally:
         engine.dispose()
@@ -904,15 +1013,19 @@ def test_empty_and_phase1_head_upgrade_paths_converge_to_exact_structure(
             phase1_config,
             _CYCLE2_PREVIOUS_MIGRATION_REVISION,
         )
-        command.upgrade(phase1_config, _SEARCH_AUTHORITY_MIGRATION_REVISION)
+        command.upgrade(phase1_config, _RECORD_HISTORY_MIGRATION_REVISION)
 
         assert _migration_revision(empty_engine) == (
-            _SEARCH_AUTHORITY_MIGRATION_REVISION
+            _RECORD_HISTORY_MIGRATION_REVISION
         )
         assert _migration_revision(phase1_engine) == (
-            _SEARCH_AUTHORITY_MIGRATION_REVISION
+            _RECORD_HISTORY_MIGRATION_REVISION
         )
         assert _schema_structure(phase1_engine) == empty_structure
+        with phase1_engine.connect() as connection:
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 0
     finally:
         empty_engine.dispose()
         phase1_engine.dispose()
@@ -1315,7 +1428,7 @@ def test_search_authority_downgrade_blocks_durable_evidence_before_mutation(
 
         assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
         inspector = inspect(engine)
         assert "mock_order_search_snapshots" in inspector.get_table_names()
         assert "status" in {
@@ -1485,7 +1598,7 @@ def test_search_authority_downgrade_waits_for_prior_snapshot_then_fails_bounded(
             downgrade_future.result(timeout=10)
         assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
         with engine.connect() as connection:
             assert (
                 connection.scalar(
@@ -1496,6 +1609,605 @@ def test_search_authority_downgrade_waits_for_prior_snapshot_then_fails_bounded(
                 )
                 == snapshot_ref
             )
+    finally:
+        if writer_transaction is not None:
+            writer_transaction.rollback()
+        if writer_connection is not None:
+            writer_connection.close()
+        executor.shutdown(wait=True)
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_record_history_upgrade_does_not_backfill_current_records(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("record-history-no-backfill")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        command.downgrade(config, _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION)
+        history_values = (
+            _history_probe_values(P0RecordCode.TASK_RECORD),
+            _history_probe_values(P0RecordCode.REQUEST_UNIT_RECORD),
+        )
+        with engine.begin() as connection:
+            for values in history_values:
+                connection.execute(
+                    P0RecordModel.__table__.insert().values(
+                        record_id=uuid4(),
+                        record_code=values["record_code"],
+                        record_schema_version=values["record_schema_version"],
+                        logical_identity=values["logical_identity"],
+                        direct_owner_customer_id=(
+                            values["scope_owner_customer_id"]
+                            if values["record_code"] == "task_record"
+                            else None
+                        ),
+                        scope_owner_customer_id=values[
+                            "scope_owner_customer_id"
+                        ],
+                        state_version=values["state_version"],
+                        envelope=values["envelope"],
+                    )
+                )
+
+        command.upgrade(config, _RECORD_HISTORY_MIGRATION_REVISION)
+
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordModel)
+            ) == 2
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 0
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_record_history_admission_owner_lookup_and_current_row_decoupling(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    task_identity = uuid4()
+    task_v1 = _history_probe_values(
+        P0RecordCode.TASK_RECORD,
+        identity=task_identity,
+        state_version=1,
+    )
+    request_unit = _history_probe_values(P0RecordCode.REQUEST_UNIT_RECORD)
+    task_v2 = _history_probe_values(
+        P0RecordCode.TASK_RECORD,
+        identity=task_identity,
+        state_version=2,
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordStateHistoryModel.__table__.insert(),
+                (task_v1, request_unit, task_v2),
+            )
+
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(P0RecordStateHistoryModel.history_id).where(
+                    P0RecordStateHistoryModel.scope_owner_customer_id
+                    == "customer-history",
+                    P0RecordStateHistoryModel.record_code == "task_record",
+                    P0RecordStateHistoryModel.logical_identity
+                    == task_v1["logical_identity"],
+                    P0RecordStateHistoryModel.state_version == 1,
+                )
+            ) == task_v1["history_id"]
+            assert connection.scalar(
+                select(P0RecordStateHistoryModel.history_id).where(
+                    P0RecordStateHistoryModel.scope_owner_customer_id
+                    == "customer-foreign",
+                    P0RecordStateHistoryModel.record_code == "task_record",
+                    P0RecordStateHistoryModel.logical_identity
+                    == task_v1["logical_identity"],
+                    P0RecordStateHistoryModel.state_version == 1,
+                )
+            ) is None
+
+        conflicting_duplicate = {
+            **task_v1,
+            "history_id": uuid4(),
+            "envelope": {"private_conflict": "must-fail-closed"},
+        }
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    P0RecordStateHistoryModel.__table__.insert().values(
+                        **conflicting_duplicate
+                    )
+                )
+
+        current_record_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordModel.__table__.insert().values(
+                    record_id=current_record_id,
+                    record_code=task_v2["record_code"],
+                    record_schema_version=task_v2["record_schema_version"],
+                    logical_identity=task_v2["logical_identity"],
+                    direct_owner_customer_id="customer-history",
+                    scope_owner_customer_id="customer-history",
+                    state_version=task_v2["state_version"],
+                    envelope=task_v2["envelope"],
+                )
+            )
+            connection.execute(
+                P0RecordModel.__table__.delete().where(
+                    P0RecordModel.record_id == current_record_id
+                )
+            )
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 3
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("update", "drop_history_id"),
+    (
+        ({"record_code": "agent_run_record"}, False),
+        ({"record_schema_version": "request_unit_record.p0.v1"}, False),
+        ({"logical_identity": {"task_id": "not-an-array"}}, False),
+        ({"scope_owner_customer_id": ""}, False),
+        ({"state_version": 0}, False),
+        ({"envelope": ["not-an-object"]}, False),
+        ({}, True),
+    ),
+)
+def test_record_history_rejects_invalid_physical_admission(
+    eval_postgres_namespace,
+    update: dict[str, object],
+    drop_history_id: bool,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    values = {
+        **_history_probe_values(P0RecordCode.TASK_RECORD),
+        **update,
+    }
+    try:
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                if drop_history_id:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO p0_record_state_history (
+                                record_code,
+                                record_schema_version,
+                                logical_identity,
+                                scope_owner_customer_id,
+                                state_version,
+                                envelope
+                            ) VALUES (
+                                'task_record',
+                                'task_record.p0.v1',
+                                '[]'::jsonb,
+                                'customer-history',
+                                1,
+                                '{}'::jsonb
+                            )
+                            """
+                        )
+                    )
+                else:
+                    connection.execute(
+                        P0RecordStateHistoryModel.__table__.insert().values(
+                            **values
+                        )
+                    )
+    finally:
+        engine.dispose()
+
+
+def test_record_history_schema_is_exact_and_has_no_current_row_foreign_key(
+    postgres_namespace,
+) -> None:
+    engine = postgres_namespace.build_engine()
+    try:
+        assert persistence_models._HISTORY_CODE_VERSION_PAIRS == (
+            _RECORD_HISTORY_CODE_VERSION_PAIRS
+        )
+        inspector = inspect(engine)
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns("p0_record_state_history")
+        }
+        assert set(columns) == {
+            "history_id",
+            "record_code",
+            "record_schema_version",
+            "logical_identity",
+            "scope_owner_customer_id",
+            "state_version",
+            "envelope",
+            "archived_at",
+        }
+        assert columns["history_id"]["nullable"] is False
+        assert columns["history_id"]["default"] is None
+        assert columns["archived_at"]["nullable"] is False
+        assert columns["archived_at"]["default"] is not None
+        assert inspector.get_pk_constraint("p0_record_state_history")[
+            "constrained_columns"
+        ] == ["history_id"]
+        assert {
+            item["name"]
+            for item in inspector.get_unique_constraints(
+                "p0_record_state_history"
+            )
+        } == {"uq_p0_record_state_history_logical_version"}
+        assert {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "p0_record_state_history"
+            )
+        } == {
+            "ck_p0_record_state_history_code_closed",
+            "ck_p0_record_state_history_code_version_closed",
+            "ck_p0_record_state_history_envelope_object",
+            "ck_p0_record_state_history_logical_identity_array",
+            "ck_p0_record_state_history_owner_nonempty",
+            "ck_p0_record_state_history_state_version_positive",
+        }
+        indexes = {
+            item["name"]: item
+            for item in inspector.get_indexes("p0_record_state_history")
+            if not item.get("duplicates_constraint")
+        }
+        assert set(indexes) == {"ix_p0_record_state_history_owner_lookup"}
+        assert indexes["ix_p0_record_state_history_owner_lookup"][
+            "column_names"
+        ] == [
+            "scope_owner_customer_id",
+            "record_code",
+            "logical_identity",
+            "state_version",
+        ]
+        assert inspector.get_foreign_keys("p0_record_state_history") == []
+        with engine.connect() as connection:
+            triggers = set(
+                connection.scalars(
+                    text(
+                        """
+                        SELECT trigger.tgname
+                        FROM pg_trigger AS trigger
+                        JOIN pg_class AS relation
+                          ON relation.oid = trigger.tgrelid
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = relation.relnamespace
+                        WHERE namespace.nspname = current_schema()
+                          AND relation.relname = 'p0_record_state_history'
+                          AND NOT trigger.tgisinternal
+                        """
+                    )
+                )
+            )
+            functions = set(
+                connection.scalars(
+                    text(
+                        """
+                        SELECT procedure.proname
+                        FROM pg_proc AS procedure
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = procedure.pronamespace
+                        WHERE namespace.nspname = current_schema()
+                          AND procedure.proname =
+                              :append_only_function
+                        """
+                    ),
+                    {
+                        "append_only_function": (
+                            _RECORD_HISTORY_APPEND_ONLY_FUNCTION
+                        )
+                    },
+                )
+            )
+        assert triggers == {
+            _RECORD_HISTORY_ROW_MUTATION_TRIGGER,
+            _RECORD_HISTORY_TRUNCATE_TRIGGER,
+        }
+        assert functions == {_RECORD_HISTORY_APPEND_ONLY_FUNCTION}
+        assert P0RecordStateHistoryModel.__table__.c.history_id.default is None
+        assert (
+            P0RecordStateHistoryModel.__table__.c.history_id.server_default
+            is None
+        )
+        assert (
+            P0RecordStateHistoryModel.__table__.c.archived_at.server_default
+            is not None
+        )
+    finally:
+        engine.dispose()
+
+
+def test_record_history_database_is_append_only_but_accepts_insert(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("record-history-append-only")
+    engine = namespace.build_engine()
+    values = _history_probe_values(
+        P0RecordCode.TASK_RECORD,
+        owner_customer_id="must-not-leak-append-only-owner",
+    )
+
+    def stored_row() -> dict[str, object]:
+        with engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(P0RecordStateHistoryModel.__table__).where(
+                        P0RecordStateHistoryModel.history_id
+                        == values["history_id"]
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return dict(row)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordStateHistoryModel.__table__.insert().values(**values)
+            )
+        original = stored_row()
+
+        rejected_mutations = (
+            P0RecordStateHistoryModel.__table__.update()
+            .where(
+                P0RecordStateHistoryModel.history_id == values["history_id"]
+            )
+            .values(envelope={"private_marker": "must-not-leak-update"}),
+            P0RecordStateHistoryModel.__table__.delete().where(
+                P0RecordStateHistoryModel.history_id == values["history_id"]
+            ),
+            text("TRUNCATE TABLE p0_record_state_history"),
+        )
+        for mutation in rejected_mutations:
+            with pytest.raises(DBAPIError) as captured:
+                with engine.begin() as connection:
+                    connection.execute(mutation)
+
+            driver_error = captured.value.orig
+            assert getattr(driver_error, "sqlstate", None) == "55000"
+            primary_message = driver_error.diag.message_primary
+            assert primary_message == _RECORD_HISTORY_APPEND_ONLY_MESSAGE
+            assert "must-not-leak-append-only-owner" not in primary_message
+            assert "must-not-leak-update" not in primary_message
+            assert str(values["history_id"]) not in primary_message
+            assert stored_row() == original
+
+        second_values = _history_probe_values(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            owner_customer_id="customer-history-second-insert",
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordStateHistoryModel.__table__.insert().values(
+                    **second_values
+                )
+            )
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 2
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    "record_code",
+    (P0RecordCode.TASK_RECORD, P0RecordCode.REQUEST_UNIT_RECORD),
+)
+def test_record_history_downgrade_blocks_any_history_before_mutation(
+    postgres_namespace_factory,
+    record_code: P0RecordCode,
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"record-history-downgrade-{record_code.value}"
+    )
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    values = _history_probe_values(
+        record_code,
+        owner_customer_id="must-not-leak-history-owner",
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordStateHistoryModel.__table__.insert().values(**values)
+            )
+
+        with pytest.raises(RuntimeError) as captured:
+            command.downgrade(
+                config,
+                _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION,
+            )
+
+        assert str(captured.value) == _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE
+        assert "must-not-leak-history-owner" not in str(captured.value)
+        assert str(values["history_id"]) not in str(captured.value)
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert "p0_record_state_history" in inspect(engine).get_table_names()
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(P0RecordStateHistoryModel.history_id)
+            ) == values["history_id"]
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_empty_record_history_downgrade_is_reversible_and_preserves_current_rows(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("record-history-empty-downgrade")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    current = _history_probe_values(P0RecordCode.TASK_RECORD)
+    current_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                P0RecordModel.__table__.insert().values(
+                    record_id=current_id,
+                    record_code=current["record_code"],
+                    record_schema_version=current["record_schema_version"],
+                    logical_identity=current["logical_identity"],
+                    direct_owner_customer_id=current[
+                        "scope_owner_customer_id"
+                    ],
+                    scope_owner_customer_id=current[
+                        "scope_owner_customer_id"
+                    ],
+                    state_version=current["state_version"],
+                    envelope=current["envelope"],
+                )
+            )
+
+        command.downgrade(config, _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION)
+        assert "p0_record_state_history" not in inspect(engine).get_table_names()
+        assert _migration_revision(engine) == (
+            _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION
+        )
+        assert _record_row(engine, current_id)["record_id"] == current_id
+
+        command.upgrade(config, _RECORD_HISTORY_MIGRATION_REVISION)
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 0
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_record_history_downgrade_lock_blocks_history_dml(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("record-history-lock-contract")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    barrier_connection = engine.connect()
+    barrier_transaction = barrier_connection.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    downgrade_future = None
+    try:
+        assert barrier_connection.scalar(
+            select(func.count()).select_from(P0RecordStateHistoryModel)
+        ) == 0
+        downgrade_future = executor.submit(
+            command.downgrade,
+            config,
+            _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION,
+        )
+        _wait_for_real_downgrade_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name="p0_record_state_history",
+        )
+
+        _assert_lock_timeout(
+            engine,
+            P0RecordStateHistoryModel.__table__.insert().values(
+                **_history_probe_values(P0RecordCode.TASK_RECORD)
+            ),
+        )
+        _assert_lock_timeout(
+            engine,
+            P0RecordStateHistoryModel.__table__.update().values(
+                archived_at=datetime(2026, 8, 2, 9, 0, tzinfo=timezone.utc)
+            ),
+        )
+    finally:
+        barrier_transaction.rollback()
+        barrier_connection.close()
+        executor.shutdown(wait=True)
+
+    try:
+        assert downgrade_future is not None
+        assert downgrade_future.result(timeout=10) is None
+        assert _migration_revision(engine) == (
+            _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION
+        )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_record_history_downgrade_waits_for_prior_insert_then_fails_bounded(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("record-history-prior-insert")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    writer_connection = engine.connect()
+    writer_transaction = writer_connection.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    downgrade_future = None
+    values = _history_probe_values(
+        P0RecordCode.TASK_RECORD,
+        owner_customer_id="must-not-leak-prior-history",
+    )
+    try:
+        writer_connection.execute(
+            P0RecordStateHistoryModel.__table__.insert().values(**values)
+        )
+        downgrade_future = executor.submit(
+            command.downgrade,
+            config,
+            _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION,
+        )
+        _wait_for_pending_table_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name="p0_record_state_history",
+            mode="ShareRowExclusiveLock",
+        )
+
+        writer_transaction.commit()
+        writer_connection.close()
+        writer_transaction = None
+        writer_connection = None
+
+        with pytest.raises(RuntimeError) as captured:
+            downgrade_future.result(timeout=10)
+        assert str(captured.value) == _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE
+        assert "must-not-leak-prior-history" not in str(captured.value)
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        with engine.connect() as connection:
+            assert connection.scalar(
+                select(P0RecordStateHistoryModel.history_id)
+            ) == values["history_id"]
     finally:
         if writer_transaction is not None:
             writer_transaction.rollback()
@@ -1666,6 +2378,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
+            "p0_record_state_history",
             "p0_records",
         }
         assert set(Base.metadata.tables) == {
@@ -1674,10 +2387,14 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
+            "p0_record_state_history",
             "p0_records",
         }
         assert P0RecordModel.__tablename__ == "p0_records"
         assert P0RecordReferenceModel.__tablename__ == "p0_record_references"
+        assert P0RecordStateHistoryModel.__tablename__ == (
+            "p0_record_state_history"
+        )
         assert MockOrderModel.__tablename__ == "mock_orders"
         assert MockOrderSearchDocumentModel.__tablename__ == (
             "mock_order_search_documents"
@@ -1693,7 +2410,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == (_SEARCH_AUTHORITY_MIGRATION_REVISION)
+            ) == (_RECORD_HISTORY_MIGRATION_REVISION)
     finally:
         engine.dispose()
 
@@ -2606,7 +3323,7 @@ def test_cycle2_downgrade_waits_for_prior_evidence_insert_then_fails_bounded(
         )
         assert str(captured.value) == expected_message
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _SEARCH_AUTHORITY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
         assert evidence_table in inspect(engine).get_table_names()
         with engine.connect() as connection:
             assert (
@@ -2759,12 +3476,13 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
             "mock_orders",
             "mock_shipments",
             "p0_record_references",
+            "p0_record_state_history",
             "p0_records",
         }
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == _SEARCH_AUTHORITY_MIGRATION_REVISION
+                == _RECORD_HISTORY_MIGRATION_REVISION
             )
     finally:
         engine.dispose()
