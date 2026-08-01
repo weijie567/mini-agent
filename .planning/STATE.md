@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-10"
-status: "phase_2_w5_complete_w6_not_started"
+current_plan: "02-07R"
+status: "phase_2_w6_02_07r_planning_review"
 last_updated: "2026-08-02"
-last_activity: "2026-08-02 — PR #247/#248 reviewed merge；冻结B_C2_PHYSICAL=bf8e88b2/fccc5a1f"
+last_activity: "2026-08-02 — PR #250 reviewed merge；批准02-07R与slots 26→27"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 26
+  total_plans: 27
   completed_plans: 18
-  percent: 69
+  percent: 67
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -34,37 +34,39 @@ implementation；当前 exact integration / `B_C2_LEAVES` 为
 `fc3a603b963ea54c597e00847ac816050bd007bf`、tree
 `01b33357c15d16ee2c1dc15194254f86dd07252c`。W4 exit三组回归`726/877/398 passed`；
 W4已完成；W5 `02-10`已reviewed merge并冻结`B_C2_PHYSICAL = bf8e88b2...` /
-tree `fccc5a1f...`，W6尚未开始。
+tree `fccc5a1f...`。W6 preflight发现Application Business Read Port owner缺口；用户
+授权`02-07R`及slots `26→27`，master Plan correction PR #250已reviewed merge。
+`02-07R`正在planning review；`02-07/02-11`仍被真实successor门禁阻断。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-10
+Current Plan: 02-07R
 Total Phases: 6
-Total Plans in Phase: 26
-Status: Phase 2 W5 complete / B_C2_PHYSICAL / W6 not started
+Total Plans in Phase: 27
+Status: Phase 2 W6 / 02-07R planning review / 02-07 and 02-11 blocked
 Last Activity: 2026-08-02
-Last Activity Description: 02-10 planning/implementation/overlay reviewed完成；两条upgrade path与targeted gate通过；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1–W5 complete；tracked Plan files 17、authorized slots 26、completed slots 18/26；1/6 phases
+Last Activity Description: PR #250 reviewed merge批准Application Port owner correction；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1–W5 complete；tracked Plan files 18、authorized slots 27、completed slots 18/27；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 26 USER-AUTHORIZED SLOTS / W1-W5 COMPLETE / W6 NOT STARTED`
-Status: `CONTRACT_ACTIVE / B_C2_PHYSICAL_CONFIRMED / W5_COMPLETE / W6_NOT_STARTED`
-Last activity: 2026-08-02 — PR #247/#248 reviewed完成；current integration bf8e88b2 / fccc5a1f
-Progress: Phase 1 100% complete；Phase 2 completed slots 18/26；W5 complete；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 27 USER-AUTHORIZED SLOTS / W1-W5 COMPLETE / 02-07R PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / B_C2_PHYSICAL_CONFIRMED / W6_OWNER_CORRECTION_PLANNING`
+Last activity: 2026-08-02 — PR #250 reviewed完成；current integration 89041f73 / 3364efa2
+Progress: Phase 1 100% complete；Phase 2 completed slots 18/27；W5 complete；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 从exact `B_C2_PHYSICAL = bf8e88b2...`只读核对并分别冻结W6 `02-07`与`02-11` exact Packets；两个writer文件零重叠，仍须串行merge。
-2. `02-07`只实现owner-scoped order/shipment Adapters；`02-11`只实现record adapters/recovery/atomicity。
-3. 两个Packet分别完成focused/neighbor/exact-head/overlay review；任何owner conflict、allowlist扩张或BLOCK/HIGH立即阻断。
-4. W6两个PR串行merge后运行唯一一次canonical full并冻结`B_C2_INFRA`；此前不推进Case lifecycle。
-5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
+1. 完成`02-07R` exact Plan review/merge，仅允许Application `ports.py`及其component test。
+2. 从reviewed `02-07R`真实 merge successor执行exact implementation/overlay review，冻结`B_C2_BUSINESS_READ_PORTS`。
+3. 只在该barrier上分别重冻结`02-07/02-11`；两个writer文件零重叠且仍须串行merge。
+4. 两个Adapter Packet均review-green并串行merge后，运行W6 exit唯一一次canonical full并冻结`B_C2_INFRA`。
+5. 全程不推进Case lifecycle/Harness/Result；真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
 
 ## Current Decisions
 
@@ -237,7 +239,8 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `fccc5a1f87a0b00dd31ba61ee8c960901c7601da`与reviewed overlay精确相等；focused
   `66 passed`、neighbor `277 passed`、empty/Phase1两条upgrade path、migration head、
   compile/diff均PASS。初审evidence-table TOCTOU HIGH已由四表固定顺序SRX lock与真实并发回归关闭；复审0 BLOCK/HIGH。
-- `OPEN`: W6及后续Plan、W6 canonical full、Phase 2 Harness/Eval Result；
+- `OPEN`: `02-07R` implementation、从其真实successor重冻结的`02-07/02-11`、
+  W6 canonical full、Phase 2 Harness/Eval Result；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -247,5 +250,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-02
-Stopped At: W5 complete / B_C2_PHYSICAL frozen / W6 not started；first 02-09 head clean/quarantined/unpublished
-Resume File: [phases/02-cycle-2-e2e-01/GATE-W5-02-10-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W5-02-10-EXECUTION-CARD.md)
+Stopped At: W6 `02-07R` planning review / `02-07/02-11` blocked；first 02-09 head clean/quarantined/unpublished
+Resume File: [phases/02-cycle-2-e2e-01/GATE-W6-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W6-EXECUTION-CARD.md)

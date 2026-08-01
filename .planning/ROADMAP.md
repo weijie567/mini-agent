@@ -37,7 +37,9 @@ PR #241 owner ruling与PR #242/#243 planning/implementation形成
 `B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；PR #244/#245随后
 reviewed完成second-refrozen replacement `02-09`并形成`B_C2_LEAVES = fc3a603b...` /
 tree `01b33357...`。W4 exit三组回归全部通过；PR #247/#248随后reviewed完成W5
-`02-10` migration并形成`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`；W6尚未开始。
+`02-10` migration并形成`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`。
+W6 preflight的Application Port owner缺口已经用户授权为`02-07R`；PR #250
+将slots更正为27且不新增wave label。`02-07/02-11`等待R真实successor。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -173,7 +175,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_PHYSICAL / W5_COMPLETE / W6_NOT_STARTED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_PHYSICAL / W6_02-07R_PLANNING / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -191,7 +193,8 @@ Plans:
 （`02-00..18`）、`W0..W12`、最大并发 `2` 已获 Gate P2-A 批准并由 PR #203
 合并。用户随后批准 `02-02R/02-04R/02-05R` 与 `W3R`，并在 recovery owner
 ruling 中把 `02-09R1/R2/R3` 加入前置修复链；PR #241又把`02-09R4/W4R2`
-加入dispatch-grant修复链。当前目标为26 slots / 16 wave labels，最大并发仍为`2`。
+加入dispatch-grant修复链。W6 preflight又经用户授权与PR #250增加
+`02-07R`，不新增wave label。当前目标为27 slots / 16 wave labels，最大并发仍为`2`。
 `02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
 完成 W2 planning 与 02-04 implementation/overlay review，形成 W2 barrier
@@ -210,7 +213,9 @@ R1 PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2 PR #235/#236/#237 又形成
 第一次replacement `02-09` head因两个shared owner HIGH未发布；PR #241批准R4，
 PR #242/#243 reviewed merge形成真实dispatch-ready successor；PR #244/#245从该
 successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passed`；旧02-09
-base/head仍不得复用；W5 `02-10`已reviewed完成并冻结`B_C2_PHYSICAL`，W6尚未开始。
+base/head仍不得复用；W5 `02-10`已reviewed完成并冻结`B_C2_PHYSICAL`。
+PR #250已批准W6 `02-07R` owner correction；当前只审该exact Plan，
+`02-07/02-11`仍blocked。
 
 **Branch mapping**:
 
@@ -347,8 +352,10 @@ B_C2_PHYSICAL
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
 `ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05`、W3R 与 W4
 `02-06/13/08`、R1/R2/R3/R4与second-refrozen 02-09已依次完成。第一次replacement
-02-09 head保持quarantine；真实`B_C2_PHYSICAL`已由reviewed W5 successor冻结，W6
-只可从该actual barrier分别冻结02-07/02-11 planning provenance。旧 `B_C2_APP_CONTRACT`、
+02-09 head保持quarantine；真实`B_C2_PHYSICAL`已由reviewed W5 successor冻结。
+PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；W6先只可从该
+actual control/product successor冻结`02-07R`。`02-07/02-11`只能在R实reviewed merge后
+再从其真实successor重冻结planning provenance。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -428,7 +435,7 @@ B_C2_PHYSICAL
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 18/26 | `W1-W5 complete；B_C2_PHYSICAL frozen；W5 focused/neighbor 66/277 passed；two upgrade paths PASS；W6 not started；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 18/27 | `W1-W5 complete；B_C2_PHYSICAL frozen；PR #250 approved 02-07R；W6 owner-correction planning；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
