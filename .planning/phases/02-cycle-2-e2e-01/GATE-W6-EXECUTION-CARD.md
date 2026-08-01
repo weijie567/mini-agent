@@ -1,6 +1,6 @@
 # Gate W6｜02-07R owner correction and Adapter execution card
 
-状态：`02-07R_PLANNING_REVIEW / 02-07_AND_02-11_BLOCKED`
+状态：`02-07R_COMPLETE / 02-07_AND_02-11_PLANNING_REVIEW`
 
 ## Exact input
 
@@ -13,16 +13,16 @@
 - User ruling：2026-08-02 授权 `02-07R`、slots `26 → 27`，不新增
   wave label。
 - Case lifecycle：`E2E01-02/03/05/06 = CONTRACT_DEFINED`。
+- `02-07R` planning PR #251 与 implementation PR #252 已reviewed merge；
+  `B_C2_BUSINESS_READ_PORTS = c775ef45eb42c9f03e63d0065d493e2fb2a43556` /
+  tree `c598651b56db003e6ab77a08d266d709a0ff8e76`，focused `25 passed`、
+  neighbor `284 passed`，feature/overlay/remote identity review均PASS。
 
 ## Ordered dispatch
 
 ```text
-02-07R planning review PASS
-→ exact two-file implementation
-→ focused + neighbor + exact-head + overlay review PASS
-→ reviewed PR merge
-→ freeze B_C2_BUSINESS_READ_PORTS from the real successor
-→ freeze fresh exact 02-07 and 02-11 Plans from that successor
+02-07R reviewed merge / B_C2_BUSINESS_READ_PORTS
+→ review and merge fresh exact 02-07 and 02-11 Plans from that successor
 → at most two non-overlapping writers
 → independent review and serial merge
 → run the one W6-exit canonical full
@@ -44,5 +44,6 @@ exact base/tree/blob/barrier 不相等，立即停止并裁决。
 
 ## Current gate
 
-`02-07R` 只在本 Plan 获得 independent exact-head `PASS` 并通过 planning PR
-合并后可 dispatch。`02-07/02-11` 现在不可 dispatch，不得复用早期 W6 draft。
+`02-07R` 已完成。`02-07/02-11` 只在两份新 exact Plan 都获得 independent
+exact-head `PASS` 并通过同一个 planning PR 合并后可 dispatch；两包文件
+零重叠，但仍需独立review、latest overlay 与串行merge。不得复用早期 W6 draft。
