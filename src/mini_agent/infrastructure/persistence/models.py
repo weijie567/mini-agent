@@ -181,6 +181,18 @@ _CODE_VERSION_CHECK = " OR ".join(
     f"(record_code = '{code}' AND record_schema_version = '{version}')"
     for code, version in _CODE_VERSION_PAIRS
 )
+_HISTORY_CODE_VERSION_PAIRS = (
+    ("task_record", "task_record.p0.v1"),
+    ("request_unit_record", "request_unit_record.p0.v1"),
+)
+_HISTORY_RECORD_CODES = tuple(code for code, _ in _HISTORY_CODE_VERSION_PAIRS)
+_HISTORY_RECORD_CODE_CHECK = (
+    "record_code IN (" + _sql_values(_HISTORY_RECORD_CODES) + ")"
+)
+_HISTORY_CODE_VERSION_CHECK = " OR ".join(
+    f"(record_code = '{code}' AND record_schema_version = '{version}')"
+    for code, version in _HISTORY_CODE_VERSION_PAIRS
+)
 
 
 class Base(DeclarativeBase):
@@ -272,6 +284,66 @@ class P0RecordModel(Base):
     recovery_sort_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     envelope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     stored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class P0RecordStateHistoryModel(Base):
+    __tablename__ = "p0_record_state_history"
+    __table_args__ = (
+        CheckConstraint(
+            _HISTORY_RECORD_CODE_CHECK,
+            name="ck_p0_record_state_history_code_closed",
+        ),
+        CheckConstraint(
+            _HISTORY_CODE_VERSION_CHECK,
+            name="ck_p0_record_state_history_code_version_closed",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(logical_identity) = 'array'",
+            name="ck_p0_record_state_history_logical_identity_array",
+        ),
+        CheckConstraint(
+            "length(scope_owner_customer_id) > 0",
+            name="ck_p0_record_state_history_owner_nonempty",
+        ),
+        CheckConstraint(
+            "state_version > 0",
+            name="ck_p0_record_state_history_state_version_positive",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(envelope) = 'object'",
+            name="ck_p0_record_state_history_envelope_object",
+        ),
+        PrimaryKeyConstraint("history_id"),
+        UniqueConstraint(
+            "record_code",
+            "logical_identity",
+            "state_version",
+            name="uq_p0_record_state_history_logical_version",
+        ),
+        Index(
+            "ix_p0_record_state_history_owner_lookup",
+            "scope_owner_customer_id",
+            "record_code",
+            "logical_identity",
+            "state_version",
+        ),
+    )
+
+    history_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    record_code: Mapped[str] = mapped_column(String, nullable=False)
+    record_schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    logical_identity: Mapped[list[list[Any]]] = mapped_column(JSONB, nullable=False)
+    scope_owner_customer_id: Mapped[str] = mapped_column(String, nullable=False)
+    state_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    envelope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    archived_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
