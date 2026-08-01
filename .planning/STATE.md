@@ -5,15 +5,15 @@ milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
 current_plan: "02-09"
-status: "phase_2_w4_read_executor_second_refrozen_plan_review"
+status: "phase_2_w4_complete_w5_not_started"
 last_updated: "2026-08-01"
-last_activity: "2026-08-01 — PR #242/#243 reviewed merge形成B_C2_02_09_DISPATCH_READY；第二次重冻结02-09"
+last_activity: "2026-08-01 — PR #244/#245 reviewed完成second-refrozen 02-09；W4 exit 726/877/398 passed；冻结B_C2_LEAVES"
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 26
-  completed_plans: 16
-  percent: 62
+  completed_plans: 17
+  percent: 65
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -29,10 +29,11 @@ See: [PROJECT.md](PROJECT.md)
 
 **Current focus:** W1–W3R 与 W4 `02-06/13/08`、`02-09R1/R2/R3` 已reviewed merge。
 第一次replacement 02-09 head在exact review发现两个shared owner HIGH后保持local clean且
-未发布。PR #241 owner ruling、PR #242 planning与PR #243 implementation已reviewed merge；
-当前 exact integration / `B_C2_02_09_DISPATCH_READY` 为
-`09be05da8fd0e9c27de54d0413fef720e8b591df`、tree
-`e1c10c67836b13a59083dc13d3f740780ff0142c`；当前从该真实successor第二次重冻结02-09并等待planning review。
+未发布。PR #241–#245已依次完成owner ruling、R4、second refreeze与replacement
+implementation；当前 exact integration / `B_C2_LEAVES` 为
+`fc3a603b963ea54c597e00847ac816050bd007bf`、tree
+`01b33357c15d16ee2c1dc15194254f86dd07252c`。W4 exit三组回归`726/877/398 passed`；
+W4已完成，W5未开始。
 
 ## GSD 1.38.3 Compatibility Fields
 
@@ -41,27 +42,27 @@ Current Phase Name: Cycle 2｜完成 E2E-01
 Current Plan: 02-09
 Total Phases: 6
 Total Plans in Phase: 26
-Status: Phase 2 W4 / second-refrozen 02-09 exact Plan review
+Status: Phase 2 W4 complete / B_C2_LEAVES frozen / W5 not started
 Last Activity: 2026-08-01
-Last Activity Description: PR #242/#243 reviewed merge；真实dispatch-ready barrier已核对；02-09从该successor第二次重冻结；Case仍为`CONTRACT_DEFINED`
-Progress: Phase 1 complete；Phase 2 W1–W3R + W4 02-06/13/08 + R1/R2/R3/R4 complete；tracked Plan files 16、authorized slots 26、completed slots 16/26；1/6 phases
+Last Activity Description: PR #244/#245 reviewed merge；W4 exit 726/877/398 passed；B_C2_LEAVES exact SHA/tree已核对；Case仍为`CONTRACT_DEFINED`
+Progress: Phase 1 complete；Phase 2 W1–W4 complete；tracked Plan files 16、authorized slots 26、completed slots 17/26；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 26 USER-AUTHORIZED SLOTS / W1-W3R + 02-06/13/08 + R1/R2/R3/R4 COMPLETE / SECOND 02-09 PLAN REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_02_09_DISPATCH_READY_CONFIRMED / FIRST_02-09_QUARANTINED / SECOND_02-09_PLANNING`
-Last activity: 2026-08-01 — PR #242/#243 merge tree已核对；02-09以该真实barrier第二次重冻结
-Progress: Phase 1 100% complete；Phase 2 completed slots 16/26；W4 planning；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 26 USER-AUTHORIZED SLOTS / W1-W4 COMPLETE / W5 NOT STARTED`
+Status: `CONTRACT_ACTIVE / B_C2_LEAVES_CONFIRMED / FIRST_02-09_QUARANTINED / W4_COMPLETE / W5_NOT_STARTED`
+Last activity: 2026-08-01 — PR #245 merge tree与W4 exit三组证据已核对；冻结B_C2_LEAVES
+Progress: Phase 1 100% complete；Phase 2 completed slots 17/26；W4 complete；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 对第二次重冻结的`02-09`做bounded exact-file planning review；`PASS` 后只合并该planning provenance。
-2. 从 exact `B_C2_02_09_DISPATCH_READY = 09be05da...` 用新的`r2` branch创建四文件Worktree；不得push/rebase第一次local head。
-3. 完成executor/recovery grant consumption、focused/neighbor/compile/diff与feature/latest-integration review；BLOCK/HIGH在原Packet内先修复。
-4. 02-09 reviewed merge后冻结`B_C2_LEAVES`，只运行integration-focused/neighbor与Phase1直接回归；不运行canonical full，不推进Case lifecycle。
+1. 停在W4完成边界；不得把Component门禁解释为Case activation、完整E2E-01或production readiness。
+2. 后续开始W5时，先从exact `B_C2_LEAVES = fc3a603b...`只读核对`02-10` physical migration owner、base/tree/blobs与branch absence，再由Integrator冻结独立Plan provenance。
+3. `02-10` Plan reviewed merge前不得创建migration implementation branch/Worktree；W5只拥有两条migration upgrade path。
+4. canonical full仍由W6 exit拥有；W5不得提前运行或替代它。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT、完整E2E-01/P0与production readiness继续保持未完成。
 
 ## Current Decisions
@@ -219,12 +220,18 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
   `09be05da8fd0e9c27de54d0413fef720e8b591df`、tree
   `e1c10c67836b13a59083dc13d3f740780ff0142c`与reviewed overlay tree相等；focused
   `428 passed`、neighbor `432 passed`、compile/diff通过，full/migration未运行。
-- `REFROZEN / SECOND_02-09_PLAN_REVIEW`: replacement 02-09只拥有两个Application
-  services及其两份component tests，使用新的`r2` branch；第一次head保持quarantine。
+- `CONFIRMED / B_C2_READ_EXECUTOR`: second-refreeze planning PR #244与implementation
+  PR #245已bounded exact-head/overlay review `PASS / 0 BLOCK / 0 HIGH`并merge；successor
+  `fc3a603b963ea54c597e00847ac816050bd007bf`、tree
+  `01b33357c15d16ee2c1dc15194254f86dd07252c`与reviewed overlay tree相等；focused
+  `79 passed`、neighbor `1104 passed`、compile/diff通过，full/migration未运行。
+- `CONFIRMED / B_C2_LEAVES / W4_EXIT`: exact integration tree上integration-focused
+  `726 passed`、neighbor-only `877 passed`、Phase 1 direct regression `398 passed`；
+  canonical full、Phase 2 Harness/Eval Result与Case lifecycle均未运行或推进。
 - `CONFIRMED / PHASE2_INTEGRATION_PROTECTION`: GitHub API 已显示 PR-required、
   enforce-admins、linear-history、conversation-resolution enabled，force-push / deletion
   disabled；每次 dispatch/merge 前继续机械复核，任何 drift 即 `BLOCK`。
-- `OPEN`: 第二次重冻结后的`02-09`、`B_C2_LEAVES`；
+- `OPEN`: W5 `02-10`及后续Plan、W6 canonical full、Phase 2 Harness/Eval Result；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
 ## Evidence Boundary
@@ -234,5 +241,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-01
-Stopped At: second-refrozen 02-09 exact Plan review；first 02-09 head clean/quarantined/unpublished
+Stopped At: W4 complete / B_C2_LEAVES frozen / W5 not started；first 02-09 head clean/quarantined/unpublished
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W4-EXECUTION-CARD.md)

@@ -34,8 +34,9 @@ tree `9c58a088...`；R3 PR #238/#239 随后形成真实
 `B_C2_02_09_READY = cdf8c194...` / tree `2e82f1b...`。第一次replacement `02-09`
 head在exact review发现两个shared dispatch-authority HIGH后保持local/unpublished；
 PR #241 owner ruling与PR #242/#243 planning/implementation形成
-`B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`，当前只从该真实
-successor第二次重冻结replacement `02-09`。
+`B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；PR #244/#245随后
+reviewed完成second-refrozen replacement `02-09`并形成`B_C2_LEAVES = fc3a603b...` /
+tree `01b33357...`。W4 exit三组回归全部通过，W5未开始。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -171,7 +172,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_02_09_DISPATCH_READY / SECOND_02-09_PLAN_REVIEW / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_LEAVES / W4_COMPLETE / W5_NOT_STARTED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -206,8 +207,9 @@ implementation PR #229/#230/#232 已形成 `B_C2_CODEC`、`B_C2_EVAL_BUNDLE`、
 R1 PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2 PR #235/#236/#237 又形成
 `B_C2_RECOVERY_APP_CONTRACT`；R3 PR #238/#239 形成真实 `B_C2_02_09_READY`。
 第一次replacement `02-09` head因两个shared owner HIGH未发布；PR #241批准R4，
-PR #242/#243 reviewed merge形成真实dispatch-ready successor。当前只从该successor
-第二次重冻结02-09；不得复用旧02-09 base/head。
+PR #242/#243 reviewed merge形成真实dispatch-ready successor；PR #244/#245从该
+successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passed`；旧02-09
+base/head仍不得复用，W5 `02-10`尚未开始。
 
 **Branch mapping**:
 
@@ -326,6 +328,11 @@ B_C2_02_09_DISPATCH_READY
 = 09be05da8fd0e9c27de54d0413fef720e8b591df
 = tree e1c10c67836b13a59083dc13d3f740780ff0142c
 = PR #242/#243 reviewed 02-09R4 planning/implementation successor and exact second-refrozen 02-09 product base
+
+B_C2_LEAVES
+= fc3a603b963ea54c597e00847ac816050bd007bf
+= tree 01b33357c15d16ee2c1dc15194254f86dd07252c
+= PR #244/#245 reviewed second-refrozen 02-09 successor; W4 exit 726/877/398 passed
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
@@ -333,8 +340,9 @@ B_C2_02_09_DISPATCH_READY
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
 `ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05`、W3R 与 W4
-`02-06/13/08` 与 R1/R2/R3/R4 已依次完成。第一次replacement 02-09 head已quarantine；
-第二次replacement 02-09只使用真实`B_C2_02_09_DISPATCH_READY`。旧 `B_C2_APP_CONTRACT`、
+`02-06/13/08`、R1/R2/R3/R4与second-refrozen 02-09已依次完成。第一次replacement
+02-09 head保持quarantine；真实`B_C2_LEAVES`已冻结，W5只可从其actual successor
+planning provenance开始。旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -414,7 +422,7 @@ B_C2_02_09_DISPATCH_READY
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 16/26 | `W1-W3R + W4 02-06/13/08 + 02-09R1/R2/R3/R4 complete；first 02-09 head quarantined；B_C2_02_09_DISPATCH_READY frozen；second 02-09 exact Plan review；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 17/26 | `W1-W4 complete；first 02-09 head quarantined；B_C2_LEAVES frozen；W4 exit 726/877/398 passed；W5 not started；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
