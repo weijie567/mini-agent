@@ -23,6 +23,7 @@ from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     AppendToolAttemptV2Command,
+    ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
@@ -30,9 +31,11 @@ from mini_agent.application.records import (
     ConditionalWriteResult,
     Cycle2DispatchFenceWriteResult,
     Cycle2WriteResult,
+    ContinuationInputBindingReadClosure,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
+    CreateToolCallV2Command,
     DispatchToolCallCommand,
     EvalExecutionFailureRecord,
     EvalResultRecord,
@@ -42,6 +45,7 @@ from mini_agent.application.records import (
     FinalizeToolCallCommand,
     FinalizeToolAttemptV2Command,
     InsertOnlyWriteResult,
+    InitialToolCallV2ReadClosure,
     NonEmptyString,
     ObservationWriteResult,
     OrderCandidateSelectionReadClosure,
@@ -2064,10 +2068,14 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
     assert Cycle2RuntimeRecordPort._is_protocol
     assert Cycle2RuntimeRecordPort is not RuntimeRecordPort
     for method_name in (
+        "load_continuation_input_binding_closure_for_owner",
+        "apply_continuation_input_binding_if_current",
         "load_order_search_current_closure_for_owner",
         "apply_order_search_outcome_if_current",
         "load_order_candidate_selection_closure_for_owner",
         "apply_order_candidate_selection_if_current",
+        "load_initial_tool_call_v2_closure_for_owner",
+        "insert_initial_tool_call_v2_if_current",
         "append_tool_attempt_if_current",
         "finalize_tool_attempt_if_current",
         "save_shipment_observation_if_current",
@@ -2079,6 +2087,14 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         assert hasattr(Cycle2RuntimeRecordPort, method_name)
         assert not hasattr(RuntimeRecordPort, method_name)
 
+    _assert_signature(
+        Cycle2RuntimeRecordPort.apply_continuation_input_binding_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": ApplyContinuationInputBindingV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
     _assert_signature(
         Cycle2RuntimeRecordPort.apply_order_search_outcome_if_current,
         parameters=("command",),
@@ -2092,6 +2108,14 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         parameters=("command",),
         type_hints={
             "command": ApplyOrderCandidateSelectionV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.insert_initial_tool_call_v2_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": CreateToolCallV2Command,
             "return": Cycle2WriteResult,
         },
     )
@@ -2139,6 +2163,26 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
 
 def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
     _assert_signature(
+        Cycle2RuntimeRecordPort.load_continuation_input_binding_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "conversation_id",
+            "message_id",
+            "task_id",
+            "request_unit_id",
+            "trusted_now",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "conversation_id": UUID,
+            "message_id": UUID,
+            "task_id": UUID,
+            "request_unit_id": UUID,
+            "trusted_now": datetime,
+            "return": ContinuationInputBindingReadClosure | None,
+        },
+    )
+    _assert_signature(
         Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner,
         parameters=(
             "owner_scope",
@@ -2179,6 +2223,22 @@ def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
         },
     )
     _assert_signature(
+        Cycle2RuntimeRecordPort.load_initial_tool_call_v2_closure_for_owner,
+        parameters=(
+            "owner_scope",
+            "task_id",
+            "request_unit_id",
+            "trusted_read_at",
+        ),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "task_id": UUID,
+            "request_unit_id": UUID,
+            "trusted_read_at": datetime,
+            "return": InitialToolCallV2ReadClosure | None,
+        },
+    )
+    _assert_signature(
         Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
         parameters=(
             "owner_scope",
@@ -2213,8 +2273,10 @@ def test_cycle2_owner_scoped_readers_are_keyword_only_exact_closures() -> None:
         },
     )
     for method in (
+        Cycle2RuntimeRecordPort.load_continuation_input_binding_closure_for_owner,
         Cycle2RuntimeRecordPort.load_order_search_current_closure_for_owner,
         Cycle2RuntimeRecordPort.load_order_candidate_selection_closure_for_owner,
+        Cycle2RuntimeRecordPort.load_initial_tool_call_v2_closure_for_owner,
         Cycle2RuntimeRecordPort.load_shipment_assessment_closure_for_owner,
         Cycle2RuntimeRecordPort.load_superseded_run_closure_for_owner,
     ):
