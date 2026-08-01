@@ -25,7 +25,10 @@
   `B_C2_LEAVES = fc3a603b963ea54c597e00847ac816050bd007bf`，tree
   `01b33357c15d16ee2c1dc15194254f86dd07252c`。W4 exit三组回归全部通过；PR #247/#248
   随后reviewed完成W5 `02-10` physical migration，当前 integration / `B_C2_PHYSICAL`
-  为`bf8e88b2...` / tree `fccc5a1f...`；两条upgrade path与targeted gate通过，W6尚未开始；
+  为`bf8e88b2...` / tree `fccc5a1f...`；两条upgrade path与targeted gate通过。
+  W6 preflight发现Application Business Read Port owner缺口；用户批准`02-07R`
+  与slots `26→27`，master Plan correction PR #250已reviewed merge。当前只冻结
+  `02-07R`，`02-07/02-11`等待其真实successor；
   writer 上限仍为 2。
   `integration/e2e01-cycle2` 已启用 PR-required、enforce-admins、linear-history、
   conversation-resolution 保护，并禁用 force-push / deletion；dispatch 与 merge 前
@@ -63,7 +66,8 @@
   exact-head review发现initial current-state TOCTOU与recovered pre-CAS budget HIGH，
   head未发布；PR #241批准`02-09R4/W4R2`，PR #242/#243已形成reviewed
   `B_C2_02_09_DISPATCH_READY`；PR #244/#245又形成reviewed `B_C2_LEAVES`。W4已完成，
-  W5 `02-10`已完成并冻结`B_C2_PHYSICAL`；W6尚未开始。
+  W5 `02-10`已完成并冻结`B_C2_PHYSICAL`；PR #250已批准W6
+  `02-07R` owner correction，其Plan正在独立review。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
@@ -99,7 +103,7 @@
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W5；`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`，W5 focused/neighbor为`66/277 passed`，两条upgrade path、migration head与overlay通过。26 slots / 16 waves，18/26 complete；W6尚未开始。Case仍为`CONTRACT_DEFINED`；canonical full只由W6 exit拥有，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W5；`B_C2_PHYSICAL = bf8e88b2...` / tree `fccc5a1f...`，W5 focused/neighbor为`66/277 passed`，两条upgrade path、migration head与overlay通过。PR #250已将授权集合更正为27 slots / 16 waves，18/27 complete；W6当前只进行`02-07R` planning，`02-07/02-11`不可提前dispatch。Case仍为`CONTRACT_DEFINED`；canonical full只由W6 exit拥有，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify只作导航且不作为当前barrier或实现证据。
 
 ## 不属于 GSD 派生层的事项
 
