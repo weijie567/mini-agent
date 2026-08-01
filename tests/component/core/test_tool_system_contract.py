@@ -1,9 +1,9 @@
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
-from uuid import uuid4
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 
 from mini_agent.core.common import (
@@ -15,6 +15,11 @@ from mini_agent.core.request_understanding import NextMove, NextMoveKind
 from mini_agent.core.tool_system import (
     MODEL_VISIBLE_TOOLSET_ARTIFACT_SCHEMA_VERSION,
     AuthorizedToolCommand,
+    CYCLE2_TOOL_REGISTRY_VERSION,
+    Cycle2RetryRevalidation,
+    Cycle2ToolDispatchFacts,
+    Cycle2ToolName,
+    Cycle2ToolTerminalProjection,
     ExecutionPolicy,
     GateDecision,
     GateDecisionValue,
@@ -22,19 +27,38 @@ from mini_agent.core.tool_system import (
     ModelVisibleToolsetArtifact,
     RegistrySnapshot,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
     ToolEffect,
     ToolRegistration,
+    ToolRecoveryDecision,
+    ToolRecoveryDisposition,
     ToolResult,
     ToolResultOutcome,
+    ToolRetryDecision,
+    ToolRetryRecoveryDecision,
     ToolSpec,
     ToolTimeoutPhase,
+    build_cycle2_registry_snapshot,
+    cycle2_tool_profiles,
     compute_model_visible_toolset_hash,
+    decide_cycle2_tool_recovery,
+    decide_cycle2_tool_retry,
+    effective_cycle2_tool_timeout_ms,
+    get_shipment_tool_spec,
     get_order_tool_spec,
+    project_cycle2_tool_terminal,
+    search_orders_tool_spec,
+    validate_cycle2_registry_snapshot,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def _with_all_model_fields_explicit(model: BaseModel) -> BaseModel:
+    return model.model_copy(update=dict(model.__dict__))
 
 
 def _spec(name: str, description: str = "Safe synthetic read contract.") -> ToolSpec:
@@ -978,4 +1002,1565 @@ def test_tool_attempt_record_has_append_only_attempt_identity_and_utc_order() ->
             finished_at=datetime(2029, 1, 1, tzinfo=UTC),
             outcome=ToolResultOutcome.SYSTEM_FAILURE,
             failure_code="UPSTREAM_FAILURE",
+        )
+
+
+def _assert_all_nested_object_schemas_are_closed(value: object) -> None:
+    if isinstance(value, Mapping):
+        if value.get("type") == "object":
+            assert value.get("additionalProperties") is False
+        for child in value.values():
+            _assert_all_nested_object_schemas_are_closed(child)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for child in value:
+            _assert_all_nested_object_schemas_are_closed(child)
+
+
+def test_cycle2_search_orders_toolspec_is_exact_closed_minimum_disclosure() -> None:
+    spec = search_orders_tool_spec()
+
+    assert spec.name == "search_orders"
+    assert spec.input_schema["required"] == ("product_description",)
+    assert set(spec.input_schema["properties"]) == {"product_description"}
+    description = spec.input_schema["properties"]["product_description"]
+    assert description == {"type": "string", "minLength": 1}
+
+    output = spec.output_schema
+    assert set(output["properties"]) == {"outcome", "candidates", "truncated"}
+    assert output["required"] == ("outcome", "candidates", "truncated")
+    candidate = output["properties"]["candidates"]["items"]
+    assert set(candidate["properties"]) == {
+        "ordinal",
+        "order_number",
+        "ordered_on_utc",
+        "status",
+        "matching_items",
+    }
+    matching_item = candidate["properties"]["matching_items"]["items"]
+    assert set(matching_item["properties"]) == {"product_name", "quantity"}
+    _assert_all_nested_object_schemas_are_closed(spec.model_dump(mode="json"))
+
+    forbidden = {
+        "customer_id",
+        "owner_scoped_order_ref",
+        "source_version",
+        "failure_code",
+        "ordered_at",
+        "line_ordinal",
+        "product_category",
+        "search_aliases",
+        "price",
+        "address",
+        "tracking_number",
+        "query_window",
+        "limit",
+        "ranking",
+    }
+    serialized = str(spec.model_dump(mode="json"))
+    assert all(field not in serialized for field in forbidden)
+
+
+def test_cycle2_get_shipment_toolspec_is_exact_closed_minimum_disclosure() -> None:
+    spec = get_shipment_tool_spec()
+
+    assert spec.name == "get_shipment"
+    assert spec.input_schema["required"] == ("order_id",)
+    assert set(spec.input_schema["properties"]) == {"order_id"}
+    assert set(spec.output_schema["properties"]) == {
+        "shipment_status",
+        "latest_event_code",
+        "latest_event_at_utc",
+        "promised_delivery_at_utc",
+        "delivered_at_utc",
+    }
+    assert spec.output_schema["required"] == (
+        "shipment_status",
+        "latest_event_code",
+        "latest_event_at_utc",
+    )
+    _assert_all_nested_object_schemas_are_closed(spec.model_dump(mode="json"))
+
+    forbidden = {
+        "customer_id",
+        "package_id",
+        "tracking_number",
+        "address",
+        "recipient",
+        "phone",
+        "raw_trajectory",
+        "outcome",
+        "failure_code",
+        "insufficiency_code",
+        "source_resource_ref",
+        "source_version",
+        "observed_at",
+        "freshness",
+        "retry",
+    }
+    serialized = str(spec.model_dump(mode="json"))
+    assert all(field not in serialized for field in forbidden)
+
+
+def test_cycle2_registry_is_exact_three_read_tools_with_exact_policies() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    profiles = cycle2_tool_profiles()
+
+    assert snapshot.tool_registry_version == CYCLE2_TOOL_REGISTRY_VERSION
+    assert tuple(profile.canonical_tool_name for profile in profiles) == (
+        Cycle2ToolName.SEARCH_ORDERS,
+        Cycle2ToolName.GET_ORDER,
+        Cycle2ToolName.GET_SHIPMENT,
+    )
+    assert {registration.tool_spec.name for registration in snapshot.canonical_registrations} == {
+        "search_orders",
+        "get_order",
+        "get_shipment",
+    }
+    assert {registration.provider_visible_name for registration in snapshot.canonical_registrations} == {
+        "search_orders",
+        "get_order",
+        "get_shipment",
+    }
+    assert {registration.effect for registration in snapshot.canonical_registrations} == {
+        ToolEffect.READ
+    }
+    policies = {
+        registration.tool_spec.name: registration.execution_policy
+        for registration in snapshot.canonical_registrations
+    }
+    assert policies["get_order"].model_dump() == {
+        "timeout_ms": 500,
+        "max_attempts": 1,
+        "retryable_failure_codes": (),
+        "interrupt_behavior": "MARK_INTERRUPTED",
+    }
+    assert policies["search_orders"].retryable_failure_codes == (
+        "ORDER_SEARCH_TRANSIENT",
+        "TOOL_CALL_TIMEOUT",
+    )
+    assert policies["get_shipment"].retryable_failure_codes == (
+        "SHIPMENT_SERVICE_TRANSIENT",
+        "TOOL_CALL_TIMEOUT",
+    )
+    assert policies["search_orders"].max_attempts == 2
+    assert policies["get_shipment"].max_attempts == 2
+    assert validate_cycle2_registry_snapshot(snapshot) is snapshot
+    assert all(
+        registration.unknown_result_recovery is None
+        for registration in snapshot.canonical_registrations
+    )
+    assert "create_refund" not in str(snapshot.model_dump(mode="json"))
+    assert "PROPOSE_ACTION" not in str(snapshot.model_dump(mode="json"))
+    assert "ActionPolicy" not in str(snapshot.model_dump(mode="json"))
+
+
+def test_cycle2_validator_is_scoped_without_tightening_generic_registry_build() -> None:
+    generic_snapshot = RegistrySnapshot.build(
+        tool_registry_version="generic-test-registry",
+        registrations=(_registration("unrelated_safe_read"),),
+    )
+    assert generic_snapshot.canonical_registrations[0].tool_spec.name == (
+        "unrelated_safe_read"
+    )
+
+    unexpected = RegistrySnapshot.build(
+        tool_registry_version=CYCLE2_TOOL_REGISTRY_VERSION,
+        registrations=tuple(build_cycle2_registry_snapshot().canonical_registrations)
+        + (_registration("unexpected_read"),),
+    )
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(unexpected)
+
+
+@pytest.mark.parametrize(
+    ("policy_field", "malformed_value"),
+    [
+        ("max_attempts", True),
+        ("max_attempts", 1.0),
+        ("timeout_ms", True),
+        ("timeout_ms", 500.0),
+        ("retryable_failure_codes", []),
+        ("interrupt_behavior", b"MARK_INTERRUPTED"),
+    ],
+)
+def test_cycle2_registry_validator_rejects_raw_private_policy_type_bypass(
+    policy_field: str,
+    malformed_value: object,
+) -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "get_order"
+    )
+    registration = registrations[index]
+    registrations[index] = registration.model_copy(
+        update={
+            "execution_policy": registration.execution_policy.model_copy(
+                update={policy_field: malformed_value}
+            )
+        }
+    )
+    malformed = snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
+def _cycle2_registry_registration_raw_variant(variant: str) -> RegistrySnapshot:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    index = next(
+        index
+        for index, registration in enumerate(registrations)
+        if registration.tool_spec.name == "search_orders"
+    )
+    registration = registrations[index]
+    if variant == "effect-string":
+        registrations[index] = registration.model_copy(update={"effect": "READ"})
+    else:
+        field_name = "input_schema" if variant in {
+            "min-length-bool",
+            "raw-schema-dict",
+            "raw-required-list",
+        } else "output_schema"
+        schema = registration.tool_spec.model_dump()[field_name]
+        if variant == "min-length-bool":
+            schema["properties"]["product_description"]["minLength"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "candidate-min-items-bool":
+            schema["properties"]["candidates"]["minItems"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "ordinal-minimum-bool":
+            schema["properties"]["candidates"]["items"]["properties"][
+                "ordinal"
+            ]["minimum"] = True
+            schema_value = freeze_json_value(schema)
+        elif variant == "raw-schema-dict":
+            schema_value = schema
+        else:
+            original = registration.tool_spec.input_schema
+            schema_value = tuple.__new__(
+                FrozenJsonDict,
+                tuple(
+                    (key, ["product_description"] if key == "required" else value)
+                    for key, value in original.items()
+                ),
+            )
+        registrations[index] = registration.model_copy(
+            update={
+                "tool_spec": registration.tool_spec.model_copy(
+                    update={field_name: schema_value}
+                )
+            }
+        )
+    return snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "min-length-bool",
+        "candidate-min-items-bool",
+        "ordinal-minimum-bool",
+        "effect-string",
+        "raw-schema-dict",
+        "raw-required-list",
+    ],
+)
+def test_cycle2_registry_rejects_complete_registration_raw_type_drift(
+    variant: str,
+) -> None:
+    malformed = _cycle2_registry_registration_raw_variant(variant)
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
+def test_cycle2_recursive_registry_comparison_accepts_exact_three_reads() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+
+    assert validate_cycle2_registry_snapshot(snapshot) is snapshot
+    assert tuple(
+        registration.tool_spec.name
+        for registration in snapshot.canonical_registrations
+    ) == ("search_orders", "get_order", "get_shipment")
+
+
+def test_cycle2_registry_validator_rejects_default_omitted_registration() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    registration = snapshot.canonical_registrations[0]
+    payload = registration.model_dump()
+    payload.pop("unknown_result_recovery")
+    defaulted = ToolRegistration.model_validate(payload)
+    assert "unknown_result_recovery" not in defaulted.model_fields_set
+    registrations = (defaulted, *snapshot.canonical_registrations[1:])
+    malformed = snapshot.model_copy(
+        update={"canonical_registrations": registrations}
+    )
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
+def _cycle2_registry_model_envelope_variant(
+    layer: str,
+    bypass: str,
+) -> RegistrySnapshot:
+    snapshot = build_cycle2_registry_snapshot()
+    registrations = list(snapshot.canonical_registrations)
+    registration = registrations[0]
+    mappings = list(snapshot.provider_name_to_canonical_name)
+    missing_fields = {
+        "snapshot": "tool_registry_version",
+        "registration": "risk",
+        "tool-spec": "description",
+        "execution-policy": "timeout_ms",
+        "provider-binding": "canonical_tool_name",
+    }
+
+    def corrupt(model: object) -> object:
+        if bypass == "model-copy-extra":
+            malformed = model.model_copy(update={"unexpected_field": "unexpected"})
+            assert "unexpected_field" in malformed.__dict__
+            return malformed
+        raw = dict(model.__dict__)
+        if bypass == "model-construct-missing":
+            raw.pop(missing_fields[layer])
+            malformed = type(model).model_construct(**raw)
+            assert missing_fields[layer] not in malformed.__dict__
+            return malformed
+        malformed = type(model).model_construct(**raw)
+        object.__setattr__(
+            malformed,
+            "__pydantic_extra__",
+            {"unexpected_field": "unexpected"},
+        )
+        assert malformed.__pydantic_extra__ == {
+            "unexpected_field": "unexpected"
+        }
+        return malformed
+
+    if layer == "snapshot":
+        return corrupt(snapshot)
+    if layer == "registration":
+        registrations[0] = corrupt(registration)
+    elif layer == "tool-spec":
+        registrations[0] = registration.model_copy(
+            update={"tool_spec": corrupt(registration.tool_spec)}
+        )
+    elif layer == "execution-policy":
+        registrations[0] = registration.model_copy(
+            update={"execution_policy": corrupt(registration.execution_policy)}
+        )
+    else:
+        mappings[0] = corrupt(mappings[0])
+        return snapshot.model_copy(
+            update={"provider_name_to_canonical_name": tuple(mappings)}
+        )
+    return snapshot.model_copy(
+        update={"canonical_registrations": tuple(registrations)}
+    )
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        "snapshot",
+        "registration",
+        "tool-spec",
+        "execution-policy",
+        "provider-binding",
+    ],
+)
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        "model-copy-extra",
+        "model-construct-extra",
+        "model-construct-missing",
+    ],
+)
+def test_cycle2_registry_validator_rejects_open_model_envelopes(
+    layer: str,
+    bypass: str,
+) -> None:
+    malformed = _cycle2_registry_model_envelope_variant(layer, bypass)
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
+
+
+def _retry_revalidation(
+    *,
+    remaining_run_time_budget_ms: int = 500,
+    current_owner_scope_ref: str = "owner-A",
+    current_task_state_version: int = 3,
+    current_binding_refs: tuple = (),
+    current_verified_target_ref=None,
+    parent_tool_call: ToolCallRecordV2 | None = None,
+    current_run_id=None,
+    current_task_id=None,
+    current_request_unit_id=None,
+    current_tool_call_id=None,
+) -> Cycle2RetryRevalidation:
+    if parent_tool_call is None:
+        binding_refs = current_binding_refs or (uuid4(),)
+        verified_target_ref = current_verified_target_ref or uuid4()
+        parent = Cycle2ToolDispatchFacts(
+            tool_call_id=uuid4(),
+            run_id=uuid4(),
+            private_owner_scope_ref="owner-A",
+            task_id=uuid4(),
+            request_unit_id=uuid4(),
+            validated_task_state_version=3,
+            argument_binding_refs=binding_refs,
+            verified_target_ref=verified_target_ref,
+        )
+    else:
+        parent = parent_tool_call.dispatch_facts()
+        binding_refs = current_binding_refs or parent.argument_binding_refs
+        verified_target_ref = (
+            current_verified_target_ref
+            if current_verified_target_ref is not None
+            else parent.verified_target_ref
+        )
+    current = parent.model_copy(
+        update={
+            "tool_call_id": current_tool_call_id or parent.tool_call_id,
+            "run_id": current_run_id or parent.run_id,
+            "private_owner_scope_ref": current_owner_scope_ref,
+            "task_id": current_task_id or parent.task_id,
+            "request_unit_id": current_request_unit_id or parent.request_unit_id,
+            "validated_task_state_version": current_task_state_version,
+            "argument_binding_refs": binding_refs,
+            "verified_target_ref": verified_target_ref,
+        }
+    )
+    return Cycle2RetryRevalidation(
+        parent_dispatch_facts=parent,
+        expected_dispatch_facts=parent,
+        current_dispatch_facts=current,
+        remaining_run_time_budget_ms=remaining_run_time_budget_ms,
+    )
+
+
+def _attempt_v2(
+    *,
+    tool_call_id=None,
+    attempt_no: int = 1,
+    outcome: ToolResultOutcome | None = None,
+    failure_code: str | None = None,
+    timeout_phase: ToolTimeoutPhase | None = None,
+    retry_decision: ToolRetryDecision | None = None,
+) -> ToolAttemptRecordV2:
+    values: dict[str, object] = {
+        "tool_call_id": tool_call_id or uuid4(),
+        "attempt_no": attempt_no,
+        "started_at": NOW + timedelta(milliseconds=attempt_no - 1),
+        "finished_at": None,
+        "outcome": None,
+        "failure_code": None,
+        "timeout_phase": None,
+        "retry_decision": None,
+    }
+    if outcome is not None:
+        values.update(
+            finished_at=NOW + timedelta(milliseconds=attempt_no),
+            outcome=outcome,
+            failure_code=failure_code,
+            timeout_phase=timeout_phase,
+            retry_decision=retry_decision,
+        )
+    return ToolAttemptRecordV2(**values)
+
+
+def _tool_call_v2_values(
+    *,
+    tool_call_id=None,
+    canonical_tool_name: Cycle2ToolName = Cycle2ToolName.SEARCH_ORDERS,
+) -> dict[str, object]:
+    return {
+        "tool_call_id": tool_call_id or uuid4(),
+        "run_id": uuid4(),
+        "task_id": uuid4(),
+        "request_unit_id": uuid4(),
+        "model_call_id": uuid4(),
+        "context_manifest_id": uuid4(),
+        "gate_decision_id": uuid4(),
+        "canonical_tool_name": canonical_tool_name,
+        "tool_registry_version": CYCLE2_TOOL_REGISTRY_VERSION,
+        "private_owner_scope_ref": "owner-A",
+        "validated_task_state_version": 3,
+        "argument_binding_refs": (uuid4(),),
+        "verified_target_ref": uuid4(),
+        "effect": ToolEffect.READ,
+        "started_at": NOW,
+    }
+
+
+def test_cycle2_effective_timeout_is_bounded_by_policy_and_run_budget() -> None:
+    assert effective_cycle2_tool_timeout_ms(800) == 500
+    assert effective_cycle2_tool_timeout_ms(499) == 499
+    with pytest.raises(ValueError, match="positive"):
+        effective_cycle2_tool_timeout_ms(0)
+    with pytest.raises(TypeError, match="strict integer"):
+        effective_cycle2_tool_timeout_ms(True)
+
+
+def test_cycle2_attempt_finalize_is_atomic_and_timeout_iff_is_closed() -> None:
+    started = _attempt_v2()
+    assert started.model_dump(exclude_none=True).keys() == {
+        "tool_call_id",
+        "attempt_no",
+        "started_at",
+    }
+
+    with pytest.raises(ValidationError, match="finalize.*atomically"):
+        ToolAttemptRecordV2(
+            tool_call_id=uuid4(),
+            attempt_no=1,
+            started_at=NOW,
+            finished_at=NOW,
+            outcome=ToolResultOutcome.TIMEOUT,
+        )
+    with pytest.raises(ValidationError, match="TIMEOUT iff"):
+        _attempt_v2(
+            outcome=ToolResultOutcome.SYSTEM_FAILURE,
+            failure_code="TOOL_CALL_TIMEOUT",
+            retry_decision=ToolRetryDecision.NOT_RETRYABLE,
+        )
+    with pytest.raises(ValidationError, match="timeout_phase"):
+        _attempt_v2(
+            outcome=ToolResultOutcome.TIMEOUT,
+            failure_code="TOOL_CALL_TIMEOUT",
+            retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+        )
+    with pytest.raises(ValidationError, match="only TIMEOUT"):
+        _attempt_v2(
+            outcome=ToolResultOutcome.SYSTEM_FAILURE,
+            failure_code="ORDER_SEARCH_TRANSIENT",
+            timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
+            retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+        )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "attempt_no", "outcome", "failure_code", "change", "expected"),
+    [
+        (
+            Cycle2ToolName.SEARCH_ORDERS,
+            1,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "ORDER_SEARCH_TRANSIENT",
+            {},
+            ToolRetryDecision.RETRY_SCHEDULED,
+        ),
+        (
+            Cycle2ToolName.GET_SHIPMENT,
+            1,
+            ToolResultOutcome.TIMEOUT,
+            "TOOL_CALL_TIMEOUT",
+            {},
+            ToolRetryDecision.RETRY_SCHEDULED,
+        ),
+        (
+            Cycle2ToolName.SEARCH_ORDERS,
+            2,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "ORDER_SEARCH_TRANSIENT",
+            {},
+            ToolRetryDecision.MAX_ATTEMPTS_REACHED,
+        ),
+        (
+            Cycle2ToolName.GET_ORDER,
+            1,
+            ToolResultOutcome.TIMEOUT,
+            "TOOL_CALL_TIMEOUT",
+            {},
+            ToolRetryDecision.MAX_ATTEMPTS_REACHED,
+        ),
+        (
+            Cycle2ToolName.GET_SHIPMENT,
+            1,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "SHIPMENT_SOURCE_INTEGRITY",
+            {},
+            ToolRetryDecision.NOT_RETRYABLE,
+        ),
+        (
+            Cycle2ToolName.SEARCH_ORDERS,
+            1,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "ORDER_SEARCH_TRANSIENT",
+            {"remaining_run_time_budget_ms": 0},
+            ToolRetryDecision.RUN_BUDGET_EXHAUSTED,
+        ),
+        (
+            Cycle2ToolName.SEARCH_ORDERS,
+            1,
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "ORDER_SEARCH_TRANSIENT",
+            {"current_owner_scope_ref": "owner-B"},
+            ToolRetryDecision.STATE_OR_BINDING_INVALIDATED,
+        ),
+    ],
+)
+def test_cycle2_retry_decision_uses_exact_policy_and_loaded_revalidation(
+    tool_name: Cycle2ToolName,
+    attempt_no: int,
+    outcome: ToolResultOutcome,
+    failure_code: str,
+    change: dict[str, object],
+    expected: ToolRetryDecision,
+) -> None:
+    decision = decide_cycle2_tool_retry(
+        canonical_tool_name=tool_name,
+        attempt_no=attempt_no,
+        outcome=outcome,
+        failure_code=failure_code,
+        revalidation=_retry_revalidation(**change),
+    )
+    assert decision is expected
+
+
+def test_cycle2_toolcall_preserves_first_failure_after_second_attempt_success() -> None:
+    tool_call_id = uuid4()
+    first = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.TIMEOUT,
+        failure_code="TOOL_CALL_TIMEOUT",
+        timeout_phase=ToolTimeoutPhase.AFTER_DISPATCH,
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    second = _attempt_v2(
+        tool_call_id=tool_call_id,
+        attempt_no=2,
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    record = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=2,
+        attempts=(first, second),
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=second.finished_at,
+        result_ref=uuid4(),
+    )
+
+    assert record.attempts[0].timeout_phase is ToolTimeoutPhase.AFTER_DISPATCH
+    assert record.attempts[0].retry_decision is ToolRetryDecision.RETRY_SCHEDULED
+    assert record.attempts[1].outcome is ToolResultOutcome.SUCCESS
+    assert record.failure_code is None
+    assert record.timeout_phase is None
+
+
+def test_cycle2_toolcall_rejects_third_attempt_and_deterministic_retry() -> None:
+    with pytest.raises(ValidationError, match="less than or equal to 2"):
+        ToolAttemptRecordV2(
+            tool_call_id=uuid4(),
+            attempt_no=3,
+            started_at=NOW,
+        )
+
+    tool_call_id = uuid4()
+    deterministic_retry = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_SOURCE_INTEGRITY",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    with pytest.raises(ValidationError, match="deterministic failure"):
+        ToolCallRecordV2(
+            **_tool_call_v2_values(tool_call_id=tool_call_id),
+            attempt_count=1,
+            attempts=(deterministic_retry,),
+            status=ToolCallStatus.RUNNING,
+        )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_code", "timeout_phase", "decision", "status"),
+    [
+        (
+            ToolResultOutcome.SUCCESS,
+            None,
+            None,
+            ToolRetryDecision.NOT_APPLICABLE,
+            ToolCallStatus.SUCCEEDED,
+        ),
+        (
+            ToolResultOutcome.SYSTEM_FAILURE,
+            "ORDER_SEARCH_UNAVAILABLE",
+            None,
+            ToolRetryDecision.NOT_RETRYABLE,
+            ToolCallStatus.FAILED,
+        ),
+        (
+            ToolResultOutcome.TIMEOUT,
+            "TOOL_CALL_TIMEOUT",
+            ToolTimeoutPhase.UNKNOWN,
+            ToolRetryDecision.MAX_ATTEMPTS_REACHED,
+            ToolCallStatus.TIMED_OUT,
+        ),
+        (
+            ToolResultOutcome.INTERRUPTED,
+            "RUN_BUDGET_EXHAUSTED",
+            None,
+            ToolRetryDecision.RUN_BUDGET_EXHAUSTED,
+            ToolCallStatus.INTERRUPTED,
+        ),
+    ],
+)
+def test_cycle2_terminal_projection_is_exact(
+    outcome: ToolResultOutcome,
+    failure_code: str | None,
+    timeout_phase: ToolTimeoutPhase | None,
+    decision: ToolRetryDecision,
+    status: ToolCallStatus,
+) -> None:
+    attempt = _attempt_v2(
+        outcome=outcome,
+        failure_code=failure_code,
+        timeout_phase=timeout_phase,
+        retry_decision=decision,
+    )
+    projection = project_cycle2_tool_terminal(
+        attempt,
+        canonical_tool_name=(
+            Cycle2ToolName.GET_ORDER
+            if outcome is ToolResultOutcome.TIMEOUT
+            else Cycle2ToolName.SEARCH_ORDERS
+        ),
+    )
+
+    assert isinstance(projection, Cycle2ToolTerminalProjection)
+    assert projection.status is status
+    if status is ToolCallStatus.FAILED:
+        assert projection.failure_code == failure_code
+    if status is ToolCallStatus.TIMED_OUT:
+        assert projection.timeout_phase is timeout_phase
+    if status is ToolCallStatus.INTERRUPTED:
+        assert projection.interruption_reason == failure_code
+
+
+def test_cycle2_recovery_truth_table_grants_only_unfenced_second_attempt() -> None:
+    created = ToolCallRecordV2(
+        **_tool_call_v2_values(),
+        attempt_count=0,
+        attempts=(),
+        status=ToolCallStatus.CREATED,
+    )
+    created = _with_all_model_fields_explicit(created)
+    assert decide_cycle2_tool_recovery(
+        tool_call=created,
+        revalidation=_retry_revalidation(parent_tool_call=created),
+        decided_at=NOW,
+    ).decision is ToolRecoveryDecision.INTERRUPT_WITHOUT_ATTEMPT
+
+    tool_call_id = uuid4()
+    unfinished = _attempt_v2(tool_call_id=tool_call_id)
+    running_unfinished = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(unfinished,),
+        status=ToolCallStatus.RUNNING,
+    )
+    running_unfinished = _with_all_model_fields_explicit(running_unfinished)
+    assert decide_cycle2_tool_recovery(
+        tool_call=running_unfinished,
+        revalidation=_retry_revalidation(parent_tool_call=running_unfinished),
+        decided_at=NOW,
+    ).decision is ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
+
+    finalized = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    before_second_fence = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(finalized,),
+        status=ToolCallStatus.RUNNING,
+    )
+    before_second_fence = _with_all_model_fields_explicit(before_second_fence)
+    append = decide_cycle2_tool_recovery(
+        tool_call=before_second_fence,
+        revalidation=_retry_revalidation(parent_tool_call=before_second_fence),
+        decided_at=NOW,
+    )
+    assert isinstance(append, ToolRetryRecoveryDecision)
+    assert append.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+    assert append.candidate_next_attempt_no == 2
+    assert append.durable_cas_claimed is False
+
+    second_fence = _attempt_v2(tool_call_id=tool_call_id, attempt_no=2)
+    after_second_fence = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=2,
+        attempts=(finalized, second_fence),
+        status=ToolCallStatus.RUNNING,
+    )
+    after_second_fence = _with_all_model_fields_explicit(after_second_fence)
+    decision = decide_cycle2_tool_recovery(
+        tool_call=after_second_fence,
+        revalidation=_retry_revalidation(parent_tool_call=after_second_fence),
+        decided_at=NOW,
+    )
+    assert decision.decision is ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_recovery_unknown_or_contradictory_shape_fails_closed() -> None:
+    contradictory = ToolCallRecordV2.model_construct(
+        **_tool_call_v2_values(),
+        attempt_count=0,
+        attempts=(),
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=None,
+    )
+    decision = decide_cycle2_tool_recovery(
+        tool_call=contradictory,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+def test_cycle2_recovery_revalidation_failure_terminates_without_append() -> None:
+    tool_call_id = uuid4()
+    finalized = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    before_second_fence = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(finalized,),
+        status=ToolCallStatus.RUNNING,
+    )
+    before_second_fence = _with_all_model_fields_explicit(before_second_fence)
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=before_second_fence,
+        revalidation=_retry_revalidation(
+            parent_tool_call=before_second_fence,
+            current_owner_scope_ref="owner-B",
+        ),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH
+    assert decision.stable_reason_code == "STATE_OR_BINDING_INVALIDATED"
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+def test_cycle2_recovery_already_terminal_has_no_executable_authority() -> None:
+    tool_call_id = uuid4()
+    failure = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_UNAVAILABLE",
+        retry_decision=ToolRetryDecision.NOT_RETRYABLE,
+    )
+    terminal = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(failure,),
+        status=ToolCallStatus.FAILED,
+        finished_at=failure.finished_at,
+        failure_code="ORDER_SEARCH_UNAVAILABLE",
+    )
+    terminal = _with_all_model_fields_explicit(terminal)
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=terminal,
+        revalidation=_retry_revalidation(parent_tool_call=terminal),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.NO_ACTION_TERMINAL
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_v2_allows_interrupted_created_call_without_fake_attempt() -> None:
+    record = ToolCallRecordV2(
+        **_tool_call_v2_values(),
+        attempt_count=0,
+        attempts=(),
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=NOW,
+        interruption_reason="PROCESS_RESTART_DETECTED",
+    )
+
+    assert record.attempts == ()
+    assert record.attempt_count == 0
+    assert record.interruption_reason == "PROCESS_RESTART_DETECTED"
+
+
+@pytest.mark.parametrize(
+    "current_change",
+    [
+        {"current_tool_call_id": uuid4()},
+        {"current_run_id": uuid4()},
+        {"current_task_id": uuid4()},
+        {"current_request_unit_id": uuid4()},
+        {"current_verified_target_ref": uuid4()},
+        {"current_binding_refs": (uuid4(),)},
+    ],
+)
+def test_cycle2_recovery_binds_retry_to_parent_dispatch_closure(
+    current_change: dict[str, object],
+) -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    parent = _with_all_model_fields_explicit(parent)
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=_retry_revalidation(
+            parent_tool_call=parent,
+            **current_change,
+        ),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.TERMINATE_RETRY_PATH
+    assert decision.stable_reason_code == "STATE_OR_BINDING_INVALIDATED"
+    assert decision.candidate_next_attempt_no is None
+
+
+def test_cycle2_recovery_rejects_revalidation_for_a_different_parent() -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    parent = _with_all_model_fields_explicit(parent)
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_CONTRADICTORY"
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+@pytest.mark.parametrize(
+    "foreign_field",
+    ["tool_call_id", "run_id", "task_id", "request_unit_id"],
+)
+def test_cycle2_recovery_foreign_parent_identity_fails_closed(
+    foreign_field: str,
+) -> None:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    parent = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    parent = _with_all_model_fields_explicit(parent)
+    revalidation = _retry_revalidation(parent_tool_call=parent)
+    foreign_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={foreign_field: uuid4()}
+    )
+    foreign_revalidation = revalidation.model_copy(
+        update={
+            "parent_dispatch_facts": foreign_dispatch,
+            "expected_dispatch_facts": foreign_dispatch,
+            "current_dispatch_facts": foreign_dispatch,
+        }
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=parent,
+        revalidation=foreign_revalidation,
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_CONTRADICTORY"
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+def _cycle2_recovery_retry_case() -> tuple[
+    ToolCallRecordV2,
+    Cycle2RetryRevalidation,
+]:
+    tool_call_id = uuid4()
+    retry_scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    tool_call = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(retry_scheduled,),
+        status=ToolCallStatus.RUNNING,
+    )
+    tool_call = _with_all_model_fields_explicit(tool_call)
+    revalidation = _retry_revalidation(parent_tool_call=tool_call)
+    baseline = decide_cycle2_tool_recovery(
+        tool_call=tool_call,
+        revalidation=revalidation,
+        decided_at=NOW,
+    )
+    assert baseline.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+    return tool_call, revalidation
+
+
+def _nested_recovery_models(value: object) -> tuple[BaseModel, ...]:
+    found: list[BaseModel] = []
+    seen: set[int] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, BaseModel):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            found.append(current)
+            for field_name in type(current).model_fields:
+                if field_name in current.__dict__:
+                    visit(current.__dict__[field_name])
+            return
+        if isinstance(current, Mapping):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            for key, item in current.items():
+                visit(key)
+                visit(item)
+            return
+        if isinstance(current, Sequence) and not isinstance(
+            current,
+            (str, bytes, bytearray),
+        ):
+            if id(current) in seen:
+                return
+            seen.add(id(current))
+            for item in current:
+                visit(item)
+
+    visit(value)
+    return tuple(found)
+
+
+def _replace_recovery_model(
+    value: object,
+    target: BaseModel,
+    replacement: BaseModel,
+) -> object:
+    if value is target:
+        return replacement
+    if isinstance(value, BaseModel):
+        updates: dict[str, object] = {}
+        for field_name in type(value).model_fields:
+            if field_name not in value.__dict__:
+                continue
+            original = value.__dict__[field_name]
+            replaced = _replace_recovery_model(original, target, replacement)
+            if replaced is not original:
+                updates[field_name] = replaced
+        return value.model_copy(update=updates) if updates else value
+    if isinstance(value, tuple):
+        replaced_items = tuple(
+            _replace_recovery_model(item, target, replacement) for item in value
+        )
+        return replaced_items if any(
+            replaced is not original
+            for replaced, original in zip(replaced_items, value, strict=True)
+        ) else value
+    return value
+
+
+def _assert_recovery_graph_corruption_rejected(
+    *,
+    tool_call: ToolCallRecordV2,
+    revalidation: Cycle2RetryRevalidation,
+    target: BaseModel,
+    replacement: BaseModel,
+    vector: str,
+) -> None:
+    malformed_tool_call = _replace_recovery_model(
+        tool_call,
+        target,
+        replacement,
+    )
+    malformed_revalidation = _replace_recovery_model(
+        revalidation,
+        target,
+        replacement,
+    )
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed_tool_call,
+        revalidation=malformed_revalidation,
+        decided_at=NOW,
+    )
+    label = f"{type(target).__name__}:{vector}"
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED, label
+    assert decision.stable_reason_code == "RECOVERY_EVIDENCE_INVALID", label
+    assert decision.candidate_next_attempt_no is None, label
+    assert decision.durable_cas_claimed is False, label
+
+
+def test_cycle2_recovery_raw_preflight_closes_complete_evidence_graph() -> None:
+    tool_call, revalidation = _cycle2_recovery_retry_case()
+    nodes = _nested_recovery_models(tool_call) + _nested_recovery_models(
+        revalidation
+    )
+    assert {
+        "ToolCallRecordV2",
+        "ToolAttemptRecordV2",
+        "Cycle2RetryRevalidation",
+        "Cycle2ToolDispatchFacts",
+    } == {type(node).__name__ for node in nodes}
+    assert all(
+        node.model_fields_set == set(type(node).model_fields) for node in nodes
+    )
+
+    for node in nodes:
+        _assert_recovery_graph_corruption_rejected(
+            tool_call=tool_call,
+            revalidation=revalidation,
+            target=node,
+            replacement=node.model_copy(
+                update={"unexpected_field": "unexpected"}
+            ),
+            vector="raw-extra",
+        )
+        pydantic_extra = type(node).model_construct(**node.__dict__)
+        object.__setattr__(
+            pydantic_extra,
+            "__pydantic_extra__",
+            {"unexpected_field": "unexpected"},
+        )
+        _assert_recovery_graph_corruption_rejected(
+            tool_call=tool_call,
+            revalidation=revalidation,
+            target=node,
+            replacement=pydantic_extra,
+            vector="pydantic-extra",
+        )
+        for field_name, field in type(node).model_fields.items():
+            missing = type(node).model_construct(**node.__dict__)
+            missing.__dict__.pop(field_name)
+            _assert_recovery_graph_corruption_rejected(
+                tool_call=tool_call,
+                revalidation=revalidation,
+                target=node,
+                replacement=missing,
+                vector=f"missing:{field_name}",
+            )
+            if not field.is_required():
+                payload = node.model_dump()
+                payload.pop(field_name)
+                defaulted = type(node).model_construct(**payload)
+                assert field_name not in defaulted.model_fields_set
+                _assert_recovery_graph_corruption_rejected(
+                    tool_call=tool_call,
+                    revalidation=revalidation,
+                    target=node,
+                    replacement=defaulted,
+                    vector=f"default-regained:{field_name}",
+                )
+
+
+def test_cycle2_recovery_rejects_raw_coercive_nested_evidence() -> None:
+    tool_call, revalidation = _cycle2_recovery_retry_case()
+    attempt = tool_call.attempts[0]
+    raw_attempt = attempt.model_copy(update={"outcome": attempt.outcome.value})
+    raw_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={"run_id": str(revalidation.parent_dispatch_facts.run_id)}
+    )
+    variants = (
+        (
+            tool_call.model_copy(update={"run_id": str(tool_call.run_id)}),
+            revalidation,
+        ),
+        (
+            tool_call.model_copy(
+                update={"canonical_tool_name": tool_call.canonical_tool_name.value}
+            ),
+            revalidation,
+        ),
+        (tool_call.model_copy(update={"attempts": (raw_attempt,)}), revalidation),
+        (
+            tool_call,
+            revalidation.model_copy(
+                update={
+                    "parent_dispatch_facts": raw_dispatch,
+                    "expected_dispatch_facts": raw_dispatch,
+                    "current_dispatch_facts": raw_dispatch,
+                }
+            ),
+        ),
+        (
+            tool_call,
+            revalidation.model_copy(
+                update={"remaining_run_time_budget_ms": 500.0}
+            ),
+        ),
+    )
+
+    for malformed_tool_call, malformed_revalidation in variants:
+        decision = decide_cycle2_tool_recovery(
+            tool_call=malformed_tool_call,
+            revalidation=malformed_revalidation,
+            decided_at=NOW,
+        )
+        assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+        assert decision.stable_reason_code == "RECOVERY_EVIDENCE_INVALID"
+        assert decision.candidate_next_attempt_no is None
+        assert decision.durable_cas_claimed is False
+
+
+def _assert_direct_retry_evidence_rejected(
+    revalidation: object,
+    *,
+    vector: str,
+) -> None:
+    decision = decide_cycle2_tool_retry(
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        attempt_no=1,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        revalidation=revalidation,
+    )
+    assert decision is ToolRetryDecision.NOT_RETRYABLE, vector
+
+
+def test_cycle2_direct_retry_raw_preflight_closes_complete_evidence_graph() -> None:
+    revalidation = _retry_revalidation()
+    assert decide_cycle2_tool_retry(
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        attempt_no=1,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        revalidation=revalidation,
+    ) is ToolRetryDecision.RETRY_SCHEDULED
+
+    class RetryRevalidationSubclass(Cycle2RetryRevalidation):
+        pass
+
+    subclass = RetryRevalidationSubclass.model_validate(
+        revalidation.model_dump(),
+        strict=True,
+    )
+    _assert_direct_retry_evidence_rejected(subclass, vector="root-subclass")
+    nodes = _nested_recovery_models(revalidation)
+    for node in nodes:
+        malformed = _replace_recovery_model(
+            revalidation,
+            node,
+            node.model_copy(update={"unexpected_field": "unexpected"}),
+        )
+        _assert_direct_retry_evidence_rejected(
+            malformed,
+            vector=f"{type(node).__name__}:extra",
+        )
+        for field_name, field in type(node).model_fields.items():
+            missing = type(node).model_construct(**node.__dict__)
+            missing.__dict__.pop(field_name)
+            malformed = _replace_recovery_model(
+                revalidation,
+                node,
+                missing,
+            )
+            _assert_direct_retry_evidence_rejected(
+                malformed,
+                vector=f"{type(node).__name__}:missing:{field_name}",
+            )
+            if not field.is_required():
+                payload = node.model_dump()
+                payload.pop(field_name)
+                defaulted = type(node).model_construct(**payload)
+                malformed = _replace_recovery_model(
+                    revalidation,
+                    node,
+                    defaulted,
+                )
+                _assert_direct_retry_evidence_rejected(
+                    malformed,
+                    vector=(
+                        f"{type(node).__name__}:default-regained:{field_name}"
+                    ),
+                )
+
+    raw_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={"run_id": str(revalidation.parent_dispatch_facts.run_id)}
+    )
+    _assert_direct_retry_evidence_rejected(
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": raw_dispatch,
+                "expected_dispatch_facts": raw_dispatch,
+                "current_dispatch_facts": raw_dispatch,
+            }
+        ),
+        vector="raw-uuid",
+    )
+    _assert_direct_retry_evidence_rejected(
+        revalidation.model_copy(update={"remaining_run_time_budget_ms": 500.0}),
+        vector="raw-float",
+    )
+
+
+def test_cycle2_direct_retry_rejects_raw_scalar_subclasses_and_spoofed_code() -> None:
+    class IntSubclass(int):
+        pass
+
+    class StrSubclass(str):
+        pass
+
+    class UUIDSubclass(UUID):
+        pass
+
+    class FailureCodeSpoof:
+        def __hash__(self) -> int:
+            return hash("ORDER_SEARCH_TRANSIENT")
+
+        def __eq__(self, other: object) -> bool:
+            return other == "ORDER_SEARCH_TRANSIENT"
+
+    revalidation = _retry_revalidation()
+    parent = revalidation.parent_dispatch_facts
+    scalar_vectors = (
+        revalidation.model_copy(
+            update={"remaining_run_time_budget_ms": IntSubclass(500)}
+        ),
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+                "expected_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+                "current_dispatch_facts": parent.model_copy(
+                    update={"private_owner_scope_ref": StrSubclass("owner-A")}
+                ),
+            }
+        ),
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+                "expected_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+                "current_dispatch_facts": parent.model_copy(
+                    update={"run_id": UUIDSubclass(str(parent.run_id))}
+                ),
+            }
+        ),
+    )
+    for index, malformed in enumerate(scalar_vectors):
+        _assert_direct_retry_evidence_rejected(
+            malformed,
+            vector=f"scalar-subclass:{index}",
+        )
+
+    with pytest.raises(TypeError, match="failure_code must be an exact string"):
+        decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+            attempt_no=1,
+            outcome=ToolResultOutcome.SYSTEM_FAILURE,
+            failure_code=FailureCodeSpoof(),
+            revalidation=revalidation,
+        )
+
+
+def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:
+    tool_call_id = uuid4()
+    malformed = ToolCallRecordV2.model_construct(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=3,
+        attempts=(
+            _attempt_v2(tool_call_id=tool_call_id),
+            _attempt_v2(tool_call_id=tool_call_id, attempt_no=2),
+            ToolAttemptRecordV2.model_construct(
+                tool_call_id=tool_call_id,
+                attempt_no=3,
+                started_at=NOW,
+            ),
+        ),
+        status=ToolCallStatus.RUNNING,
+    )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.last_attempt_no == 3
+    assert decision.candidate_next_attempt_no is None
+
+
+@pytest.mark.parametrize("malformed_kind", ["missing-id", "invalid-id", "non-model"])
+def test_cycle2_recovery_malformed_identity_stably_fails_closed(
+    malformed_kind: str,
+) -> None:
+    if malformed_kind == "non-model":
+        malformed: object = object()
+    else:
+        values = _tool_call_v2_values()
+        if malformed_kind == "missing-id":
+            values.pop("tool_call_id")
+        else:
+            values["tool_call_id"] = "not-a-uuid"
+        malformed = ToolCallRecordV2.model_construct(
+            **values,
+            attempt_count=0,
+            attempts=(),
+            status=ToolCallStatus.CREATED,
+        )
+
+    decision = decide_cycle2_tool_recovery(
+        tool_call=malformed,
+        revalidation=_retry_revalidation(),
+        decided_at=NOW,
+    )
+
+    assert decision.decision is ToolRecoveryDecision.FAIL_CLOSED
+    assert decision.tool_call_id is None
+    assert decision.candidate_next_attempt_no is None
+    assert decision.durable_cas_claimed is False
+
+
+def test_cycle2_terminal_recovery_matrix_preserves_child_attempt_evidence() -> None:
+    tool_call_id = uuid4()
+    unfinished = _attempt_v2(tool_call_id=tool_call_id)
+    unfinished_terminal = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(unfinished,),
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=NOW + timedelta(seconds=1),
+        interruption_reason="PROCESS_RESTART_DETECTED",
+        recovery_disposition=ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED,
+        recovery_decision_ref=uuid4(),
+    )
+    assert unfinished_terminal.attempts[-1].finished_at is None
+
+    scheduled = _attempt_v2(
+        tool_call_id=tool_call_id,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    invalidated_terminal = ToolCallRecordV2(
+        **_tool_call_v2_values(tool_call_id=tool_call_id),
+        attempt_count=1,
+        attempts=(scheduled,),
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=scheduled.finished_at + timedelta(milliseconds=1),
+        interruption_reason="STATE_OR_BINDING_INVALIDATED",
+        recovery_disposition=(
+            ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+        ),
+        recovery_decision_ref=uuid4(),
+    )
+    assert invalidated_terminal.attempts[-1].retry_decision is (
+        ToolRetryDecision.RETRY_SCHEDULED
+    )
+
+
+def test_cycle2_terminal_recovery_exceptions_require_exact_disposition_and_ref() -> None:
+    tool_call_id = uuid4()
+    unfinished = _attempt_v2(tool_call_id=tool_call_id)
+    with pytest.raises(ValidationError, match="recovery disposition"):
+        ToolCallRecordV2(
+            **_tool_call_v2_values(tool_call_id=tool_call_id),
+            attempt_count=1,
+            attempts=(unfinished,),
+            status=ToolCallStatus.INTERRUPTED,
+            finished_at=NOW + timedelta(seconds=1),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+        )
+
+
+def test_cycle2_terminal_projector_rejects_unscoped_failure_code() -> None:
+    arbitrary = _attempt_v2(
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="UNSCOPED_FAILURE_CODE",
+        retry_decision=ToolRetryDecision.NOT_RETRYABLE,
+    )
+    with pytest.raises(ValueError, match="unknown system failure"):
+        project_cycle2_tool_terminal(
+            arbitrary,
+            canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        )
+
+
+def test_cycle2_get_shipment_uses_exact_insufficiency_failure_vocabulary() -> None:
+    exact_codes = {
+        "SHIPMENT_LATEST_EVENT_MISSING",
+        "SHIPMENT_PROMISE_MISSING_FOR_ACTIVE_DELIVERY",
+        "SHIPMENT_DELIVERED_AT_MISSING",
+    }
+    for code in exact_codes:
+        assert decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            outcome=ToolResultOutcome.BUSINESS_FAILURE,
+            failure_code=code,
+            revalidation=_retry_revalidation(),
+        ) is ToolRetryDecision.NOT_RETRYABLE
+
+    with pytest.raises(ValueError, match="unknown business failure"):
+        decide_cycle2_tool_retry(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            outcome=ToolResultOutcome.BUSINESS_FAILURE,
+            failure_code="FACTS_INSUFFICIENT",
+            revalidation=_retry_revalidation(),
         )
