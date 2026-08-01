@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W4_02-06_13_08_AND_R1_R2_R3_MERGED / FIRST_02-09_QUARANTINED / 02-09R4_PLAN_REVIEW`
+状态：`W4_02-06_13_08_AND_R1_R2_R3_R4_MERGED / FIRST_02-09_QUARANTINED / SECOND_02-09_PLAN_REVIEW`
 
 ## Exact input
 
@@ -71,6 +71,12 @@
   tree `397ad50f095d3356ed0583af3bc9ea31042ac39e`。裁决增加`02-09R4/W4R2`、
   Application-private non-persistent grant、initial/recovered same-CAS identity+timeout；
   当前26 slots / 16 wave labels / max2 writers，Case仍`CONTRACT_DEFINED`。
+- 02-09R4 planning PR #242 与 implementation PR #243 已reviewed merge；exact 4-file
+  allowlist、feature/latest-integration overlay review均`PASS / 0 BLOCK / 0 HIGH`，focused
+  `428 passed`、neighbor `432 passed`、compile/diff通过。真实
+  `B_C2_02_09_DISPATCH_READY = 09be05da8fd0e9c27de54d0413fef720e8b591df` /
+  tree `e1c10c67836b13a59083dc13d3f740780ff0142c`与reviewed overlay tree相等；Case仍
+  `CONTRACT_DEFINED`，full/migration/Runtime/Infrastructure/Eval lifecycle均未运行或推进。
 
 ## Historical W4 preflight blocker and owner ruling
 
@@ -111,7 +117,8 @@ logical child、budget evidence 来自 owner-scoped reader并在 CAS 内重算�
 `02-09R1 → 02-09R2 → 02-09R3` single-writer 串行执行；每个后继 Plan 只能用前驱真实
 reviewed merge SHA/tree重冻结，不得预测。该链现已完成；原 02-09 已从真实
 `B_C2_02_09_READY` 第一次重冻结，但上述两个HIGH使该head quarantine。只有R4
-reviewed merge并形成真实`B_C2_02_09_DISPATCH_READY`后才能第二次重冻结02-09。
+reviewed merge并形成真实`B_C2_02_09_DISPATCH_READY`后才能第二次重冻结02-09；该条件
+现已由PR #242/#243满足。
 
 ## Packet freeze 与批次
 
@@ -125,26 +132,26 @@ exact-file planning review `PASS`，并通过同一 planning PR 合并为 proven
 - `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de`
 - tree `174fbebcfa622336ffeade113cfae74a5611edae`
 - 最终 02-09 的当前 frozen product input 独立为
-  `B_C2_02_09_READY = cdf8c194ff80c9f47d6587bef9b5b386f29e5341` / tree
-  `2e82f1b9708f44df1bec7b16eaa7774e55d60ed3`
+  `B_C2_02_09_DISPATCH_READY = 09be05da8fd0e9c27de54d0413fef720e8b591df` /
+  tree `e1c10c67836b13a59083dc13d3f740780ff0142c`
 - 02-09 replacement implementation branch
-  `codex/e2e01-cycle2-read-executor-recovery-r1` 在 refreeze preflight 为 local / remote
+  `codex/e2e01-cycle2-read-executor-recovery-r2` 在 second-refreeze preflight 为 local / remote
   `NOT_FOUND`；owned-file overlap仍为零
 
 ```text
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader — MERGED
 Batch B: 02-08 Request understanding/routing — MERGED
 W4R: 02-09R1 + 02-09R2 + 02-09R3 — MERGED
-W4R2: 02-09R4 dispatch-grant contract — PLAN REVIEW
-W4 resumed: second-refrozen 02-09 executor/recovery — BLOCKED UNTIL R4 MERGE
+W4R2: 02-09R4 dispatch-grant contract — MERGED
+W4 resumed: second-refrozen 02-09 executor/recovery — PLAN REVIEW
 ```
 
 - writer 并发上限为 2；每个 Packet 独立 branch / Worktree；owned files 两两无交集。
 - 实际/后续串行 merge：`02-06 → 02-13 → owner ruling → 02-08 → 02-09R1 →
   02-09R2 → 02-09R3 → first refrozen 02-09 (quarantined) → owner ruling →
   02-09R4 → second-refrozen 02-09`。
-- 02-06/13/08 保留各自已 reviewed 的历史 product base；R4只使用真实
-  `B_C2_DISPATCH_GRANT_OWNER_RULING`，最终02-09只使用未来真实R4 successor；不得复用
+- 02-06/13/08 保留各自已 reviewed 的历史 product base；R4只使用历史真实
+  `B_C2_DISPATCH_GRANT_OWNER_RULING`，最终02-09只使用真实`B_C2_02_09_DISPATCH_READY`；不得复用
   `B_C2_W4_READY`、`B_C2_02_09_READY`、planning-control SHA或猜测successor。
   merge 前必须在 latest integration 上形成 reviewed overlay。
 
