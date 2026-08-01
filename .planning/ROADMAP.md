@@ -36,7 +36,8 @@ head在exact review发现两个shared dispatch-authority HIGH后保持local/unpu
 PR #241 owner ruling与PR #242/#243 planning/implementation形成
 `B_C2_02_09_DISPATCH_READY = 09be05da...` / tree `e1c10c67...`；PR #244/#245随后
 reviewed完成second-refrozen replacement `02-09`并形成`B_C2_LEAVES = fc3a603b...` /
-tree `01b33357...`。W4 exit三组回归全部通过，W5未开始。
+tree `01b33357...`。W4 exit三组回归全部通过；当前只冻结并review W5 `02-10`
+migration Packet，implementation尚未开始。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -172,7 +173,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / B_C2_LEAVES / W4_COMPLETE / W5_NOT_STARTED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_LEAVES / W4_COMPLETE / W5_02-10_PLAN_REVIEW / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -209,7 +210,7 @@ R1 PR #233/#234 形成 `B_C2_RECOVERY_CORE`；R2 PR #235/#236/#237 又形成
 第一次replacement `02-09` head因两个shared owner HIGH未发布；PR #241批准R4，
 PR #242/#243 reviewed merge形成真实dispatch-ready successor；PR #244/#245从该
 successor第二次重冻结并reviewed完成02-09。W4 exit为`726/877/398 passed`；旧02-09
-base/head仍不得复用，W5 `02-10`尚未开始。
+base/head仍不得复用；W5 `02-10`当前仅进入exact planning review。
 
 **Branch mapping**:
 
@@ -422,7 +423,7 @@ planning provenance开始。旧 `B_C2_APP_CONTRACT`、
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 17/26 | `W1-W4 complete；first 02-09 head quarantined；B_C2_LEAVES frozen；W4 exit 726/877/398 passed；W5 not started；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 17/26 | `W1-W4 complete；B_C2_LEAVES frozen；W4 exit 726/877/398 passed；W5 02-10 exact Plan review；no migration source；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
