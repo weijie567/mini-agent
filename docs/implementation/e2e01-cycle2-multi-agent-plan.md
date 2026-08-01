@@ -144,7 +144,7 @@ contract change。
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
 | Future GSD Plans | `W1-W8 COMPLETE / 02-15R0/R1/R2 OWNER CORRECTIONS APPROVED / 02-15 BLOCKED` |
-| Task Packets | `24 COMPLETE / 02-15R0/R1/R2 PLAN PENDING / 02-15 NOT REFROZEN` |
+| Task Packets | `25 COMPLETE / 02-15R0/R1/R2 PLAN PENDING / 02-15 NOT REFROZEN` |
 | Proposed Plan / Packet slots / Waves | `32 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` + `02-15R0/R1/R2` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
