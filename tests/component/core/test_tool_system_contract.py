@@ -1023,7 +1023,7 @@ def test_cycle2_search_orders_toolspec_is_exact_closed_minimum_disclosure() -> N
     assert spec.input_schema["required"] == ("product_description",)
     assert set(spec.input_schema["properties"]) == {"product_description"}
     description = spec.input_schema["properties"]["product_description"]
-    assert description == {"type": "string", "minLength": 1, "maxLength": 80}
+    assert description == {"type": "string", "minLength": 1}
 
     output = spec.output_schema
     assert set(output["properties"]) == {"outcome", "candidates", "truncated"}
@@ -1290,6 +1290,22 @@ def test_cycle2_recursive_registry_comparison_accepts_exact_three_reads() -> Non
         registration.tool_spec.name
         for registration in snapshot.canonical_registrations
     ) == ("search_orders", "get_order", "get_shipment")
+
+
+def test_cycle2_registry_validator_rejects_default_omitted_registration() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    registration = snapshot.canonical_registrations[0]
+    payload = registration.model_dump()
+    payload.pop("unknown_result_recovery")
+    defaulted = ToolRegistration.model_validate(payload)
+    assert "unknown_result_recovery" not in defaulted.model_fields_set
+    registrations = (defaulted, *snapshot.canonical_registrations[1:])
+    malformed = snapshot.model_copy(
+        update={"canonical_registrations": registrations}
+    )
+
+    with pytest.raises(ValueError, match="exact Cycle 2 registry"):
+        validate_cycle2_registry_snapshot(malformed)
 
 
 def _cycle2_registry_model_envelope_variant(
@@ -2242,6 +2258,97 @@ def test_cycle2_recovery_rejects_raw_coercive_nested_evidence() -> None:
         assert decision.stable_reason_code == "RECOVERY_EVIDENCE_INVALID"
         assert decision.candidate_next_attempt_no is None
         assert decision.durable_cas_claimed is False
+
+
+def _assert_direct_retry_evidence_rejected(
+    revalidation: object,
+    *,
+    vector: str,
+) -> None:
+    decision = decide_cycle2_tool_retry(
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        attempt_no=1,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        revalidation=revalidation,
+    )
+    assert decision is ToolRetryDecision.NOT_RETRYABLE, vector
+
+
+def test_cycle2_direct_retry_raw_preflight_closes_complete_evidence_graph() -> None:
+    revalidation = _retry_revalidation()
+    assert decide_cycle2_tool_retry(
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        attempt_no=1,
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="ORDER_SEARCH_TRANSIENT",
+        revalidation=revalidation,
+    ) is ToolRetryDecision.RETRY_SCHEDULED
+
+    class RetryRevalidationSubclass(Cycle2RetryRevalidation):
+        pass
+
+    subclass = RetryRevalidationSubclass.model_validate(
+        revalidation.model_dump(),
+        strict=True,
+    )
+    _assert_direct_retry_evidence_rejected(subclass, vector="root-subclass")
+    nodes = _nested_recovery_models(revalidation)
+    for node in nodes:
+        malformed = _replace_recovery_model(
+            revalidation,
+            node,
+            node.model_copy(update={"unexpected_field": "unexpected"}),
+        )
+        _assert_direct_retry_evidence_rejected(
+            malformed,
+            vector=f"{type(node).__name__}:extra",
+        )
+        for field_name, field in type(node).model_fields.items():
+            missing = type(node).model_construct(**node.__dict__)
+            missing.__dict__.pop(field_name)
+            malformed = _replace_recovery_model(
+                revalidation,
+                node,
+                missing,
+            )
+            _assert_direct_retry_evidence_rejected(
+                malformed,
+                vector=f"{type(node).__name__}:missing:{field_name}",
+            )
+            if not field.is_required():
+                payload = node.model_dump()
+                payload.pop(field_name)
+                defaulted = type(node).model_construct(**payload)
+                malformed = _replace_recovery_model(
+                    revalidation,
+                    node,
+                    defaulted,
+                )
+                _assert_direct_retry_evidence_rejected(
+                    malformed,
+                    vector=(
+                        f"{type(node).__name__}:default-regained:{field_name}"
+                    ),
+                )
+
+    raw_dispatch = revalidation.parent_dispatch_facts.model_copy(
+        update={"run_id": str(revalidation.parent_dispatch_facts.run_id)}
+    )
+    _assert_direct_retry_evidence_rejected(
+        revalidation.model_copy(
+            update={
+                "parent_dispatch_facts": raw_dispatch,
+                "expected_dispatch_facts": raw_dispatch,
+                "current_dispatch_facts": raw_dispatch,
+            }
+        ),
+        vector="raw-uuid",
+    )
+    _assert_direct_retry_evidence_rejected(
+        revalidation.model_copy(update={"remaining_run_time_budget_ms": 500.0}),
+        vector="raw-float",
+    )
 
 
 def test_cycle2_recovery_malformed_three_attempt_shape_fails_closed_once() -> None:

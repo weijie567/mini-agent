@@ -149,6 +149,7 @@ class Cycle2GatewayBudgetFacts(RuntimePrivateModel):
 class Cycle2ToolProgressFact(RuntimePrivateModel):
     """A prior validated step used for deterministic no-progress comparison."""
 
+    tool_call_id: UUID
     run_id: UUID
     context_manifest_id: UUID
     tool_registry_version: Literal["e2e01-cycle2-tools.p0.v1"]
@@ -556,13 +557,13 @@ def _cycle2_schema_valid(
         if set(arguments) != {"product_description"}:
             return False
         value = arguments.get("product_description")
-        if type(value) is not str or not 1 <= len(value) <= 80:
+        if type(value) is not str:
             return False
         try:
-            normalize_product_description(value)
+            normalized = normalize_product_description(value)
         except (TypeError, ValueError):
             return False
-        return True
+        return 1 <= len(normalized) <= 80
     if set(arguments) != {"order_id"}:
         return False
     order_id = arguments.get("order_id")
@@ -832,6 +833,24 @@ def _cycle2_budget_valid(
     )
 
 
+def _cycle2_progress_step_is_canonical(step: Cycle2ToolProgressFact) -> bool:
+    """Close one durable step to its tool-specific normalized argument contract."""
+
+    if len(step.argument_binding_refs) != len(set(step.argument_binding_refs)):
+        return False
+    normalized = _cycle2_normalized_argument(
+        tool_name=step.canonical_tool_name,
+        arguments=step.validated_arguments,
+    )
+    if normalized is None:
+        return False
+    argument_name, argument_value = normalized
+    if set(step.validated_arguments) != {argument_name}:
+        return False
+    raw_value = step.validated_arguments.get(argument_name)
+    return type(raw_value) is str and raw_value == argument_value
+
+
 def _cycle2_progress_valid(
     *,
     candidate: Cycle2GatewayCandidate,
@@ -843,14 +862,11 @@ def _cycle2_progress_valid(
     progress = loaded.progress_snapshot
     snapshot = loaded.registry_snapshot
     prior_steps = progress.prior_tool_steps
+    prior_tool_call_ids = tuple(step.tool_call_id for step in prior_steps)
     if not (
         progress.history_complete is True
         and loaded.budget.tool_calls_used == len(prior_steps)
-        and not any(
-            left == right
-            for index, left in enumerate(prior_steps)
-            for right in prior_steps[index + 1 :]
-        )
+        and len(prior_tool_call_ids) == len(set(prior_tool_call_ids))
         and progress.run_id == candidate.run_id
         and progress.context_manifest_id == candidate.context_manifest_id
         and progress.tool_registry_version == snapshot.tool_registry_version
@@ -864,6 +880,7 @@ def _cycle2_progress_valid(
             and step.model_visible_toolset_hash
             == progress.model_visible_toolset_hash
             and step.task_state_version == progress.task_state_version
+            and _cycle2_progress_step_is_canonical(step)
             for step in progress.prior_tool_steps
         )
     ):

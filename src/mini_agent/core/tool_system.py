@@ -8,7 +8,8 @@ from collections.abc import Mapping, Sequence, Set as AbstractSet
 from copy import deepcopy
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from types import UnionType
+from typing import Annotated, Any, Literal, Self, Union, get_args, get_origin
 from uuid import UUID
 
 from pydantic import (
@@ -798,9 +799,20 @@ def decide_cycle2_tool_retry(
 ) -> ToolRetryDecision:
     """Apply the exact policy and loaded-fact comparisons without persistence IO."""
 
-    if not isinstance(canonical_tool_name, Cycle2ToolName):
+    if type(canonical_tool_name) is not Cycle2ToolName:
         raise TypeError("canonical_tool_name must be a Cycle2ToolName")
-    revalidation = Cycle2RetryRevalidation.model_validate(revalidation.model_dump())
+    if (
+        type(revalidation) is not Cycle2RetryRevalidation
+        or not cycle2_pydantic_model_graph_is_raw_closed(revalidation)
+    ):
+        return ToolRetryDecision.NOT_RETRYABLE
+    try:
+        revalidation = Cycle2RetryRevalidation.model_validate(
+            revalidation.model_dump(),
+            strict=True,
+        )
+    except (PydanticSerializationError, TypeError, ValidationError, ValueError):
+        return ToolRetryDecision.NOT_RETRYABLE
     if type(attempt_no) is not int or attempt_no < 1:
         raise ValueError("attempt_no must be a strict positive integer")
     max_attempts = _CYCLE2_MAX_ATTEMPTS[canonical_tool_name]
@@ -1524,7 +1536,6 @@ def search_orders_tool_spec() -> ToolSpec:
                 "product_description": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 80,
                 }
             },
             "required": ["product_description"],
@@ -1788,6 +1799,8 @@ def validate_cycle2_registry_snapshot(
     try:
         if type(snapshot) is not RegistrySnapshot:
             raise TypeError("Cycle 2 snapshot must be the exact contract type")
+        if not cycle2_pydantic_model_graph_is_raw_closed(snapshot):
+            raise TypeError("Cycle 2 snapshot graph must be raw-complete and exact")
         if type(snapshot.canonical_registrations) is not tuple:
             raise TypeError("Cycle 2 registrations must be a tuple")
         actual_registrations = {
@@ -1879,6 +1892,91 @@ def _pydantic_model_envelope_is_raw_closed(value: object) -> bool:
     return extra is None or (type(extra) is dict and not extra)
 
 
+def _cycle2_json_value_is_raw_exact(value: object) -> bool:
+    """Accept only the immutable/native JSON graph stored by Cycle 2 models."""
+
+    if value is None or type(value) in {bool, int, float, str}:
+        return True
+    if isinstance(value, Mapping):
+        return all(
+            type(key) is str and _cycle2_json_value_is_raw_exact(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return all(_cycle2_json_value_is_raw_exact(item) for item in value)
+    return False
+
+
+def _cycle2_raw_value_matches_annotation(
+    value: object,
+    annotation: object,
+) -> bool:
+    """Match a stored raw value to its declared field type without laundering."""
+
+    if annotation is Any:
+        return True
+    if annotation is JsonValue:
+        return _cycle2_json_value_is_raw_exact(value)
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return _cycle2_raw_value_matches_annotation(value, arguments[0])
+    if origin in {Union, UnionType}:
+        return any(
+            _cycle2_raw_value_matches_annotation(value, option)
+            for option in arguments
+        )
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return type(value) is annotation
+    if isinstance(value, BaseModel):
+        return False
+
+    if origin is tuple:
+        if type(value) is not tuple:
+            return False
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return all(
+                _cycle2_raw_value_matches_annotation(item, arguments[0])
+                for item in value
+            )
+        return len(value) == len(arguments) and all(
+            _cycle2_raw_value_matches_annotation(item, item_annotation)
+            for item, item_annotation in zip(value, arguments, strict=True)
+        )
+    if isinstance(origin, type) and issubclass(origin, Mapping):
+        if not isinstance(value, Mapping):
+            return False
+        key_annotation, item_annotation = arguments or (Any, Any)
+        return all(
+            _cycle2_raw_value_matches_annotation(key, key_annotation)
+            and _cycle2_raw_value_matches_annotation(item, item_annotation)
+            for key, item in value.items()
+        )
+    if origin is list:
+        return type(value) is list and all(
+            _cycle2_raw_value_matches_annotation(item, arguments[0])
+            for item in value
+        )
+    if isinstance(origin, type) and issubclass(origin, AbstractSet):
+        if not isinstance(value, AbstractSet):
+            return False
+        item_annotation = arguments[0] if arguments else Any
+        return all(
+            _cycle2_raw_value_matches_annotation(item, item_annotation)
+            for item in value
+        )
+
+    try:
+        TypeAdapter(annotation).validate_python(value, strict=True)
+    except (TypeError, ValidationError, ValueError):
+        return False
+    return True
+
+
 def cycle2_pydantic_model_graph_is_raw_closed(*roots: object) -> bool:
     """Recursively close every BaseModel envelope in a trusted Cycle 2 graph."""
 
@@ -1896,12 +1994,11 @@ def cycle2_pydantic_model_graph_is_raw_closed(*roots: object) -> bool:
                 return False
             for field_name, field in type(value).model_fields.items():
                 raw_field_value = value.__dict__[field_name]
-                if isinstance(raw_field_value, (BaseModel, Mapping)):
-                    continue
-                TypeAdapter(field.annotation).validate_python(
+                if not _cycle2_raw_value_matches_annotation(
                     raw_field_value,
-                    strict=True,
-                )
+                    field.annotation,
+                ):
+                    return False
             value_id = id(value)
             if value_id in seen:
                 return True

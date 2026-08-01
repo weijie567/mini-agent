@@ -3,9 +3,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
-from mini_agent.core.common import FrozenJsonDict, freeze_json_value
+from mini_agent.core.common import (
+    FrozenJsonDict,
+    RuntimePrivateModel,
+    freeze_json_value,
+)
 from mini_agent.core.control_gateway import (
     Cycle2AcceptedBindingFacts,
     Cycle2GatewayBudgetFacts,
@@ -699,6 +703,18 @@ def _evaluate_cycle2(
     )
 
 
+def _foreign_shadow_model(model: BaseModel) -> BaseModel:
+    shadow_type = create_model(
+        f"Foreign{type(model).__name__}",
+        __base__=RuntimePrivateModel,
+        **{
+            field_name: (field.annotation, ...)
+            for field_name, field in type(model).model_fields.items()
+        },
+    )
+    return shadow_type.model_validate(model.model_dump(), strict=True)
+
+
 @pytest.mark.parametrize(
     "tool_name",
     [
@@ -729,6 +745,90 @@ def test_cycle2_gateway_accepts_three_distinct_typed_binding_paths(
         assert candidate.verified_target_ref in candidate.argument_binding_refs
 
 
+def test_cycle2_gateway_accepts_search_length_after_normalization() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.SEARCH_ORDERS)
+    normalized = "a" * 80
+    candidate = candidate.model_copy(
+        update={"candidate_arguments": {"product_description": normalized + " "}}
+    )
+    binding = loaded.current_input_bindings[0].model_copy(
+        update={"normalized_value": normalized}
+    )
+    loaded = loaded.model_copy(update={"current_input_bindings": (binding,)})
+
+    accepted = _evaluate_cycle2(candidate, loaded)
+
+    assert accepted.decision is GateDecisionValue.ACCEPT
+    assert accepted.schema_valid is True
+    assert accepted.argument_binding_valid is True
+
+    too_long = candidate.model_copy(
+        update={"candidate_arguments": {"product_description": "a" * 81}}
+    )
+    rejected = _evaluate_cycle2(too_long, loaded)
+
+    assert rejected.decision is GateDecisionValue.REJECT
+    assert rejected.schema_valid is False
+
+
+def test_cycle2_gateway_rejects_declared_nested_model_type_substitution() -> None:
+    candidate, loaded = _cycle2_complete_gateway_model_graph()
+
+    class CustomerContextSubclass(CustomerContext):
+        pass
+
+    subclass_context = CustomerContextSubclass.model_validate(
+        loaded.customer_context.model_dump(),
+        strict=True,
+    )
+    shadow_context = _foreign_shadow_model(loaded.customer_context)
+    shadow_binding = _foreign_shadow_model(loaded.current_input_bindings[0])
+    task_ref = loaded.context_manifest.task_state_ref_and_version
+    assert task_ref is not None
+    shadow_task_ref = _foreign_shadow_model(task_ref)
+    variants = (
+        (
+            candidate,
+            loaded.model_copy(update={"customer_context": shadow_context}),
+        ),
+        (
+            candidate,
+            loaded.model_copy(update={"customer_context": subclass_context}),
+        ),
+        (
+            candidate,
+            loaded.model_copy(update={"current_input_bindings": (shadow_binding,)}),
+        ),
+        (
+            candidate,
+            loaded.model_copy(
+                update={
+                    "context_manifest": loaded.context_manifest.model_copy(
+                        update={"task_state_ref_and_version": shadow_task_ref}
+                    )
+                }
+            ),
+        ),
+        (
+            candidate.model_copy(
+                update={
+                    "candidate_arguments": {
+                        "order_id": _foreign_shadow_model(
+                            loaded.current_input_bindings[0]
+                        )
+                    }
+                }
+            ),
+            loaded,
+        ),
+    )
+
+    for malformed_candidate, malformed_loaded in variants:
+        gate = _evaluate_cycle2(malformed_candidate, malformed_loaded)
+        assert gate.decision is GateDecisionValue.REJECT
+        assert gate.reason_code is GateReasonCode.SCHEMA_INVALID
+
+
 @pytest.mark.parametrize(
     "tool_name",
     [Cycle2ToolName.GET_ORDER, Cycle2ToolName.GET_SHIPMENT],
@@ -755,7 +855,15 @@ def test_cycle2_gateway_rejects_duplicate_request_unit_binding_refs(
 
 @pytest.mark.parametrize(
     "history_variant",
-    ["budget-ahead", "history-ahead", "duplicate-step-identity"],
+    [
+        "budget-ahead",
+        "history-ahead",
+        "duplicate-step-identity",
+        "identity-collision",
+        "arguments-extra",
+        "arguments-missing",
+        "duplicate-binding-ref",
+    ],
 )
 def test_cycle2_gateway_reconciles_complete_progress_history(
     history_variant: str,
@@ -774,13 +882,62 @@ def test_cycle2_gateway_reconciles_complete_progress_history(
                 "budget": loaded.budget.model_copy(update={"tool_calls_used": 0})
             }
         )
-    else:
+    elif history_variant == "duplicate-step-identity":
         loaded = loaded.model_copy(
             update={
                 "budget": loaded.budget.model_copy(update={"tool_calls_used": 2}),
                 "progress_snapshot": loaded.progress_snapshot.model_copy(
                     update={"prior_tool_steps": (prior_step, prior_step)}
                 ),
+            }
+        )
+    elif history_variant == "identity-collision":
+        collision = prior_step.model_copy(
+            update={"validated_arguments": {"order_id": "O-9998"}}
+        )
+        loaded = loaded.model_copy(
+            update={
+                "budget": loaded.budget.model_copy(update={"tool_calls_used": 2}),
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (prior_step, collision)}
+                ),
+            }
+        )
+    elif history_variant == "arguments-extra":
+        malformed = prior_step.model_copy(
+            update={
+                "validated_arguments": {
+                    "order_id": "O-9999",
+                    "unexpected": "value",
+                }
+            }
+        )
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (malformed,)}
+                )
+            }
+        )
+    elif history_variant == "arguments-missing":
+        malformed = prior_step.model_copy(update={"validated_arguments": {}})
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (malformed,)}
+                )
+            }
+        )
+    else:
+        binding_ref = prior_step.argument_binding_refs[0]
+        malformed = prior_step.model_copy(
+            update={"argument_binding_refs": (binding_ref, binding_ref)}
+        )
+        loaded = loaded.model_copy(
+            update={
+                "progress_snapshot": loaded.progress_snapshot.model_copy(
+                    update={"prior_tool_steps": (malformed,)}
+                )
             }
         )
 
@@ -922,6 +1079,7 @@ def test_cycle2_gateway_compares_loaded_facts_and_fails_closed(
                     update={
                         "prior_tool_steps": (
                             Cycle2ToolProgressFact(
+                                tool_call_id=uuid4(),
                                 run_id=candidate.run_id,
                                 context_manifest_id=candidate.context_manifest_id,
                                 tool_registry_version=(
@@ -1459,6 +1617,7 @@ def _cycle2_complete_gateway_model_graph() -> tuple[
         }
     )
     prior_step = Cycle2ToolProgressFact(
+        tool_call_id=uuid4(),
         run_id=candidate.run_id,
         context_manifest_id=candidate.context_manifest_id,
         tool_registry_version=loaded.registry_snapshot.tool_registry_version,
@@ -1483,6 +1642,17 @@ def _cycle2_complete_gateway_model_graph() -> tuple[
     )
     assert _evaluate_cycle2(candidate, loaded).decision is GateDecisionValue.ACCEPT
     return candidate, loaded
+
+
+def test_cycle2_progress_fact_requires_durable_tool_call_identity() -> None:
+    _candidate, loaded = _cycle2_complete_gateway_model_graph()
+    prior_step = loaded.progress_snapshot.prior_tool_steps[0]
+    assert type(prior_step.tool_call_id) is UUID
+
+    legacy_payload = prior_step.model_dump()
+    legacy_payload.pop("tool_call_id")
+    with pytest.raises(ValidationError):
+        Cycle2ToolProgressFact.model_validate(legacy_payload, strict=True)
 
 
 def _nested_gateway_models(value: object) -> tuple[BaseModel, ...]:
