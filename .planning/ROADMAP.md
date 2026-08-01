@@ -24,8 +24,11 @@ merge 后冻结 `B_C2_CORE_123` 并关闭 W1。PR #216/#217 随后完成 W2 plan
 PR #218/#219 又完成 W3 `02-05` planning、implementation、feature/overlay review 与
 串行 merge，冻结 `B_C2_APP_CONTRACT = 86d1b835...`。W4 preflight 随后确认
 InputBinding / atomic ordinal selection / selected-target Gateway 缺口；用户授权先
-完成 `02-02R/02-04R/02-05R` 再开始 W4。旧 02-06 Plan 不可执行；真实
-`B_C2_W4_READY` 形成前不创建 W4 实现分支。Phase 3–6
+完成 `02-02R/02-04R/02-05R` 再开始 W4。02-05R planning PR #226 与
+implementation PR #227 已 reviewed merge，形成真实
+`B_C2_W4_READY = 5f2fa6d...` / tree `174fbebc...`。`02-06/08/09/13` 已从该
+barrier重冻结，当前等待各自 exact-file planning review；reviewed planning provenance
+合并前不创建 W4 实现分支。Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
 
@@ -160,7 +163,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W3R_02_05R_PLANNING_REVIEW / W4_BLOCKED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / B_C2_W4_READY / W4_PLAN_REFREEZE_REVIEW / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -185,10 +188,11 @@ PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/
 已 reviewed merge 并形成真实 `B_C2_W3R_RULING = ed61f4d...`。02-02R PR #222/#223
 又形成 `B_C2_INPUT_BINDING_V2 = 5efd8fa...`。02-04R planning PR #224 与
 implementation PR #225 已 reviewed merge，形成
-`B_C2_SELECTED_TARGET_GATEWAY = 53e36aa...` / tree `3f9852e8...`；当前从该真实
-successor 单独冻结 `02-05R`。三者形成 `B_C2_W4_READY` 后，重新冻结
-`02-06/08/09/13`；每份全新 planning review `PASS`/merge 前不创建对应 implementation
-branch。旧 02-06 Plan 仅保留为历史 planning artifact。
+`B_C2_SELECTED_TARGET_GATEWAY = 53e36aa...` / tree `3f9852e8...`。02-05R
+planning PR #226 与 implementation PR #227 reviewed merge 后形成
+`B_C2_W4_READY = 5f2fa6d...` / tree `174fbebc...`。`02-06/08/09/13` 四份 Plan
+均从该 exact product base重冻结；每份全新 planning review `PASS` 且 planning
+provenance merge前不创建对应 implementation branch。
 
 **Branch mapping**:
 
@@ -258,17 +262,20 @@ B_C2_SELECTED_TARGET_GATEWAY
 = PR #225 reviewed 02-04R merge successor and exact 02-05R product base
 
 B_C2_W4_READY
-= OPEN; only the actual reviewed serial-merge successor of 02-02R/02-04R/02-05R
-= future exact W4 product base; must not be guessed
+= 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de
+= tree 174fbebcfa622336ffeade113cfae74a5611edae
+= PR #227 reviewed 02-05R merge successor and exact W4 product base
+= exact W4 product base; planning-control and later serial feature successors do not replace it
 ```
 
 `.planning/config.json` 中的 mapping 已用于创建 `integration/e2e01-cycle2`；
 `B_C2_START` 已冻结为 `B_C2_OWNER_ALIGNED` exact SHA/tree，随后 reviewed 02-03/02-01
 串行形成历史 `B_C2_W1A`。Phase 1 的 `integration/e2e01-thin` 保留为历史 release
 证据。W1 `02-02` r2 已从 exact repaired product base 形成 reviewed merge；旧
-`ecfad7e...` 未进入 ancestry。W2 `02-04` 与 W3 `02-05` 已依次完成；W4 四个
-implementation Packet 必须等 W3R 完成后固定到真实 `B_C2_W4_READY`。旧
-`B_C2_APP_CONTRACT` 与旧 02-06 Plan 均不得作为 W4 dispatch base。
+`ecfad7e...` 未进入 ancestry。W2 `02-04`、W3 `02-05` 与 W3R 已依次完成；四个
+W4 implementation Packet已固定到真实`B_C2_W4_READY`；当前 planning-control
+successor与后续串行 feature merge均不得替换其 product base。旧
+`B_C2_APP_CONTRACT` 与旧 02-06 literals 均不得作为 W4 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
 
@@ -347,7 +354,7 @@ implementation Packet 必须等 W3R 完成后固定到真实 `B_C2_W4_READY`。�
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 8/22 | `02-00..05 + 02-02R + 02-04R complete；B_C2_SELECTED_TARGET_GATEWAY frozen；02-05R planning review；functional implementation 7/21；Cases CONTRACT_DEFINED` | - |
+| 2. 完成 E2E-01 | 9/22 | `W1-W3R complete；B_C2_W4_READY frozen；02-06/08/09/13 refreeze review；functional implementation 8/21；Cases CONTRACT_DEFINED` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |

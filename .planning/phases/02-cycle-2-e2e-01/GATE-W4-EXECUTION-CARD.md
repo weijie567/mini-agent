@@ -1,6 +1,6 @@
 # Gate W4｜Leaves execution card
 
-状态：`W3_REVIEWED_MERGE_CONFIRMED / W3R_02_05R_PLANNING_REVIEW / W4_BLOCKED_PENDING_REMEDIATION`
+状态：`W3R_COMPLETE / B_C2_W4_READY_CONFIRMED / W4_PLAN_REFREEZE_REVIEW`
 
 ## Exact input
 
@@ -23,6 +23,13 @@
   feature/residual/latest-integration overlay review `PASS` 并 merge；真实
   `B_C2_SELECTED_TARGET_GATEWAY = 53e36aa88fab1ab99d2b076a1d731f63dced064a`，
   tree `3f9852e825a69c9ceb8a19e18c810263ef74349e` 与 reviewed overlay tree 相等。
+- 02-05R planning PR #226 与 implementation PR #227 已 bounded
+  feature/residual/latest-integration overlay review `PASS` 并 merge；两个 reviewer HIGH
+  （caller-derived UUIDv4 与 module-level issuance token）均在原 Packet 内关闭。真实
+  `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de`，tree
+  `174fbebcfa622336ffeade113cfae74a5611edae` 与 reviewed overlay tree相等；focused
+  `409 passed`、neighbor `363 passed`，full/migration/Runtime/Infrastructure/Eval
+  lifecycle 均未运行或推进。
 
 ## Confirmed W4 preflight blocker and owner ruling
 
@@ -43,17 +50,23 @@ name 同时存在 `shipment_not_received` / `not_received_claim` 漂移。
 - Claim canonical name 统一为 `shipment_not_received`；
 - 增加 `02-02R/02-04R/02-05R` 与 `W3R`，最大 writer 仍为 2。
 
-02-04R 已关闭 exact Tool v2 type dependency。当前只允许从 exact
-`B_C2_SELECTED_TARGET_GATEWAY` 签发并审阅 `02-05R`；其 Plan review/merge 前不得创建
-implementation Worktree。02-05R reviewed merge 的实际 successor 才能冻结为真实
-`B_C2_W4_READY`；此前不得重冻结或创建 W4 implementation Worktree。
+02-05R 已关闭 exact Application dependency与受控 selected-target issuance。真实
+`B_C2_W4_READY` 已形成；四个 W4 implementation Packet 均只能以该 exact SHA/tree作为
+product base，不能以当前 planning-control successor 或未来串行 merge successor替代。
 
 ## Packet freeze 与批次
 
-旧 02-06 Plan 因 base/dependency/product-blob 变化已失效，不得执行。四个 W4 exact
-Plan / Task Packet 必须在 `B_C2_W4_READY` 后逐个由
-Integrator 单写，并分别取得全新 independent exact-file planning review `PASS`；此前
-不得创建对应实现 branch / Worktree。
+旧 02-06 内容已从真实 barrier 完整重冻结；02-08/09/13 exact Plan亦由Integrator在
+dedicated planning-status Worktree逐个单写。四份 Plan 必须分别取得全新 independent
+exact-file planning review `PASS`，并通过同一 planning PR 合并为 provenance；此前不得
+创建对应实现 branch / Worktree。
+
+四个 Packet 的 frozen product input 统一为：
+
+- `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de`
+- tree `174fbebcfa622336ffeade113cfae74a5611edae`
+- implementation branches在本次 refreeze preflight均为 local / remote `NOT_FOUND`
+- owned-file intersections两两为零；new Cycle 2 Eval artifact paths在base为`NOT_FOUND`
 
 ```text
 Batch A: 02-06 Exact persistence codec || 02-13 Eval bundle/loader
