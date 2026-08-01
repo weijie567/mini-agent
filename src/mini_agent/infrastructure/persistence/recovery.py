@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from mini_agent.application.persistence import (
 )
 from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
+    Cycle2RunBudgetPolicyEvidence,
     RecoveryWriteResult,
     RestartRecoveryClosure,
     TaskRecoveryAggregate,
@@ -36,8 +38,18 @@ from mini_agent.infrastructure.persistence.postgres import (
 class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
     """Bounded restart-closure loader and atomic state-plus-Trace writer."""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
-        super().__init__(session_factory)
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        cycle2_clock: Callable[[], datetime] | None = None,
+        cycle2_run_budget_policy: Cycle2RunBudgetPolicyEvidence | None = None,
+    ) -> None:
+        super().__init__(
+            session_factory,
+            cycle2_clock=cycle2_clock,
+            cycle2_run_budget_policy=cycle2_run_budget_policy,
+        )
 
     @staticmethod
     def _bounded_rows(
@@ -102,6 +114,8 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
             .where(
                 P0RecordModel.record_code
                 == P0RecordCode.AGENT_RUN_RECORD.value,
+                P0RecordModel.record_schema_version
+                == "agent_run_record.p0.v1",
                 P0RecordModel.lifecycle_status.in_(
                     (
                         AgentRunStatus.CREATED.value,
@@ -147,11 +161,14 @@ class PostgresRestartRecoveryAdapter(PostgresRecordAdapter):
         run_link_statement = select(P0RecordModel).where(
             P0RecordModel.record_code
             == P0RecordCode.RUN_TASK_LINK_RECORD.value,
+            P0RecordModel.record_schema_version
+            == "run_task_link_record.p0.v1",
             P0RecordModel.run_id == run_record.run_id,
             P0RecordModel.scope_owner_customer_id == owner,
         )
         tool_statement = select(P0RecordModel).where(
             P0RecordModel.record_code == P0RecordCode.TOOL_CALL_RECORD.value,
+            P0RecordModel.record_schema_version == "tool_call_record.p0.v1",
             P0RecordModel.run_id == run_record.run_id,
             P0RecordModel.lifecycle_status.in_(("CREATED", "RUNNING")),
             P0RecordModel.scope_owner_customer_id == owner,

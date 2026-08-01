@@ -47,6 +47,8 @@ _COMPONENT_APPLICATION_TESTS = (
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_persistence_contract import _record_cases  # noqa: E402
 from test_record_contracts import (  # noqa: E402
+    _c2_retry_recovery_closure,
+    _conversation,
     _created_restart_recovery_closure,
     _recovery_trace_events,
 )
@@ -756,5 +758,41 @@ async def test_running_action_requires_reconciliation_and_writes_nothing(
             assert tool_call is not None
             assert run.lifecycle_status == AgentRunStatus.RUNNING.value
             assert tool_call.lifecycle_status == ToolCallStatus.RUNNING.value
+    finally:
+        engine.dispose()
+
+
+async def test_legacy_restart_reader_does_not_decode_cycle2_active_run(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+    records = PostgresRecordAdapter(session_factory)
+    recovery = PostgresRestartRecoveryAdapter(session_factory)
+    cycle2 = _c2_retry_recovery_closure()
+    conversation = _conversation(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=cycle2.active_run_record.conversation_id,
+        owner_customer_id=cycle2.owner_scope.customer_id,
+        created_at=cycle2.active_run_record.started_at,
+    )
+    try:
+        with session_factory.begin() as session:
+            records._cycle2_insert(
+                session,
+                (
+                    records._cycle2_encode(
+                        P0RecordCode.CONVERSATION_RECORD,
+                        conversation,
+                    ),
+                    records._cycle2_encode(
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        cycle2.active_run_record,
+                    ),
+                ),
+                owner_customer_id=cycle2.owner_scope.customer_id,
+            )
+
+        assert await recovery.load_next_restart_recovery_closure() is None
     finally:
         engine.dispose()

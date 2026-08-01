@@ -51,6 +51,7 @@ from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
+    P0RecordStateHistoryModel,
 )
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
@@ -78,6 +79,8 @@ sys.path.append(str(_INTEGRATION_TESTS))
 from test_postgres_record_adapters import (  # noqa: E402
     _encode_non_ru_record_case,
     _non_ru_record_cases,
+    _physical_cycle2_continuation_command,
+    _seed_cycle2_continuation,
 )
 
 pytestmark = pytest.mark.anyio
@@ -817,6 +820,67 @@ async def test_owner_scoped_read_discards_database_failure_context(
             captured.value,
             forbidden_values=forbidden_values,
         )
+    finally:
+        engine.dispose()
+
+
+async def test_cycle2_continuation_late_failure_rolls_back_every_projection(
+    eval_postgres_namespace,
+    monkeypatch,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _physical_cycle2_continuation_command()
+    closure = command.loaded_closure
+    try:
+        _seed_cycle2_continuation(adapter, command)
+        real_replace = adapter._cycle2_replace
+        replace_count = 0
+
+        def fail_second_replace(*args, **kwargs):
+            nonlocal replace_count
+            replace_count += 1
+            result = real_replace(*args, **kwargs)
+            if replace_count == 2:
+                raise RuntimeError("injected late Cycle 2 failure")
+            return result
+
+        monkeypatch.setattr(adapter, "_cycle2_replace", fail_second_replace)
+        with pytest.raises(RuntimeError, match="injected late Cycle 2 failure"):
+            await adapter.apply_continuation_input_binding_if_current(command)
+
+        owner = closure.owner_scope.customer_id
+        with adapter.session_factory() as session:
+            task = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", closure.current_task_record.task_id),),
+            )
+            unit = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=((
+                    "request_unit_id",
+                    closure.current_request_unit_record.request_unit_id,
+                ),),
+            )
+            inserted_binding = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.INPUT_BINDING_RECORD.value,
+                    P0RecordModel.logical_identity
+                    == [["binding_id", str(command.new_input_binding_record.binding_id)]],
+                )
+            )
+            history_count = session.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            )
+        assert task is not None and task[1].source_record == closure.current_task_record
+        assert unit is not None and unit[1].source_record == closure.current_request_unit_record
+        assert inserted_binding is None
+        assert history_count == 0
     finally:
         engine.dispose()
 

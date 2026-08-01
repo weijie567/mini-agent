@@ -7,7 +7,7 @@ import json
 import sys
 import threading
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic_core import to_jsonable_python
-from sqlalchemy import delete, event, select, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from mini_agent.application.persistence import (
@@ -30,17 +30,23 @@ from mini_agent.application.persistence import (
     encode_persistence_record_versioned,
 )
 from mini_agent.application.records import (
+    ApplyContinuationInputBindingV2Command,
+    Cycle2WriteResult,
     ExactRunEvidenceClosure,
+    RunTaskLinkRecordV2,
+    SupersededRunInvalidationKind,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_understanding import ReferenceSourceKindV2
 from mini_agent.core.task_state import DurableResolvedReferenceCandidateV2
+from mini_agent.core.trace import AgentRunRecordV2, AgentRunStatusV2
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
+    P0RecordStateHistoryModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
@@ -50,6 +56,7 @@ _COMPONENT_APPLICATION_TESTS = (
 sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
 from test_persistence_contract import _record_cases  # noqa: E402
 from test_record_contracts import (  # noqa: E402
+    _c2_continuation_command,
     _minimal_exact_run_evidence,
     _rebuild_exact_run_evidence,
     _rejected_gate_exact_run_evidence,
@@ -253,6 +260,154 @@ def _assert_bounded_integrity_error(
     assert error.__context__ is None
     projection = f"{error!s} {error!r} {error.args!r}"
     assert all(value not in projection for value in forbidden_values)
+
+
+def _seed_cycle2_continuation(
+    adapter: PostgresRecordAdapter,
+    command: ApplyContinuationInputBindingV2Command,
+) -> None:
+    closure = command.loaded_closure
+    prerequisite_message_ids = {
+        *closure.current_request_unit_record.goal_source_refs,
+        *closure.current_input_binding_records[0].source_refs,
+    }
+    goal_messages = tuple(
+        closure.saved_user_message_record.model_copy(
+            update={
+                "message_id": message_id,
+                "received_at": closure.trusted_conversation_record.created_at,
+            }
+        )
+        for message_id in prerequisite_message_ids
+        if message_id != closure.saved_user_message_record.message_id
+    )
+    envelopes = tuple(
+        adapter._cycle2_encode(code, record)
+        for code, record in (
+            (
+                P0RecordCode.CONVERSATION_RECORD,
+                closure.trusted_conversation_record,
+            ),
+            (
+                P0RecordCode.MESSAGE_RECORD,
+                closure.saved_user_message_record,
+            ),
+            (P0RecordCode.TASK_RECORD, closure.current_task_record),
+            (
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                closure.current_request_unit_record,
+            ),
+            (
+                P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                closure.current_conversation_task_link_record,
+            ),
+            *(
+                (P0RecordCode.MESSAGE_RECORD, message)
+                for message in goal_messages
+            ),
+        )
+    ) + (
+        adapter._cycle2_encode_input_binding(
+            closure.current_input_binding_records[0],
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+        ),
+    )
+    with adapter.session_factory.begin() as session:
+        adapter._cycle2_insert(
+            session,
+            envelopes,
+            owner_customer_id=closure.owner_scope.customer_id,
+        )
+
+
+def _physical_cycle2_continuation_command() -> ApplyContinuationInputBindingV2Command:
+    command = _c2_continuation_command()
+    original_closure = command.loaded_closure
+    closure_values = {
+        field_name: getattr(original_closure, field_name)
+        for field_name in type(original_closure).model_fields
+    }
+    closure = type(original_closure)(
+        **{
+            **closure_values,
+            "trusted_conversation_record": (
+                original_closure.trusted_conversation_record.model_copy(
+                    update={"schema_version": "conversation_record.p0.v1"}
+                )
+            ),
+            "current_conversation_task_link_record": (
+                original_closure.current_conversation_task_link_record.model_copy(
+                    update={
+                        "schema_version": "conversation_task_link_record.p0.v1"
+                    }
+                )
+            ),
+            "saved_user_message_record": (
+                original_closure.saved_user_message_record.model_copy(
+                    update={"schema_version": "message_record.p0.v1"}
+                )
+            ),
+        }
+    )
+    return ApplyContinuationInputBindingV2Command(
+        loaded_closure=closure,
+        new_input_binding_record=command.new_input_binding_record,
+        next_task_record=command.next_task_record,
+        next_request_unit_record=command.next_request_unit_record,
+    )
+
+
+def _seed_cycle2_superseded_run_graph(
+    adapter: PostgresRecordAdapter,
+    command: ApplyContinuationInputBindingV2Command,
+) -> tuple[UUID, UUID]:
+    closure = command.loaded_closure
+    obsolete_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=closure.trusted_conversation_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=closure.current_task_record.updated_at,
+    )
+    replacement_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=closure.trusted_conversation_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted",
+        started_at=command.next_task_record.updated_at,
+    )
+    envelopes = tuple(
+        adapter._cycle2_encode(code, record)
+        for code, record in (
+            (P0RecordCode.AGENT_RUN_RECORD, obsolete_run),
+            (
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                RunTaskLinkRecordV2(
+                    run_id=obsolete_run.run_id,
+                    task_id=closure.current_task_record.task_id,
+                    base_task_state_version=(
+                        closure.current_task_record.state_version
+                    ),
+                ),
+            ),
+            (P0RecordCode.AGENT_RUN_RECORD, replacement_run),
+            (
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                RunTaskLinkRecordV2(
+                    run_id=replacement_run.run_id,
+                    task_id=closure.current_task_record.task_id,
+                    base_task_state_version=command.next_task_record.state_version,
+                ),
+            ),
+        )
+    )
+    with adapter.session_factory.begin() as session:
+        adapter._cycle2_insert(
+            session,
+            envelopes,
+            owner_customer_id=closure.owner_scope.customer_id,
+        )
+    return obsolete_run.run_id, replacement_run.run_id
 
 
 async def _seed_non_ru_records(adapter: PostgresRecordAdapter) -> None:
@@ -710,9 +865,7 @@ async def test_all_non_ru_records_and_five_external_references_round_trip_exactl
             )
 
             assert {row.record_code for row in rows} == {
-                code.value
-                for code in P0RecordCode
-                if code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                case.code.value for case in cases
             }
             assert len(rows) == 16
             for row in rows:
@@ -760,6 +913,285 @@ async def test_all_non_ru_records_and_five_external_references_round_trip_exactl
                 in expected_external_relations
             }
             assert external_relations == expected_external_relations
+    finally:
+        engine.dispose()
+
+
+async def test_cycle2_continuation_reader_and_cas_commit_exact_graph(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _physical_cycle2_continuation_command()
+    closure = command.loaded_closure
+    try:
+        _seed_cycle2_continuation(adapter, command)
+
+        loaded = await adapter.load_continuation_input_binding_closure_for_owner(
+            owner_scope=closure.owner_scope,
+            conversation_id=closure.trusted_conversation_record.conversation_id,
+            message_id=closure.saved_user_message_record.message_id,
+            task_id=closure.current_task_record.task_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+            trusted_now=closure.trusted_now,
+        )
+        assert loaded == closure
+        assert (
+            await adapter.apply_continuation_input_binding_if_current(command)
+            is Cycle2WriteResult.APPLIED
+        )
+
+        with adapter.session_factory() as session:
+            task = adapter._cycle2_row(
+                session,
+                owner_customer_id=closure.owner_scope.customer_id,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", closure.current_task_record.task_id),),
+            )
+            unit = adapter._cycle2_row(
+                session,
+                owner_customer_id=closure.owner_scope.customer_id,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=((
+                    "request_unit_id",
+                    closure.current_request_unit_record.request_unit_id,
+                ),),
+            )
+            binding = adapter._cycle2_row(
+                session,
+                owner_customer_id=closure.owner_scope.customer_id,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=((
+                    "binding_id",
+                    command.new_input_binding_record.binding_id,
+                ),),
+                expected_versions=frozenset({"input_binding_record.p0.v2"}),
+            )
+            history = tuple(
+                session.scalars(
+                    select(P0RecordStateHistoryModel).order_by(
+                        P0RecordStateHistoryModel.record_code
+                    )
+                )
+            )
+        assert task is not None and task[1].source_record == command.next_task_record
+        assert unit is not None and unit[1].source_record == command.next_request_unit_record
+        assert binding is not None
+        assert binding[1].source_record == command.new_input_binding_record
+        assert len(history) == 2
+        historical_by_code = {row.record_code: row for row in history}
+        assert historical_by_code[P0RecordCode.TASK_RECORD.value].envelope == (
+            adapter._cycle2_encode(
+                P0RecordCode.TASK_RECORD,
+                closure.current_task_record,
+            ).model_dump(mode="json")
+        )
+        assert historical_by_code[
+            P0RecordCode.REQUEST_UNIT_RECORD.value
+        ].envelope == adapter._cycle2_encode(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            closure.current_request_unit_record,
+        ).model_dump(mode="json")
+        assert (
+            await adapter.apply_continuation_input_binding_if_current(command)
+            is Cycle2WriteResult.NOT_APPLICABLE
+        )
+    finally:
+        engine.dispose()
+
+
+async def test_cycle2_history_duplicate_identical_is_idempotent_and_conflict_fails(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    command = _physical_cycle2_continuation_command()
+    closure = command.loaded_closure
+    try:
+        _seed_cycle2_continuation(adapter, command)
+        assert (
+            await adapter.apply_continuation_input_binding_if_current(command)
+            is Cycle2WriteResult.APPLIED
+        )
+        owner = closure.owner_scope.customer_id
+        with adapter.session_factory.begin() as session:
+            history = session.scalar(
+                select(P0RecordStateHistoryModel).where(
+                    P0RecordStateHistoryModel.record_code
+                    == P0RecordCode.TASK_RECORD.value
+                )
+            )
+            assert history is not None
+            decoded = adapter._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", closure.current_task_record.task_id),),
+                state_version=closure.current_task_record.state_version,
+            )
+            assert decoded is not None
+            identical_values = adapter._cycle2_projection_values(
+                adapter._cycle2_encode(
+                    P0RecordCode.TASK_RECORD,
+                    closure.current_task_record,
+                ),
+                decoded,
+                owner_customer_id=owner,
+            )
+            identical_row = P0RecordModel(
+                record_id=uuid4(),
+                **identical_values,
+            )
+            adapter._cycle2_archive_preimage(
+                session,
+                identical_row,
+                decoded,
+                owner_customer_id=owner,
+            )
+            assert session.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 2
+
+            conflicting_record = closure.current_task_record.model_copy(
+                update={
+                    "updated_at": (
+                        closure.current_task_record.updated_at
+                        + timedelta(microseconds=1)
+                    )
+                }
+            )
+            conflicting_envelope = adapter._cycle2_encode(
+                P0RecordCode.TASK_RECORD,
+                conflicting_record,
+            )
+            conflicting_decoded = adapter._ru_v2_write_decode_cycle2(
+                conflicting_envelope,
+                record_code=P0RecordCode.TASK_RECORD,
+                schema_version="task_record.p0.v1",
+            )
+            conflicting_row = P0RecordModel(
+                record_id=uuid4(),
+                **adapter._cycle2_projection_values(
+                    conflicting_envelope,
+                    conflicting_decoded,
+                    owner_customer_id=owner,
+                ),
+            )
+            with pytest.raises(postgres_persistence._Cycle2ProjectionConflict):
+                adapter._cycle2_archive_preimage(
+                    session,
+                    conflicting_row,
+                    conflicting_decoded,
+                    owner_customer_id=owner,
+                )
+            assert session.scalar(
+                select(func.count()).select_from(P0RecordStateHistoryModel)
+            ) == 2
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("corruption_kind", "raises_integrity"),
+    (
+        ("missing", False),
+        ("wrong_owner", False),
+        ("mutated", True),
+        ("contradictory", True),
+    ),
+)
+async def test_cycle2_superseded_reader_requires_exact_historical_pair(
+    eval_postgres_namespace,
+    corruption_kind: str,
+    raises_integrity: bool,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    command = _physical_cycle2_continuation_command()
+    closure = command.loaded_closure
+    trusted_now = command.next_task_record.updated_at + timedelta(seconds=1)
+    adapter = PostgresRecordAdapter(
+        build_session_factory(engine),
+        cycle2_clock=lambda: trusted_now,
+    )
+    try:
+        _seed_cycle2_continuation(adapter, command)
+        assert (
+            await adapter.apply_continuation_input_binding_if_current(command)
+            is Cycle2WriteResult.APPLIED
+        )
+        obsolete_run_id, replacement_run_id = _seed_cycle2_superseded_run_graph(
+            adapter,
+            command,
+        )
+        loaded = await adapter.load_superseded_run_closure_for_owner(
+            owner_scope=closure.owner_scope,
+            obsolete_run_id=obsolete_run_id,
+            replacement_run_id=replacement_run_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+        )
+        assert loaded is not None
+        assert loaded.obsolete_task_record == closure.current_task_record
+        assert (
+            loaded.obsolete_request_unit_record
+            == closure.current_request_unit_record
+        )
+        assert loaded.current_task_record == command.next_task_record
+        assert loaded.current_request_unit_record == command.next_request_unit_record
+        assert (
+            loaded.invalidation_kind
+            is SupersededRunInvalidationKind.TASK_VERSION_ADVANCED
+        )
+
+        with adapter.session_factory.begin() as session:
+            session.execute(
+                text(
+                    "ALTER TABLE p0_record_state_history "
+                    "DISABLE TRIGGER USER"
+                )
+            )
+            target_code = (
+                P0RecordCode.TASK_RECORD.value
+                if corruption_kind == "mutated"
+                else P0RecordCode.REQUEST_UNIT_RECORD.value
+            )
+            historical = session.scalar(
+                select(P0RecordStateHistoryModel).where(
+                    P0RecordStateHistoryModel.record_code == target_code
+                )
+            )
+            assert historical is not None
+            if corruption_kind == "missing":
+                session.delete(historical)
+            elif corruption_kind == "wrong_owner":
+                historical.scope_owner_customer_id = "customer-B"
+            else:
+                corrupted = json.loads(json.dumps(historical.envelope))
+                if corruption_kind == "mutated":
+                    corrupted["payload"]["data"]["owner_customer_id"] = (
+                        "customer-B"
+                    )
+                else:
+                    corrupted["payload"]["data"]["task_id"] = str(uuid4())
+                historical.envelope = corrupted
+            session.flush()
+            session.execute(
+                text(
+                    "ALTER TABLE p0_record_state_history "
+                    "ENABLE TRIGGER USER"
+                )
+            )
+
+        operation = adapter.load_superseded_run_closure_for_owner(
+            owner_scope=closure.owner_scope,
+            obsolete_run_id=obsolete_run_id,
+            replacement_run_id=replacement_run_id,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+        )
+        if raises_integrity:
+            with pytest.raises(P0PersistenceIntegrityError):
+                await operation
+        else:
+            assert await operation is None
     finally:
         engine.dispose()
 
