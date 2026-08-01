@@ -54,9 +54,11 @@
   W2 planning、02-04 implementation、feature/overlay review 与串行 merge，冻结
   `B_C2_TOOL = f9a2a75...`。PR #218/#219 随后完成 02-05 planning、implementation、
   feature/overlay review 与串行 merge，冻结 `B_C2_APP_CONTRACT = 86d1b835...`；旧
-  `ecfad7e...` 实现 head 保持 quarantined。旧 02-06 Plan 因 remediation dependency /
-  product blob 变化已失效；W4 四个 implementation Packet 必须改以未来真实
-  `B_C2_W4_READY` 为 base，并在 latest integration 上逐个 overlay review。
+  `ecfad7e...` 实现 head 保持 quarantined。02-02R/02-04R/02-05R 已reviewed完成；
+  PR #227 merge successor形成真实`B_C2_W4_READY = 5f2fa6d...` / tree
+  `174fbebc...`。W4四个Plan已从该同一product base重冻结，独立planning review /
+  provenance merge前不创建 implementation resources；每个feature仍在latest
+  integration上逐个overlay review。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope

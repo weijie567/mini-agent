@@ -2,7 +2,7 @@
 
 更新日期：2026-08-01
 
-状态：`NON_NORMATIVE / PLAN_APPROVED / W3R_02_05R_PLANNING_REVIEW`
+状态：`NON_NORMATIVE / PLAN_APPROVED / B_C2_W4_READY / W4_PLAN_REFREEZE_REVIEW`
 
 规划输入：`main@b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3`
 
@@ -22,8 +22,12 @@ squash merge；`B_C2_PLAN_APPROVED =
 > [`02-00`](../../.planning/phases/02-cycle-2-e2e-01/02-00-PLAN.md) 与 W1–W3
 > `02-01..05` 均已 reviewed merge。W4 preflight 已确认三个跨 owner 的 contract
 > 缺口；用户于 2026-08-01 明确授权“有问题先修复完成后开始 W4”。因此先增加
-> `02-02R/02-04R/02-05R` 三个一对一 correction Packet，并在真实 remediation
-> barrier 上重新冻结 W4 `02-06/08/09/13`；旧 02-06 Plan 不再是可执行输入。
+> `02-02R/02-04R/02-05R` 三个一对一 correction Packet。三者已reviewed串行完成；
+> PR #227 的实际 merge successor
+> `B_C2_W4_READY = 5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de` / tree
+> `174fbebcfa622336ffeade113cfae74a5611edae` 与 reviewed overlay相等。W4
+> `02-06/08/09/13` 已从该同一 product barrier重冻结，当前等待四份独立 exact-file
+> planning review；旧 02-06 literals不再是可执行输入。
 >
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
 > 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
