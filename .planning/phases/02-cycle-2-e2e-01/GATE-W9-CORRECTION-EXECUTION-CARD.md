@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_R1CD_OWNER_APPROVED / 02-15R1C_PLAN_REVIEW`
+状态：`B_C2_W9_UNIQUE_TARGET_CONTRACT / 02-15R1D_PLAN_REVIEW`
 
 ## Exact input
 
@@ -27,6 +27,10 @@
   批准`02-15R1C → 02-15R1D`，当前36 slots / 16 wave labels；真实
   `B_C2_W9_R1CD_OWNER_APPROVED = aef424c0fdd1b2c913a699b6a4f456e14b178eee` /
   tree `dc4662ac4e994811cb8a2160f9678d8f86cfdf61`。旧R1 checkpoint继续未发布。
+- PR #282/#283已reviewed完成R1C planning/implementation；真实
+  `B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e972763534198e6d2601baa2b60bb3312ad80` /
+  tree `394d022adfa80ef4d935216393fecf19892d4316`。R1C只补active scoped Spec，
+  Core/Application/Infrastructure与Case lifecycle均未推进。
 
 ## Ordered dispatch
 
@@ -51,4 +55,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R1C` exact-one-file planning/review；R1C实现、R1D/R1/R2/02-15尚未冻结。
+当前只允许`02-15R1D` exact-four-file planning/review；R1D实现、R1/R2/02-15尚未冻结。
