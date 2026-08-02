@@ -2667,7 +2667,7 @@ ref 一律 unknown，不允许按命名约定自动生成。
 | `fx-search-no-match-owner-a-v1` | customer-A trusted session；order/search/shipment/runtime tuples 全空，`鞋` 查询得到真实 owner-scoped zero-row read |
 | `fx-search-multiple-owner-a-v1` | 复用 W9 `ORDER/SEARCH-A-1001/A-1002` |
 | `fx-order-targets-owner-a-v1` | 复用 W9 `ORDER-A-1001/A-1002`；与 candidate setup 的 observation target mapping identity 精确一致 |
-| `fx-current-candidate-set-owner-a-v1` | current `WAITING_USER` graph；一个 MULTIPLE CandidateSet，entries `1→O-1001`、`2→O-1002`，pending ref/current Task version/15-minute TTL/source Search Observation 与两个 runtime-private target mappings 全部闭合 |
+| `fx-current-candidate-set-owner-a-v1` | current `WAITING_USER` graph；一个 MULTIPLE CandidateSet，entries `1→O-1002`、`2→O-1001`，该顺序由 D1 `ordered_at DESC, order_number ASC` 与 W9 exact dates 唯一导出；pending ref/current Task version/15-minute TTL/source Search Observation 与两个 runtime-private target mappings 全部闭合 |
 | `fx-expired-candidate-set-owner-a-v1` | 与 current fixture 同形，但 trusted now 已满足 `now >= valid_until`；没有其他 current CandidateSet |
 | `fx-candidate-set-other-task-owner-a-v1` | customer-A current Session Task 与 CandidateSet 所属 customer-A other Task 精确不同；current Task 不拥有该 pending ref，且不包含 foreign owner data |
 | `fx-verified-order-target-o1001-owner-a-v1` | current ACTIVE graph；accepted `order_id=O-1001` Claim、唯一 verified target 与 target Observation 由同 owner/current Task/version闭合；不预置本次 evaluated Run 的 ToolCall/Result |
@@ -3499,6 +3499,7 @@ exact-head review 与 merge 证据。
 | 20 | W12 execution-contract exact-review remediation | ordinal、transport、mapper、recovery与setup是否形成单一可实现合同 | 63355354 exact review以`2 BLOCK + 3 HIGH + 1 MEDIUM`拒绝：旧binding仍限`1..5`、non-HTTP T2只能合成HTTP 200、actual observation遗漏imported mapper、recovery root被ordinary preseed禁令误伤、overlay顺序矛盾且两条longitudinal reject缺binding总规则。修正将Claim domain统一为`1..99`而CandidateSet capability保持`1..5`；T2 transport改为nullable `NOT_APPLICABLE`并要求Eval原子sync；mapper observation使用imported/delta closed union；只给exact recovery fixture开放non-terminal root；setup使用pre-fold/fold/post-fold/write两阶段门禁；六条schema-valid selection reject都保存Claim且不创建Selection/target |
 | 21 | W12 recovery-root provenance remediation | closed recovery root是否能满足InputBinding source closure | ed66bab第二轮exact review确认旧六项已关闭，但发现absolute no-Message preseed使`InputBinding.source_refs`必然dangling。修正只允许closed obsolete-run fixture预置一个owner-A/current Conversation下、与authenticated Case唯一USER input exact一致的历史USER Message；RequestUnit / binding / manifest / applicable Trace refs必须形成exact set，ASSISTANT、terminal output、额外或跨Conversation Message继续禁止 |
 | 22 | W12 recovery trajectory assertion remediation | OA-10 no-output断言是否错误删除历史输入provenance | 871e6b2第三轮exact review确认recovery主合同已闭合，但第9.5节总断言仍禁止任何Message，因而会拒绝强制历史USER source。修正为finalization不新增Message、只禁止ASSISTANT / terminal output并保留第9.2.3节唯一历史USER provenance；no-result/no-state/no-response语义不变 |
+| 23 | W12 CandidateSet ordinal mapping remediation | fixture序号是否服从已冻结排序与W9 exact dates | R17实现预检确认D1与production Core均固定`ordered_at DESC, order_number ASC`，W9冻结O-1002日期晚于O-1001，因此唯一合法映射为`1→O-1002、2→O-1001`；第9.2.3节原反向fixture行属于scoped Spec内部矛盾。本owner显式修正该行，不改变排序算法、种子日期、Case身份、期望结果或lifecycle；旧`02-18R17`控制包因消费错误Spec blob而失效，必须从本修正真实successor重冻结replacement R17 |
 
 ## 14. Review checklist
 
