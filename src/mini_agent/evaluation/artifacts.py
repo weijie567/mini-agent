@@ -25,7 +25,7 @@ EXPECTED_MANIFEST_SHA256 = (
 )
 CYCLE2_MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-cycle2.v1.json"
 CYCLE2_EXPECTED_MANIFEST_SHA256 = (
-    "00600b24a8403280f527c0ad8140e1a3543738dad46c648d1965ca4bda22914c"
+    "dca872d87c50f3496f5eb8f6b5a7a289865297d86b6fc8157129c2b19670e168"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -821,33 +821,33 @@ _CYCLE2_CASE_IDS = (
     "T2-two-active-packages-integrity-blocked",
 )
 _CYCLE2_CASE_CONTRACT_SHA256: Mapping[str, str] = {
-    "E2E01-02/unique-own-with-foreign-decoy": "ee4ba2acd7741587079aefd1d49fd15782532f55f5c93445a74088d79bc6fb2a",
-    "E2E01-02/no-match-safe-not-found": "f88a0a8eadec996066db2fb147a5bb2514f1e7cd2b3fa50d8486d75b3387ccb8",
-    "E2E01-03/multiple-minimum-summary": "6ae92783328f9ab634f23d713dfb2cd3567ca0823595346ddd0a82ee630c68fe",
-    "E2E01-03/current-second-selected": "f0dc2d1baf2da2957dda31ced226fe658caa0b89ffeb06c71a143b1b21ee3e03",
-    "E2E01-03/expired-second-rejected": "131b8ef42e2a07ffc79f4d5c965229cbbd67297d878d8142b083f85f336bc633",
-    "E2E01-03/cross-task-second-rejected": "fbea2b11152d02fc7e266641ebaeac11c592c0edf65476bc5c76d77d94090e11",
-    "E2E01-05/order-only-no-shipment": "a960200b4694424c52bd25aca25ab0bb37fde1f72a8307e10fa94ae7d9094b86",
-    "E2E01-05/logistics-required-uses-shipment": "7aab06b77728321fa0ed9323e4e11329c45a2b3fe3084a8ed51fde99cece8ec4",
-    "E2E01-06/stale-refresh-success": "d39cb6ff820093fcda128115557fffdd15bd906f587c05baf2cd1c4378846de2",
-    "E2E01-06/transient-once-then-success": "d31f0b0c126d0ca8ef82b0e15cd188dc9b53d85298fa376d7b4f32a876462dd1",
-    "E2E01-06/transient-exhausted-blocked": "6dfb18831720536fcc1881954c79a0fd63cad232b1af1ee6443d1eac7e326d37",
-    "E2E01-06/deterministic-source-integrity-no-retry": "738ae3fdd847efc31e1120c65f340480d4e5222bc18d1877adf195a92c449e0c",
-    "E2E01-06/insufficient-promise-need-human": "27027eb16d9474a19f3ff5dcc4a64b462a357029e3661252d22d8c00b4771674",
-    "E2E01-06/no-shipment-need-human": "fadee09b297b66a224d53c9f3e54fa21dfdad278e897239f32d4bad3df081d98",
-    "T2-candidate-owner-mismatch-rejected": "80887c5aa462b32d63d7686b0af992822ecd5fc73a2119890841aeb54691b84e",
-    "T2-candidate-superseded-rejected": "871a4c511fdf5a9060a95893e26dbce2904dbabce5c020e35ca21585b2857848",
-    "T2-candidate-out-of-range-rejected": "f53e8378307be20476eff022cdfdd3899e46f4f9c0c0fe459a502cb7ba88830a",
-    "T2-candidate-zero-or-multiple-current-rejected": "34230b8e9acf1285766f990249cb25f0b5c1254419bf1d78298b2ca17b833bb2",
-    "T2-assessment-delayed-boundary": "4eee58f51bfc5e0fbf0ad77c9f326d12158b6209276b41f5767e74c0f9142935",
-    "T2-assessment-delivered-not-received-current-claim": "c416655d151c89545297162bc976eb6049976be1f47e96a97a0bd5783d4c438b",
-    "T2-assessment-claim-corrected": "46560a94765e3d742f5be777cdd449747537141996c5f40300a9b31e87f87157",
-    "T2-timeout-after-dispatch-then-success": "4d97d65c12d415a08d7d376d4b88dbc43e3b5c66d3cd54f35ceefab99c79374c",
-    "T2-retry-finalize-before-second-fence-recovery": "58e736b45396059eeadf4d70b9045471daff5bea3c438c1b3fdf14e47f87a801",
-    "T2-retry-finalize-before-second-fence-state-invalidated": "350bd904ed5a289503266983853d6db0edb61449d27167e96d3cb5a8a3cd6ec8",
-    "T2-retry-unfinished-attempt-restart-blocked": "81fec623a8488e19e82df1d77e013ddd131fe6b7d333ca0bf0ceed9a122c0593",
-    "T2-refresh-returns-already-stale-blocked": "fd5865f64defe194bbfacc3203b44fca9faae8cf23528bc02ec76dfe0fdfd315",
-    "T2-two-active-packages-integrity-blocked": "90c1bde8a72d7dda8e61c5a12bdf79f28dd16f79775bb99544f203ebd41bfa35",
+    "E2E01-02/unique-own-with-foreign-decoy": "068a18cf996563422bc60743a3a50c7b446a827f8d750749a11af8c42dd377e0",
+    "E2E01-02/no-match-safe-not-found": "b830a8ce1171355ef4b647845e52be5877b9de9a602f69be0c6d36098166df24",
+    "E2E01-03/multiple-minimum-summary": "b05eb93758ef2e086fcda22f333521a0d252c0b81bc2157d25afd824079884a3",
+    "E2E01-03/current-second-selected": "730f0e9f5ea000c3b42dd13336146ab21ab6801b4aa27e76a9628b597561195d",
+    "E2E01-03/expired-second-rejected": "87e0cfd2809eaad9cb52609644c58f5b4cf6cf5f693c4344d895140defca9b50",
+    "E2E01-03/cross-task-second-rejected": "b628b8b51e4c9c1c11a9b873d2b8f6a728bc4844571b8ceed556e6c9f7921250",
+    "E2E01-05/order-only-no-shipment": "a3cdf23a4a6c168600f23b1e6c58c92f37e72798d8b710aebe7bc31e470e51e1",
+    "E2E01-05/logistics-required-uses-shipment": "f6ec51cb713c240fb8a46cd38ab02254c2973f824eb77f883c3c4012d9f95d92",
+    "E2E01-06/stale-refresh-success": "64c1baaafb7f32524aa6a98bff0f5da3c873eb532cadba858168922c9bbec5ff",
+    "E2E01-06/transient-once-then-success": "295d45f71c7b72127a64d2210bf05c8efdff4fa82c2f5f9515b0dda56ae9f5ff",
+    "E2E01-06/transient-exhausted-blocked": "65515aef775dfadca70667cf17dad25edb3b57762e854c4715a133571a056e1f",
+    "E2E01-06/deterministic-source-integrity-no-retry": "bfcb5f511a9bb438565945c8b93d131eab81c79e584e0a7f50889495cb05a5be",
+    "E2E01-06/insufficient-promise-need-human": "7d1cd8c35b1f35ca059ce586f1ddf6b78793a1a4c55859aca19e3ca15c038e62",
+    "E2E01-06/no-shipment-need-human": "66c9d6d7ea0f932f6494ed8d9989cc8335c31755d53a18a1e7b31b2539d6efe7",
+    "T2-candidate-owner-mismatch-rejected": "09ffa3718fa344ea89aa55e5debbdf5adb7ed1bc844ae051464f270e7b02b99c",
+    "T2-candidate-superseded-rejected": "bd8e6d9244042b90bfc37e1bf1dbbb36b0ca439c6451285db83872b6acac1213",
+    "T2-candidate-out-of-range-rejected": "438f0498aa3ec3914e0c11f9a70d4824cd15182f2c28f2e0dcbb8357b121f3ee",
+    "T2-candidate-zero-or-multiple-current-rejected": "cee55679db23f28a73f30babbe951b407dcb448f9e96128b223cefa373aefd79",
+    "T2-assessment-delayed-boundary": "062b2a6064203c96fe425a1704ec95c6a782b9523d335f83789d655c3cdf419f",
+    "T2-assessment-delivered-not-received-current-claim": "10dd8f1b6939338b905c1c4215b2147d763d4d21a783fd6cb2815d1dd5a1614e",
+    "T2-assessment-claim-corrected": "04b60c59467ef3a81f8ddd1849f6a57c28b7d330ba0ebb86989ba260dedc4097",
+    "T2-timeout-after-dispatch-then-success": "8bcdfb7f4bc76ea896831ba2f89a8ce529b1db19ca09ec72321578943f4eb501",
+    "T2-retry-finalize-before-second-fence-recovery": "38a4b33f02839c9d6e21b80e5136af926a33b2b997f6d4ddaeb1900a047d9231",
+    "T2-retry-finalize-before-second-fence-state-invalidated": "c2defe8e7ebcdfcb8f5948f95048cd6089963d100d69dac128a1b04c217a262f",
+    "T2-retry-unfinished-attempt-restart-blocked": "375f4d99a9cf39f52d73c0ffeaf23778a781adbc853dddc19448a2446dd33436",
+    "T2-refresh-returns-already-stale-blocked": "98c38dda138b14648dab05549459d3abbbbb0fc79e80fc8be17c1ca73b692565",
+    "T2-two-active-packages-integrity-blocked": "44e64c7c5065e1a8ded15231967bca581199d0d5688e716593acfdae4f6d9560",
 }
 _CYCLE2_SHARED_EXPECTATIONS = (
     "TRUSTED_IDENTITY_NOT_USER_CONTROLLED",
@@ -882,7 +882,7 @@ _CYCLE2_CASE_VERSION_MANIFEST = {
     "fixture_versions": ["e2e01-cycle2-fixture-v1"],
     "model_config_version": "scripted-model-provider-config-v1",
     "prompt_version": "e2e01-cycle2-prompt-v1",
-    "tool_registry_version": "e2e01-cycle2-tools-v1",
+    "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
     "corpus_version": None,
     "runtime_version": _RUNTIME_VERSION_PLACEHOLDER,
 }
@@ -1032,7 +1032,7 @@ def _cycle2_validate_manifest(
         "dataset_version": "e2e01-cycle2-dataset-v1",
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": None,
         "model_script_catalog_version": "e2e01-cycle2-model-scripts-v1",
         "lane_manifest_version": "e2e01-cycle2-lanes-v1",

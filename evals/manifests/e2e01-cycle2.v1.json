@@ -9,7 +9,7 @@
     "dataset_version": "e2e01-cycle2-dataset-v1",
     "model_config_version": "scripted-model-provider-config-v1",
     "prompt_version": "e2e01-cycle2-prompt-v1",
-    "tool_registry_version": "e2e01-cycle2-tools-v1",
+    "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
     "corpus_version": null,
     "model_script_catalog_version": "e2e01-cycle2-model-scripts-v1",
     "lane_manifest_version": "e2e01-cycle2-lanes-v1",
@@ -34,7 +34,7 @@
       "path": "evals/cases/e2e01-cycle2.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-cycle2-dataset-v1",
-      "sha256": "ff683a18ca252c3e119447e2d0031c1d1b9344e80731adf61b1797d0a9d6032c"
+      "sha256": "5026ab451a0ea60ffeb673ceb04626a1bfe4329b8be19c9c957322ce6cde8477"
     },
     {
       "artifact_id": "e2e01-cycle2-model-scripts",
