@@ -5136,7 +5136,25 @@ class ToolRetryRecoveryReadClosureV2(_StrictRuntimePrivateRecord):
                 "attempt, or scheduled attempt 1"
             )
         if self.recovery_decision_records:
-            raise ValueError("recovery decision child already exists")
+            decision = self.recovery_decision_records[0]
+            if (
+                tool_call.attempt_count != 2
+                or len(tool_call.attempts) != 2
+                or tool_call.attempts[0].finished_at is None
+                or tool_call.attempts[0].retry_decision
+                is not ToolRetryDecision.RETRY_SCHEDULED
+                or tool_call.attempts[1].finished_at is not None
+                or decision.tool_call_id != tool_call.tool_call_id
+                or decision.last_attempt_no != 1
+                or decision.decision
+                is not ToolRecoveryDecision.APPEND_SECOND_ATTEMPT
+                or decision.stable_reason_code
+                != "RETRY_REVALIDATED_CAS_REQUIRED"
+                or decision.candidate_next_attempt_no != 2
+                or decision.decided_at < tool_call.attempts[0].finished_at
+                or decision.decided_at > tool_call.attempts[1].started_at
+            ):
+                raise ValueError("recovery decision child already exists")
         attempt_evidence_times = ()
         if tool_call.attempts:
             last_attempt = tool_call.attempts[-1]

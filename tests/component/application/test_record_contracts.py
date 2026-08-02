@@ -10897,6 +10897,7 @@ def test_cycle2_recovery_closure_fails_closed_on_stale_partial_or_duplicate_grap
 def test_cycle2_unfinished_attempt_2_recovery_never_grants_another_append() -> None:
     closure = _c2_retry_recovery_closure()
     first = closure.tool_call_record.attempts[0]
+    append_decision = _c2_recovery_decision_record(closure)
     second = ToolAttemptRecordV2(
         tool_call_id=closure.tool_call_record.tool_call_id,
         attempt_no=2,
@@ -10914,6 +10915,7 @@ def test_cycle2_unfinished_attempt_2_recovery_never_grants_another_append() -> N
                 for field_name in type(closure).model_fields
             },
             "tool_call_record": source,
+            "recovery_decision_records": (append_decision,),
         }
     )
     decision = second_closure.derive_recovery_decision()
