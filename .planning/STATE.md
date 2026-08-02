@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-15R1"
-status: "phase_2_w9_application_entry_refreeze_review"
+current_plan: "02-15R1B"
+status: "phase_2_w9_typed_read_execution_planning_review"
 last_updated: "2026-08-02"
-last_activity: "2026-08-02 — PR #274/#275 reviewed完成R1A并冻结B_C2_W9_INITIAL_RU；重冻结R1"
+last_activity: "2026-08-02 — PR #276重冻结R1；PR #277批准R1B与34 slots；R1 dirty checkpoint未发布"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 33
+  total_plans: 34
   completed_plans: 27
-  percent: 82
+  percent: 79
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -58,37 +58,38 @@ full、未dispatch Harness或生成Eval Result。PR #266/#267又reviewed完成W8
 `B_C2_EVAL_MACHINERY = d6fdcbb3...` / tree `8ab6f2ae...`；PR #268/#269批准W9
 `02-15R0/R1/R2` corrections后，PR #273又批准R1A与33 slots / 16 wave labels。PR
 #270/#271已reviewed完成R0；PR #274/#275已reviewed完成R1A并冻结
-`B_C2_W9_INITIAL_RU = 2fb68b02...` / tree `b0dfc780...`；当前只重冻结R1 exact Plan；
+`B_C2_W9_INITIAL_RU = 2fb68b02...` / tree `b0dfc780...`；PR #276重冻结R1，PR #277
+批准R1B与34 slots；当前只冻结R1B exact Plan，R1 dirty checkpoint未发布；
 Case仍为`CONTRACT_DEFINED`。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-15R1
+Current Plan: 02-15R1B
 Total Phases: 6
-Total Plans in Phase: 33
-Status: Phase 2 W9 / 02-15R1 Application entry refreeze review
+Total Plans in Phase: 34
+Status: Phase 2 W9 / 02-15R1B typed read execution planning review
 Last Activity: 2026-08-02
-Last Activity Description: PR #274/#275 reviewed完成R1A并冻结B_C2_W9_INITIAL_RU；重冻结R1
-Progress: Phase 1 complete；Phase 2 W1–W8 + R0/R1A complete；tracked Plan files 26、authorized slots 33、completed slots 27/33；1/6 phases
+Last Activity Description: PR #276重冻结R1；PR #277批准R1B与34 slots；R1 dirty checkpoint未发布
+Progress: Phase 1 complete；Phase 2 W1–W8 + R0/R1A complete；tracked Plan files 27（含R1B）、authorized slots 34、completed slots 27/34；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 33 USER-AUTHORIZED SLOTS / W8 + 02-15R0/R1A COMPLETE / 02-15R1 REFREEZE REVIEW`
-Status: `CONTRACT_ACTIVE / B_C2_W9_INITIAL_RU_CONFIRMED / W9_R1_REFREEZE`
-Last activity: 2026-08-02 — PR #274/#275 PASS；current integration 2fb68b02 / b0dfc780
-Progress: Phase 1 100% complete；Phase 2 completed slots 27/33；W9 R1 refreeze；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 34 USER-AUTHORIZED SLOTS / W8 + 02-15R0/R1A COMPLETE / 02-15R1B PLANNING REVIEW`
+Status: `CONTRACT_ACTIVE / W9_R1B_TYPED_READ_EXECUTION_PLANNING / R1_DIRTY_BLOCKED`
+Last activity: 2026-08-02 — PR #277 PASS；current integration d978629c / 28783212
+Progress: Phase 1 100% complete；Phase 2 completed slots 27/34；W9 R1B planning；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 完成 refrozen `02-15R1` exact Plan与Gate W9 independent bounded review/merge；未合并前不dispatch。
-2. 从exact `2fb68b02... / b0dfc780...`创建全新exact-six-file Application Worktree。
-3. 完成compile/focused/neighbor/diff/containment与20秒exact-head review后串行merge，冻结`B_C2_W9_APP_ENTRY`。
-4. R2只从真实R1 successor冻结；R1不运行full、不写Infrastructure/API/bootstrap/Eval lifecycle。
+1. 完成 `02-15R1B` exact Plan与Gate W9 independent bounded review/merge；未合并前不dispatch。
+2. 从exact `d978629c... / 28783212...`创建exact-two-file executor Worktree。
+3. 完成compile/focused/neighbor/diff/containment与20秒exact-head review后串行merge，冻结`B_C2_W9_TYPED_READ_EXECUTION`。
+4. R1只从真实R1B successor second-refreeze；R1B不运行full、不写handler/DB/API/Eval lifecycle。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
 
 ## Current Decisions
@@ -315,7 +316,9 @@ Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GAT
 - `CONFIRMED / B_C2_W9_INITIAL_RU`: PR #274/#275 reviewed merge；integration
   `2fb68b0210a865c293bcb7f471b38c728dcbb7dd` / tree
   `b0dfc7802b81bee21168c4e79e2d046a642d0162`；focused159、neighbor669、compile/containment/review PASS。
-- `OPEN`: refrozen `02-15R1`、`02-15R2/15` planning/implementation、latest overlay/identity、serial merge、
+- `CONFIRMED / 02-15R1_DIRTY_BLOCKED`: PR #276 refreeze后writer只改records/ports
+  653 insertions/1 deletion，未commit/test/publish；executor typed result gap经独立复核CONFIRMED。
+- `OPEN`: `02-15R1B`、second-refrozen `02-15R1`、`02-15R2/15` planning/implementation、latest overlay/identity、serial merge、
   Phase 2 Harness/Eval Result；
   `E2E01-02/03/05/06` Case 仍为 `CONTRACT_DEFINED`；Phase 3–6 scoped implementation owner。
 
@@ -326,5 +329,5 @@ GSD状态、Summary、Review或UAT文档不能单独证明实现完成。完成�
 ## Session
 
 Last Date: 2026-08-02
-Stopped At: W9 refrozen `02-15R1` planning review；R1A complete
+Stopped At: W9 `02-15R1B` exact planning review；R1 dirty checkpoint unpublished
 Resume File: [phases/02-cycle-2-e2e-01/GATE-W9-CORRECTION-EXECUTION-CARD.md](phases/02-cycle-2-e2e-01/GATE-W9-CORRECTION-EXECUTION-CARD.md)

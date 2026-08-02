@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_INITIAL_RU_CONFIRMED / 02-15R1_REFREEZE_REVIEW`
+状态：`B_C2_W9_R1B_OWNER_APPROVED / 02-15R1B_PLANNING_REVIEW`
 
 ## Exact input
 
@@ -16,12 +16,15 @@
 - PR #274/#275已reviewed完成R1A；真实
   `B_C2_W9_INITIAL_RU = 2fb68b0210a865c293bcb7f471b38c728dcbb7dd` /
   tree `b0dfc7802b81bee21168c4e79e2d046a642d0162`。
+- PR #276已reviewed重冻结R1；success-path executor gap经PR #277 reviewed批准
+  `02-15R1B`，当前34 slots / 16 wave labels；R1 checkpoint未发布。
 
 ## Ordered dispatch
 
 ```text
 02-15R0 exact Spec seed contract → review/merge B_C2_W9_SEED_CONTRACT
 → 02-15R1A Core initial product-description RU → review/merge B_C2_W9_INITIAL_RU
+→ 02-15R1B typed read-execution envelope → review/merge B_C2_W9_TYPED_READ_EXECUTION
 → refreeze 02-15R1 Application normal entry → review/merge
 → refreeze 02-15R2 Infrastructure normal evidence/dispatch/typed seed → review/merge
 → refreeze original 02-15 composition-only seam
@@ -37,4 +40,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许从真实`B_C2_W9_INITIAL_RU`重冻结`02-15R1` exact-six-file Application correction；R2/02-15尚未冻结。
+当前只允许`02-15R1B` exact-two-file executor correction；R1待second-refreeze，R2/02-15尚未冻结。
