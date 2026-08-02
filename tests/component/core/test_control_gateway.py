@@ -239,6 +239,7 @@ def _manifest(
     model_call_id: UUID,
     context_manifest_id: UUID,
     observation_refs_and_versions: tuple[VersionedRecordRef, ...] = (),
+    task_state_ref_and_version: TaskStateRefAndVersion | None = None,
 ) -> ContextManifest:
     return ContextManifest(
         context_manifest_id=context_manifest_id,
@@ -247,7 +248,7 @@ def _manifest(
         tool_registry_version=snapshot.tool_registry_version,
         model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
         selected_message_refs=(uuid4(),),
-        task_state_ref_and_version=None,
+        task_state_ref_and_version=task_state_ref_and_version,
         observation_refs_and_versions=observation_refs_and_versions,
         evidence_refs_and_versions=(),
         action_record_refs=(),
@@ -544,6 +545,7 @@ def _cycle2_gateway_case(
     *,
     binding_authority: InputAuthority = InputAuthority.USER_CLAIM,
     selected_get_order: bool = False,
+    unique_auto_target: bool = False,
 ) -> tuple[Cycle2GatewayCandidate, Cycle2GatewayLoadedClosure]:
     decision = _decision()
     task = decision.task_graph.task.model_copy(
@@ -564,8 +566,12 @@ def _cycle2_gateway_case(
     model_call_id = uuid4()
     context_manifest_id = uuid4()
     snapshot = build_cycle2_registry_snapshot()
-    if selected_get_order and tool_name is not Cycle2ToolName.GET_ORDER:
-        raise ValueError("selected_get_order is only valid for get_order")
+    if (selected_get_order or unique_auto_target) and (
+        tool_name is not Cycle2ToolName.GET_ORDER
+    ):
+        raise ValueError("target-bearing options are only valid for get_order")
+    if selected_get_order and unique_auto_target:
+        raise ValueError("get_order target origins must remain distinct")
     if tool_name is Cycle2ToolName.SEARCH_ORDERS:
         binding_name = "product_description"
         normalized_value = "跑鞋"
@@ -573,6 +579,10 @@ def _cycle2_gateway_case(
     elif selected_get_order:
         binding_name = "candidate_ordinal"
         normalized_value = 2
+        arguments = {"order_id": "O-1001"}
+    elif unique_auto_target:
+        binding_name = "product_description"
+        normalized_value = "跑鞋"
         arguments = {"order_id": "O-1001"}
     else:
         binding_name = "order_id"
@@ -606,7 +616,11 @@ def _cycle2_gateway_case(
     manifest_observation_refs: tuple[VersionedRecordRef, ...] = ()
     candidate_refs = (binding_id,)
     candidate_target_ref = None
-    if tool_name is Cycle2ToolName.GET_SHIPMENT or selected_get_order:
+    if (
+        tool_name is Cycle2ToolName.GET_SHIPMENT
+        or selected_get_order
+        or unique_auto_target
+    ):
         source_observation_ref = uuid4()
         source_observation_version = "shipment-observation-v1"
         verified_targets = (
@@ -656,6 +670,14 @@ def _cycle2_gateway_case(
         model_call_id=model_call_id,
         context_manifest_id=context_manifest_id,
         observation_refs_and_versions=manifest_observation_refs,
+        task_state_ref_and_version=(
+            TaskStateRefAndVersion(
+                task_id=task.task_id,
+                state_version=task.state_version,
+            )
+            if unique_auto_target
+            else None
+        ),
     )
     candidate = Cycle2GatewayCandidate(
         run_id=decision.closure.record.run_id,
@@ -665,7 +687,9 @@ def _cycle2_gateway_case(
         context_manifest_id=context_manifest_id,
         requested_provider_tool_name=tool_name.value,
         candidate_arguments=arguments,
-        proposed_base_task_state_version=None,
+        proposed_base_task_state_version=(
+            task.state_version if unique_auto_target else None
+        ),
         validated_task_state_version=task.state_version,
         argument_binding_refs=candidate_refs,
         verified_target_ref=candidate_target_ref,
@@ -731,21 +755,24 @@ def _foreign_shadow_model(model: BaseModel) -> BaseModel:
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "selected_get_order"),
+    ("tool_name", "selected_get_order", "unique_auto_target"),
     [
-        (Cycle2ToolName.SEARCH_ORDERS, False),
-        (Cycle2ToolName.GET_ORDER, False),
-        (Cycle2ToolName.GET_ORDER, True),
-        (Cycle2ToolName.GET_SHIPMENT, False),
+        (Cycle2ToolName.SEARCH_ORDERS, False, False),
+        (Cycle2ToolName.GET_ORDER, False, False),
+        (Cycle2ToolName.GET_ORDER, True, False),
+        (Cycle2ToolName.GET_ORDER, False, True),
+        (Cycle2ToolName.GET_SHIPMENT, False, False),
     ],
 )
-def test_cycle2_gateway_accepts_four_distinct_typed_binding_paths(
+def test_cycle2_gateway_accepts_five_distinct_typed_binding_paths(
     tool_name: Cycle2ToolName,
     selected_get_order: bool,
+    unique_auto_target: bool,
 ) -> None:
     candidate, loaded = _cycle2_gateway_case(
         tool_name,
         selected_get_order=selected_get_order,
+        unique_auto_target=unique_auto_target,
     )
 
     gate = _evaluate_cycle2(candidate, loaded)
@@ -758,31 +785,42 @@ def test_cycle2_gateway_accepts_four_distinct_typed_binding_paths(
     assert "authorized_tool_command" not in type(gate).model_fields
     assert isinstance(gate, GateDecisionV2)
     assert gate.verified_target_ref == candidate.verified_target_ref
-    if tool_name is Cycle2ToolName.GET_ORDER and not selected_get_order:
+    if (
+        tool_name is Cycle2ToolName.GET_ORDER
+        and not selected_get_order
+        and not unique_auto_target
+    ):
         assert loaded.current_verified_order_targets == ()
         assert loaded.current_input_bindings[0].authority is InputAuthority.USER_CLAIM
         assert candidate.verified_target_ref is None
-    elif tool_name is Cycle2ToolName.GET_SHIPMENT or selected_get_order:
+    elif (
+        tool_name is Cycle2ToolName.GET_SHIPMENT
+        or selected_get_order
+        or unique_auto_target
+    ):
         assert candidate.verified_target_ref is not None
         assert candidate.verified_target_ref not in candidate.argument_binding_refs
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "selected_get_order"),
+    ("tool_name", "selected_get_order", "unique_auto_target"),
     [
-        (Cycle2ToolName.SEARCH_ORDERS, False),
-        (Cycle2ToolName.GET_ORDER, False),
-        (Cycle2ToolName.GET_ORDER, True),
-        (Cycle2ToolName.GET_SHIPMENT, False),
+        (Cycle2ToolName.SEARCH_ORDERS, False, False),
+        (Cycle2ToolName.GET_ORDER, False, False),
+        (Cycle2ToolName.GET_ORDER, True, False),
+        (Cycle2ToolName.GET_ORDER, False, True),
+        (Cycle2ToolName.GET_SHIPMENT, False, False),
     ],
 )
 def test_cycle2_accepted_gate_builds_exact_target_preserving_command(
     tool_name: Cycle2ToolName,
     selected_get_order: bool,
+    unique_auto_target: bool,
 ) -> None:
     candidate, loaded = _cycle2_gateway_case(
         tool_name,
         selected_get_order=selected_get_order,
+        unique_auto_target=unique_auto_target,
     )
     gate = _evaluate_cycle2(candidate, loaded)
 
@@ -805,6 +843,24 @@ def test_cycle2_accepted_gate_builds_exact_target_preserving_command(
     assert command.verified_target_ref == gate.verified_target_ref
     if command.verified_target_ref is not None:
         assert command.verified_target_ref not in command.argument_binding_refs
+
+
+def test_cycle2_unique_auto_target_rejects_wrong_binding_family() -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_ORDER,
+        unique_auto_target=True,
+    )
+    wrong_binding = loaded.current_input_bindings[0].model_copy(
+        update={"name": "shipment_not_received", "normalized_value": True}
+    )
+    drifted = loaded.model_copy(
+        update={"current_input_bindings": (wrong_binding,)}
+    )
+
+    gate = _evaluate_cycle2(candidate, drifted)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
 
 
 def test_cycle2_rejected_or_mismatched_gate_cannot_form_command() -> None:

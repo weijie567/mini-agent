@@ -816,6 +816,32 @@ def _cycle2_verified_target_closed(
     )
 
 
+def _cycle2_target_bearing_get_order_binding_valid(
+    *,
+    verified_target_ref: UUID | None,
+    task_id: UUID,
+    request_unit_id: UUID,
+    task_state_version: int,
+    loaded: Cycle2GatewayLoadedClosure,
+    binding: Cycle2AcceptedBindingFacts,
+    order_id: str,
+) -> bool:
+    """Close both reviewed get_order target origins without merging authority."""
+
+    return (
+        binding.name in {"candidate_ordinal", "product_description"}
+        and _cycle2_verified_target_closed(
+            verified_target_ref=verified_target_ref,
+            task_id=task_id,
+            request_unit_id=request_unit_id,
+            task_state_version=task_state_version,
+            loaded=loaded,
+            binding=binding,
+            order_id=order_id,
+        )
+    )
+
+
 def _cycle2_argument_binding_valid(
     *,
     candidate: Cycle2GatewayCandidate,
@@ -853,8 +879,7 @@ def _cycle2_argument_binding_valid(
                 and candidate.argument_binding_refs == (binding.binding_id,)
             )
         return (
-            binding.name == "candidate_ordinal"
-            and _cycle2_verified_target_closed(
+            _cycle2_target_bearing_get_order_binding_valid(
                 verified_target_ref=candidate.verified_target_ref,
                 task_id=candidate.task_id,
                 request_unit_id=candidate.request_unit_id,
@@ -1002,8 +1027,7 @@ def _cycle2_progress_semantic_identity(
             canonical_target_ref = None
         else:
             if not (
-                binding.name == "candidate_ordinal"
-                and _cycle2_verified_target_closed(
+                _cycle2_target_bearing_get_order_binding_valid(
                     verified_target_ref=verified_target_ref,
                     task_id=loaded.current_task.task_id,
                     request_unit_id=loaded.current_request_unit.request_unit_id,
