@@ -36,11 +36,16 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import AgentOutcome
 from mini_agent.infrastructure.cycle2_fixture_seed import (
     TRUSTED_CLOCK,
-    compute_cycle2_pair_seed_digest,
+    ResolvedCycle2SeedPlan,
     resolve_cycle2_seed_plan,
 )
 from mini_agent.infrastructure.persistence.database import build_session_factory
-from mini_agent.infrastructure.persistence.models import P0RecordModel
+from mini_agent.infrastructure.persistence.models import (
+    MockOrderModel,
+    MockOrderSearchDocumentModel,
+    MockShipmentModel,
+    P0RecordModel,
+)
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
 
@@ -208,6 +213,103 @@ def _tool_calls(session_factory, *run_ids) -> tuple[ToolCallRecordV2, ...]:
     return decoded
 
 
+def _expected_seed_projection(plan: ResolvedCycle2SeedPlan) -> tuple[object, ...]:
+    return (
+        tuple(
+            (
+                seed.owner_customer_id,
+                seed.order_id,
+                seed.order_payload.model_dump(mode="json"),
+            )
+            for seed in plan.order_seeds
+        ),
+        tuple(
+            (
+                seed.owner_customer_id,
+                seed.order_id,
+                seed.line_ordinal,
+                seed.ordered_at,
+                seed.order_number,
+                seed.status.value,
+                seed.product_name,
+                seed.quantity,
+                seed.product_category,
+                seed.search_aliases,
+            )
+            for seed in plan.search_document_seeds
+        ),
+        tuple(
+            (
+                seed.owner_customer_id,
+                seed.order_id,
+                seed.package_id,
+                dict(seed.shipment_payload),
+            )
+            for seed in plan.shipment_seeds
+        ),
+    )
+
+
+def _stored_seed_projection(session_factory) -> tuple[object, ...]:
+    with session_factory() as session:
+        orders = tuple(
+            session.scalars(
+                select(MockOrderModel).order_by(
+                    MockOrderModel.customer_id,
+                    MockOrderModel.order_id,
+                )
+            )
+        )
+        searches = tuple(
+            session.scalars(
+                select(MockOrderSearchDocumentModel).order_by(
+                    MockOrderSearchDocumentModel.customer_id,
+                    MockOrderSearchDocumentModel.order_id,
+                    MockOrderSearchDocumentModel.line_ordinal,
+                )
+            )
+        )
+        shipments = tuple(
+            session.scalars(
+                select(MockShipmentModel).order_by(
+                    MockShipmentModel.customer_id,
+                    MockShipmentModel.order_id,
+                    MockShipmentModel.package_id,
+                )
+            )
+        )
+    return (
+        tuple(
+            (row.customer_id, row.order_id, row.order_payload)
+            for row in orders
+        ),
+        tuple(
+            (
+                row.customer_id,
+                row.order_id,
+                row.line_ordinal,
+                row.ordered_at,
+                row.order_number,
+                row.status,
+                row.product_name,
+                row.quantity,
+                row.product_category,
+                tuple(row.search_aliases),
+            )
+            for row in searches
+        ),
+        tuple(
+            (
+                row.customer_id,
+                row.order_id,
+                row.package_id,
+                row.shipment_payload,
+            )
+            for row in shipments
+        ),
+    )
+
+
 async def _start(
     namespace,
     *,
@@ -289,11 +391,14 @@ async def test_same_pair_seed_and_registry_select_shipment_only_for_logistics(
     postgres_namespace_factory,
 ) -> None:
     fixture_refs = ("fx-dynamic-tool-pair-owner-a-v1",)
-    expected_digest = compute_cycle2_pair_seed_digest(
+    expected_seed = _expected_seed_projection(
         resolve_cycle2_seed_plan(fixture_refs)
     )
     expected_registry = build_cycle2_registry_snapshot()
-    results: dict[bool, tuple[tuple[str, ...], tuple[Cycle2ToolName, ...]]] = {}
+    results: dict[
+        bool,
+        tuple[tuple[object, ...], tuple[str, ...], tuple[Cycle2ToolName, ...]],
+    ] = {}
 
     for include_shipment in (False, True):
         namespace = postgres_namespace_factory.create(
@@ -323,6 +428,7 @@ async def test_same_pair_seed_and_registry_select_shipment_only_for_logistics(
             assert result.outcome is AgentOutcome.COMPLETED
             assert evidence.terminal_result == result
             results[include_shipment] = (
+                _stored_seed_projection(session_factory),
                 tuple(sorted({call.tool_registry_version for call in calls})),
                 tuple(call.canonical_tool_name for call in calls),
             )
@@ -330,12 +436,12 @@ async def test_same_pair_seed_and_registry_select_shipment_only_for_logistics(
             engine.dispose()
             postgres_namespace_factory.drop(namespace)
 
-    assert len(expected_digest) == 64
-    assert results[False][0] == results[True][0] == (
+    assert results[False][0] == results[True][0] == expected_seed
+    assert results[False][1] == results[True][1] == (
         expected_registry.tool_registry_version,
     )
-    assert Cycle2ToolName.GET_SHIPMENT not in results[False][1]
-    assert Cycle2ToolName.GET_SHIPMENT in results[True][1]
+    assert Cycle2ToolName.GET_SHIPMENT not in results[False][2]
+    assert Cycle2ToolName.GET_SHIPMENT in results[True][2]
 
 
 async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds(
