@@ -15,6 +15,7 @@ import mini_agent.core.request_understanding as request_understanding_module
 import mini_agent.core.task_state as task_state_module
 from mini_agent.core.control_gateway import (
     Cycle2GatewayCandidate,
+    Cycle2TargetObservationFacts,
     Cycle2VerifiedOrderTargetFacts,
 )
 from mini_agent.core.identity import CustomerContext
@@ -6018,6 +6019,7 @@ def test_cycle2_ordinary_continuation_builds_current_message_claims_only() -> No
         current_request_unit=next_unit,
         current_input_bindings=(initial_binding, decision.input_binding),
         verified_target=None,
+        verified_target_observation=None,
         model_call_id=uuid4(),
         context_manifest_id=uuid4(),
         trusted_now=NOW,
@@ -6045,6 +6047,7 @@ def test_cycle2_ordinary_continuation_builds_current_message_claims_only() -> No
             current_request_unit=next_unit,
             current_input_bindings=(initial_binding, decision.input_binding),
             verified_target=None,
+            verified_target_observation=None,
             model_call_id=uuid4(),
             context_manifest_id=uuid4(),
             trusted_now=NOW,
@@ -6560,6 +6563,17 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
     next_unit = next_unit.model_copy(
         update={"observation_refs": (target.source_observation_ref,)}
     )
+    target_observation = Cycle2TargetObservationFacts(
+        observation_ref=target.source_observation_ref,
+        observation_version=target.source_observation_version,
+        private_owner_scope_ref=target.private_owner_scope_ref,
+        owner_customer_id=target.owner_customer_id,
+        task_id=target.task_id,
+        request_unit_id=target.request_unit_id,
+        task_state_version=target.task_state_version,
+        verified_target_ref=target.verified_target_ref,
+        input_binding_refs=target.input_binding_refs,
+    )
     move = NextMove(
         kind=NextMoveKind.CALL_TOOL,
         requested_tool_name="get_shipment",
@@ -6575,6 +6589,7 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
         current_request_unit=next_unit,
         current_input_bindings=(order_binding, decision.input_binding),
         verified_target=target,
+        verified_target_observation=target_observation,
         model_call_id=uuid4(),
         context_manifest_id=uuid4(),
         trusted_now=NOW,
@@ -6593,6 +6608,7 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
             current_request_unit=unit,
             current_input_bindings=(order_binding,),
             verified_target=target,
+            verified_target_observation=target_observation,
             model_call_id=uuid4(),
             context_manifest_id=uuid4(),
             trusted_now=NOW,
@@ -6611,6 +6627,7 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
             current_request_unit=next_unit,
             current_input_bindings=(order_binding, decision.input_binding),
             verified_target=target,
+            verified_target_observation=target_observation,
             model_call_id=uuid4(),
             context_manifest_id=uuid4(),
             trusted_now=NOW,
@@ -6652,6 +6669,17 @@ def test_cycle2_verified_target_routes_shipment_from_exact_origin_binding(
     unit = unit.model_copy(
         update={"observation_refs": (target.source_observation_ref,)}
     )
+    target_observation = Cycle2TargetObservationFacts(
+        observation_ref=target.source_observation_ref,
+        observation_version=target.source_observation_version,
+        private_owner_scope_ref=target.private_owner_scope_ref,
+        owner_customer_id=target.owner_customer_id,
+        task_id=target.task_id,
+        request_unit_id=target.request_unit_id,
+        task_state_version=target.task_state_version,
+        verified_target_ref=target.verified_target_ref,
+        input_binding_refs=target.input_binding_refs,
+    )
     move = NextMove(
         kind=NextMoveKind.CALL_TOOL,
         requested_tool_name="get_shipment",
@@ -6667,6 +6695,7 @@ def test_cycle2_verified_target_routes_shipment_from_exact_origin_binding(
         current_request_unit=unit,
         current_input_bindings=(origin,),
         verified_target=target,
+        verified_target_observation=target_observation,
         model_call_id=uuid4(),
         context_manifest_id=uuid4(),
         trusted_now=NOW,
@@ -6702,6 +6731,17 @@ def test_cycle2_verified_target_shipment_route_rejects_authority_substitution() 
     unit = unit.model_copy(
         update={"observation_refs": (target.source_observation_ref,)}
     )
+    target_observation = Cycle2TargetObservationFacts(
+        observation_ref=target.source_observation_ref,
+        observation_version=target.source_observation_version,
+        private_owner_scope_ref=target.private_owner_scope_ref,
+        owner_customer_id=target.owner_customer_id,
+        task_id=target.task_id,
+        request_unit_id=target.request_unit_id,
+        task_state_version=target.task_state_version,
+        verified_target_ref=target.verified_target_ref,
+        input_binding_refs=target.input_binding_refs,
+    )
     move = NextMove(
         kind=NextMoveKind.CALL_TOOL,
         requested_tool_name="get_shipment",
@@ -6716,6 +6756,7 @@ def test_cycle2_verified_target_shipment_route_rejects_authority_substitution() 
         "current_request_unit": unit,
         "current_input_bindings": (origin,),
         "verified_target": target,
+        "verified_target_observation": target_observation,
         "model_call_id": uuid4(),
         "context_manifest_id": uuid4(),
         "trusted_now": NOW,
@@ -6727,6 +6768,11 @@ def test_cycle2_verified_target_shipment_route_rejects_authority_substitution() 
         {"verified_target": target.model_copy(update={"input_binding_refs": (uuid4(),)})},
         {"verified_target": target.model_copy(update={"owner_customer_id": "customer-B"})},
         {"verified_target": target.model_copy(update={"source_observation_ref": uuid4()})},
+        {
+            "verified_target_observation": target_observation.model_copy(
+                update={"observation_version": "order-observation-v2"}
+            )
+        },
         {
             "current_input_bindings": (
                 origin.model_copy(

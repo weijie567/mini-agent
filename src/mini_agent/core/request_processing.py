@@ -49,6 +49,7 @@ from .task_state import (
 if TYPE_CHECKING:
     from .control_gateway import (
         Cycle2GatewayCandidate,
+        Cycle2TargetObservationFacts,
         Cycle2VerifiedOrderTargetFacts,
     )
 
@@ -3243,6 +3244,22 @@ def _canonical_cycle2_verified_target(
     return value
 
 
+def _canonical_cycle2_target_observation(
+    value: object,
+) -> Cycle2TargetObservationFacts:
+    from .control_gateway import Cycle2TargetObservationFacts
+
+    if (
+        type(value) is not Cycle2TargetObservationFacts
+        or not _is_exact_canonical_model_v2(
+            value,
+            Cycle2TargetObservationFacts,
+        )
+    ):
+        raise _cycle2_routing_error()
+    return value
+
+
 _CYCLE2_SHIPMENT_TARGET_ORIGIN_BINDING_NAMES = frozenset(
     {"order_id", "product_description", "candidate_ordinal"}
 )
@@ -3255,10 +3272,14 @@ def _resolve_cycle2_shipment_target_origin_binding(
     current_request_unit: RequestUnitRecord,
     current_input_bindings: tuple[InputBindingV2, ...],
     verified_target: Cycle2VerifiedOrderTargetFacts,
+    verified_target_observation: Cycle2TargetObservationFacts,
 ) -> InputBindingV2:
     """Resolve one current Claim ref without treating its value as an order fact."""
 
     target = _canonical_cycle2_verified_target(verified_target)
+    observation = _canonical_cycle2_target_observation(
+        verified_target_observation
+    )
     matching = tuple(
         binding
         for binding in current_input_bindings
@@ -3279,8 +3300,17 @@ def _resolve_cycle2_shipment_target_origin_binding(
         or target.task_id != current_task.task_id
         or target.request_unit_id != current_request_unit.request_unit_id
         or target.task_state_version != current_task.state_version
-        or target.source_observation_ref
-        not in current_request_unit.observation_refs
+        or observation.private_owner_scope_ref != customer_context.customer_id
+        or observation.owner_customer_id != customer_context.customer_id
+        or observation.task_id != current_task.task_id
+        or observation.request_unit_id != current_request_unit.request_unit_id
+        or observation.task_state_version != current_task.state_version
+        or observation.verified_target_ref != target.verified_target_ref
+        or observation.observation_ref != target.source_observation_ref
+        or observation.observation_version != target.source_observation_version
+        or observation.input_binding_refs != target.input_binding_refs
+        or observation.superseded_by is not None
+        or observation.observation_ref not in current_request_unit.observation_refs
         or (
             origin.name == "order_id"
             and origin.normalized_value != target.order_id
@@ -3299,6 +3329,7 @@ def route_cycle2_verified_target_next_move(
     current_request_unit: RequestUnitRecord,
     current_input_bindings: tuple[InputBindingV2, ...],
     verified_target: Cycle2VerifiedOrderTargetFacts,
+    verified_target_observation: Cycle2TargetObservationFacts,
     model_call_id: UUID,
     context_manifest_id: UUID,
     trusted_now: datetime,
@@ -3324,6 +3355,7 @@ def route_cycle2_verified_target_next_move(
         current_request_unit=unit,
         current_input_bindings=bindings,
         verified_target=target,
+        verified_target_observation=verified_target_observation,
     )
     arguments = move.arguments
     if (
@@ -3533,6 +3565,7 @@ def route_cycle2_continuation_next_move(
     current_request_unit: RequestUnitRecord,
     current_input_bindings: tuple[InputBindingV2, ...],
     verified_target: Cycle2VerifiedOrderTargetFacts | None,
+    verified_target_observation: Cycle2TargetObservationFacts | None,
     model_call_id: UUID,
     context_manifest_id: UUID,
     trusted_now: datetime,
@@ -3587,6 +3620,7 @@ def route_cycle2_continuation_next_move(
             pass
         if (
             verified_target is not None
+            or verified_target_observation is not None
             or move.requested_tool_name != "search_orders"
             or set(arguments) != {"product_description"}
             or type(arguments.get("product_description")) is not str
@@ -3605,6 +3639,7 @@ def route_cycle2_continuation_next_move(
             current_request_unit=unit,
             current_input_bindings=bindings,
             verified_target=target,
+            verified_target_observation=verified_target_observation,
         )
         arguments = move.arguments
         if (
