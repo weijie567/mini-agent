@@ -2739,9 +2739,26 @@ recovery script没有 control；`logistics-required-uses-shipment`有两个 cont
 | `PROPOSE_GET_ORDER`（control） | UNIQUE search或成功 ordinal gate后 | Gateway对已验证target形成 candidate；script的空 arguments不得生成order id |
 | `PROPOSE_CANDIDATE_QUESTION` | MULTIPLE search state已原子保存后 | deterministic mapper/renderer拥有问题与minimum summary |
 | `PROPOSE_FIXED_RESPONSE` | no-match、selection reject、dependency/integrity/human terminal boundary | 只能接受/拒绝“结束”候选；exact policy/text来自 mapper/renderer |
-| `PROPOSE_ORDER_SUMMARY` | successful get_order Observation已保存后 | 只能选择 order-only finish；业务字段来自Observation |
-| `PROPOSE_GET_SHIPMENT`（control） | successful get_order且current goal需要物流后 | Gateway只使用current verified order target |
+| `PROPOSE_ORDER_SUMMARY` / `PROPOSE_GET_SHIPMENT`（`PROPOSE_POST_ORDER` control的两个closed behavior） | successful get_order Observation已保存、same-current verified target仍闭合后 | 前者只能返回`FINISH`且不消费target argument；后者只能返回无参数`CALL_TOOL/get_shipment`，Gateway再从same-current verified target确定性注入`order_id` |
 | `PROPOSE_SHIPMENT_ASSESSMENT` | deterministic Assessment或freshness gate完成后 | 模型不提出primary result/reason/facts；renderer只消费实际Assessment |
+
+Application 在该边界只能请求一个private、非持久化的
+`Cycle2ControlPurpose.PROPOSE_POST_ORDER`，不得先用消息关键词、业务Intent label、
+Case `input_goal`、script expectation或fixture metadata决定分支。Provider candidate的
+closed union精确为：
+
+1. `FINISH + requested_tool_name=null`：不向`materialize_cycle2_control_next_move`
+   传入verified order id，进入既有deterministic order-summary mapper / renderer；
+2. `CALL_TOOL + requested_tool_name=get_shipment`：candidate本身仍无arguments，只有
+   Gateway可以从同一current closure的唯一verified target注入canonical `order_id`，
+   随后必须通过正常authorization、Task/version、ToolCall、freshness与assessment边界。
+
+任意其他kind/tool组合、arguments/target/owner/fact注入、缺失或多重verified target、
+candidate round-trip不一致都进入既有protocol/source-integrity安全映射。该control
+candidate不形成InputBinding、verified target、Observation、业务事实或Eval Result；
+真正的ToolCall / Observation / Assessment / Trace才是SUT evidence。由current
+`shipment_not_received`或current Shipment Observation触发的direct shipment
+continuation不消费本post-order control，语义保持不变。
 
 Core model contract新增 `order_id` 只作为 `USER_CLAIM`，strict pattern继续服从 P0 order
 identifier；`customer_id`、owner scope、verified target ref、source version、Task version
@@ -3500,6 +3517,7 @@ exact-head review 与 merge 证据。
 | 21 | W12 recovery-root provenance remediation | closed recovery root是否能满足InputBinding source closure | ed66bab第二轮exact review确认旧六项已关闭，但发现absolute no-Message preseed使`InputBinding.source_refs`必然dangling。修正只允许closed obsolete-run fixture预置一个owner-A/current Conversation下、与authenticated Case唯一USER input exact一致的历史USER Message；RequestUnit / binding / manifest / applicable Trace refs必须形成exact set，ASSISTANT、terminal output、额外或跨Conversation Message继续禁止 |
 | 22 | W12 recovery trajectory assertion remediation | OA-10 no-output断言是否错误删除历史输入provenance | 871e6b2第三轮exact review确认recovery主合同已闭合，但第9.5节总断言仍禁止任何Message，因而会拒绝强制历史USER source。修正为finalization不新增Message、只禁止ASSISTANT / terminal output并保留第9.2.3节唯一历史USER provenance；no-result/no-state/no-response语义不变 |
 | 23 | W12 CandidateSet ordinal mapping remediation | fixture序号是否服从已冻结排序与W9 exact dates | R17实现预检确认D1与production Core均固定`ordered_at DESC, order_number ASC`，W9冻结O-1002日期晚于O-1001，因此唯一合法映射为`1→O-1002、2→O-1001`；第9.2.3节原反向fixture行属于scoped Spec内部矛盾。本owner显式修正该行，不改变排序算法、种子日期、Case身份、期望结果或lifecycle；旧`02-18R17`控制包因消费错误Spec blob而失效，必须从本修正真实successor重冻结replacement R17 |
+| 24 | W12 E2E01-05 post-order control remediation | order-only与logistics-required能否在active argument-free control边界真实分流 | R17R1 neighbor审查确认旧integration harness首先引用已移除proposal wrapper；继续沿active flow证明普通logistics goal在`get_order`后受未授权先验`requires_shipment=false`阻断，无法消费已认证`PROPOSE_GET_SHIPMENT` script step。裁决以Application-private`PROPOSE_POST_ORDER`统一post-order purpose，只允许`FINISH`或无参数`get_shipment`两个closed behavior；verified target/order id仍仅由Gateway注入。不得新增Intent/InputBinding/关键词heuristic/Case expectation authority；Application、integration test、Eval adapter与Composition继续分离single-writer，Case/predicate/digest/lifecycle不变 |
 
 ## 14. Review checklist
 
