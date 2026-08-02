@@ -3907,11 +3907,14 @@ def _binding_complete_cycle2_evidence(
     evidence = _minimal_cycle2_evidence()
     gate_event = TraceEventV2(
         trace_event_id=UUID(int=9857),
-        event_type=TraceEventType.NEXT_MOVE_REVALIDATED,
+        event_type=TraceEventType.GATE_DECISION_RECORDED,
         occurred_at=NOW + timedelta(milliseconds=500),
         run_id=evidence.run_record.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
         validated_task_state_version=1,
         argument_binding_refs=(binding_id,),
+        gate_decision=GateDecisionValue.ACCEPT,
     )
     return evidence.model_copy(
         update={
@@ -3957,7 +3960,16 @@ def test_cycle2_required_binding_matches_one_current_typed_record() -> None:
     assert outcome.status is EvalResultStatus.PASS
 
 
-@pytest.mark.parametrize("mutation", ("missing", "duplicate"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing",
+        "duplicate",
+        "wrong_gate_version",
+        "foreign_existing_version",
+        "historical_existing_version",
+    ),
+)
 def test_cycle2_required_binding_missing_or_ambiguous_fails_closed(
     mutation: str,
 ) -> None:
@@ -3970,6 +3982,67 @@ def test_cycle2_required_binding_missing_or_ambiguous_fails_closed(
                 "input_bindings": (),
                 "task_records": (),
                 "request_units": (),
+            }
+        )
+    elif mutation == "wrong_gate_version":
+        evidence = evidence.model_copy(
+            update={
+                "trace_events": (
+                    evidence.trace_events[0],
+                    evidence.trace_events[1].model_copy(
+                        update={"validated_task_state_version": 2}
+                    ),
+                    evidence.trace_events[2],
+                )
+            }
+        )
+    elif mutation == "foreign_existing_version":
+        foreign_task = evidence.task_records[0].model_copy(
+            update={"task_id": UUID(int=9858), "state_version": 2}
+        )
+        foreign_unit = evidence.request_units[0].model_copy(
+            update={
+                "request_unit_id": UUID(int=9859),
+                "task_id": foreign_task.task_id,
+                "input_binding_refs": (UUID(int=9860),),
+                "state_version": 2,
+            }
+        )
+        evidence = evidence.model_copy(
+            update={
+                "task_records": (*evidence.task_records, foreign_task),
+                "request_units": (*evidence.request_units, foreign_unit),
+                "trace_events": (
+                    evidence.trace_events[0],
+                    evidence.trace_events[1].model_copy(
+                        update={"validated_task_state_version": 2}
+                    ),
+                    evidence.trace_events[2],
+                ),
+            }
+        )
+    elif mutation == "historical_existing_version":
+        current_task = evidence.task_records[0].model_copy(
+            update={"status": TaskStatus.COMPLETED, "state_version": 2}
+        )
+        current_unit = evidence.request_units[0].model_copy(
+            update={"status": TaskStatus.COMPLETED, "state_version": 2}
+        )
+        transition = TaskStateTransition(
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            from_status=TaskStatus.ACTIVE,
+            to_status=TaskStatus.COMPLETED,
+            base_state_version=1,
+            result_state_version=2,
+            reason_ref=UUID(int=9861),
+            changed_at=NOW + timedelta(milliseconds=250),
+        )
+        evidence = evidence.model_copy(
+            update={
+                "task_records": (current_task,),
+                "request_units": (current_unit,),
+                "task_state_transitions": (transition,),
             }
         )
 

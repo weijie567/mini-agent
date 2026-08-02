@@ -3048,6 +3048,62 @@ def _cycle2_current_bindings(
     )
 
 
+def _cycle2_task_version_at(
+    evidence: Cycle2EvalEvidence,
+    *,
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+    occurred_at: datetime,
+) -> int | None:
+    if (
+        request_unit.task_id != task.task_id
+        or request_unit.state_version != task.state_version
+        or request_unit.status is not task.status
+    ):
+        return None
+    transitions = tuple(
+        sorted(
+            (
+                transition
+                for transition in evidence.task_state_transitions
+                if transition.task_id == task.task_id
+                and transition.request_unit_id
+                == request_unit.request_unit_id
+            ),
+            key=lambda transition: transition.changed_at,
+        )
+    )
+    if not transitions:
+        return task.state_version
+    if len({transition.changed_at for transition in transitions}) != len(
+        transitions
+    ):
+        return None
+    if any(
+        previous.result_state_version != current.base_state_version
+        or previous.to_status is not current.from_status
+        for previous, current in zip(
+            transitions,
+            transitions[1:],
+            strict=False,
+        )
+    ):
+        return None
+    if (
+        transitions[-1].result_state_version != task.state_version
+        or transitions[-1].to_status is not task.status
+    ):
+        return None
+    version_at_event = task.state_version
+    for transition in reversed(transitions):
+        if transition.changed_at < occurred_at:
+            break
+        if transition.result_state_version != version_at_event:
+            return None
+        version_at_event = transition.base_state_version
+    return version_at_event
+
+
 def _cycle2_binding_predicate_matches(
     evidence: Cycle2EvalEvidence,
     operands: tuple[str, ...],
@@ -3080,23 +3136,77 @@ def _cycle2_binding_predicate_matches(
     ):
         return False
     if version_symbol == "$SELECTION_EXPECTED_TASK_VERSION":
-        referenced_versions = {
-            selection.base_task_state_version
+        selections = tuple(
+            selection
             for selection in evidence.candidate_selections
             if selection.ordinal_input_binding_ref == binding.binding_id
+        )
+        candidate_sets = {
+            candidate_set.candidate_set_id: candidate_set
+            for candidate_set in evidence.candidate_sets
         }
+        if len(selections) != 1:
+            return False
+        candidate_set = candidate_sets.get(selections[0].candidate_set_ref)
+        if (
+            candidate_set is None
+            or candidate_set.selection_expected_task_state_version
+            != selections[0].base_task_state_version
+        ):
+            return False
+        referenced_versions = {selections[0].base_task_state_version}
     else:
-        referenced_versions = {
-            call.validated_task_state_version
+        owning_units = tuple(
+            unit
+            for unit in evidence.request_units
+            if binding.binding_id in unit.input_binding_refs
+        )
+        if len(owning_units) != 1:
+            return False
+        owning_unit = owning_units[0]
+        owning_tasks = tuple(
+            task
+            for task in evidence.task_records
+            if task.task_id == owning_unit.task_id
+        )
+        if len(owning_tasks) != 1:
+            return False
+        owning_task = owning_tasks[0]
+        gate_events = tuple(
+            event
+            for event in evidence.trace_events
+            if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+            and binding.binding_id in event.argument_binding_refs
+        )
+        if not gate_events or any(
+            event.task_id != owning_task.task_id
+            or event.request_unit_id != owning_unit.request_unit_id
+            or event.validated_task_state_version
+            != _cycle2_task_version_at(
+                evidence,
+                task=owning_task,
+                request_unit=owning_unit,
+                occurred_at=event.occurred_at,
+            )
+            for event in gate_events
+        ):
+            return False
+        calls = tuple(
+            call
             for call in evidence.tool_calls
             if binding.binding_id in call.argument_binding_refs
-        }
-        referenced_versions.update(
-            event.validated_task_state_version
-            for event in evidence.trace_events
-            if binding.binding_id in event.argument_binding_refs
-            and event.validated_task_state_version is not None
         )
+        gate_versions = {
+            event.validated_task_state_version for event in gate_events
+        }
+        if any(
+            call.task_id != owning_task.task_id
+            or call.request_unit_id != owning_unit.request_unit_id
+            or call.validated_task_state_version not in gate_versions
+            for call in calls
+        ):
+            return False
+        referenced_versions = gate_versions
     return bool(referenced_versions) and all(
         type(version) is int and version >= 1
         for version in referenced_versions
@@ -3109,10 +3219,21 @@ def _cycle2_tool_result_code(
 ) -> str:
     if call.status is ToolCallStatus.SUCCEEDED:
         if call.canonical_tool_name.value == "search_orders":
+            observations = tuple(
+                observation
+                for observation in evidence.search_observations
+                if observation.source_tool_call_id == call.tool_call_id
+                and observation.observation_id == call.result_ref
+            )
             outcomes = {
                 candidate_set.outcome.value
                 for candidate_set in evidence.candidate_sets
                 if candidate_set.source_tool_call_id == call.tool_call_id
+                and len(observations) == 1
+                and candidate_set.search_observation_ref
+                == observations[0].observation_id
+                and candidate_set.search_observation_source_version
+                == observations[0].source_version
             }
             if len(outcomes) == 1:
                 return outcomes.pop()
@@ -3121,11 +3242,12 @@ def _cycle2_tool_result_code(
                 observation
                 for observation in evidence.shipment_observations
                 if observation.source_tool_call_id == call.tool_call_id
+                and observation.observation_id == call.result_ref
             )
             if len(observations) == 1:
                 return "FOUND"
-        if call.canonical_tool_name.value == "get_order" and call.result_ref is not None:
-            return "FOUND"
+        # Cycle2EvalEvidence currently has no typed OrderObservation family,
+        # so a get_order result_ref cannot prove FOUND by itself.
         return "INVALID"
     if call.status is ToolCallStatus.INTERRUPTED:
         return "NONE"
@@ -3271,7 +3393,42 @@ def _cycle2_observation_predicate_matches(
             and completed_at >= observation.valid_until
         )
     )
-    return len(freshness_matches) == 1
+    if len(freshness_matches) != 1:
+        return False
+    observation = freshness_matches[0]
+    source_calls = tuple(
+        call
+        for call in evidence.tool_calls
+        if call.tool_call_id == observation.source_tool_call_id
+        and call.result_ref == observation.observation_id
+        and call.status is ToolCallStatus.SUCCEEDED
+    )
+    if len(source_calls) != 1:
+        # A historical stale Observation has no run-local ToolCall.  Its
+        # symbolic ref/version therefore needs typed authenticated execution
+        # context that is not part of Cycle2EvalEvidence yet.
+        return False
+    if observation_type == "ORDER_SEARCH_CANDIDATES":
+        closures = tuple(
+            candidate_set
+            for candidate_set in evidence.candidate_sets
+            if candidate_set.search_observation_ref
+            == observation.observation_id
+            and candidate_set.search_observation_source_version
+            == observation.source_version
+            and candidate_set.source_tool_call_id
+            == source_calls[0].tool_call_id
+        )
+    else:
+        closures = tuple(
+            assessment
+            for assessment in evidence.shipment_assessments
+            if assessment.shipment_observation_ref
+            == observation.observation_id
+            and assessment.shipment_observation_source_version
+            == observation.source_version
+        )
+    return len(closures) == 1
 
 
 def _cycle2_candidate_set_predicate_matches(
