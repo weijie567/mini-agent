@@ -12610,8 +12610,7 @@ def test_cycle2_application_control_and_rejection_fields_are_closed() -> None:
         "PROPOSE_GET_ORDER",
         "PROPOSE_FIXED_RESPONSE",
         "PROPOSE_CANDIDATE_QUESTION",
-        "PROPOSE_ORDER_SUMMARY",
-        "PROPOSE_GET_SHIPMENT",
+        "PROPOSE_POST_ORDER",
         "PROPOSE_SHIPMENT_ASSESSMENT",
     }
     assert set(ApplyContinuationInputBindingV2Command.model_fields) == {
