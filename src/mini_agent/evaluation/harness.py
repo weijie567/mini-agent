@@ -20,6 +20,7 @@ from mini_agent.application.ports import EvalResultPort
 from mini_agent.application.records import (
     AgentRunResult,
     CriticalFailureCode,
+    Cycle2ExactRunEvidenceClosure,
     EvalExecutionFailurePhase,
     EvalExecutionFailureRecord,
     EvalExecutionSafeErrorCode,
@@ -31,6 +32,10 @@ from mini_agent.application.records import (
     EvalVersionManifest,
     ExactRunEvidenceClosure,
     InsertOnlyWriteResult,
+    MessageDirection,
+)
+from mini_agent.application.run_result_mapper import (
+    Cycle2ExecutionOutcomeObservationV1,
 )
 from mini_agent.core.common import (
     AuditOnlyModel,
@@ -65,6 +70,7 @@ from mini_agent.evaluation.graders import (
     PHASE1_GRADER_NAMES,
     Cycle2EvalEvidence,
     Cycle2EvalExpectations,
+    Cycle2MapperEvidence,
     Cycle2Predicate,
     EvalCaseExpectations,
     EvalEvidence,
@@ -76,6 +82,7 @@ from mini_agent.evaluation.graders import (
     TraceEventCountExpectation,
     derive_grading_outcome,
     e2e01_04_safe_observables_match,
+    e2e01_05_pair_execution_evidence_match,
     _fixed_message,
     grade_cycle2_evidence,
     grade_evidence,
@@ -87,6 +94,9 @@ from mini_agent.evaluation.scripted_provider import (
 )
 from mini_agent.infrastructure.model.qwen_responses import (
     QwenResponsesAdapterV2,
+)
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    Cycle2PairExecutionEvidenceV1,
 )
 
 
@@ -330,6 +340,7 @@ _UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST = (
     "observed_outcome",
     "response_policy",
     "run_record",
+    "supporting_run_records",
     "mapper_evidence",
     "conversation_records",
     "agent_results",
@@ -338,17 +349,22 @@ _UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST = (
     "task_records",
     "request_units",
     "run_task_links",
+    "supporting_run_task_links",
     "task_state_transitions",
     "candidate_sets",
     "candidate_selections",
+    "order_observations",
     "search_observations",
     "shipment_observations",
+    "observation_source_edges",
     "shipment_assessments",
     "tool_calls",
+    "supporting_tool_calls",
     "recovery_decisions",
     "superseded_run_finalizations",
     "context_manifests",
     "model_visible_toolset_artifacts",
+    "pair_evidence",
     "trace_events",
 )
 
@@ -391,6 +407,175 @@ def _build_unbound_cycle2_evidence_model() -> type[AuditOnlyModel]:
 
 
 UnboundCycle2EvalEvidence = _build_unbound_cycle2_evidence_model()
+
+
+def map_cycle2_exact_run_evidence_to_unbound(
+    *,
+    closure: Cycle2ExactRunEvidenceClosure,
+    outcome_observation: Cycle2ExecutionOutcomeObservationV1 | None,
+    pair_evidence: Cycle2PairExecutionEvidenceV1 | None,
+    http_status: int | None,
+) -> UnboundCycle2EvalEvidence:
+    """Project expectation-free actual closure data into the Cycle 2 SUT seam."""
+
+    if type(closure) is not Cycle2ExactRunEvidenceClosure:
+        raise TypeError("exact Cycle2ExactRunEvidenceClosure required")
+    if http_status is not None and (
+        type(http_status) is not int or not 100 <= http_status <= 599
+    ):
+        raise ValueError("actual HTTP status is invalid")
+    try:
+        rebuilt_closure = Cycle2ExactRunEvidenceClosure(
+            **{
+                field_name: getattr(closure, field_name)
+                for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+            }
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Cycle 2 exact closure is not canonical") from None
+    if rebuilt_closure != closure:
+        raise ValueError("Cycle 2 exact closure round-trip mismatch")
+
+    run_id = closure.run_record.run_id
+    supporting_ids = {
+        record.run_id for record in closure.supporting_run_records
+    }
+    root_links = tuple(
+        record
+        for record in closure.run_task_link_records
+        if record.run_id == run_id
+    )
+    supporting_links = tuple(
+        record
+        for record in closure.run_task_link_records
+        if record.run_id in supporting_ids
+    )
+    root_tools = tuple(
+        record for record in closure.tool_call_records if record.run_id == run_id
+    )
+    supporting_tools = tuple(
+        record
+        for record in closure.tool_call_records
+        if record.run_id in supporting_ids
+    )
+    if (
+        len(root_links) + len(supporting_links)
+        != len(closure.run_task_link_records)
+        or len(root_tools) + len(supporting_tools)
+        != len(closure.tool_call_records)
+    ):
+        raise ValueError("Cycle 2 exact closure contains an unpartitioned Run")
+
+    terminal_result = closure.terminal_result
+    mapper_evidence: Cycle2MapperEvidence | None = None
+    observed_outcome: AgentOutcome | None = None
+    response_policy = "NONE"
+    agent_results: tuple[AgentRunResult, ...] = ()
+    if terminal_result is None:
+        run_stops = tuple(
+            trace
+            for trace in closure.trace_records
+            if trace.run_id == run_id
+            and trace.event_type is TraceEventType.RUN_STOPPED
+        )
+        if (
+            outcome_observation is not None
+            or http_status is not None
+            or len(run_stops) != 1
+            or run_stops[0].user_outcome is None
+            or run_stops[0].stop_reason is not closure.run_record.stop_reason
+            or any(
+                message.direction is MessageDirection.ASSISTANT
+                for message in closure.message_records
+            )
+            or any(
+                trace.event_type is TraceEventType.RESPONSE_RENDERED
+                for trace in closure.trace_records
+            )
+        ):
+            raise ValueError("no-result closure cannot carry outbound evidence")
+        observed_outcome = run_stops[0].user_outcome
+    else:
+        if type(outcome_observation) is not Cycle2ExecutionOutcomeObservationV1:
+            raise ValueError("completed closure requires actual mapper capture")
+        try:
+            rebuilt_observation = (
+                Cycle2ExecutionOutcomeObservationV1.model_validate(
+                    outcome_observation.model_dump(),
+                    strict=True,
+                )
+            )
+        except (TypeError, ValueError):
+            raise ValueError("actual mapper capture is not canonical") from None
+        if (
+            rebuilt_observation != outcome_observation
+            or outcome_observation.run_id != run_id
+            or terminal_result.run_id != run_id
+            or terminal_result.outcome is not outcome_observation.observed_outcome
+            or closure.run_record.stop_reason is not outcome_observation.stop_reason
+        ):
+            raise ValueError("actual mapper capture does not close the result")
+        mapper_evidence = Cycle2MapperEvidence(
+            mapping_source_kind=outcome_observation.mapping_source_kind,
+            imported_reference=outcome_observation.imported_reference,
+            signal=outcome_observation.cycle2_signal,
+            row_id=outcome_observation.mapper_row_id,
+            disposition=outcome_observation.mapper_disposition,
+            stop_reason=outcome_observation.stop_reason,
+            outcome=outcome_observation.observed_outcome,
+            response_policy=outcome_observation.response_policy,
+        )
+        observed_outcome = outcome_observation.observed_outcome
+        response_policy = outcome_observation.response_policy.value
+        agent_results = (terminal_result,)
+
+    if pair_evidence is not None:
+        if type(pair_evidence) is not Cycle2PairExecutionEvidenceV1:
+            raise TypeError("exact Cycle2PairExecutionEvidenceV1 required")
+        try:
+            rebuilt_pair = Cycle2PairExecutionEvidenceV1.model_validate(
+                pair_evidence.model_dump(),
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            raise ValueError("actual pair evidence is not canonical") from None
+        if rebuilt_pair != pair_evidence:
+            raise ValueError("actual pair evidence round-trip mismatch")
+
+    return UnboundCycle2EvalEvidence(
+        http_status=http_status,
+        observed_outcome=observed_outcome,
+        response_policy=response_policy,
+        run_record=closure.run_record,
+        supporting_run_records=closure.supporting_run_records,
+        mapper_evidence=mapper_evidence,
+        conversation_records=(closure.conversation_record,),
+        agent_results=agent_results,
+        message_records=closure.message_records,
+        input_bindings=closure.input_binding_records,
+        task_records=closure.task_records,
+        request_units=closure.request_unit_records,
+        run_task_links=root_links,
+        supporting_run_task_links=supporting_links,
+        task_state_transitions=closure.task_state_transition_records,
+        candidate_sets=closure.candidate_set_records,
+        candidate_selections=closure.candidate_selection_records,
+        order_observations=closure.order_observation_records,
+        search_observations=closure.search_observation_records,
+        shipment_observations=closure.shipment_observation_records,
+        observation_source_edges=closure.observation_source_edges,
+        shipment_assessments=closure.shipment_assessment_records,
+        tool_calls=root_tools,
+        supporting_tool_calls=supporting_tools,
+        recovery_decisions=closure.recovery_decision_records,
+        superseded_run_finalizations=closure.superseded_run_finalizations,
+        context_manifests=closure.context_manifest_records,
+        model_visible_toolset_artifacts=(
+            closure.model_visible_toolset_artifacts
+        ),
+        pair_evidence=pair_evidence,
+        trace_events=closure.trace_records,
+    )
 
 
 class EvalCaseSutResult(AuditOnlyModel):
@@ -489,6 +674,7 @@ class _StagedCase:
     expectations: EvalCaseExpectations | Cycle2EvalExpectations
     result: EvalResultRecord
     safe_observable: SafeCaseObservable | None
+    cycle2_pair_evidence: Cycle2PairExecutionEvidenceV1 | None = None
 
 
 _ReplayCacheKey = tuple[UUID, str, str, int, str]
@@ -2761,6 +2947,33 @@ class OfflineEvalHarness:
                 execution_failures=tuple(failures),
                 command_passed=False,
             )
+        cycle2_pair_ids = {
+            "E2E01-05/order-only-no-shipment",
+            "E2E01-05/logistics-required-uses-shipment",
+        }
+        selected_cycle2_pair = set(selected_ids) & cycle2_pair_ids
+        if selected_cycle2_pair and selected_cycle2_pair != cycle2_pair_ids:
+            for case_id in selected_ids:
+                if case_id not in selected_cycle2_pair:
+                    continue
+                case = self._artifacts.case_by_id(case_id)
+                failures.append(
+                    await self._append_failure(
+                        eval_run_id=eval_run_id,
+                        lane=lane,
+                        phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                        case=case,
+                        attempt=attempt,
+                        trace_ref=None,
+                        lane_artifact=lane_artifact,
+                    )
+                )
+            return EvalLaneRunOutcome(
+                lane=lane,
+                results=(),
+                execution_failures=tuple(failures),
+                command_passed=False,
+            )
 
         staged: dict[str, _StagedCase] = {}
         replay_key_by_case: dict[str, _ReplayCacheKey] = {}
@@ -2864,6 +3077,60 @@ class OfflineEvalHarness:
                                 current.expectations,
                             ),
                             safe_observable=current.safe_observable,
+                            cycle2_pair_evidence=None,
+                        )
+
+        if selected_cycle2_pair == cycle2_pair_ids:
+            staged_cycle2_pair = set(staged) & cycle2_pair_ids
+            if staged_cycle2_pair != cycle2_pair_ids:
+                for case_id in staged_cycle2_pair:
+                    stage = staged.pop(case_id)
+                    failures.append(
+                        await self._append_failure(
+                            eval_run_id=eval_run_id,
+                            lane=lane,
+                            phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                            case=stage.case,
+                            attempt=attempt,
+                            trace_ref=stage.result.trace_ref,
+                            lane_artifact=lane_artifact,
+                        )
+                    )
+            else:
+                pair = {
+                    case_id: staged[case_id].cycle2_pair_evidence
+                    for case_id in cycle2_pair_ids
+                }
+                if not e2e01_05_pair_execution_evidence_match(pair):
+                    for case_id in cycle2_pair_ids:
+                        current = staged[case_id]
+                        if type(current.expectations) is not Cycle2EvalExpectations:
+                            stage = staged.pop(case_id)
+                            failures.append(
+                                await self._append_failure(
+                                    eval_run_id=eval_run_id,
+                                    lane=lane,
+                                    phase=(
+                                        EvalExecutionFailurePhase.RESULT_COMPLETENESS
+                                    ),
+                                    case=stage.case,
+                                    attempt=attempt,
+                                    trace_ref=stage.result.trace_ref,
+                                    lane_artifact=lane_artifact,
+                                )
+                            )
+                            continue
+                        staged[case_id] = _StagedCase(
+                            case=current.case,
+                            expectations=current.expectations,
+                            result=_force_cycle2_pair_failure(
+                                current.result,
+                                current.expectations,
+                            ),
+                            safe_observable=None,
+                            cycle2_pair_evidence=(
+                                current.cycle2_pair_evidence
+                            ),
                         )
 
         persisted: list[EvalResultRecord] = []
@@ -2900,6 +3167,14 @@ class OfflineEvalHarness:
                         SafeCaseObservable,
                     )
                 )
+                cache_pair_evidence = (
+                    None
+                    if stage.cycle2_pair_evidence is None
+                    else _detached_canonical_model(
+                        stage.cycle2_pair_evidence,
+                        Cycle2PairExecutionEvidenceV1,
+                    )
+                )
                 replay_key = replay_key_by_case.get(case_id)
                 phase1_cache_is_closed = (
                     expectations_type is EvalCaseExpectations
@@ -2910,6 +3185,11 @@ class OfflineEvalHarness:
                     expectations_type is Cycle2EvalExpectations
                     and type(cache_expectations) is Cycle2EvalExpectations
                     and cache_observable is None
+                    and (
+                        cache_pair_evidence is None
+                        or type(cache_pair_evidence)
+                        is Cycle2PairExecutionEvidenceV1
+                    )
                 )
                 if (
                     type(public_record) is EvalResultRecord
@@ -2942,6 +3222,7 @@ class OfflineEvalHarness:
                             expectations=cache_expectations,
                             result=cache_record,
                             safe_observable=cache_observable,
+                            cycle2_pair_evidence=cache_pair_evidence,
                         )
                     )
 
@@ -3353,6 +3634,7 @@ class OfflineEvalHarness:
                 expectations=expectations,
                 result=result,
                 safe_observable=None,
+                cycle2_pair_evidence=evidence.pair_evidence,
             ),
             None,
         )
@@ -4318,6 +4600,46 @@ def _force_disclosure_failure(
         status=derived.status,
         grader_results=derived.grader_results,
         critical_failures=derived.critical_failures,
+        observed_outcome=record.observed_outcome,
+        trace_ref=record.trace_ref,
+        version_manifest=record.version_manifest,
+        latency_summary=record.latency_summary,
+        usage_summary=record.usage_summary,
+        completed_at=record.completed_at,
+    )
+
+
+def _force_cycle2_pair_failure(
+    record: EvalResultRecord,
+    expectations: Cycle2EvalExpectations,
+) -> EvalResultRecord:
+    replacement = EvalGraderResult(
+        grader_name="SchemaGrader",
+        status=EvalGraderStatus.FAIL,
+        reason_code=EvalGraderReasonCode.ASSERTION_FAILED,
+    )
+    grader_results = tuple(
+        replacement if result.grader_name == "SchemaGrader" else result
+        for result in record.grader_results
+    )
+    if not any(
+        result.grader_name == "SchemaGrader" for result in record.grader_results
+    ):
+        raise GradingConfigurationError("E2E01-05 requires SchemaGrader")
+    critical_failures = set(record.critical_failures)
+    if CriticalFailureCode.CF_12 in expectations.applicable_critical_failures:
+        critical_failures.add(CriticalFailureCode.CF_12)
+    return EvalResultRecord(
+        schema_version=record.schema_version,
+        eval_run_id=record.eval_run_id,
+        case_id=record.case_id,
+        lane=record.lane,
+        attempt=record.attempt,
+        status=EvalResultStatus.FAIL,
+        grader_results=grader_results,
+        critical_failures=tuple(
+            code for code in CriticalFailureCode if code in critical_failures
+        ),
         observed_outcome=record.observed_outcome,
         trace_ref=record.trace_ref,
         version_manifest=record.version_manifest,

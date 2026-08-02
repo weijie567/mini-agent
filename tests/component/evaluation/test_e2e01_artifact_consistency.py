@@ -1291,6 +1291,29 @@ def test_cycle2_bundle_has_exact_27_executable_case_identities() -> None:
     )
 
 
+def test_cycle2_transport_applicability_is_exact_by_execution_mode() -> None:
+    cases = _load_json(CYCLE2_CASES_PATH)["cases"]
+    longitudinal = tuple(
+        case for case in cases if case["case_id"] in CYCLE2_LONGITUDINAL_CASE_IDS
+    )
+    trajectory = tuple(
+        case for case in cases if case["case_id"] in CYCLE2_TRAJECTORY_CASE_IDS
+    )
+
+    assert len(longitudinal) == 14
+    assert len(trajectory) == 13
+    assert all(
+        type(case["expectations"]["expected_http_status"]) is int
+        and case["expectations"]["expected_http_status"] == 200
+        for case in longitudinal
+    )
+    assert all(
+        case["scope_levels"] == ["TRAJECTORY"]
+        and case["expectations"]["expected_http_status"] is None
+        for case in trajectory
+    )
+
+
 def test_cycle2_bundle_uses_the_real_runtime_tool_registry_version() -> None:
     dataset = _load_json(CYCLE2_CASES_PATH)
     manifest = _load_json(CYCLE2_MANIFEST_PATH)

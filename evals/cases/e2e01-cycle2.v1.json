@@ -1891,7 +1891,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "ASK_USER",
         "expected_stop_reason": "CANDIDATE_REFRESH_REQUIRED",
         "response_policy": "CANDIDATE_REFRESH_FIXED",
@@ -2014,7 +2014,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "ASK_USER",
         "expected_stop_reason": "CANDIDATE_REFRESH_REQUIRED",
         "response_policy": "CANDIDATE_REFRESH_FIXED",
@@ -2134,7 +2134,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "ASK_USER",
         "expected_stop_reason": "CANDIDATE_REFRESH_REQUIRED",
         "response_policy": "CANDIDATE_REFRESH_FIXED",
@@ -2254,7 +2254,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "ASK_USER",
         "expected_stop_reason": "CANDIDATE_REFRESH_REQUIRED",
         "response_policy": "CANDIDATE_REFRESH_FIXED",
@@ -2378,7 +2378,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "COMPLETED",
         "expected_stop_reason": "GOAL_COMPLETED",
         "response_policy": "SHIPMENT_ASSESSMENT_DETERMINISTIC",
@@ -2506,7 +2506,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "COMPLETED",
         "expected_stop_reason": "GOAL_COMPLETED",
         "response_policy": "SHIPMENT_ASSESSMENT_DETERMINISTIC",
@@ -2636,7 +2636,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "COMPLETED",
         "expected_stop_reason": "GOAL_COMPLETED",
         "response_policy": "SHIPMENT_ASSESSMENT_DETERMINISTIC",
@@ -2767,7 +2767,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "COMPLETED",
         "expected_stop_reason": "GOAL_COMPLETED",
         "response_policy": "SHIPMENT_ASSESSMENT_DETERMINISTIC",
@@ -2900,7 +2900,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "COMPLETED",
         "expected_stop_reason": "GOAL_COMPLETED",
         "response_policy": "SHIPMENT_ASSESSMENT_DETERMINISTIC",
@@ -3033,7 +3033,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "BLOCKED",
         "expected_stop_reason": "STATE_OR_BINDING_INVALIDATED",
         "response_policy": "NONE",
@@ -3175,7 +3175,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "BLOCKED",
         "expected_stop_reason": "PROCESS_RESTART_DETECTED",
         "response_policy": "NONE",
@@ -3301,7 +3301,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "BLOCKED",
         "expected_stop_reason": "SHIPMENT_SNAPSHOT_STALE",
         "response_policy": "DEPENDENCY_BLOCKED_FIXED",
@@ -3424,7 +3424,7 @@
         "TIMEOUT_ATTEMPT_SHAPE_EXACT"
       ],
       "expectations": {
-        "expected_http_status": 200,
+        "expected_http_status": null,
         "expected_user_outcome": "BLOCKED",
         "expected_stop_reason": "INTEGRITY_CHECK_FAILED",
         "response_policy": "INTEGRITY_BLOCKED_FIXED",

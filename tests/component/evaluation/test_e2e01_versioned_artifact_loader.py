@@ -349,3 +349,27 @@ def test_cycle2_reauthenticated_registry_version_drift_fails_closed(
         match="grading or version contract is invalid",
     ):
         load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
+
+
+@pytest.mark.parametrize(
+    ("case_index", "transport_value"),
+    ((0, None), (14, 200)),
+)
+def test_cycle2_reauthenticated_transport_applicability_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_index: int,
+    transport_value: int | None,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    cases = _read_json(root, CYCLE2_REFERENCED[1])
+    case = cases["cases"][case_index]  # type: ignore[index]
+    case["expectations"]["expected_http_status"] = transport_value  # type: ignore[index]
+    _write_json(root, CYCLE2_REFERENCED[1], cases)
+    _reauthenticate_cycle2_cases(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="expected HTTP status is invalid",
+    ):
+        load_e2e01_cycle2_artifacts(root, candidate_version="candidate")

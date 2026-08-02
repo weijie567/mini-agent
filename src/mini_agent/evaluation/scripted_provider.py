@@ -10,15 +10,23 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import ValidationError
 
 from mini_agent.application.records import (
+    Cycle2ControlPurpose,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
 )
 from mini_agent.core.common import FrozenJsonDict, freeze_json_value
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
+    Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2InitialTaskDeltaCandidateV2,
+    Cycle2InputCandidate,
     InputAuthority,
     InputSourceKind,
+    NextMove,
     NextMoveKind,
+    QueryContextualizationCandidateV2,
     ReferenceSourceKindV2,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
@@ -144,6 +152,7 @@ _CYCLE2_BEHAVIORS = {
     "CONTROL_CANDIDATE": frozenset(
         {
             "PROPOSE_GET_ORDER",
+            "PROPOSE_GET_SHIPMENT",
             "PROPOSE_ORDER_SUMMARY",
             "PROPOSE_CANDIDATE_QUESTION",
             "PROPOSE_SHIPMENT_ASSESSMENT",
@@ -407,6 +416,49 @@ class ScriptedModelProviderV2:
             raise _fresh_protocol_error()
         return output
 
+    async def propose_cycle2_initial(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2InitialRequestUnderstandingOutputV2:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        output = _project_cycle2_initial(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if output is None:
+            raise _fresh_protocol_error()
+        return output
+
+    async def propose_cycle2_continuation(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2InputCandidate:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        output = _project_cycle2_continuation(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if output is None:
+            raise _fresh_protocol_error()
+        return output
+
+    async def propose_cycle2_control(
+        self,
+        request: RequestUnderstandingInput,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        if type(purpose) is not Cycle2ControlPurpose:
+            raise TypeError("purpose must be Cycle2ControlPurpose")
+        output = _project_cycle2_control(self, purpose)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        purpose = None  # type: ignore[assignment]
+        if output is None:
+            raise _fresh_protocol_error()
+        return output
+
     async def plan_presentation(
         self,
         request: PresentationInput,
@@ -517,6 +569,152 @@ class ScriptedModelProviderV2:
         step = self._steps[self._cursor]
         self._cursor += 1
         return step
+
+
+def _take_cycle2_candidate(
+    provider: ScriptedModelProviderV2,
+    purpose: Literal["REQUEST_UNDERSTANDING", "CONTROL_CANDIDATE"],
+) -> Cycle2ScriptDirective | None:
+    try:
+        return provider.take_cycle2_directive(purpose)
+    except ProviderProtocolError:
+        return None
+
+
+def _project_cycle2_initial(
+    provider: ScriptedModelProviderV2,
+    request: RequestUnderstandingInput,
+) -> Cycle2InitialRequestUnderstandingOutputV2 | None:
+    directive = _take_cycle2_candidate(provider, "REQUEST_UNDERSTANDING")
+    if directive is None or directive.behavior != "PROPOSE_SEARCH_ORDERS":
+        return None
+    product_description = directive.candidate_arguments.get(
+        "product_description"
+    )
+    if type(product_description) is not str:
+        return None
+    goal = f"查找最近购买的{product_description}订单"
+    try:
+        return Cycle2InitialRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-initial.p0.v1",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text=goal,
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2InitialTaskDeltaCandidateV2(
+                    candidate_id=uuid5(
+                        NAMESPACE_URL,
+                        f"{provider.script_execution_ref}:cycle2-initial-delta",
+                    ),
+                    operation=TaskDeltaOperation.ADD_GOAL,
+                    goal_patch=goal,
+                    input_candidates=(
+                        Cycle2InputCandidate(
+                            name="product_description",
+                            candidate_value=product_description,
+                            source_ref=request.message_ref,
+                            source_quote=product_description,
+                            confidence=0.99,
+                        ),
+                    ),
+                    confidence=0.99,
+                ),
+            ),
+            next_move_candidate=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="search_orders",
+                arguments={"product_description": product_description},
+                base_task_state_version=None,
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_cycle2_continuation(
+    provider: ScriptedModelProviderV2,
+    request: RequestUnderstandingInput,
+) -> Cycle2InputCandidate | None:
+    directive = _take_cycle2_candidate(provider, "REQUEST_UNDERSTANDING")
+    if directive is None:
+        return None
+    projected = {
+        "PROPOSE_CANDIDATE_SELECTION": (
+            "candidate_ordinal",
+            directive.candidate_arguments.get("candidate_ordinal"),
+        ),
+        "PROPOSE_GET_ORDER": (
+            "order_id",
+            directive.candidate_arguments.get("order_id"),
+        ),
+        "PROPOSE_GET_SHIPMENT": (
+            "order_id",
+            directive.candidate_arguments.get("order_id"),
+        ),
+    }.get(directive.behavior)
+    if projected is None:
+        return None
+    name, value = projected
+    source_quote = (
+        request.original_query
+        if name == "candidate_ordinal"
+        else str(value)
+    )
+    try:
+        return Cycle2InputCandidate(
+            name=name,
+            candidate_value=value,
+            source_ref=request.message_ref,
+            source_quote=source_quote,
+            confidence=0.99,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_cycle2_control(
+    provider: ScriptedModelProviderV2,
+    purpose: Cycle2ControlPurpose,
+) -> Cycle2ControlCandidate | None:
+    directive = _take_cycle2_candidate(provider, "CONTROL_CANDIDATE")
+    if directive is None:
+        return None
+    behavior = directive.behavior
+    if (
+        purpose is Cycle2ControlPurpose.PROPOSE_GET_ORDER
+        and behavior == "PROPOSE_GET_ORDER"
+    ):
+        return Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.CALL_TOOL,
+            requested_tool_name="get_order",
+        )
+    if purpose is Cycle2ControlPurpose.PROPOSE_POST_ORDER:
+        if behavior == "PROPOSE_ORDER_SUMMARY":
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.FINISH,
+            )
+        if behavior == "PROPOSE_GET_SHIPMENT":
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
+                requested_tool_name="get_shipment",
+            )
+        return None
+    matching_finish = {
+        Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION: (
+            "PROPOSE_CANDIDATE_QUESTION"
+        ),
+        Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT: (
+            "PROPOSE_SHIPMENT_ASSESSMENT"
+        ),
+        Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE: "PROPOSE_FIXED_RESPONSE",
+    }.get(purpose)
+    if behavior != matching_finish:
+        return None
+    return Cycle2ControlCandidate(kind=Cycle2ControlCandidateKind.FINISH)
 
 
 def _v2_fresh_candidate_invalid_error(
