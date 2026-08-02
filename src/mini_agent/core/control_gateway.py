@@ -683,10 +683,13 @@ def _cycle2_loaded_graph_complete(loaded: Cycle2GatewayLoadedClosure) -> bool:
     }
     if set(targets_by_ref) != set(observations_by_target):
         return False
-    if set(request_unit.observation_refs) != {
+    current_target_observation_refs = {
         observation.observation_ref
         for observation in loaded.current_target_observations
-    }:
+    }
+    if not current_target_observation_refs.issubset(
+        set(request_unit.observation_refs)
+    ):
         return False
     manifest_observations = {
         (record.record_ref, record.version)

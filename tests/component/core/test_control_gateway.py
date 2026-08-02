@@ -1960,6 +1960,95 @@ def test_cycle2_shipment_target_requires_exact_current_observation_closure(
     assert gate.argument_binding_valid is False
 
 
+def test_cycle2_shipment_accepts_request_unit_observation_history() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    current_observation = loaded.current_target_observations[0]
+    historical_observation_ref = uuid4()
+    loaded = loaded.model_copy(
+        update={
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={
+                    "observation_refs": (
+                        historical_observation_ref,
+                        current_observation.observation_ref,
+                    )
+                }
+            )
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert gate.verified_target_ref == candidate.verified_target_ref
+    assert loaded.context_manifest.observation_refs_and_versions == (
+        VersionedRecordRef(
+            record_ref=current_observation.observation_ref,
+            version=current_observation.observation_version,
+        ),
+    )
+
+
+def test_cycle2_shipment_rejects_duplicate_request_unit_observation_refs() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    current_ref = loaded.current_target_observations[0].observation_ref
+    loaded = loaded.model_copy(
+        update={
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={"observation_refs": (current_ref, current_ref)}
+            )
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.argument_binding_valid is False
+
+
+def test_cycle2_shipment_history_does_not_authorize_unrelated_target() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    current_observation = loaded.current_target_observations[0]
+    unrelated_observation = current_observation.model_copy(
+        update={
+            "observation_ref": uuid4(),
+            "verified_target_ref": uuid4(),
+        }
+    )
+    loaded = loaded.model_copy(
+        update={
+            "current_target_observations": (
+                current_observation,
+                unrelated_observation,
+            ),
+            "current_request_unit": loaded.current_request_unit.model_copy(
+                update={
+                    "observation_refs": (
+                        current_observation.observation_ref,
+                        unrelated_observation.observation_ref,
+                    )
+                }
+            ),
+            "context_manifest": loaded.context_manifest.model_copy(
+                update={
+                    "observation_refs_and_versions": (
+                        *loaded.context_manifest.observation_refs_and_versions,
+                        VersionedRecordRef(
+                            record_ref=unrelated_observation.observation_ref,
+                            version=unrelated_observation.observation_version,
+                        ),
+                    )
+                }
+            ),
+        }
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.argument_binding_valid is False
+
+
 def test_cycle2_gateway_rejects_multiple_current_targets_for_same_binding() -> None:
     candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
     target = loaded.current_verified_order_targets[0]
