@@ -25,10 +25,13 @@ from mini_agent.application.read_tool_executor import (
     ReadToolExecutor,
 )
 from mini_agent.application.run_result_mapper import (
+    Cycle2ExecutionOutcomeObservationV1,
+    Cycle2MappingSourceKind,
     Cycle2MapperSignal,
     ImportedMapperReference,
     MapperDisposition,
     PHASE1_RESULT_MAPPER_CONTRACT,
+    ResponsePolicy,
     RunResultMapper,
 )
 from mini_agent.application.records import (
@@ -37,8 +40,10 @@ from mini_agent.application.records import (
     AgentRunResult,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
-    Cycle2ContinuationProviderProposal,
+    ContinuationInputBindingReadClosure,
+    Cycle2ControlPurpose,
     Cycle2CurrentSessionTaskClosure,
+    Cycle2ExactRunEvidenceClosure,
     Cycle2WriteResult,
     FinalizeRunCommand,
     InsertOnlyWriteResult,
@@ -51,11 +56,16 @@ from mini_agent.application.records import (
     RequestUnderstandingCandidateInvalidError,
     ToolDispatchFenceWriteResult,
 )
-from mini_agent.core.control_gateway import Cycle2ToolProgressFact
+from mini_agent.core.control_gateway import (
+    Cycle2TargetObservationFacts,
+    Cycle2ToolProgressFact,
+    Cycle2VerifiedOrderTargetFacts,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ObservationVisibility,
     OrderObservation,
+    ShipmentObservation,
     TokenCounts,
 )
 from mini_agent.core.order import (
@@ -80,8 +90,13 @@ from mini_agent.core.presentation import (
     PresentationPlan,
     PresentationTone,
 )
-from mini_agent.core.request_processing import RequestUnderstandingV2Error
+from mini_agent.core.request_processing import (
+    Cycle2OrdinalSelectionRejectionReason,
+    RequestUnderstandingV2Error,
+)
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -125,11 +140,19 @@ from mini_agent.core.tool_system import (
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
-from mini_agent.core.shipment import GetShipmentOutcome, GetShipmentResult
+from mini_agent.core.shipment import (
+    GetShipmentOutcome,
+    GetShipmentResult,
+    SHIPMENT_FRESHNESS_TTL,
+    ShipmentEventCode,
+    ShipmentStatus,
+    ShipmentSummaryProjection,
+)
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunStatus,
     StopReason,
+    StopReasonV2,
     TraceEvent,
     TraceEventType,
 )
@@ -2591,6 +2614,10 @@ class _Cycle2UnusedExecutor:
 
 
 class _Cycle2ProviderHarness:
+    def __init__(self, *, ordinal: int = 2) -> None:
+        self.ordinal = ordinal
+        self.control_purposes: list[Cycle2ControlPurpose] = []
+
     async def propose_cycle2_initial(
         self,
         request: object,
@@ -2633,28 +2660,81 @@ class _Cycle2ProviderHarness:
     async def propose_cycle2_continuation(
         self,
         request: object,
-    ) -> Cycle2ContinuationProviderProposal:
-        return Cycle2ContinuationProviderProposal(
-            input_candidate=Cycle2InputCandidate(
-                name="candidate_ordinal",
-                candidate_value=2,
-                source_ref=request.message_ref,
-                source_quote=request.original_query,
-                confidence=0.99,
-            ),
-            next_move_candidate=NextMove(
-                kind=NextMoveKind.CALL_TOOL,
-                requested_tool_name="get_order",
-                arguments={"order_id": "O-1002"},
-                base_task_state_version=2,
-            ),
+    ) -> Cycle2InputCandidate:
+        return Cycle2InputCandidate(
+            name="candidate_ordinal",
+            candidate_value=self.ordinal,
+            source_ref=request.message_ref,
+            source_quote=request.original_query,
+            confidence=0.99,
         )
 
-    async def propose_cycle2_search_followup(self, *_args: object) -> object:
-        raise AssertionError("MULTIPLE must stop before a search follow-up")
+    async def propose_cycle2_control(
+        self,
+        _request: object,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        self.control_purposes.append(purpose)
+        tool_name = {
+            Cycle2ControlPurpose.PROPOSE_GET_ORDER: "get_order",
+            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT: "get_shipment",
+        }.get(purpose)
+        if tool_name is not None:
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
+                requested_tool_name=tool_name,
+            )
+        return Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.FINISH,
+        )
 
-    async def propose_cycle2_order_followup(self, *_args: object) -> object:
-        raise AssertionError("get_order is injected in these tests")
+
+class _Cycle2OrderIdProvider(_Cycle2ProviderHarness):
+    async def propose_cycle2_continuation(
+        self,
+        request: object,
+    ) -> Cycle2InputCandidate:
+        return Cycle2InputCandidate(
+            name="order_id",
+            candidate_value="O-1001",
+            source_ref=request.message_ref,
+            source_quote="O-1001",
+            confidence=0.99,
+        )
+
+
+class _StrictCycle2ControlProvider(_Cycle2ProviderHarness):
+    def __init__(
+        self,
+        expected_purposes: tuple[Cycle2ControlPurpose, ...],
+        *,
+        wrong_candidate: bool = False,
+    ) -> None:
+        super().__init__()
+        self.expected_purposes = list(expected_purposes)
+        self.wrong_candidate = wrong_candidate
+
+    async def propose_cycle2_control(
+        self,
+        request: object,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        if not self.expected_purposes:
+            raise ProviderProtocolError()
+        expected = self.expected_purposes.pop(0)
+        if purpose is not expected:
+            raise ProviderProtocolError()
+        if self.wrong_candidate:
+            self.control_purposes.append(purpose)
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
+                requested_tool_name="get_order",
+            )
+        return await super().propose_cycle2_control(request, purpose)
+
+    def assert_exhausted(self) -> None:
+        if self.expected_purposes:
+            raise ProviderProtocolError()
 
 
 class _Cycle2RuntimeHarness:
@@ -2667,6 +2747,9 @@ class _Cycle2RuntimeHarness:
         self.search_write_result = Cycle2WriteResult.APPLIED
         self.search_commands: list[object] = []
         self.selection_commands: list[object] = []
+        self.selection_closure_available = True
+        self.binding_commands: list[object] = []
+        self.finalize_commands: list[object] = []
         self.search_load_count = 0
 
     async def load_current_session_task_for_owner(self, **kwargs: object):
@@ -2727,7 +2810,9 @@ class _Cycle2RuntimeHarness:
     async def load_order_candidate_selection_closure_for_owner(
         self,
         **kwargs: object,
-    ) -> OrderCandidateSelectionReadClosure:
+    ) -> OrderCandidateSelectionReadClosure | None:
+        if not self.selection_closure_available:
+            return None
         session = self.current_session
         initial = self.initial_graph_command
         assert session is not None and initial is not None
@@ -2783,10 +2868,91 @@ class _Cycle2RuntimeHarness:
         self.selection_commands.append(command)
         return Cycle2WriteResult.APPLIED
 
+    async def load_continuation_input_binding_closure_for_owner(
+        self,
+        **kwargs: object,
+    ):
+        session = self.current_session
+        assert session is not None
+        return ContinuationInputBindingReadClosure(
+            owner_scope=session.owner_scope,
+            trusted_conversation_record=session.conversation_record,
+            current_conversation_task_link_record=(
+                session.current_conversation_task_link_record
+            ),
+            saved_user_message_record=self.root_commands[-1].user_message_record,
+            current_task_record=session.current_task_record,
+            current_request_unit_record=session.current_request_unit_record,
+            current_input_binding_records=session.current_input_binding_records,
+            trusted_now=kwargs["trusted_now"],
+        )
+
+    async def apply_continuation_input_binding_if_current(self, command: object):
+        self.binding_commands.append(command)
+        return Cycle2WriteResult.APPLIED
+
+    async def finalize_cycle2_run_if_current(self, command: object):
+        self.finalize_commands.append(command)
+        return Cycle2WriteResult.APPLIED
+
+    async def load_cycle2_exact_run_evidence_for_owner(self, **_kwargs: object):
+        command = self.finalize_commands[-1]
+        root = self.root_commands[-1]
+        task = command.current_task_record
+        unit = command.current_request_unit_record
+        if task is None:
+            tasks = ()
+            units = ()
+            links = ()
+            bindings = ()
+        else:
+            tasks = (task,)
+            units = (unit,)
+            links = (command.terminal_run_task_link_record,)
+            initial = self.initial_graph_command
+            assert initial is not None
+            initial_binding = initial.reducer_decision.task_graph.input_binding
+            bindings = (initial_binding,)
+        user_messages = tuple(
+            root_command.user_message_record
+            for root_command in self.root_commands
+            if root_command.user_message_record.conversation_id
+            == root.conversation_record.conversation_id
+        )
+        return Cycle2ExactRunEvidenceClosure(
+            owner_scope=command.owner_scope,
+            conversation_record=root.conversation_record,
+            run_record=command.terminal_run_record,
+            message_records=(*user_messages, command.assistant_message_record),
+            run_task_link_records=links,
+            task_records=tasks,
+            request_unit_records=units,
+            input_binding_records=bindings,
+            trace_records=command.ordinary_trace_records,
+            terminal_result=command.terminal_result,
+        )
+
+
+class _Cycle2OutcomeCapture:
+    def __init__(self, runtime: _Cycle2RuntimeHarness | None = None) -> None:
+        self.runtime = runtime
+        self.observations: list[Cycle2ExecutionOutcomeObservationV1] = []
+
+    def observe_cycle2_execution_outcome(
+        self,
+        observation: Cycle2ExecutionOutcomeObservationV1,
+    ) -> None:
+        if self.runtime is not None:
+            assert self.runtime.finalize_commands
+        self.observations.append(observation)
+
 
 def _cycle2_handler(
     runtime: _Cycle2RuntimeHarness,
     provider: _Cycle2ProviderHarness,
+    *,
+    observer: Any | None = None,
+    clock_now: datetime = NOW,
 ) -> Cycle2AgentRunHandler:
     return Cycle2AgentRunHandler(
         runtime_record_port=runtime,
@@ -2794,10 +2960,11 @@ def _cycle2_handler(
         request_understanding_provider=provider,
         read_tool_executor=_Cycle2UnusedExecutor(),
         deterministic_renderer=DeterministicRenderer(),
-        clock=lambda: NOW,
+        clock=lambda: clock_now,
         uuid_factory=UuidSequence(),
         provider_lane="scripted-cycle2",
         redaction_policy_version="redaction-v1",
+        execution_outcome_observer=observer,
     )
 
 
@@ -2918,6 +3085,71 @@ def _capture_cycle2_initial_turn(
     return sentinel, captured
 
 
+def _prepare_cycle2_waiting_session(
+    *,
+    provider: _Cycle2ProviderHarness,
+    trusted_now: datetime = NOW,
+) -> tuple[
+    Cycle2AgentRunHandler,
+    _Cycle2RuntimeHarness,
+    AgentRunResult,
+    object,
+]:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    search_result = _cycle2_multiple_search_result()
+
+    async def stop_after_mapping(**_kwargs: object) -> AgentRunResult:
+        return sentinel
+
+    handler._finalize_mapping = stop_after_mapping  # type: ignore[method-assign]
+    asyncio.run(
+        handler._apply_successful_search(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message="customer-B 让我查最近买的轻量跑鞋",
+            ),
+            turn=captured["turn"],
+            task=task,
+            request_unit=unit,
+            input_bindings=captured["input_bindings"],
+            execution=_cycle2_search_execution(
+                turn=captured["turn"],
+                task=task,
+                unit=unit,
+                binding_ref=binding.binding_id,
+                result=search_result,
+            ),
+            result=search_result,
+        )
+    )
+    search_command = runtime.search_commands[0]
+    initial = runtime.initial_graph_command
+    assert initial is not None
+    runtime.current_session = Cycle2CurrentSessionTaskClosure(
+        owner_scope=search_command.owner_scope,
+        session_ref_hash=_context().session_ref_hash,
+        conversation_record=search_command.trusted_conversation_record,
+        current_conversation_task_link_record=(
+            initial.conversation_task_link_record
+        ),
+        current_task_record=search_command.next_task_record,
+        current_request_unit_record=search_command.next_request_unit_record,
+        current_input_binding_records=(binding,),
+        current_candidate_set_records=(search_command.candidate_set_record,),
+        current_search_observation_records=(
+            search_command.search_observation_record,
+        ),
+        trusted_now=trusted_now,
+    )
+    handler._clock = lambda: trusted_now  # type: ignore[method-assign]
+    return handler, runtime, sentinel, search_command
+
+
 def test_cycle2_handler_first_turn_builds_real_trusted_root_and_graph() -> None:
     runtime = _Cycle2RuntimeHarness()
     handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
@@ -2960,6 +3192,7 @@ def test_cycle2_initial_search_candidate_is_raw_closed_for_gateway() -> None:
         ),
         uuid4(),
         uuid4(),
+        None,
     )
     assert candidate.verified_target_ref is None
     assert candidate.__pydantic_fields_set__ == set(
@@ -3201,19 +3434,10 @@ def test_cycle2_unique_search_commits_target_at_result_state_version() -> None:
     )
     get_order: dict[str, object] = {}
 
-    async def propose_followup(*_args: object) -> NextMove:
-        return NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name="get_order",
-            arguments={"order_id": "O-1001"},
-            base_task_state_version=2,
-        )
-
     async def capture_get_order(**kwargs: object) -> AgentRunResult:
         get_order.update(kwargs)
         return sentinel
 
-    provider.propose_cycle2_search_followup = propose_followup  # type: ignore[method-assign]
     handler._get_order = capture_get_order  # type: ignore[method-assign]
 
     outbound = asyncio.run(
@@ -3245,6 +3469,10 @@ def test_cycle2_unique_search_commits_target_at_result_state_version() -> None:
     )
     assert get_order["task"] == search_command.next_task_record
     assert get_order["request_unit"] == search_command.next_request_unit_record
+    assert (
+        get_order["control_purpose"]
+        is Cycle2ControlPurpose.PROPOSE_GET_ORDER
+    )
 
 
 def test_cycle2_handler_continues_multiple_with_ordinal_without_research() -> None:
@@ -3322,3 +3550,656 @@ def test_cycle2_handler_continues_multiple_with_ordinal_without_research() -> No
     assert selection.next_task_record.state_version == 3
     assert get_order["task"] == selection.next_task_record
     assert get_order["request_unit"] == selection.next_request_unit_record
+    assert (
+        get_order["control_purpose"]
+        is Cycle2ControlPurpose.PROPOSE_GET_ORDER
+    )
+
+
+def test_cycle2_rejected_ordinal_persists_claim_without_selection_or_tool() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2ProviderHarness(ordinal=6)
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    search_result = _cycle2_multiple_search_result()
+
+    async def stop_after_mapping(**_kwargs: object) -> AgentRunResult:
+        return sentinel
+
+    handler._finalize_mapping = stop_after_mapping  # type: ignore[method-assign]
+    asyncio.run(
+        handler._apply_successful_search(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message="customer-B 让我查最近买的轻量跑鞋",
+            ),
+            turn=captured["turn"],
+            task=task,
+            request_unit=unit,
+            input_bindings=captured["input_bindings"],
+            execution=_cycle2_search_execution(
+                turn=captured["turn"],
+                task=task,
+                unit=unit,
+                binding_ref=binding.binding_id,
+                result=search_result,
+            ),
+            result=search_result,
+        )
+    )
+    search_command = runtime.search_commands[0]
+    initial = runtime.initial_graph_command
+    assert initial is not None
+    runtime.current_session = Cycle2CurrentSessionTaskClosure(
+        owner_scope=search_command.owner_scope,
+        session_ref_hash=_context().session_ref_hash,
+        conversation_record=search_command.trusted_conversation_record,
+        current_conversation_task_link_record=(
+            initial.conversation_task_link_record
+        ),
+        current_task_record=search_command.next_task_record,
+        current_request_unit_record=search_command.next_request_unit_record,
+        current_input_binding_records=(binding,),
+        current_candidate_set_records=(search_command.candidate_set_record,),
+        current_search_observation_records=(
+            search_command.search_observation_record,
+        ),
+        trusted_now=NOW,
+    )
+
+    outbound = asyncio.run(
+        handler.handle(
+            AgentRunCommand(customer_context=_context(), message="第六个")
+        )
+    )
+
+    assert outbound is sentinel
+    assert runtime.selection_commands == []
+    assert len(runtime.binding_commands) == 1
+    rejected_command = runtime.binding_commands[0]
+    assert rejected_command.new_input_binding_record.normalized_value == 6
+    assert (
+        rejected_command.rejected_ordinal_selection.rejection_reason.value
+        == "OUT_OF_RANGE"
+    )
+    assert rejected_command.next_task_record.status is TaskStatus.WAITING_USER
+    assert rejected_command.next_request_unit_record.open_questions == (
+        search_command.next_request_unit_record.open_questions
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "ordinal", "shape", "trusted_now"),
+    [
+        (
+            Cycle2OrdinalSelectionRejectionReason.OUT_OF_RANGE,
+            6,
+            "CURRENT",
+            NOW,
+        ),
+        (
+            Cycle2OrdinalSelectionRejectionReason.EXPIRED,
+            2,
+            "CURRENT",
+            NOW + SHIPMENT_FRESHNESS_TTL * 4,
+        ),
+        (
+            Cycle2OrdinalSelectionRejectionReason.CROSS_TASK,
+            2,
+            "EMPTY_HINT",
+            NOW,
+        ),
+        (
+            Cycle2OrdinalSelectionRejectionReason.OWNER_MISMATCH,
+            2,
+            "READER_ABSENT_HINT",
+            NOW,
+        ),
+        (
+            Cycle2OrdinalSelectionRejectionReason.SUPERSEDED,
+            2,
+            "SUPERSEDED_HINT",
+            NOW,
+        ),
+        (
+            Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE,
+            2,
+            "EMPTY_HINT",
+            NOW,
+        ),
+    ],
+)
+def test_cycle2_all_typed_ordinal_rejections_use_binding_only_cas(
+    reason: Cycle2OrdinalSelectionRejectionReason,
+    ordinal: int,
+    shape: str,
+    trusted_now: datetime,
+) -> None:
+    provider = _Cycle2ProviderHarness(ordinal=ordinal)
+    handler, runtime, sentinel, _search_command = (
+        _prepare_cycle2_waiting_session(
+            provider=provider,
+            trusted_now=trusted_now,
+        )
+    )
+    session = runtime.current_session
+    assert session is not None
+    updates: dict[str, object] = {}
+    if shape in {"EMPTY_HINT", "SUPERSEDED_HINT"}:
+        updates.update(
+            current_candidate_set_records=(),
+            current_search_observation_records=(),
+            ordinal_selection_rejection_hint=reason,
+        )
+    elif shape == "READER_ABSENT_HINT":
+        updates["ordinal_selection_rejection_hint"] = reason
+        runtime.selection_closure_available = False
+    if shape == "SUPERSEDED_HINT":
+        updates["superseded_candidate_set_refs"] = (
+            session.current_candidate_set_records[0].candidate_set_id,
+        )
+    if updates:
+        runtime.current_session = Cycle2CurrentSessionTaskClosure(
+            **{
+                **{
+                    field_name: getattr(session, field_name)
+                    for field_name in type(session).model_fields
+                },
+                **updates,
+            }
+        )
+
+    outbound = asyncio.run(
+        handler.handle(
+            AgentRunCommand(
+                customer_context=_context(),
+                message="第六个" if ordinal == 6 else "第二个",
+            )
+        )
+    )
+
+    assert outbound is sentinel
+    assert runtime.selection_commands == []
+    assert len(runtime.binding_commands) == 1
+    rejected = runtime.binding_commands[0]
+    assert rejected.rejected_ordinal_selection.rejection_reason is reason
+    assert rejected.new_input_binding_record.normalized_value == ordinal
+    assert rejected.next_task_record.status is TaskStatus.WAITING_USER
+    assert rejected.next_request_unit_record.open_questions
+    assert not hasattr(rejected, "selection_record")
+    assert not hasattr(rejected, "selected_target_ref")
+    assert not hasattr(rejected, "tool_call_record")
+
+
+@pytest.mark.parametrize("has_current_shipment", [False, True])
+def test_cycle2_direct_order_id_routes_from_actual_current_observation_state(
+    has_current_shipment: bool,
+) -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2OrderIdProvider()
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, _captured = _capture_cycle2_initial_turn(handler)
+    initial = runtime.initial_graph_command
+    assert initial is not None
+    graph = initial.reducer_decision.task_graph
+    unit = graph.request_unit
+    shipment_records: tuple[ShipmentObservation, ...] = ()
+    if has_current_shipment:
+        observed_at = NOW - SHIPMENT_FRESHNESS_TTL * 2
+        shipment = ShipmentObservation(
+            observation_id=uuid4(),
+            private_owner_scope="customer-A",
+            task_id=graph.task.task_id,
+            request_unit_id=unit.request_unit_id,
+            verified_order_target_ref=str(uuid4()),
+            source_tool="get_shipment",
+            source_tool_call_id=uuid4(),
+            source_resource_ref="private-shipment-O-1001",
+            source_version=(
+                "mock-shipment-source-version.p0.v1:sha256:" + "c" * 64
+            ),
+            normalized_type="SHIPMENT_SUMMARY",
+            normalized_value=ShipmentSummaryProjection(
+                shipment_status=ShipmentStatus.IN_TRANSIT,
+                latest_event_code=ShipmentEventCode.IN_TRANSIT,
+                latest_event_at=observed_at,
+                promised_delivery_at=NOW + SHIPMENT_FRESHNESS_TTL * 100,
+            ),
+            observed_at=observed_at,
+            recorded_at=observed_at,
+            valid_until=observed_at + SHIPMENT_FRESHNESS_TTL,
+            raw_result_ref=str(uuid4()),
+        )
+        shipment_records = (shipment,)
+        unit = unit.model_copy(
+            update={"observation_refs": (shipment.observation_id,)}
+        )
+    runtime.current_session = Cycle2CurrentSessionTaskClosure(
+        owner_scope=initial.owner_scope,
+        session_ref_hash=_context().session_ref_hash,
+        conversation_record=initial.expected_conversation_record,
+        current_conversation_task_link_record=(
+            initial.conversation_task_link_record
+        ),
+        current_task_record=graph.task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(graph.input_binding,),
+        current_shipment_observation_records=shipment_records,
+        trusted_now=NOW,
+    )
+    routed: list[str] = []
+
+    async def capture_order(**_kwargs: object) -> AgentRunResult:
+        routed.append("get_order")
+        return sentinel
+
+    async def capture_shipment(**_kwargs: object) -> AgentRunResult:
+        routed.append("get_shipment")
+        return sentinel
+
+    handler._get_order = capture_order  # type: ignore[method-assign]
+    handler._get_shipment = capture_shipment  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        handler.handle(
+            AgentRunCommand(
+                customer_context=_context(),
+                message="订单 O-1001 状态怎么样？",
+            )
+        )
+    )
+
+    assert outbound is sentinel
+    assert routed == ["get_shipment" if has_current_shipment else "get_order"]
+    assert len(runtime.binding_commands) == 1
+    assert runtime.binding_commands[0].new_input_binding_record.name == "order_id"
+
+
+def test_cycle2_terminal_control_and_actual_observation_follow_durable_evidence() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2ProviderHarness()
+    observer = _Cycle2OutcomeCapture(runtime)
+    handler = _cycle2_handler(runtime, provider, observer=observer)
+    _, captured = _capture_cycle2_initial_turn(handler)
+
+    outbound = asyncio.run(
+        handler._finalize_mapping(
+            turn=captured["turn"],
+            step=handler._step_for_signal(
+                run_id=captured["turn"].running_run.run_id,
+                signal=Cycle2MapperSignal.SEARCH_NO_MATCH,
+            ),
+            task=captured["task"],
+            request_unit=captured["request_unit"],
+        )
+    )
+
+    assert outbound.outcome is AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
+    assert provider.control_purposes == [
+        Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE
+    ]
+    assert len(runtime.finalize_commands) == 1
+    assert len(observer.observations) == 1
+    observation = observer.observations[0]
+    assert observation.cycle2_signal is Cycle2MapperSignal.SEARCH_NO_MATCH
+    assert observation.mapper_row_id == "RM-05"
+    assert observation.response_policy is ResponsePolicy.SAFE_NOT_FOUND_FIXED
+
+
+def test_cycle2_two_control_path_consumes_get_shipment_then_assessment() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _StrictCycle2ControlProvider(
+        (
+            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+            Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
+        )
+    )
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    target_ref = uuid4()
+    observation_ref = uuid4()
+    unit_with_target = unit.model_copy(
+        update={"observation_refs": (observation_ref,)}
+    )
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=target_ref,
+        private_owner_scope_ref="customer-A",
+        owner_customer_id="customer-A",
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        order_id="O-1001",
+        source_observation_ref=observation_ref,
+        source_observation_version="order-observation-v1",
+        input_binding_refs=(binding.binding_id,),
+    )
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=captured["turn"].owner_scope,
+        current_task_record=task,
+        current_request_unit_record=unit_with_target,
+        current_input_binding_records=(binding,),
+        current_verified_order_targets=(target,),
+        current_target_observations=(
+            Cycle2TargetObservationFacts(
+                observation_ref=observation_ref,
+                observation_version="order-observation-v1",
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_target_ref=target_ref,
+                input_binding_refs=(binding.binding_id,),
+            ),
+        ),
+        trusted_read_at=NOW,
+    )
+
+    move = asyncio.run(
+        handler._materialize_tool_control(
+            turn=captured["turn"],
+            purpose=Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+            closure=closure,
+        )
+    )
+    assert move.requested_tool_name == "get_shipment"
+    assert move.arguments == {"order_id": "O-1001"}
+
+    async def stop_after_control(**kwargs: object) -> AgentRunResult:
+        return kwargs["result"]  # type: ignore[return-value]
+
+    handler._finalize = stop_after_control  # type: ignore[method-assign]
+    asyncio.run(
+        handler._finalize_mapping(
+            turn=captured["turn"],
+            step=handler._steps._outbound_step(
+                run_id=captured["turn"].running_run.run_id,
+                signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+                rendered_message="物流状态已按当前 Observation 评估。",
+            ),
+            task=task,
+            request_unit=unit,
+        )
+    )
+    provider.assert_exhausted()
+    assert provider.control_purposes == [
+        Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+        Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
+    ]
+
+
+@pytest.mark.parametrize("origin", ["UNIQUE", "ORDINAL"])
+def test_cycle2_unique_and_ordinal_get_order_control_is_consumed_once(
+    origin: str,
+) -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _StrictCycle2ControlProvider(
+        (Cycle2ControlPurpose.PROPOSE_GET_ORDER,)
+    )
+    handler = _cycle2_handler(runtime, provider)
+    _, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    if origin == "ORDINAL":
+        binding = binding.model_copy(
+            update={"name": "candidate_ordinal", "normalized_value": 2}
+        )
+    target_ref = uuid4()
+    observation_ref = uuid4()
+    unit = unit.model_copy(
+        update={
+            "input_binding_refs": (binding.binding_id,),
+            "observation_refs": (observation_ref,),
+        }
+    )
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=captured["turn"].owner_scope,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(binding,),
+        current_verified_order_targets=(
+            Cycle2VerifiedOrderTargetFacts(
+                verified_target_ref=target_ref,
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                order_id="O-1001",
+                source_observation_ref=observation_ref,
+                source_observation_version="order-observation-v1",
+                input_binding_refs=(binding.binding_id,),
+            ),
+        ),
+        current_target_observations=(
+            Cycle2TargetObservationFacts(
+                observation_ref=observation_ref,
+                observation_version="order-observation-v1",
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_target_ref=target_ref,
+                input_binding_refs=(binding.binding_id,),
+            ),
+        ),
+        trusted_read_at=NOW,
+    )
+
+    move = asyncio.run(
+        handler._materialize_tool_control(
+            turn=captured["turn"],
+            purpose=Cycle2ControlPurpose.PROPOSE_GET_ORDER,
+            closure=closure,
+        )
+    )
+
+    provider.assert_exhausted()
+    assert provider.control_purposes == [
+        Cycle2ControlPurpose.PROPOSE_GET_ORDER
+    ]
+    assert move.requested_tool_name == "get_order"
+    assert move.arguments == {"order_id": "O-1001"}
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["MISSING", "WRONG_PURPOSE", "WRONG_CANDIDATE", "DUPLICATE"],
+)
+def test_cycle2_control_cursor_fails_closed_for_negative_shapes(mode: str) -> None:
+    if mode == "MISSING":
+        expected: tuple[Cycle2ControlPurpose, ...] = ()
+    elif mode == "WRONG_PURPOSE":
+        expected = (Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION,)
+    else:
+        expected = (Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,)
+    provider = _StrictCycle2ControlProvider(
+        expected,
+        wrong_candidate=mode == "WRONG_CANDIDATE",
+    )
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, provider)
+    _, captured = _capture_cycle2_initial_turn(handler)
+
+    if mode == "DUPLICATE":
+        asyncio.run(
+            handler._propose_cycle2_control(
+                turn=captured["turn"],
+                purpose=Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+            )
+        )
+    with pytest.raises(agent_run_service_module._Cycle2ControlProtocolError):
+        asyncio.run(
+            handler._propose_cycle2_control(
+                turn=captured["turn"],
+                purpose=Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+            )
+        )
+
+
+def test_cycle2_control_cursor_rejects_unconsumed_extra_step() -> None:
+    provider = _StrictCycle2ControlProvider(
+        (
+            Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+            Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION,
+        )
+    )
+    handler = _cycle2_handler(_Cycle2RuntimeHarness(), provider)
+    _, captured = _capture_cycle2_initial_turn(handler)
+    asyncio.run(
+        handler._propose_cycle2_control(
+            turn=captured["turn"],
+            purpose=Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+        )
+    )
+    with pytest.raises(ProviderProtocolError):
+        provider.assert_exhausted()
+
+
+def test_cycle2_imported_observation_is_emitted_only_after_durable_evidence() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    observer = _Cycle2OutcomeCapture(runtime)
+    handler = _cycle2_handler(
+        runtime,
+        _Cycle2ProviderHarness(),
+        observer=observer,
+    )
+    _, captured = _capture_cycle2_initial_turn(handler)
+    result = AgentRunResult(
+        run_id=captured["turn"].running_run.run_id,
+        outcome=AgentOutcome.COMPLETED,
+        message="订单状态已安全汇总。",
+    )
+
+    outbound = asyncio.run(
+        handler._finalize_imported(
+            turn=captured["turn"],
+            result=result,
+            stop_reason=StopReasonV2.GOAL_COMPLETED,
+            task=captured["task"],
+            request_unit=captured["request_unit"],
+            reference=ImportedMapperReference.ORDER_SUCCESS,
+            response_policy=ResponsePolicy.DETERMINISTIC_ORDER_SUMMARY_V1,
+            consume_control=False,
+        )
+    )
+
+    assert outbound is result
+    assert len(runtime.finalize_commands) == 1
+    assert len(observer.observations) == 1
+    observation = observer.observations[0]
+    assert observation.mapping_source_kind is Cycle2MappingSourceKind.IMPORTED_PHASE1
+    assert observation.imported_reference is ImportedMapperReference.ORDER_SUCCESS
+    assert observation.cycle2_signal is None
+    assert observation.mapper_disposition is None
+
+
+def test_cycle2_observer_failure_propagates_after_durable_finalize() -> None:
+    class _FailingObserver:
+        def observe_cycle2_execution_outcome(
+            self,
+            _observation: Cycle2ExecutionOutcomeObservationV1,
+        ) -> None:
+            raise RuntimeError("offline capture failed")
+
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(
+        runtime,
+        _Cycle2ProviderHarness(),
+        observer=_FailingObserver(),
+    )
+    _, captured = _capture_cycle2_initial_turn(handler)
+
+    with pytest.raises(RuntimeError, match="offline capture failed"):
+        asyncio.run(
+            handler._finalize_mapping(
+                turn=captured["turn"],
+                step=handler._step_for_signal(
+                    run_id=captured["turn"].running_run.run_id,
+                    signal=Cycle2MapperSignal.SEARCH_NO_MATCH,
+                ),
+                task=captured["task"],
+                request_unit=captured["request_unit"],
+            )
+        )
+    assert len(runtime.finalize_commands) == 1
+
+
+def test_cycle2_default_noop_and_no_result_recovery_have_no_capture_failure() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
+    _, captured = _capture_cycle2_initial_turn(handler)
+    outbound = asyncio.run(
+        handler._finalize_mapping(
+            turn=captured["turn"],
+            step=handler._step_for_signal(
+                run_id=captured["turn"].running_run.run_id,
+                signal=Cycle2MapperSignal.SEARCH_NO_MATCH,
+            ),
+            task=captured["task"],
+            request_unit=captured["request_unit"],
+        )
+    )
+    assert outbound.outcome is AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE
+    obsolete_source = inspect.getsource(
+        Cycle2AgentRunService.finalize_obsolete_run
+    )
+    assert "observe_cycle2_execution_outcome" not in obsolete_source
+    assert "propose_cycle2_control" not in obsolete_source
+
+
+def test_cycle2_mapper_builds_mutually_exclusive_actual_observations() -> None:
+    mapper = RunResultMapper()
+    run_id = uuid4()
+    delta = mapper.observe_cycle2(
+        run_id=run_id,
+        signal=Cycle2MapperSignal.SEARCH_NO_MATCH,
+        observed_outcome=AgentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        stop_reason=StopReasonV2.NOT_FOUND_OR_NOT_ACCESSIBLE,
+        response_policy=ResponsePolicy.SAFE_NOT_FOUND_FIXED,
+        agent_result_emitted=True,
+    )
+    imported = mapper.observe_imported(
+        run_id=run_id,
+        reference=ImportedMapperReference.ORDER_SUCCESS,
+        observed_outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+        response_policy=ResponsePolicy.DETERMINISTIC_ORDER_SUMMARY_V1,
+        agent_result_emitted=True,
+    )
+
+    assert type(delta) is Cycle2ExecutionOutcomeObservationV1
+    assert delta.mapping_source_kind is Cycle2MappingSourceKind.CYCLE2_DELTA
+    assert delta.imported_reference is None
+    assert delta.cycle2_signal is Cycle2MapperSignal.SEARCH_NO_MATCH
+    assert imported.mapping_source_kind is Cycle2MappingSourceKind.IMPORTED_PHASE1
+    assert imported.imported_reference is ImportedMapperReference.ORDER_SUCCESS
+    assert imported.cycle2_signal is None
+    assert imported.mapper_disposition is None
+
+
+def test_cycle2_control_candidate_remains_argument_free_at_application_boundary() -> None:
+    candidate = Cycle2ControlCandidate(
+        kind=Cycle2ControlCandidateKind.CALL_TOOL,
+        requested_tool_name="get_order",
+    )
+    assert candidate.model_dump() == {
+        "kind": Cycle2ControlCandidateKind.CALL_TOOL,
+        "requested_tool_name": "get_order",
+    }
+    assert set(Cycle2ControlPurpose) == {
+        Cycle2ControlPurpose.PROPOSE_GET_ORDER,
+        Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+        Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION,
+        Cycle2ControlPurpose.PROPOSE_ORDER_SUMMARY,
+        Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+        Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
+    }

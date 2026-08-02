@@ -17,10 +17,12 @@ from mini_agent.application.deterministic_renderer import (
 )
 from mini_agent.application.ports import (
     ConversationRecordPort,
+    Cycle2ExecutionOutcomeObserver,
     Cycle2RuntimeRecordPort,
     Cycle2RequestUnderstandingProvider,
     ModelProviderV2,
     ModelVisibleToolsetArtifactPort,
+    NoOpCycle2ExecutionOutcomeObserver,
     RuntimeRecordPort,
 )
 from mini_agent.application.read_tool_executor import (
@@ -72,16 +74,18 @@ from mini_agent.application.records import (
     TransitionRunCommand,
     TrustedOwnerScope,
     Cycle2WriteResult,
+    Cycle2ControlPurpose,
     Cycle2CurrentSessionTaskClosure,
-    Cycle2ContinuationProviderProposal,
     IssuedSelectedTargetRef,
     build_order_candidate_selection_v2_command,
 )
 from mini_agent.application.run_result_mapper import (
+    Cycle2ExecutionOutcomeObservationV1,
     Cycle2MapperSignal,
     Cycle2ResultMapping,
     ImportedMapperReference,
     MapperDisposition,
+    ResponsePolicy,
     RunResultMapper,
 )
 from mini_agent.core.control_gateway import (
@@ -135,12 +139,17 @@ from mini_agent.core.presentation_policy import (
 from mini_agent.core.request_processing import (
     Cycle2ContinuationBindingDecision,
     Cycle2InitialRequestDecisionV2,
+    Cycle2OrdinalClaimPreparation,
+    Cycle2OrdinalSelectionRejectionReason,
     InitialTaskIdentityAllocationV2,
     InitialRequestRoutableTaskGraphDecisionV2,
     RequestProcessingError,
     RequestUnderstandingV2Error,
     build_cycle2_unique_auto_target_record,
+    materialize_cycle2_control_next_move,
+    prepare_cycle2_ordinal_claim,
     prepare_cycle2_ordinal_selection,
+    reject_cycle2_ordinal_selection,
     reduce_cycle2_continuation_candidate,
     revalidate_next_move_v2,
     route_cycle2_continuation_next_move,
@@ -151,6 +160,9 @@ from mini_agent.core.request_processing import (
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
+    Cycle2InputCandidate,
     ModelVisibleTaskSummary,
     NextMove,
     NextMoveKind,
@@ -1418,6 +1430,11 @@ class Cycle2RuntimeStep:
     mapping: Cycle2ResultMapping | None = None
     outbound_result: AgentRunResult | None = None
     verified_target_ref: UUID | None = None
+    cycle2_signal: Cycle2MapperSignal | None = None
+
+
+class _Cycle2ControlProtocolError(Exception):
+    """One actual control boundary failed its closed Provider contract."""
 
 
 def _map_cycle2_typed_tool_result(
@@ -1549,6 +1566,7 @@ class Cycle2AgentRunService:
                 mapping=mapping,
                 rendered_message=rendered_message,
             ),
+            cycle2_signal=signal,
         )
 
     async def apply_search_outcome(
@@ -1640,7 +1658,6 @@ class Cycle2AgentRunService:
     ) -> AgentRunResult:
         """Preserve imported Phase 1 success and perform no Shipment operation."""
 
-        self.map_imported_phase1(ImportedMapperReference.ORDER_SUCCESS)
         rendered = self._deterministic_renderer.render_order_summary(
             observation=observation,
             plan=plan,
@@ -1833,6 +1850,7 @@ class Cycle2AgentRunHandler:
         provider_lane: str,
         redaction_policy_version: str,
         gateway_run_budget_ms: int = 30_000,
+        execution_outcome_observer: Cycle2ExecutionOutcomeObserver | None = None,
     ) -> None:
         if (
             type(provider_lane) is not str
@@ -1853,6 +1871,11 @@ class Cycle2AgentRunHandler:
         self._provider_lane = provider_lane
         self._redaction_policy_version = redaction_policy_version
         self._gateway_run_budget_ms = gateway_run_budget_ms
+        self._execution_outcome_observer = (
+            execution_outcome_observer
+            if execution_outcome_observer is not None
+            else NoOpCycle2ExecutionOutcomeObserver()
+        )
         self._registry_snapshot = validate_cycle2_registry_snapshot(
             build_cycle2_registry_snapshot()
         )
@@ -1861,6 +1884,97 @@ class Cycle2AgentRunHandler:
             deterministic_renderer=deterministic_renderer,
             uuid_factory=uuid_factory,
         )
+
+    async def _propose_cycle2_control(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        try:
+            candidate = await (
+                self._request_understanding_provider.propose_cycle2_control(
+                    turn.request_input,
+                    purpose,
+                )
+            )
+        except (
+            AttributeError,
+            ProviderProtocolError,
+            RequestUnderstandingCandidateInvalidError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise _Cycle2ControlProtocolError from error
+        if type(candidate) is not Cycle2ControlCandidate:
+            raise _Cycle2ControlProtocolError
+        try:
+            rebuilt = Cycle2ControlCandidate.model_validate(
+                candidate.model_dump(),
+                strict=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise _Cycle2ControlProtocolError from error
+        if rebuilt != candidate:
+            raise _Cycle2ControlProtocolError
+        expected_tool = {
+            Cycle2ControlPurpose.PROPOSE_GET_ORDER: "get_order",
+            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT: "get_shipment",
+        }.get(purpose)
+        if expected_tool is None:
+            if (
+                candidate.kind is not Cycle2ControlCandidateKind.FINISH
+                or candidate.requested_tool_name is not None
+            ):
+                raise _Cycle2ControlProtocolError
+        elif (
+            candidate.kind is not Cycle2ControlCandidateKind.CALL_TOOL
+            or candidate.requested_tool_name != expected_tool
+        ):
+            raise _Cycle2ControlProtocolError
+        return candidate
+
+    async def _materialize_tool_control(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        purpose: Cycle2ControlPurpose,
+        closure: InitialToolCallV2ReadClosure,
+    ) -> NextMove:
+        if len(closure.current_verified_order_targets) != 1:
+            raise _Cycle2ControlProtocolError
+        candidate = await self._propose_cycle2_control(
+            turn=turn,
+            purpose=purpose,
+        )
+        try:
+            return materialize_cycle2_control_next_move(
+                candidate=candidate,
+                current_task_state_version=(
+                    closure.current_task_record.state_version
+                ),
+                verified_order_id=(
+                    closure.current_verified_order_targets[0].order_id
+                ),
+            )
+        except RequestProcessingError as error:
+            raise _Cycle2ControlProtocolError from error
+
+    @staticmethod
+    def _terminal_control_purpose(
+        signal: Cycle2MapperSignal,
+    ) -> Cycle2ControlPurpose:
+        if signal is Cycle2MapperSignal.SEARCH_MULTIPLE:
+            return Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION
+        if signal is Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY:
+            return Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT
+        return Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE
+
+    @staticmethod
+    def _require_control_move(value: NextMove | None) -> NextMove:
+        if type(value) is not NextMove:
+            raise AgentRunExecutionError("actual control NextMove unavailable")
+        return value
 
     async def handle(self, command: AgentRunCommand) -> AgentRunResult:
         if type(command) is not AgentRunCommand:
@@ -2154,7 +2268,7 @@ class Cycle2AgentRunHandler:
             task=graph.task,
             request_unit=graph.request_unit,
             input_bindings=(graph.input_binding,),
-            candidate_factory=lambda _closure, model_call_id, manifest_id: Cycle2GatewayCandidate(
+            candidate_factory=lambda _closure, model_call_id, manifest_id, _move: Cycle2GatewayCandidate(
                 run_id=turn.running_run.run_id,
                 task_id=graph.task.task_id,
                 request_unit_id=graph.request_unit.request_unit_id,
@@ -2188,6 +2302,7 @@ class Cycle2AgentRunHandler:
                 run_id=run_id,
                 mapping=mapping,
             ),
+            cycle2_signal=signal,
         )
 
     async def _search_orders(
@@ -2199,7 +2314,7 @@ class Cycle2AgentRunHandler:
         request_unit: RequestUnitRecord,
         input_bindings: tuple[InputBindingV2, ...],
         candidate_factory: Callable[
-            [InitialToolCallV2ReadClosure, UUID, UUID],
+            [InitialToolCallV2ReadClosure, UUID, UUID, NextMove | None],
             Cycle2GatewayCandidate,
         ],
     ) -> AgentRunResult:
@@ -2211,12 +2326,14 @@ class Cycle2AgentRunHandler:
             candidate_factory=candidate_factory,
         )
         if type(dispatched) is AgentRunResult:
-            return await self._finalize(
+            return await self._finalize_imported(
                 turn=turn,
                 result=dispatched,
                 stop_reason=StopReasonV2.GATE_REJECTED,
                 task=task,
                 request_unit=request_unit,
+                reference=ImportedMapperReference.GATE_REJECTED,
+                response_policy=ResponsePolicy.INTEGRITY_BLOCKED_FIXED,
             )
         if (
             type(dispatched) is not Cycle2ReadToolExecution
@@ -2503,24 +2620,17 @@ class Cycle2AgentRunHandler:
             or applied.verified_target_ref != auto_target.verified_target_ref
         ):
             raise AgentRunExecutionError("UNIQUE target was not committed")
-        next_move = await (
-            self._request_understanding_provider.propose_cycle2_search_followup(
-                turn.request_input,
-                project_search_orders_observation_safe(observation),
-                next_task.state_version,
-            )
-        )
         return await self._get_order(
             command=command,
             turn=turn,
             task=next_task,
             request_unit=next_unit,
-            candidate_factory=lambda closure, model_call_id, manifest_id: (
+            candidate_factory=lambda closure, model_call_id, manifest_id, control_move: (
                 self._route_unique_candidate(
                     command=command,
                     turn=turn,
                     closure=closure,
-                    next_move=next_move,
+                    next_move=self._require_control_move(control_move),
                     candidate_set=candidate_set,
                     observation=observation,
                     auto_target=auto_target,
@@ -2532,6 +2642,7 @@ class Cycle2AgentRunHandler:
                     manifest_id=manifest_id,
                 )
             ),
+            control_purpose=Cycle2ControlPurpose.PROPOSE_GET_ORDER,
         )
 
     def _route_unique_candidate(
@@ -2595,24 +2706,41 @@ class Cycle2AgentRunHandler:
         task: TaskRecord,
         request_unit: RequestUnitRecord,
         candidate_factory: Callable[
-            [InitialToolCallV2ReadClosure, UUID, UUID],
+            [InitialToolCallV2ReadClosure, UUID, UUID, NextMove | None],
             Cycle2GatewayCandidate,
         ],
+        control_purpose: Cycle2ControlPurpose | None = None,
+        requires_shipment: bool = False,
     ) -> AgentRunResult:
-        dispatched = await self._execute_tool(
-            command=command,
-            turn=turn,
-            task_id=task.task_id,
-            request_unit_id=request_unit.request_unit_id,
-            candidate_factory=candidate_factory,
-        )
+        try:
+            dispatched = await self._execute_tool(
+                command=command,
+                turn=turn,
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                candidate_factory=candidate_factory,
+                control_purpose=control_purpose,
+            )
+        except _Cycle2ControlProtocolError:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+                ),
+                task=task,
+                request_unit=request_unit,
+                consume_control=False,
+            )
         if type(dispatched) is AgentRunResult:
-            return await self._finalize(
+            return await self._finalize_imported(
                 turn=turn,
                 result=dispatched,
                 stop_reason=StopReasonV2.GATE_REJECTED,
                 task=task,
                 request_unit=request_unit,
+                reference=ImportedMapperReference.GATE_REJECTED,
+                response_policy=ResponsePolicy.INTEGRITY_BLOCKED_FIXED,
             )
         if (
             type(dispatched) is not Cycle2ReadToolExecution
@@ -2631,23 +2759,28 @@ class Cycle2AgentRunHandler:
             )
         result = map_cycle2_get_order_tool_result(dispatched)
         if result.outcome is GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE:
-            return await self._finish_fixed_phase1(
+            return await self._finalize_mapping(
                 turn=turn,
-                stop_reason_v1=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
-                stop_reason_v2=StopReasonV2.NOT_FOUND_OR_NOT_ACCESSIBLE,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.PRIVATE_RESOURCE_NOT_FOUND,
+                ),
                 task=task,
                 request_unit=request_unit,
             )
         if result.outcome is GetOrderOutcome.SYSTEM_FAILURE:
-            self._steps.map_imported_phase1(
-                ImportedMapperReference.ORDER_SERVICE_UNAVAILABLE
+            result_outbound = self._deterministic_renderer.map_result(
+                run_id=turn.running_run.run_id,
+                stop_reason=StopReason.ORDER_SERVICE_UNAVAILABLE,
             )
-            return await self._finish_fixed_phase1(
+            return await self._finalize_imported(
                 turn=turn,
-                stop_reason_v1=StopReason.ORDER_SERVICE_UNAVAILABLE,
-                stop_reason_v2=StopReasonV2.ORDER_SERVICE_UNAVAILABLE,
+                result=result_outbound,
+                stop_reason=StopReasonV2.ORDER_SERVICE_UNAVAILABLE,
                 task=task,
                 request_unit=request_unit,
+                reference=ImportedMapperReference.ORDER_SERVICE_UNAVAILABLE,
+                response_policy=ResponsePolicy.DEPENDENCY_BLOCKED_FIXED,
             )
         terminal = dispatched.terminal_tool_call
         summary = result.order_summary
@@ -2710,57 +2843,58 @@ class Cycle2AgentRunHandler:
                 ),
                 task=task,
                 request_unit=request_unit,
-            )
-        next_move = await (
-            self._request_understanding_provider.propose_cycle2_order_followup(
-                turn.request_input,
-                summary,
-                next_task.state_version,
-            )
         )
-        if next_move.kind is NextMoveKind.FINISH:
+        if not requires_shipment:
+            if control_purpose is None:
+                try:
+                    await self._propose_cycle2_control(
+                        turn=turn,
+                        purpose=Cycle2ControlPurpose.PROPOSE_ORDER_SUMMARY,
+                    )
+                except _Cycle2ControlProtocolError:
+                    return await self._finalize_mapping(
+                        turn=turn,
+                        step=self._step_for_signal(
+                            run_id=turn.running_run.run_id,
+                            signal=(
+                                Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                            ),
+                        ),
+                        task=next_task,
+                        request_unit=next_unit,
+                        consume_control=False,
+                    )
             result_outbound = self._steps.complete_order_only(
                 run_id=turn.running_run.run_id,
                 observation=observation,
                 plan=_cycle2_order_presentation_plan(),
             )
-            return await self._finalize(
+            return await self._finalize_imported(
                 turn=turn,
                 result=result_outbound,
                 stop_reason=StopReasonV2.GOAL_COMPLETED,
                 task=next_task,
                 request_unit=next_unit,
-            )
-        if (
-            next_move.kind is not NextMoveKind.CALL_TOOL
-            or next_move.requested_tool_name != "get_shipment"
-        ):
-            return await self._finalize_mapping(
-                turn=turn,
-                step=self._step_for_signal(
-                    run_id=turn.running_run.run_id,
-                    signal=(
-                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
-                    ),
-                ),
-                task=next_task,
-                request_unit=next_unit,
+                reference=ImportedMapperReference.ORDER_SUCCESS,
+                response_policy=ResponsePolicy.DETERMINISTIC_ORDER_SUMMARY_V1,
+                consume_control=False,
             )
         return await self._get_shipment(
             command=command,
             turn=turn,
             task=next_task,
             request_unit=next_unit,
-            candidate_factory=lambda closure, model_call_id, manifest_id: (
+            candidate_factory=lambda closure, model_call_id, manifest_id, control_move: (
                 self._route_verified_shipment_candidate(
                     command=command,
                     turn=turn,
                     closure=closure,
-                    next_move=next_move,
+                    next_move=self._require_control_move(control_move),
                     model_call_id=model_call_id,
                     manifest_id=manifest_id,
                 )
             ),
+            control_purpose=Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
         )
 
     def _route_verified_shipment_candidate(
@@ -2802,24 +2936,40 @@ class Cycle2AgentRunHandler:
         task: TaskRecord,
         request_unit: RequestUnitRecord,
         candidate_factory: Callable[
-            [InitialToolCallV2ReadClosure, UUID, UUID],
+            [InitialToolCallV2ReadClosure, UUID, UUID, NextMove | None],
             Cycle2GatewayCandidate,
         ],
+        control_purpose: Cycle2ControlPurpose | None = None,
     ) -> AgentRunResult:
-        dispatched = await self._execute_tool(
-            command=command,
-            turn=turn,
-            task_id=task.task_id,
-            request_unit_id=request_unit.request_unit_id,
-            candidate_factory=candidate_factory,
-        )
+        try:
+            dispatched = await self._execute_tool(
+                command=command,
+                turn=turn,
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                candidate_factory=candidate_factory,
+                control_purpose=control_purpose,
+            )
+        except _Cycle2ControlProtocolError:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+                ),
+                task=task,
+                request_unit=request_unit,
+                consume_control=False,
+            )
         if type(dispatched) is AgentRunResult:
-            return await self._finalize(
+            return await self._finalize_imported(
                 turn=turn,
                 result=dispatched,
                 stop_reason=StopReasonV2.GATE_REJECTED,
                 task=task,
                 request_unit=request_unit,
+                reference=ImportedMapperReference.GATE_REJECTED,
+                response_policy=ResponsePolicy.INTEGRITY_BLOCKED_FIXED,
             )
         if (
             type(dispatched) is not Cycle2ReadToolExecution
@@ -3023,7 +3173,17 @@ class Cycle2AgentRunHandler:
                 task=current_session.current_task_record,
                 request_unit=current_session.current_request_unit_record,
             )
-        if proposal.input_candidate.name == "candidate_ordinal":
+        if type(proposal) is not Cycle2InputCandidate:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        if proposal.name == "candidate_ordinal":
             return await self._continue_with_ordinal(
                 command=command,
                 turn=turn,
@@ -3043,13 +3203,13 @@ class Cycle2AgentRunHandler:
         command: AgentRunCommand,
         turn: _Cycle2Turn,
         current_session: Cycle2CurrentSessionTaskClosure,
-        proposal: Cycle2ContinuationProviderProposal,
+        proposal: Cycle2InputCandidate,
     ) -> AgentRunResult:
         bound_at = self._clock()
         try:
             decision = reduce_cycle2_continuation_candidate(
                 request_input=turn.request_input,
-                candidate=proposal.input_candidate,
+                candidate=proposal,
                 authoritative_messages={
                     turn.user_message.message_id: turn.user_message.content
                 },
@@ -3137,14 +3297,27 @@ class Cycle2AgentRunHandler:
             for binding in closure.current_input_binding_records
             if binding.binding_id != replaced
         ) + (decision.input_binding,)
+        direct_tool_name = (
+            "get_shipment"
+            if decision.input_binding.name == "shipment_not_received"
+            or (
+                decision.input_binding.name == "order_id"
+                and bool(current_session.current_shipment_observation_records)
+            )
+            else (
+                "get_order"
+                if decision.input_binding.name == "order_id"
+                else "search_orders"
+            )
+        )
         candidate_factory = (
-            lambda tool_closure, model_call_id, manifest_id: (
+            lambda tool_closure, model_call_id, manifest_id, _control_move: (
                 self._route_continuation_candidate(
                     command=command,
                     turn=turn,
                     closure=tool_closure,
                     decision=decision,
-                    next_move=proposal.next_move_candidate,
+                    tool_name=direct_tool_name,
                     model_call_id=model_call_id,
                     manifest_id=manifest_id,
                 )
@@ -3167,6 +3340,28 @@ class Cycle2AgentRunHandler:
                 request_unit=next_unit,
                 candidate_factory=candidate_factory,
             )
+        if decision.input_binding.name == "order_id":
+            if direct_tool_name == "get_shipment":
+                return await self._get_shipment(
+                    command=command,
+                    turn=turn,
+                    task=next_task,
+                    request_unit=next_unit,
+                    candidate_factory=candidate_factory,
+                )
+            requires_shipment = any(
+                binding.name == "shipment_not_received"
+                and binding.normalized_value is True
+                for binding in next_bindings
+            )
+            return await self._get_order(
+                command=command,
+                turn=turn,
+                task=next_task,
+                request_unit=next_unit,
+                candidate_factory=candidate_factory,
+                requires_shipment=requires_shipment,
+            )
         raise AgentRunExecutionError("unsupported Cycle 2 continuation binding")
 
     def _route_continuation_candidate(
@@ -3176,11 +3371,11 @@ class Cycle2AgentRunHandler:
         turn: _Cycle2Turn,
         closure: InitialToolCallV2ReadClosure,
         decision: Cycle2ContinuationBindingDecision,
-        next_move: NextMove,
+        tool_name: str,
         model_call_id: UUID,
         manifest_id: UUID,
     ) -> Cycle2GatewayCandidate:
-        if decision.input_binding.name == "shipment_not_received":
+        if decision.input_binding.name in {"shipment_not_received", "order_id"}:
             if (
                 len(closure.current_verified_order_targets) != 1
                 or len(closure.current_target_observations) != 1
@@ -3193,6 +3388,22 @@ class Cycle2AgentRunHandler:
         else:
             target = None
             target_observation = None
+        if tool_name == "search_orders":
+            arguments = {
+                "product_description": decision.input_binding.normalized_value,
+            }
+        else:
+            if target is None:
+                raise AgentRunExecutionError(
+                    "continuation verified Order target unavailable"
+                )
+            arguments = {"order_id": target.order_id}
+        next_move = NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name=tool_name,
+            arguments=arguments,
+            base_task_state_version=decision.result_task_state_version,
+        )
         return route_cycle2_continuation_next_move(
             request_input=turn.request_input,
             decision=decision,
@@ -3214,13 +3425,41 @@ class Cycle2AgentRunHandler:
         command: AgentRunCommand,
         turn: _Cycle2Turn,
         current_session: Cycle2CurrentSessionTaskClosure,
-        proposal: Cycle2ContinuationProviderProposal,
+        proposal: Cycle2InputCandidate,
     ) -> AgentRunResult:
         selected_at = self._clock()
         try:
+            claim = prepare_cycle2_ordinal_claim(
+                request_input=turn.request_input,
+                candidate=proposal,
+                authoritative_messages={
+                    turn.user_message.message_id: turn.user_message.content
+                },
+                customer_context=command.customer_context,
+                current_task=current_session.current_task_record,
+                current_request_unit=(
+                    current_session.current_request_unit_record
+                ),
+                current_input_bindings=(
+                    current_session.current_input_binding_records
+                ),
+                binding_id=self._uuid_factory(),
+                now=selected_at,
+            )
+        except RequestProcessingError:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        try:
             preparation = prepare_cycle2_ordinal_selection(
                 request_input=turn.request_input,
-                candidate=proposal.input_candidate,
+                candidate=proposal,
                 authoritative_messages={
                     turn.user_message.message_id: turn.user_message.content
                 },
@@ -3247,18 +3486,19 @@ class Cycle2AgentRunHandler:
                 existing_selection_records=(
                     current_session.existing_selection_records
                 ),
-                binding_id=self._uuid_factory(),
+                binding_id=claim.ordinal_input_binding.binding_id,
                 now=selected_at,
             )
         except (RequestProcessingError, IndexError):
-            return await self._finalize_mapping(
+            return await self._persist_rejected_ordinal_claim(
                 turn=turn,
-                step=self._step_for_signal(
-                    run_id=turn.running_run.run_id,
-                    signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+                current_session=current_session,
+                claim=claim,
+                reason=self._ordinal_rejection_reason(
+                    current_session=current_session,
+                    ordinal=claim.selection_request.ordinal,
+                    trusted_now=selected_at,
                 ),
-                task=current_session.current_task_record,
-                request_unit=current_session.current_request_unit_record,
             )
         selection_closure = await (
             self._runtime_record_port.load_order_candidate_selection_closure_for_owner(
@@ -3273,14 +3513,15 @@ class Cycle2AgentRunHandler:
             )
         )
         if type(selection_closure) is not OrderCandidateSelectionReadClosure:
-            return await self._finalize_mapping(
+            return await self._persist_rejected_ordinal_claim(
                 turn=turn,
-                step=self._step_for_signal(
-                    run_id=turn.running_run.run_id,
-                    signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+                current_session=current_session,
+                claim=claim,
+                reason=self._ordinal_rejection_reason(
+                    current_session=current_session,
+                    ordinal=claim.selection_request.ordinal,
+                    trusted_now=selected_at,
                 ),
-                task=current_session.current_task_record,
-                request_unit=current_session.current_request_unit_record,
             )
         current_task = selection_closure.current_task_record
         current_unit = selection_closure.current_request_unit_record
@@ -3372,12 +3613,12 @@ class Cycle2AgentRunHandler:
             turn=turn,
             task=next_task,
             request_unit=next_unit,
-            candidate_factory=lambda closure, model_call_id, manifest_id: (
+            candidate_factory=lambda closure, model_call_id, manifest_id, control_move: (
                 self._route_selected_candidate(
                     command=command,
                     turn=turn,
                     closure=closure,
-                    next_move=proposal.next_move_candidate,
+                    next_move=self._require_control_move(control_move),
                     candidate_set=(
                         selection_closure.current_candidate_set_record
                     ),
@@ -3386,6 +3627,109 @@ class Cycle2AgentRunHandler:
                     manifest_id=manifest_id,
                 )
             ),
+            control_purpose=Cycle2ControlPurpose.PROPOSE_GET_ORDER,
+        )
+
+    @staticmethod
+    def _ordinal_rejection_reason(
+        *,
+        current_session: Cycle2CurrentSessionTaskClosure,
+        ordinal: int,
+        trusted_now: datetime,
+    ) -> Cycle2OrdinalSelectionRejectionReason:
+        hinted = current_session.ordinal_selection_rejection_hint
+        if hinted is not None:
+            return hinted
+        candidate_sets = current_session.current_candidate_set_records
+        if len(candidate_sets) != 1:
+            if (
+                len(candidate_sets) == 0
+                and current_session.superseded_candidate_set_refs
+            ):
+                return Cycle2OrdinalSelectionRejectionReason.SUPERSEDED
+            return (
+                Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE
+            )
+        candidate_set = candidate_sets[0]
+        if candidate_set.candidate_set_id in set(
+            current_session.superseded_candidate_set_refs
+        ):
+            return Cycle2OrdinalSelectionRejectionReason.SUPERSEDED
+        if trusted_now >= candidate_set.valid_until:
+            return Cycle2OrdinalSelectionRejectionReason.EXPIRED
+        if ordinal not in {
+            entry.ordinal for entry in candidate_set.ordered_candidates
+        }:
+            return Cycle2OrdinalSelectionRejectionReason.OUT_OF_RANGE
+        return (
+            Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE
+        )
+
+    async def _persist_rejected_ordinal_claim(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        current_session: Cycle2CurrentSessionTaskClosure,
+        claim: Cycle2OrdinalClaimPreparation,
+        reason: Cycle2OrdinalSelectionRejectionReason,
+    ) -> AgentRunResult:
+        closure = await (
+            self._runtime_record_port.load_continuation_input_binding_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                conversation_id=turn.conversation.conversation_id,
+                message_id=turn.user_message.message_id,
+                task_id=current_session.current_task_record.task_id,
+                request_unit_id=(
+                    current_session.current_request_unit_record.request_unit_id
+                ),
+                trusted_now=claim.ordinal_input_binding.created_at,
+            )
+        )
+        if closure is None:
+            raise AgentRunExecutionError(
+                "rejected ordinal binding closure unavailable"
+            )
+        rejected = reject_cycle2_ordinal_selection(
+            claim=claim,
+            reason=reason,
+        )
+        current_task = closure.current_task_record
+        current_unit = closure.current_request_unit_record
+        next_task = _project_task(
+            current_task,
+            state_version=rejected.result_task_state_version,
+            updated_at=closure.trusted_now,
+        )
+        next_unit = _project_request_unit(
+            current_unit,
+            input_binding_refs=(
+                *current_unit.input_binding_refs,
+                rejected.ordinal_input_binding.binding_id,
+            ),
+            state_version=rejected.result_task_state_version,
+            updated_at=closure.trusted_now,
+        )
+        written = await (
+            self._runtime_record_port.apply_continuation_input_binding_if_current(
+                ApplyContinuationInputBindingV2Command(
+                    loaded_closure=closure,
+                    new_input_binding_record=rejected.ordinal_input_binding,
+                    next_task_record=next_task,
+                    next_request_unit_record=next_unit,
+                    rejected_ordinal_selection=rejected,
+                )
+            )
+        )
+        terminal_task = next_task if written is Cycle2WriteResult.APPLIED else current_task
+        terminal_unit = next_unit if written is Cycle2WriteResult.APPLIED else current_unit
+        return await self._finalize_mapping(
+            turn=turn,
+            step=self._step_for_signal(
+                run_id=turn.running_run.run_id,
+                signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+            ),
+            task=terminal_task,
+            request_unit=terminal_unit,
         )
 
     def _route_selected_candidate(
@@ -3431,9 +3775,10 @@ class Cycle2AgentRunHandler:
         task_id: UUID,
         request_unit_id: UUID,
         candidate_factory: Callable[
-            [InitialToolCallV2ReadClosure, UUID, UUID],
+            [InitialToolCallV2ReadClosure, UUID, UUID, NextMove | None],
             Cycle2GatewayCandidate,
         ],
+        control_purpose: Cycle2ControlPurpose | None = None,
     ) -> Cycle2ReadToolExecution | AgentRunResult:
         closure = await (
             self._runtime_record_port.load_initial_tool_call_v2_closure_for_owner(
@@ -3447,10 +3792,20 @@ class Cycle2AgentRunHandler:
             raise AgentRunExecutionError("current ToolCall closure unavailable")
         model_call_id = self._uuid_factory()
         manifest_id = self._uuid_factory()
+        control_move = (
+            None
+            if control_purpose is None
+            else await self._materialize_tool_control(
+                turn=turn,
+                purpose=control_purpose,
+                closure=closure,
+            )
+        )
         candidate = candidate_factory(
             closure,
             model_call_id,
             manifest_id,
+            control_move,
         )
         manifest = ContextManifest(
             context_manifest_id=manifest_id,
@@ -3576,9 +3931,6 @@ class Cycle2AgentRunHandler:
         if type(gate) is not GateDecisionV2:
             raise AgentRunExecutionError("Cycle 2 Gateway result is not exact")
         if gate.decision is GateDecisionValue.REJECT:
-            self._steps.map_imported_phase1(
-                ImportedMapperReference.GATE_REJECTED
-            )
             return self._deterministic_renderer.map_result(
                 run_id=turn.running_run.run_id,
                 stop_reason=StopReason.GATE_REJECTED,
@@ -3679,22 +4031,80 @@ class Cycle2AgentRunHandler:
         step: Cycle2RuntimeStep,
         task: TaskRecord,
         request_unit: RequestUnitRecord,
+        consume_control: bool = True,
     ) -> AgentRunResult:
         mapping = step.mapping
         result = step.outbound_result
+        signal = step.cycle2_signal
         if (
             type(mapping) is not Cycle2ResultMapping
             or mapping.disposition is not MapperDisposition.EMIT
             or mapping.stop_reason is None
             or type(result) is not AgentRunResult
+            or type(signal) is not Cycle2MapperSignal
         ):
             raise AgentRunExecutionError("Cycle 2 mapping is not outbound")
+        if consume_control:
+            try:
+                await self._propose_cycle2_control(
+                    turn=turn,
+                    purpose=self._terminal_control_purpose(signal),
+                )
+            except _Cycle2ControlProtocolError:
+                signal = Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                mapping = self._steps.result_mapper.map_cycle2(signal)
+                result = self._deterministic_renderer.map_cycle2_result(
+                    run_id=turn.running_run.run_id,
+                    mapping=mapping,
+                )
         return await self._finalize(
             turn=turn,
             result=result,
             stop_reason=mapping.stop_reason,
             task=task,
             request_unit=request_unit,
+            cycle2_signal=signal,
+            response_policy=mapping.response_policy,
+        )
+
+    async def _finalize_imported(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        result: AgentRunResult,
+        stop_reason: StopReasonV2,
+        task: TaskRecord | None,
+        request_unit: RequestUnitRecord | None,
+        reference: ImportedMapperReference,
+        response_policy: ResponsePolicy,
+        consume_control: bool = True,
+    ) -> AgentRunResult:
+        if consume_control:
+            try:
+                await self._propose_cycle2_control(
+                    turn=turn,
+                    purpose=Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+                )
+            except _Cycle2ControlProtocolError:
+                return await self._finalize_mapping(
+                    turn=turn,
+                    step=self._step_for_signal(
+                        run_id=turn.running_run.run_id,
+                        signal=Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
+                    ),
+                    task=task,
+                    request_unit=request_unit,
+                    consume_control=False,
+                )
+        actual_reference = self._steps.map_imported_phase1(reference)
+        return await self._finalize(
+            turn=turn,
+            result=result,
+            stop_reason=stop_reason,
+            task=task,
+            request_unit=request_unit,
+            imported_reference=actual_reference,
+            response_policy=response_policy,
         )
 
     async def _finalize(
@@ -3705,6 +4115,9 @@ class Cycle2AgentRunHandler:
         stop_reason: StopReasonV2,
         task: TaskRecord | None,
         request_unit: RequestUnitRecord | None,
+        imported_reference: ImportedMapperReference | None = None,
+        cycle2_signal: Cycle2MapperSignal | None = None,
+        response_policy: ResponsePolicy | None = None,
     ) -> AgentRunResult:
         completed_at = self._clock()
         terminal_run = _project_cycle2_run(
@@ -3776,4 +4189,33 @@ class Cycle2AgentRunHandler:
             or stopped not in evidence.trace_records
         ):
             raise AgentRunExecutionError("terminal Cycle 2 evidence unavailable")
+        observation: Cycle2ExecutionOutcomeObservationV1 | None = None
+        if imported_reference is not None:
+            if cycle2_signal is not None or response_policy is None:
+                raise AgentRunExecutionError("imported mapper observation mismatch")
+            observation = self._steps.result_mapper.observe_imported(
+                run_id=turn.running_run.run_id,
+                reference=imported_reference,
+                observed_outcome=result.outcome,
+                stop_reason=stop_reason,
+                response_policy=response_policy,
+                agent_result_emitted=True,
+            )
+        elif cycle2_signal is not None:
+            if response_policy is None:
+                raise AgentRunExecutionError("Cycle 2 mapper observation mismatch")
+            observation = self._steps.result_mapper.observe_cycle2(
+                run_id=turn.running_run.run_id,
+                signal=cycle2_signal,
+                observed_outcome=result.outcome,
+                stop_reason=stop_reason,
+                response_policy=response_policy,
+                agent_result_emitted=True,
+            )
+        elif response_policy is not None:
+            raise AgentRunExecutionError("mapper observation source missing")
+        if observation is not None:
+            self._execution_outcome_observer.observe_cycle2_execution_outcome(
+                observation
+            )
         return result

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from uuid import UUID
 
+from pydantic import Field, model_validator
+
+from mini_agent.core.common import RuntimePrivateModel
 from mini_agent.core.trace import AgentOutcome, StopReasonV2
 
 
@@ -75,6 +79,7 @@ class ResponsePolicy(StrEnum):
     SHIPMENT_ASSESSMENT_DETERMINISTIC = (
         "SHIPMENT_ASSESSMENT_DETERMINISTIC"
     )
+    DETERMINISTIC_ORDER_SUMMARY_V1 = "DETERMINISTIC_ORDER_SUMMARY_V1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +89,56 @@ class Cycle2ResultMapping:
     stop_reason: StopReasonV2 | None
     outcome: AgentOutcome | None
     response_policy: ResponsePolicy
+
+
+class Cycle2MappingSourceKind(StrEnum):
+    IMPORTED_PHASE1 = "IMPORTED_PHASE1"
+    CYCLE2_DELTA = "CYCLE2_DELTA"
+
+
+class Cycle2ExecutionOutcomeObservationV1(RuntimePrivateModel):
+    """In-process actual effective-mapper observation; never persistence input."""
+
+    run_id: UUID
+    mapping_source_kind: Cycle2MappingSourceKind
+    imported_reference: ImportedMapperReference | None = None
+    cycle2_signal: Cycle2MapperSignal | None = None
+    mapper_row_id: str = Field(min_length=1)
+    mapper_disposition: MapperDisposition | None = None
+    observed_outcome: AgentOutcome
+    stop_reason: StopReasonV2
+    response_policy: ResponsePolicy
+    agent_result_emitted: bool = Field(strict=True)
+
+    @model_validator(mode="after")
+    def effective_mapping_branch_is_exact(self):
+        if self.agent_result_emitted is not True:
+            raise ValueError("outcome observation requires one emitted Agent result")
+        if self.mapping_source_kind is Cycle2MappingSourceKind.IMPORTED_PHASE1:
+            if (
+                type(self.imported_reference) is not ImportedMapperReference
+                or self.cycle2_signal is not None
+                or self.mapper_disposition is not None
+                or self.mapper_row_id != self.imported_reference.value
+            ):
+                raise ValueError("imported mapper observation branch mismatch")
+            return self
+        if (
+            self.imported_reference is not None
+            or type(self.cycle2_signal) is not Cycle2MapperSignal
+        ):
+            raise ValueError("Cycle 2 mapper observation branch mismatch")
+        mapping = _DELTA_ROWS[self.cycle2_signal]
+        if (
+            mapping.disposition is not MapperDisposition.EMIT
+            or self.mapper_row_id != mapping.row_id
+            or self.mapper_disposition is not mapping.disposition
+            or self.observed_outcome is not mapping.outcome
+            or self.stop_reason is not mapping.stop_reason
+            or self.response_policy is not mapping.response_policy
+        ):
+            raise ValueError("Cycle 2 mapper observation does not exact-copy row")
+        return self
 
 
 _DELTA_ROWS: dict[Cycle2MapperSignal, Cycle2ResultMapping] = {
@@ -227,6 +282,51 @@ class RunResultMapper:
         if type(signal) is not Cycle2MapperSignal:
             raise ValueError("canonical Cycle 2 mapper signal required")
         return _DELTA_ROWS[signal]
+
+    def observe_imported(
+        self,
+        *,
+        run_id: UUID,
+        reference: ImportedMapperReference,
+        observed_outcome: AgentOutcome,
+        stop_reason: StopReasonV2,
+        response_policy: ResponsePolicy,
+        agent_result_emitted: bool,
+    ) -> Cycle2ExecutionOutcomeObservationV1:
+        canonical_reference = self.import_reference(reference)
+        return Cycle2ExecutionOutcomeObservationV1(
+            run_id=run_id,
+            mapping_source_kind=Cycle2MappingSourceKind.IMPORTED_PHASE1,
+            imported_reference=canonical_reference,
+            mapper_row_id=canonical_reference.value,
+            observed_outcome=observed_outcome,
+            stop_reason=stop_reason,
+            response_policy=response_policy,
+            agent_result_emitted=agent_result_emitted,
+        )
+
+    def observe_cycle2(
+        self,
+        *,
+        run_id: UUID,
+        signal: Cycle2MapperSignal,
+        observed_outcome: AgentOutcome,
+        stop_reason: StopReasonV2,
+        response_policy: ResponsePolicy,
+        agent_result_emitted: bool,
+    ) -> Cycle2ExecutionOutcomeObservationV1:
+        mapping = self.map_cycle2(signal)
+        return Cycle2ExecutionOutcomeObservationV1(
+            run_id=run_id,
+            mapping_source_kind=Cycle2MappingSourceKind.CYCLE2_DELTA,
+            cycle2_signal=signal,
+            mapper_row_id=mapping.row_id,
+            mapper_disposition=mapping.disposition,
+            observed_outcome=observed_outcome,
+            stop_reason=stop_reason,
+            response_policy=response_policy,
+            agent_result_emitted=agent_result_emitted,
+        )
 
     @property
     def delta_rows(self) -> tuple[Cycle2ResultMapping, ...]:

@@ -20,7 +20,7 @@ from mini_agent.application.records import (
     CreateCycle2InitialTaskGraphCommand,
     CreateCycle2RunRootCommand,
     Cycle2ReadDispatchGrant,
-    Cycle2ContinuationProviderProposal,
+    Cycle2ControlPurpose,
     Cycle2CurrentSessionTaskClosure,
     Cycle2ExactRunEvidenceClosure,
     Cycle2WriteResult,
@@ -68,16 +68,17 @@ from mini_agent.application.records import (
     ShipmentAssessmentReadClosure,
     SupersededRunReadClosure,
 )
+from mini_agent.application.run_result_mapper import (
+    Cycle2ExecutionOutcomeObservationV1,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
     OrderObservation,
-    SearchOrdersObservationSafeProjection,
 )
 from mini_agent.core.order import (
     GetOrderQuery,
     GetOrderResult,
-    OrderSummaryProjection,
 )
 from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import (
@@ -85,8 +86,9 @@ from mini_agent.core.presentation import (
     PresentationPlan,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
     Cycle2InitialRequestUnderstandingOutputV2,
-    NextMove,
+    Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
 )
@@ -885,25 +887,36 @@ class Cycle2RequestUnderstandingProvider(Protocol):
     async def propose_cycle2_continuation(
         self,
         request: RequestUnderstandingInput,
-    ) -> Cycle2ContinuationProviderProposal: ...
+    ) -> Cycle2InputCandidate: ...
 
-    async def propose_cycle2_search_followup(
+    async def propose_cycle2_control(
         self,
         request: RequestUnderstandingInput,
-        safe_search_projection: SearchOrdersObservationSafeProjection,
-        current_task_state_version: int,
-    ) -> NextMove:
-        """Propose only a model-visible post-search next move; grants no target."""
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        """Return one argument-free choice for the actual closed control purpose."""
         ...
 
-    async def propose_cycle2_order_followup(
+
+@runtime_checkable
+class Cycle2ExecutionOutcomeObserver(Protocol):
+    """Post-finalize in-process observation seam; grants no control authority."""
+
+    def observe_cycle2_execution_outcome(
         self,
-        request: RequestUnderstandingInput,
-        order_summary: OrderSummaryProjection,
-        current_task_state_version: int,
-    ) -> NextMove:
-        """Choose FINISH or get_shipment from safe Order facts; grants no target."""
-        ...
+        observation: Cycle2ExecutionOutcomeObservationV1,
+    ) -> None: ...
+
+
+class NoOpCycle2ExecutionOutcomeObserver:
+    """Production default that cannot change or fail normal execution."""
+
+    def observe_cycle2_execution_outcome(
+        self,
+        observation: Cycle2ExecutionOutcomeObservationV1,
+    ) -> None:
+        if type(observation) is not Cycle2ExecutionOutcomeObservationV1:
+            raise TypeError("exact Cycle2ExecutionOutcomeObservationV1 required")
 
 
 @runtime_checkable
