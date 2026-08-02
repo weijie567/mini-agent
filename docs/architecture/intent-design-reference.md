@@ -728,7 +728,10 @@ P0 只支持当前两条 E2E 所需的有限输入词汇：
 编码、selection record shape 和 exact failure code，只在
 [E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
 正式 Activation 后由其 scoped 拥有；本节不把这些具体值升级为通用 Intent
-contract，也不改变四个 Case 的 `CONTRACT_DEFINED` lifecycle。
+contract，也不自行推进四个 Case 的 lifecycle。当前 effective lifecycle 服从 Coverage
+Matrix owner 与 Agent Evaluation Strategy：四个 logical Case families / 27 个
+authenticated physical artifacts 已为 `EXECUTABLE`，Phase 2 lifecycle-valid Result
+仍为 0，且没有 `REGRESSION_GATE`。
 
 ## 11. 与 Controlled ReAct 的边界
 
