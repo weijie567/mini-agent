@@ -2391,11 +2391,61 @@ grader predicates、Run/ToolCall/Trace/result和fault outcome；因此ORDER_ONLY
 LOGISTICS_REQUIRED得到同一真实seed digest，唯一允许差异仍是§9.3.4的
 `input_goal`。
 
-当前`CONTRACT_DEFINED` artifact中的静态digest只作为待同步consumer值，不能授权
-W9写入或dispatch。W9 direct seam必须保存其实际重算值并证明pair两路相同；若它与
-当前artifact值不同，保持Case pre-dispatch fail closed，并把consumer同步留给
-reviewed `02-17` atomic lifecycle / manifest / loader Packet，不能在R0/R1/R2/02-15
-越权修改artifact。
+##### E2E01-05 real Registry / toolset / provider mapping digest
+
+另外三个pair值必须从`build_cycle2_registry_snapshot()`返回的同一个已验证
+`RegistrySnapshot`重算，不得从Case、pair manifest、expectation、loader常量或彼此
+复制。`registry_snapshot_digest`的projection固定为：
+
+```json
+{
+  "digest_schema": "cycle2-registry-snapshot.p0.v1",
+  "tool_registry_version": "完整 RegistrySnapshot.tool_registry_version",
+  "canonical_registrations": ["按 ToolSpec.name 升序的完整 ToolRegistration object"],
+  "provider_visible_toolset": ["按 ToolSpec.name 升序的完整 provider-visible ToolSpec object"],
+  "provider_name_to_canonical_name": ["按 provider_visible_name 升序的完整 ProviderToolNameBinding object"],
+  "model_visible_toolset_hash": "完整 RegistrySnapshot.model_visible_toolset_hash"
+}
+```
+
+`provider_mapping_digest`的projection固定为：
+
+```json
+{
+  "digest_schema": "cycle2-provider-mapping.p0.v1",
+  "tool_registry_version": "完整 RegistrySnapshot.tool_registry_version",
+  "provider_name_to_canonical_name": ["按 provider_visible_name 升序的完整 ProviderToolNameBinding object"]
+}
+```
+
+引号中的说明在真实projection中必须替换为对应typed object的完整
+`model_dump(mode="json")`；不得保留说明字符串、遗漏字段、使用集合顺序或由
+artifact反向填值。两个projection与上一小节seed projection使用同一canonical JSON
+bytes规则，digest均为这些bytes的SHA-256 lower hex。
+
+`model_visible_toolset_hash`不再次hash，也不去掉scheme；它必须精确等于Core
+`compute_model_visible_toolset_hash()`对同一snapshot的最终provider-visible ToolSpec
+集合返回的完整`sha256:<64 lower hex>`。`ModelVisibleToolsetArtifact`、每个相关
+`ContextManifest`和普通Trace中的hash必须与它精确相等。任何registry version、
+registration、execution policy、ToolSpec、provider mapping、排序或hash格式变化都会
+使pair重新认证失败，不能兼容新旧两个值。
+
+在本次W12 correction所依赖的真实源码上，四个producer重算值为：
+
+```text
+registry_snapshot_digest = 8c8535246587423132362dbc13dcb42fdf15a4fa7a1891c59ebd8a9645067725
+model_visible_toolset_hash = sha256:e9d6ae60206aa7ed88aeefd78b016215782df03e0c45021cf3010c4e2f128aa8
+provider_mapping_digest = 8b1e0b50d8f9b88b5a303be5cdb1d9f3d29376f443eccdaf97b00b7d6ded3c47
+owner_order_initial_state_digest = 022fced2373c4a83413c00b647b6badf158f8da9eb681e9a99e78a4a5e7860b5
+```
+
+这些值是上述算法在当前typed source上的consumer快照，算法与typed source才是
+authority。W12发现已reviewed `02-17` consumer没有同步W9已要求重算的seed值，且
+其余pair常量也不等于当前Registry/toolset/provider projection。修正合并前，两个
+`E2E01-05` Case虽已标记`EXECUTABLE`，仍必须在`REQ_PAIR` grading处fail closed，
+不得产生有效PASS Result。reviewed `02-18R3`先冻结本契约，随后由Core producer与
+Eval consumer各自single-writer Packet实现和原子同步；本scoped Spec Packet自身不
+修改artifact、manifest、loader、Harness、Result或lifecycle。
 
 ### 9.3 四个逻辑 Case、14 个 required offline variants
 
@@ -2615,6 +2665,11 @@ same_owner_order_and_initial_task_fixture_digest: required
 allowed_difference:
   input_goal: ORDER_ONLY | LOGISTICS_REQUIRED
 ```
+
+四个共同值必须按§9.2.2的actual-source算法解析；pair manifest保存的值只是经过
+同步的consumer，不是producer或可信执行上下文。任一值无法从本次执行使用的typed
+RegistrySnapshot、toolset artifact / manifest链与共同seed plan唯一重算时，两个
+variant都必须fail closed。
 
 pair manifest 自身进入 artifact bundle digest。任一共同 digest 不等、缺失 paired
 variant、使用不同 Registry、或 order-only 通过“不注册 `get_shipment`”得到零调用，
