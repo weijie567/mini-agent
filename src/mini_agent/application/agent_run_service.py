@@ -99,6 +99,7 @@ from mini_agent.core.control_gateway import (
     resolve_validated_get_order_registration,
 )
 from mini_agent.core.common import thaw_json_value
+from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
@@ -3466,8 +3467,14 @@ class Cycle2AgentRunHandler:
                 )
                 for observation in closure.current_target_observations
             ),
+            evidence_refs_and_versions=(),
+            action_record_refs=(),
             redaction_policy_version=self._redaction_policy_version,
-            token_counts=TokenCounts(),
+            truncation_decisions=(),
+            token_counts=TokenCounts(
+                input_tokens=None,
+                output_tokens=None,
+            ),
             assembled_at=closure.trusted_read_at,
         )
         await self._context_record_port.save_context_manifest(manifest)
@@ -3497,7 +3504,14 @@ class Cycle2AgentRunHandler:
             for binding in closure.current_input_binding_records
         )
         loaded_gateway = Cycle2GatewayLoadedClosure(
-            customer_context=command.customer_context,
+            customer_context=CustomerContext(
+                provenance=command.customer_context.provenance,
+                subject_ref=command.customer_context.subject_ref,
+                customer_id=command.customer_context.customer_id,
+                auth_scopes=command.customer_context.auth_scopes,
+                authenticated_at=command.customer_context.authenticated_at,
+                session_ref_hash=command.customer_context.session_ref_hash,
+            ),
             private_owner_scope_ref=turn.owner_scope.customer_id,
             current_task=closure.current_task_record,
             current_request_unit=closure.current_request_unit_record,
