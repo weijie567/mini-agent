@@ -97,6 +97,16 @@ squash merge；`B_C2_PLAN_APPROVED =
 > 只补Cycle2首轮RU output/reducer与InputBindingV2，reviewed后R1必须从真实successor
 > 重冻结回放，不得提交只支持旧`order_id`的partial handler。
 >
+> R1A reviewed完成且R1从真实successor重冻结后，writer在成功工具路径接线前又确认
+> 一个更窄的Application executor symbol BLOCK：`Cycle2ReadToolExecutor`内部接收并
+> 校验typed `ToolResult`，但public `execute()`只返回`ToolCallRecordV2`，导致normal
+> handler无法将search/shipment payload交给既有step service；当前没有post-execution
+> typed envelope。把该mapping推给Infrastructure会越过Application ownership。依据同一
+> 用户授权，Gate P2-A9在W9原wave内增加串行`02-15R1B`，slot数从33调整为34、不新增
+> wave label；R1B只给read executor增加backward-compatible typed execution envelope，
+> 保留legacy `execute()`形状。当前R1两文件dirty checkpoint不发布，R1B reviewed后
+> R1再次从真实successor重冻结回放。
+>
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
 > 创建。后续仍只有 exact Packet、planning review 与当前 user directive 都满足后，
 > 才创建对应 feature branch / Worktree；Plan、artifact 或测试的存在不推进 Case
@@ -153,16 +163,16 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `W1-W8 + 02-15R0 COMPLETE / 02-15R1A CORE CORRECTION APPROVED / 02-15R1 IMPLEMENTATION BLOCKED UNTIL REFREEZE` |
-| Task Packets | `26 COMPLETE / 02-15R1A PLAN PENDING / 02-15R1 PLANNED-BLOCKED / 02-15R2/15 NOT REFROZEN` |
-| Proposed Plan / Packet slots / Waves | `33 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` + `02-15R0/R1A/R1/R2` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
+| Future GSD Plans | `W1-W8 + 02-15R0/R1A COMPLETE / 02-15R1B EXECUTOR CORRECTION APPROVED / 02-15R1 IMPLEMENTATION BLOCKED UNTIL SECOND REFREEZE` |
+| Task Packets | `27 COMPLETE / 02-15R1B PLAN PENDING / 02-15R1 REFROZEN-BLOCKED / 02-15R2/15 NOT REFROZEN` |
+| Proposed Plan / Packet slots / Waves | `34 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` + `02-15R0/R1A/R1B/R1/R2` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
 | Integration branch | `integration/e2e01-cycle2 / ACTIVE / d6fdcbb3cdd4e6bb41fb2ae0b1ff5b80629b4efb` / tree `8ab6f2aeab53bfae73edff219cab70623c437ebc` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W8 + 02-15R0 COMPLETE；02-15R1 clean-blocked；02-15R1A/R2与02-15尚未dispatch` |
+| Integration / code feature branches / Worktrees | `W1..W8 + 02-15R0/R1A COMPLETE；02-15R1 refrozen dirty-blocked unpublished；02-15R1B/R2与02-15尚未dispatch` |
 | Writer assignments | `Integrator W9 owner-ruling single writer ACTIVE；implementation writer 0` |
 | Execution concurrency | approved ceiling `2` writers；当前 implementation writer `0` |
 
@@ -261,7 +271,7 @@ Tech Lead / Integrator
 
 ## 5. Future Plan / Task Packet slots
 
-以下 33 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
+以下 34 个 slot 是当前冻结集合：原 `02-00..18` 保持编号与 ownership；
 `02-02R/02-04R/02-05R` 是用户授权的 W4 前 correction set，
 `02-09R1/02-09R2/02-09R3` 是 02-09 preflight 触发的 recovery owner correction
 set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correction，
@@ -270,7 +280,8 @@ set，`02-09R4` 是 replacement exact-head review触发的 dispatch-grant correc
 correction，`02-11R` 是 02-11 实现验证触发的 immutable Task / RequestUnit
 pre-image history correction；`02-15R0/R1/R2` 是W9 preflight触发的seed owner、
 Application normal entry与Infrastructure normal evidence/dispatch corrections；
-`02-15R1A`是R1写前preflight触发的Cycle2首轮RU Core owner correction。
+`02-15R1A`是R1写前preflight触发的Cycle2首轮RU Core owner correction；
+`02-15R1B`是R1成功工具路径接线触发的Application executor result-envelope correction。
 `02-00` 是零功能代码的
 scoped-owner correction；其余 slot 覆盖实现、remediation、lifecycle 与
 post-activation verification。
@@ -749,7 +760,7 @@ post-activation verification。
   - `tests/component/application/test_record_contracts.py`
   - `tests/component/application/test_ports_contract.py`
   - `tests/component/application/test_agent_run_service.py`
-- **Depends on:** reviewed `02-15R1A`真实successor、R0 seed contract与`B_C2_RUNTIME`。
+- **Depends on:** reviewed `02-15R1B`真实successor、R1A/R0 contracts与`B_C2_RUNTIME`。
 - **Acceptance:** message-only trusted command可形成normal v2 Run closure；
   UNIQUE/MULTIPLE/ordinal/order-only/shipment/retry/obsolete routes只消费exact current
   authority；normal terminal把Run/link/Task/Message/ordinary Trace/result在一个Port
@@ -776,6 +787,24 @@ post-activation verification。
   Task/RequestUnit roots，不生成owner、verified target、Observation、Tool result或
   business fact；unknown/ordinal/shipment flag/multiple/duplicate/wrong-source/
   model-trusted field全部fail closed；Phase 1模型与reducer public shape不变。
+
+### `02-15R1B` — Cycle 2 typed read-execution envelope
+
+- **Owner:** Runtime Engineer / Application read executor single writer.
+- **Goal:** 为`Cycle2ReadToolExecutor`增加additive typed execution envelope，使normal
+  handler能同时消费terminal `ToolCallRecordV2`与本次已校验`ToolResult`；保留现有
+  `execute()`返回形状和全部fence/retry/CAS语义。
+- **Proposed files:**
+  - `src/mini_agent/application/read_tool_executor.py`
+  - `tests/component/application/test_read_tool_executor.py`
+- **Depends on:** reviewed `B_C2_W9_INITIAL_RU`、R1 refrozen dirty checkpoint BLOCK与用户
+  2026-08-02“有问题按照你的建议走”的授权。
+- **Acceptance:** 新`execute_with_result()`复用同一insert/fence/dispatch/retry/finalize
+  流程；只有terminal finalize `APPLIED`才返回该attempt exact validated `ToolResult`；
+  timeout、insert/fence/finalize conflict、recovery/no-dispatch均为`None`；transient retry
+  只暴露attempt 2结果，不返回attempt 1 payload；legacy `execute()`继续只返回terminal
+  ToolCall且现有tests不变；不创建Infrastructure Port、不构造Observation/CandidateSet/
+  Assessment、不修改handler、DB、HTTP、Harness或Case lifecycle。
 
 ### `02-15R2` — Normal Cycle 2 Infrastructure and typed seed adapters
 
@@ -881,7 +910,7 @@ post-activation verification。
 | `W6` | `02-07R → 02-10R → 02-07 → 02-11R → 02-11` | 1 | 前四项依次补全 Application Port、search authority、business adapters 与 immutable record history；blocked 02-11 只能从真实 R successor 重冻结回放；形成 `B_C2_INFRA` |
 | `W7` | `02-12` | 1 | `B_C2_RUNTIME` |
 | `W8` | `02-14` | 1 | `B_C2_EVAL_MACHINERY`；Case 仍为 `CONTRACT_DEFINED` |
-| `W9` | `02-15R0 → 02-15R1A → 02-15R1 → 02-15R2 → 02-15` | 1 | seed contract、Core first-turn RU、Application normal entry与Infrastructure normal evidence/dispatch依次reviewed后重冻结Composition；形成`B_C2_EXECUTION_SEAM`；Case仍为`CONTRACT_DEFINED` |
+| `W9` | `02-15R0 → 02-15R1A → 02-15R1B → 02-15R1 → 02-15R2 → 02-15` | 1 | seed contract、Core first-turn RU、typed read-execution envelope、Application normal entry与Infrastructure normal evidence/dispatch依次reviewed后重冻结Composition；形成`B_C2_EXECUTION_SEAM`；Case仍为`CONTRACT_DEFINED` |
 | `W10` | `02-16` | 1 | independent owner ruling `G_C2_APPROVED_FOR_EXECUTABLE` |
 | `W11` | `02-17` | 1 | atomic consumer sync；形成 `B_C2_EXECUTABLE` |
 | `W12` | `02-18` | 1 | `B_C2_VERTICAL` |
@@ -926,6 +955,8 @@ W8 Graders / Harness machinery; pre-dispatch fail closed
 W9 seed contract owner correction
   ↓
 W9 Core initial product-description RU correction
+  ↓
+W9 Application typed read-execution envelope correction
   ↓
 W9 Application normal entry/evidence correction
   ↓
@@ -1197,7 +1228,8 @@ barrier 与 release。
    新增 wave label。W9 preflight发现的seed、Application normal entry与Infrastructure
    normal evidence/dispatch跨owner缺口又经同日用户授权由Gate P2-A7增加
    `02-15R0/R1/R2`，仍不新增wave label。R1写前确认的首轮RU Core owner缺口再由
-   Gate P2-A8增加`02-15R1A`，同样不新增wave label。当前冻结集合为33 slots / 16 wave labels /
+   Gate P2-A8增加`02-15R1A`，Gate P2-A9再增加`02-15R1B`，均不新增wave label。
+   当前冻结集合为34 slots / 16 wave labels /
    max 2 writers。
    后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
@@ -1356,7 +1388,7 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
       `02-09R4 / W4R2`；Gate P2-A4 又增加 `02-07R` 但不新增 wave
       label；Gate P2-A5 又增加 `02-10R` 但不新增 wave label；Gate P2-A6 又增加
       `02-11R` 但不新增 wave label；Gate P2-A7再增加`02-15R0/R1/R2`，Gate P2-A8
-      增加`02-15R1A`，均不新增wave label；当前冻结为33 slots / 16 wave labels，
+      增加`02-15R1A`，Gate P2-A9增加`02-15R1B`，均不新增wave label；当前冻结为34 slots / 16 wave labels，
       并发上限仍为 2。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
