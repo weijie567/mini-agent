@@ -816,7 +816,15 @@ def _cycle2_verified_target_closed(
     )
 
 
-def _cycle2_target_bearing_get_order_binding_valid(
+_CYCLE2_GET_ORDER_TARGET_ORIGIN_BINDING_NAMES = frozenset(
+    {"candidate_ordinal", "product_description"}
+)
+_CYCLE2_GET_SHIPMENT_TARGET_ORIGIN_BINDING_NAMES = frozenset(
+    {"order_id", "candidate_ordinal", "product_description"}
+)
+
+
+def _cycle2_target_origin_binding_valid(
     *,
     verified_target_ref: UUID | None,
     task_id: UUID,
@@ -825,11 +833,12 @@ def _cycle2_target_bearing_get_order_binding_valid(
     loaded: Cycle2GatewayLoadedClosure,
     binding: Cycle2AcceptedBindingFacts,
     order_id: str,
+    accepted_binding_names: frozenset[str],
 ) -> bool:
-    """Close both reviewed get_order target origins without merging authority."""
+    """Require one reviewed origin binding plus its exact verified target graph."""
 
     return (
-        binding.name in {"candidate_ordinal", "product_description"}
+        binding.name in accepted_binding_names
         and _cycle2_verified_target_closed(
             verified_target_ref=verified_target_ref,
             task_id=task_id,
@@ -879,7 +888,7 @@ def _cycle2_argument_binding_valid(
                 and candidate.argument_binding_refs == (binding.binding_id,)
             )
         return (
-            _cycle2_target_bearing_get_order_binding_valid(
+            _cycle2_target_origin_binding_valid(
                 verified_target_ref=candidate.verified_target_ref,
                 task_id=candidate.task_id,
                 request_unit_id=candidate.request_unit_id,
@@ -887,12 +896,13 @@ def _cycle2_argument_binding_valid(
                 loaded=loaded,
                 binding=binding,
                 order_id=normalized_value,
+                accepted_binding_names=(
+                    _CYCLE2_GET_ORDER_TARGET_ORIGIN_BINDING_NAMES
+                ),
             )
         )
     return (
-        binding.name == "order_id"
-        and binding.normalized_value == normalized_value
-        and _cycle2_verified_target_closed(
+        _cycle2_target_origin_binding_valid(
             verified_target_ref=candidate.verified_target_ref,
             task_id=candidate.task_id,
             request_unit_id=candidate.request_unit_id,
@@ -900,6 +910,9 @@ def _cycle2_argument_binding_valid(
             loaded=loaded,
             binding=binding,
             order_id=normalized_value,
+            accepted_binding_names=(
+                _CYCLE2_GET_SHIPMENT_TARGET_ORIGIN_BINDING_NAMES
+            ),
         )
     )
 
@@ -1027,7 +1040,7 @@ def _cycle2_progress_semantic_identity(
             canonical_target_ref = None
         else:
             if not (
-                _cycle2_target_bearing_get_order_binding_valid(
+                _cycle2_target_origin_binding_valid(
                     verified_target_ref=verified_target_ref,
                     task_id=loaded.current_task.task_id,
                     request_unit_id=loaded.current_request_unit.request_unit_id,
@@ -1035,15 +1048,16 @@ def _cycle2_progress_semantic_identity(
                     loaded=loaded,
                     binding=binding,
                     order_id=argument_value,
+                    accepted_binding_names=(
+                        _CYCLE2_GET_ORDER_TARGET_ORIGIN_BINDING_NAMES
+                    ),
                 )
             ):
                 return None
             canonical_target_ref = verified_target_ref
     else:
         if not (
-            binding.name == "order_id"
-            and binding.normalized_value == argument_value
-            and _cycle2_verified_target_closed(
+            _cycle2_target_origin_binding_valid(
                 verified_target_ref=verified_target_ref,
                 task_id=loaded.current_task.task_id,
                 request_unit_id=loaded.current_request_unit.request_unit_id,
@@ -1051,6 +1065,9 @@ def _cycle2_progress_semantic_identity(
                 loaded=loaded,
                 binding=binding,
                 order_id=argument_value,
+                accepted_binding_names=(
+                    _CYCLE2_GET_SHIPMENT_TARGET_ORIGIN_BINDING_NAMES
+                ),
             )
         ):
             return None
