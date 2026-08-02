@@ -42,6 +42,7 @@ from mini_agent.application.records import (
     Cycle2WriteResult,
     FinalizeRunCommand,
     InsertOnlyWriteResult,
+    InitialToolCallV2ReadClosure,
     MessageDirection,
     MessageRecord,
     ObservationWriteResult,
@@ -2939,6 +2940,29 @@ def test_cycle2_handler_first_turn_builds_real_trusted_root_and_graph() -> None:
         "轻量跑鞋"
     )
     assert captured["task"] == initial.reducer_decision.task_graph.task
+
+
+def test_cycle2_initial_search_candidate_is_raw_closed_for_gateway() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
+
+    _, captured = _capture_cycle2_initial_turn(handler)
+
+    candidate = captured["candidate_factory"](
+        InitialToolCallV2ReadClosure(
+            owner_scope=captured["turn"].owner_scope,
+            current_task_record=captured["task"],
+            current_request_unit_record=captured["request_unit"],
+            current_input_binding_records=captured["input_bindings"],
+            trusted_read_at=NOW,
+        ),
+        uuid4(),
+        uuid4(),
+    )
+    assert candidate.verified_target_ref is None
+    assert candidate.__pydantic_fields_set__ == set(
+        type(candidate).model_fields
+    )
 
 
 def test_cycle2_search_conflict_finalizes_from_pre_cas_task_version() -> None:

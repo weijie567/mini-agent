@@ -2170,6 +2170,7 @@ class Cycle2AgentRunHandler:
                     decision.validated_task_state_version
                 ),
                 argument_binding_refs=decision.argument_binding_refs,
+                verified_target_ref=None,
             ),
         )
 
