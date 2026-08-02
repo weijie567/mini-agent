@@ -7,8 +7,10 @@ import pytest
 from pydantic import ValidationError
 
 from mini_agent.core.task_state import (
+    ORDER_CANDIDATE_AUTO_TARGET_RECORD_SCHEMA_VERSION,
     ORDER_CANDIDATE_SET_RECORD_SCHEMA_VERSION,
     ORDER_SEARCH_OBSERVATION_RECORD_SCHEMA_VERSION,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
     OrderCandidateSetEntry,
@@ -79,6 +81,109 @@ def _candidate_set_values(**overrides: object) -> dict[str, object]:
 
 def _candidate_set(**overrides: object) -> OrderCandidateSetRecord:
     return OrderCandidateSetRecord.model_validate(_candidate_set_values(**overrides))
+
+
+def _auto_target_values(**overrides: object) -> dict[str, object]:
+    candidate_set = _candidate_set(
+        outcome=OrderCandidateSetOutcome.UNIQUE,
+        ordered_candidates=(_entry(1),),
+        selection_expected_task_state_version=None,
+        query_binding_refs=(uuid4(),),
+    )
+    entry = candidate_set.ordered_candidates[0]
+    values: dict[str, object] = {
+        "verified_target_ref": uuid4(),
+        "private_owner_scope_ref": candidate_set.private_owner_scope_ref,
+        "conversation_id": candidate_set.conversation_id,
+        "task_id": candidate_set.task_id,
+        "request_unit_id": candidate_set.request_unit_id,
+        "query_input_binding_ref": candidate_set.query_binding_refs[0],
+        "candidate_set_ref": candidate_set.candidate_set_id,
+        "candidate_set_version": candidate_set.candidate_set_version,
+        "source_tool_call_id": candidate_set.source_tool_call_id,
+        "search_observation_ref": candidate_set.search_observation_ref,
+        "search_observation_record_schema_version": (
+            candidate_set.search_observation_record_schema_version
+        ),
+        "search_observation_source_version": (
+            candidate_set.search_observation_source_version
+        ),
+        "observation_candidate_ref": entry.observation_candidate_ref,
+        "candidate_source_version": entry.candidate_source_version,
+        "owner_scoped_order_target_ref": "owner-order:1",
+        "order_id": "O-1001",
+        "base_task_state_version": candidate_set.base_task_state_version,
+        "result_task_state_version": candidate_set.result_task_state_version,
+        "verified_at": candidate_set.created_at,
+        "supersedes_verified_target_ref": None,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_unique_auto_target_record_has_exact_private_capability_surface() -> None:
+    record = OrderCandidateAutoTargetRecord.model_validate(_auto_target_values())
+
+    assert record.record_schema_version == (
+        ORDER_CANDIDATE_AUTO_TARGET_RECORD_SCHEMA_VERSION
+    )
+    assert set(record.model_dump()) == {
+        "verified_target_ref",
+        "private_owner_scope_ref",
+        "conversation_id",
+        "task_id",
+        "request_unit_id",
+        "query_input_binding_ref",
+        "candidate_set_ref",
+        "candidate_set_version",
+        "source_tool_call_id",
+        "search_observation_ref",
+        "search_observation_record_schema_version",
+        "search_observation_source_version",
+        "observation_candidate_ref",
+        "candidate_source_version",
+        "owner_scoped_order_target_ref",
+        "order_id",
+        "base_task_state_version",
+        "result_task_state_version",
+        "verified_at",
+        "supersedes_verified_target_ref",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"verified_target_ref": UUID("00000000-0000-1000-8000-000000000001")},
+        {"result_task_state_version": 5},
+        {"verified_at": NOW.replace(tzinfo=None)},
+        {"order_id": "o-1001"},
+        {
+            "supersedes_verified_target_ref": UUID(
+                "00000000-0000-1000-8000-000000000002"
+            )
+        },
+    ),
+)
+def test_unique_auto_target_record_rejects_invalid_identity_and_fields(
+    mutation: dict[str, object],
+) -> None:
+    with pytest.raises((TypeError, ValueError, ValidationError)):
+        OrderCandidateAutoTargetRecord.model_validate(
+            _auto_target_values(**mutation)
+        )
+
+
+def test_unique_auto_target_record_rejects_graph_alias_and_self_supersession() -> None:
+    values = _auto_target_values()
+    values["verified_target_ref"] = values["candidate_set_ref"]
+    with pytest.raises(ValidationError):
+        OrderCandidateAutoTargetRecord.model_validate(values)
+
+    values = _auto_target_values()
+    values["supersedes_verified_target_ref"] = values["verified_target_ref"]
+    with pytest.raises(ValidationError):
+        OrderCandidateAutoTargetRecord.model_validate(values)
 
 
 def _selection_request(
