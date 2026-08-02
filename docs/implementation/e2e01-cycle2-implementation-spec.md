@@ -1660,6 +1660,40 @@ retry。Phase 2 不要求 wall-clock backoff；所有 attempt 仍受同一 Run �
 本节是 active scoped consumer；其上游 owner alignment 已由 R6 与 PR #201
 闭合，但后续 Plan / 实现仍不得改写 imported Phase 1 mapping。
 
+#### 7.10.1 OA-10 durable read-evidence projection
+
+OA-10 的原子 writer 以同一 owner-scoped transaction 持久化 terminal
+`AgentRunRecordV2`、no-result `RunTaskLinkRecordV2` 与 audit-only
+`RunStopped TraceEventV2`。W12 exact reader 与 Eval 只能在同一个 owner-scoped
+snapshot 中把这三个**已经持久化的 exact record**组成 expectation-free
+`SupersededRunFinalizationEvidenceV2` read projection：
+
+- `superseded_run_record` 必须是被评估 root Run，且精确为
+  `SUPERSEDED + STATE_OR_BINDING_INVALIDATED`；
+- `no_result_link_record` 必须属于同一 Run / Task，且
+  `result_task_state_version = null`；
+- `run_stopped_trace_record` 必须属于同一 Run，精确为
+  `RunStopped(user_outcome=BLOCKED,
+  stop_reason=STATE_OR_BINDING_INVALIDATED)`，并保持 shared Trace 字段闭集；
+- 该 root Run 必须恰有一个 projection；ordinary `COMPLETED` Run 必须为零；缺失、
+  多余、wrong-run、wrong-task、wrong-owner、错误 terminal matrix 或跨 snapshot
+  拼接全部 fail closed；
+- 同一 root Run 不得存在 `AgentRunResult`、assistant `Message`、
+  `ResponseRendered`、Task / RequestUnit mutation 或对外响应。
+
+该 projection 只证明 durable terminal outcome，不声称重放 writer 当时的完整输入。
+`FinalizeSupersededRunV2Command`、其 `loaded_closure`、replacement Run identity 与
+`trusted_current_evidence_at` 都是瞬时 Application write authority，不是持久化事实，
+不得由时间戳、当前 Task、其他 Run、Fixture、Script、Expectation 或 grader 反推、
+补造或序列化进 actual evidence。`FinalizeSupersededRunV2Command` 继续保持
+Application-private；read closure 与 Eval evidence 必须消费上述 audit projection，
+不能把 command 当作 record。
+
+本裁决不新增 top-level record、logical child、schema version、migration 或 shared
+Trace 字段，也不改变既有 OA-10 writer 的原子 no-result / no-state / no-response
+语义。Application evidence model、Eval consumer 与 Infrastructure exact reader 必须
+分别由后续 single-writer Packet 从本裁决的真实 reviewed successor 实现。
+
 本文以 stable identity
 `e2e01-thin-slice.result-mapper.p0.v1` **完整 import 且不改写**
 [第一最薄 E2E-01 Spec §8.1](e2e01-thin-slice-implementation-spec.md#81-本人订单)
@@ -1889,6 +1923,11 @@ closure 再演进两个 records。目标 active logical versions 固定为：
 | `AgentRunRecord` | `agent_run_record.p0.v1` | `agent_run_record.p0.v2` | 增加 `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` 的 terminal closed matrix；`completed_at` 必填、`incomplete_reason=null`、无用户结果 |
 | `RunTaskLinkRecord` | `run_task_link_record.p0.v1` | `run_task_link_record.p0.v2` | `result_task_state_version=null` 在 parent Run=`SUPERSEDED` 时是合法 no-result terminal closure；不得复制新 Run 的 Task version |
 | `TraceEventRecord` | `trace_event_record.p0.v1` | `trace_event_record.p0.v2` | shared 字段结构不变；`RunStopped` closed matrix 接受 exact stop reason 与 audit-only `BLOCKED` |
+
+第 7.10.1 节的 `SupersededRunFinalizationEvidenceV2` 是读取上述三个 durable records
+形成的 Application audit projection，不是第七个 top-level record、AgentRun logical
+child、migration target 或可重放 command。持久化实现不得为了满足 Eval shape 新增
+隐藏 payload，也不得从其他 Run 或 trusted-time 猜测原 writer closure。
 
 P0 exact-version-only 规则不允许 runtime 同时把 v1 / v2 当作 active version。未来
 Task Packet 可以选择物理表 / codec 实现，但在 Activation 前必须先把以下 migration
@@ -2692,7 +2731,7 @@ variant、使用不同 Registry、或 order-only 通过“不注册 `get_shipmen
 | `C2-RETRY-01` | retryable allowlist、effective deadline、`TIMEOUT ⇔ TOOL_CALL_TIMEOUT ⇔ timeout_phase present`、attempt truth table、retry decision、final success preserving prior failure、max 2、deterministic no-retry、ToolCall terminal projection |
 | `C2-RECOVERY-01` | restart at CREATED、unfinished attempt、finalized retry decision before second fence、after second fence、already terminal；唯一恢复者 CAS；restart 的新增 attempt evidence 不重新拥有 imported `P1-RM-PROCESS-RESTART` 的 Run / Task / RequestUnit / outbound mapping |
 | `C2-MAPPER-01` | imported `e2e01-thin-slice.result-mapper.p0.v1` 与第 7.10 节 Phase 2 `RM-* / RM-I*` delta 的并集 completeness / zero-overlap / no-unmapped；显式回归 `P1-RM-ORDER-SUCCESS`、`P1-RM-GATE-REJECTED`、`P1-RM-ORDER-SERVICE-UNAVAILABLE`、`P1-RM-PROCESS-RESTART`，并覆盖 Phase 2 allowlisted code / interruption reason / unknown 值、service unavailable、obsolete Run suppression、fixed response policy / forbidden metadata |
-| `C2-OA10-01` | exact current closure 唯一证明 obsolete 时 Run=`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`、link result=`null`、audit-only `RunStopped(BLOCKED)`，且 no Agent result / Message / ResponseRendered / Task / RequestUnit write；unknown / contradictory 不进入 mapper、不猜测且不改变任何 Run/link/Task/RequestUnit/Tool state；`INCOMPLETE` restart-only |
+| `C2-OA10-01` | 同一 owner-scoped snapshot 的 `SupersededRunFinalizationEvidenceV2` 只由 exact persisted Run / link / Trace terminal triplet组成；Run=`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`、link result=`null`、audit-only `RunStopped(BLOCKED)`，且 no Agent result / Message / ResponseRendered / Task / RequestUnit write；不得重建 `FinalizeSupersededRunV2Command`、replacement Run 或 trusted time；unknown / contradictory 不进入 mapper、不猜测且不改变任何 Run/link/Task/RequestUnit/Tool state；`INCOMPLETE` restart-only |
 | `C2-PERSIST-01` | 五个新 record / projection，以及 ToolCall（含 attempt child）/ AgentRun / RunTaskLink / TraceEvent v1→v2 exact-version conversion / cutover / rollback vectors；unknown / mismatch version、mixed active version、dangling / half-write / wrong-owner fail closed |
 
 其中 candidate invalid 条件、四种 Assessment、source hash mutation 和 crash points 由
@@ -2714,8 +2753,9 @@ required offline variants 仍是最小纵向集。
 - finalized `RETRY_SCHEDULED` 与 attempt 2 fence 之间恢复、unfinished attempt
   恢复和 already-terminal recovery no-op。
 - finalized retry 在 attempt 2 fence 前发现 exact state / binding invalidation 时，
-  旧 Run 的 `SUPERSEDED` no-result closure、null link result、audit-only
-  `RunStopped(BLOCKED)`，以及不存在 attempt 2、Agent result、Message、
+  旧 Run 从同一 snapshot 形成 exact `SupersededRunFinalizationEvidenceV2`，其中
+  `SUPERSEDED` no-result Run、null link result、audit-only
+  `RunStopped(BLOCKED)` 三者闭合；同时不存在 attempt 2、Agent result、Message、
   `ResponseRendered` 和 Task / RequestUnit mutation。
 
 Trajectory Grader 不要求所有表达使用同一自然语言，但必须对关键记录和路径做
@@ -3066,6 +3106,7 @@ exact-head review 与 merge 证据。
 | 15 | Contract Activation | Phase 2 现在能进入哪一步 | 用户授权独立 Activation；只推进到 `SCOPED_CONTRACT_ACTIVE / READY_FOR_PLANNING`，Case 保持 `CONTRACT_DEFINED`，不创建功能代码 |
 | 16 | W4 02-09 owner-gap ruling | reviewed Core / Application contract 能否持久化 exact restart recovery | 02-09 preflight 只读证明现有 Port / command 缺少 unfinished parent-only terminal、durable recovery decision child 与 `RETRY_SCHEDULED + RUN_BUDGET_EXHAUSTED` terminal；裁决采用 ToolCall v2 logical decision child、可信 budget evidence 与三个 single-writer correction Packet，02-09 source 保持 clean，Case lifecycle 不变 |
 | 17 | W4 02-09 dispatch-grant ruling | durable attempt fence 是否同时关闭 current-state 与 timeout authority | 02-09 exact-head review证明 initial bare ToolCall CAS 可在 Task/binding drift 后 dispatch，recovered writer只返回 enum会让Executor继续使用pre-CAS budget。裁决采用Application-private非持久化`Cycle2ReadDispatchGrant`、initial atomic wrapper与initial/recovered same-CAS timeout grant；增加`02-09R4 / W4R2` single-writer correction，02-09 head不发布，Case lifecycle不变 |
+| 18 | W12 OA-10 durable read-evidence ruling | exact reader 能否把瞬时 finalization command 当作 actual evidence | W12 preflight 证明 PostgreSQL 只持久化 terminal Run / no-result Link / RunStopped Trace，无法重放 `FinalizeSupersededRunV2Command.loaded_closure`；用户授权按建议持续修正到 W12 完成。裁决以同一 owner-scoped snapshot 的 exact terminal triplet形成 `SupersededRunFinalizationEvidenceV2`，禁止反推 replacement Run / trusted time，不新增 record、migration或shared Trace字段；后续 Application / Eval / Infrastructure 分别 single-writer 实现 |
 
 ## 14. Review checklist
 
@@ -3091,16 +3132,19 @@ Reviewer 应重点判断：
    obsolete Run suppression、restart no-retroactive-send 与 response-channel
    ownership 是否只有一个 disposition，且 `RM-I05` 不产生任何 mapper result /
    state mutation。
-9. v2 ToolCall（含 attempt 与 recovery decision logical children）/ Run / link / Trace record 的 closure、
+9. 第 7.10.1 节 OA-10 read evidence 是否只由同一 owner-scoped snapshot 的 durable
+   Run / Link / Trace triplet组成，且没有把 transient command、replacement Run、
+   trusted time 或 loaded closure 伪装为 actual evidence。
+10. v2 ToolCall（含 attempt 与 recovery decision logical children）/ Run / link / Trace record 的 closure、
    exact-version cutover 和 rollback fence 是否可机械实现，且没有补造历史 attempt
    metadata 或把新 Task version 伪装为旧 Run result。
-10. 组件 ownership 矩阵是否正确区分 semantic、Python source、Port、Adapter 与
+11. 组件 ownership 矩阵是否正确区分 semantic、Python source、Port、Adapter 与
    shared / specialized Trace ownership。
-11. 14 个 variants 是否逐项满足通用 EvalCase 字段、grading、version manifest、
+12. 14 个 variants 是否逐项满足通用 EvalCase 字段、grading、version manifest、
     typed predicate grammar、`CF-*` mapping 与 pair identity，且 13 个额外
     Trajectory Case 是否具有可唯一编码的完整 mapping。
-12. Document / Contract、Planning 与 EvalCase lifecycle 是否完全分轴。
-13. D1–D8 当前 task 冻结证据是否被诚实限定，且 exact-head full-contract approval
+13. Document / Contract、Planning 与 EvalCase lifecycle 是否完全分轴。
+14. D1–D8 当前 task 冻结证据是否被诚实限定，且 exact-head full-contract approval
     仍明确是 activation gate。
 
 ---
