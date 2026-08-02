@@ -7,7 +7,7 @@ import json
 import sys
 import threading
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -34,13 +34,19 @@ from mini_agent.application.records import (
     ApplyContinuationInputBindingV2Command,
     Cycle2WriteResult,
     ExactRunEvidenceClosure,
+    MessageDirection,
+    MessageRecord,
     RunTaskLinkRecordV2,
     SupersededRunInvalidationKind,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.request_understanding import ReferenceSourceKindV2
+from mini_agent.core.request_processing import (
+    Cycle2OrdinalSelectionRejectionReason,
+)
 from mini_agent.core.task_state import DurableResolvedReferenceCandidateV2
+from mini_agent.core.task_state import OrderCandidateSelectionRequest
 from mini_agent.core.trace import AgentRunRecordV2, AgentRunStatusV2
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
@@ -50,6 +56,11 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordStateHistoryModel,
 )
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    apply_cycle2_execution_setup_plan,
+    resolve_cycle2_execution_setup_plan,
+)
+from mini_agent.infrastructure.cycle2_runtime import Cycle2DetachedExecutionSetup
 
 _COMPONENT_APPLICATION_TESTS = (
     Path(__file__).parents[1] / "component" / "application"
@@ -238,12 +249,182 @@ def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
     return TrustedOwnerScope.from_customer_context(context)
 
 
+class _W12RecordSetupTarget:
+    def __init__(self) -> None:
+        self.setup: Cycle2DetachedExecutionSetup | None = None
+
+    def attach_cycle2_execution_setup(
+        self,
+        setup: Cycle2DetachedExecutionSetup,
+    ) -> None:
+        self.setup = setup
+
+    def detach_cycle2_execution_setup(
+        self,
+        setup: Cycle2DetachedExecutionSetup,
+    ) -> None:
+        if self.setup is setup:
+            self.setup = None
+
+
 def _non_ru_record_cases():
     return tuple(
         case
         for case in _record_cases()
         if case.code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
     )
+
+
+@pytest.mark.parametrize(
+    ("fixture_ref", "expected_hint", "expected_current_sets"),
+    (
+        ("fx-current-candidate-set-owner-a-v1", None, 1),
+        (
+            "fx-candidate-set-other-task-owner-a-v1",
+            Cycle2OrdinalSelectionRejectionReason.CROSS_TASK,
+            0,
+        ),
+        (
+            "fx-candidate-owner-mismatch-owner-a-v1",
+            Cycle2OrdinalSelectionRejectionReason.OWNER_MISMATCH,
+            1,
+        ),
+        (
+            "fx-superseded-candidate-set-owner-a-v1",
+            Cycle2OrdinalSelectionRejectionReason.SUPERSEDED,
+            0,
+        ),
+        (
+            "fx-zero-or-multiple-current-candidate-set-owner-a-v1",
+            Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE,
+            2,
+        ),
+    ),
+)
+async def test_w12_current_session_reader_returns_exact_binding_only_rejection_hint(
+    eval_postgres_namespace,
+    fixture_ref: str,
+    expected_hint: Cycle2OrdinalSelectionRejectionReason | None,
+    expected_current_sets: int,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    session_ref_hash = "0" * 64
+    adapter = PostgresRecordAdapter(
+        factory,
+        cycle2_session_owners={session_ref_hash: "customer-A"},
+    )
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(fixture_ref,),
+        environment_fixture_refs=("fx-order-targets-owner-a-v1",),
+        fault_ref=None,
+    )
+    target = _W12RecordSetupTarget()
+    try:
+        setup = apply_cycle2_execution_setup_plan(
+            factory,
+            plan,
+            attachment_target=target,
+        )
+        loaded = await adapter.load_current_session_task_for_owner(
+            owner_scope=_owner_scope(),
+            session_ref_hash=session_ref_hash,
+            trusted_now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+        )
+        assert loaded is not None
+        assert loaded.ordinal_selection_rejection_hint is expected_hint
+        assert len(loaded.current_candidate_set_records) == expected_current_sets
+        assert await adapter.load_current_session_task_for_owner(
+            owner_scope=_owner_scope(),
+            session_ref_hash="not-authorized",
+            trusted_now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+        ) is None
+        setup.detach()
+        setup.dispose()
+    finally:
+        engine.dispose()
+
+
+async def test_w12_owner_mismatch_selection_reader_is_indistinguishably_absent(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    session_ref_hash = "0" * 64
+    adapter = PostgresRecordAdapter(
+        factory,
+        cycle2_session_owners={session_ref_hash: "customer-A"},
+    )
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-candidate-owner-mismatch-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-order-targets-owner-a-v1",),
+        fault_ref=None,
+    )
+    target = _W12RecordSetupTarget()
+    try:
+        setup = apply_cycle2_execution_setup_plan(
+            factory,
+            plan,
+            attachment_target=target,
+        )
+        current = await adapter.load_current_session_task_for_owner(
+            owner_scope=_owner_scope(),
+            session_ref_hash=session_ref_hash,
+            trusted_now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+        )
+        assert current is not None
+        message = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=uuid4(),
+            conversation_id=current.conversation_record.conversation_id,
+            direction=MessageDirection.USER,
+            content="第二个",
+            received_at=datetime(2026, 7, 31, 11, 51, tzinfo=UTC),
+        )
+        run = AgentRunRecordV2(
+            run_id=uuid4(),
+            conversation_id=current.conversation_record.conversation_id,
+            status=AgentRunStatusV2.RUNNING,
+            provider_lane="scripted-cycle2",
+            started_at=message.received_at,
+        )
+        link = RunTaskLinkRecordV2(
+            run_id=run.run_id,
+            task_id=current.current_task_record.task_id,
+            base_task_state_version=current.current_task_record.state_version,
+            result_task_state_version=None,
+        )
+        with factory.begin() as session:
+            adapter._cycle2_insert(
+                session,
+                (
+                    adapter._cycle2_encode(P0RecordCode.MESSAGE_RECORD, message),
+                    adapter._cycle2_encode(P0RecordCode.AGENT_RUN_RECORD, run),
+                    adapter._cycle2_encode(P0RecordCode.RUN_TASK_LINK_RECORD, link),
+                ),
+                owner_customer_id="customer-A",
+            )
+        loaded = await adapter.load_order_candidate_selection_closure_for_owner(
+            owner_scope=_owner_scope(),
+            conversation_id=current.conversation_record.conversation_id,
+            task_id=current.current_task_record.task_id,
+            request_unit_id=current.current_request_unit_record.request_unit_id,
+            selection_request=OrderCandidateSelectionRequest(
+                source_message_ref=message.message_id,
+                ordinal_input_binding_ref=uuid4(),
+                ordinal=2,
+            ),
+            trusted_now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+        )
+        assert loaded is None
+        setup.detach()
+        setup.dispose()
+    finally:
+        engine.dispose()
 
 
 def _encode_non_ru_record_case(

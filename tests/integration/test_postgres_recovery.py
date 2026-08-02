@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import threading
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -27,7 +27,9 @@ from mini_agent.application.records import (
     MarkRunIncompleteForRecoveryCommand,
     RecoveryWriteResult,
     TransitionRunCommand,
+    TrustedOwnerScope,
 )
+from mini_agent.core.identity import CustomerContext
 from mini_agent.core.tool_system import ToolCallStatus, ToolEffect
 from mini_agent.core.trace import AgentRunStatus, StopReason
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
@@ -40,6 +42,11 @@ from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
 )
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    apply_cycle2_execution_setup_plan,
+    resolve_cycle2_execution_setup_plan,
+)
+from mini_agent.infrastructure.cycle2_runtime import Cycle2DetachedExecutionSetup
 
 _COMPONENT_APPLICATION_TESTS = (
     Path(__file__).parents[1] / "component" / "application"
@@ -112,6 +119,36 @@ def _recovery_command(closure):
     )
 
 
+class _RecoverySetupTarget:
+    def __init__(self) -> None:
+        self.setup: Cycle2DetachedExecutionSetup | None = None
+
+    def attach_cycle2_execution_setup(
+        self,
+        setup: Cycle2DetachedExecutionSetup,
+    ) -> None:
+        self.setup = setup
+
+    def detach_cycle2_execution_setup(
+        self,
+        setup: Cycle2DetachedExecutionSetup,
+    ) -> None:
+        if self.setup is setup:
+            self.setup = None
+
+
+def _w12_owner_scope() -> TrustedOwnerScope:
+    return TrustedOwnerScope.from_customer_context(
+        CustomerContext(
+            subject_ref="subject-A",
+            customer_id="customer-A",
+            auth_scopes=frozenset({"orders:read"}),
+            authenticated_at=datetime(2026, 7, 31, 11, 0, tzinfo=UTC),
+            session_ref_hash="0" * 64,
+        )
+    )
+
+
 def _assert_bounded_persistence_system_error(
     error: Exception,
     *,
@@ -142,6 +179,71 @@ async def _seed_created_recovery_candidate(
         CreateRunCommand(created_record=fixture.active_run_record)
     )
     return fixture
+
+
+async def test_w12_recovery_setup_reads_exact_root_and_supporting_closure(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    adapter = PostgresRecordAdapter(factory)
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-retry-scheduled-obsolete-run-owner-a-v1",
+        ),
+        environment_fixture_refs=(
+            "fx-search-unique-owner-a-with-foreign-decoy-v1",
+            "fx-shipment-current-owner-a-v1",
+        ),
+        fault_ref=(
+            "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1"
+        ),
+        authenticated_user_message="订单 O-1001 到哪了？",
+    )
+    target = _RecoverySetupTarget()
+    try:
+        setup = apply_cycle2_execution_setup_plan(
+            factory,
+            plan,
+            attachment_target=target,
+        )
+        assert plan.runtime_state.recovery_subject_run_id is not None
+        closure = await adapter.load_cycle2_exact_run_evidence_for_owner(
+            owner_scope=_w12_owner_scope(),
+            run_id=plan.runtime_state.recovery_subject_run_id,
+        )
+        assert closure is not None
+        assert closure.run_record.run_id == plan.runtime_state.recovery_subject_run_id
+        assert closure.run_record.status.value == "RUNNING"
+        assert closure.terminal_result is None
+        assert len(closure.message_records) == 1
+        assert closure.message_records[0].content == "订单 O-1001 到哪了？"
+        assert len(closure.supporting_run_records) == 1
+        root_tools = tuple(
+            record
+            for record in closure.tool_call_records
+            if record.run_id == closure.run_record.run_id
+        )
+        supporting_tools = tuple(
+            record
+            for record in closure.tool_call_records
+            if record.run_id != closure.run_record.run_id
+        )
+        assert len(root_tools) == 1
+        assert root_tools[0].attempts[0].retry_decision.value == "RETRY_SCHEDULED"
+        assert len(supporting_tools) == 1
+        assert all(
+            edge.source_run_id != closure.run_record.run_id
+            for edge in closure.observation_source_edges
+        )
+        serialized = closure.model_dump_json()
+        assert "customer-B" not in serialized
+        assert "O-9001" not in serialized
+        setup.detach()
+        setup.dispose()
+    finally:
+        engine.dispose()
 
 
 def _encoded_full_recovery_graph(*, effect: ToolEffect):

@@ -45,7 +45,14 @@ from mini_agent.infrastructure.cycle2_runtime import (
     Cycle2AttemptFault,
     Cycle2BusinessReadDispatchError,
     Cycle2BusinessReadHandler,
+    Cycle2FaultBoundary,
+    Cycle2FaultDirectiveKind,
+    Cycle2FaultProtocolError,
+    Cycle2InjectedProcessRestart,
+    build_cycle2_detached_fault_controller,
+    consume_cycle2_retry_finalize_boundary,
 )
+from mini_agent.infrastructure.cycle2_fixture_seed import cycle2_w12_fault_catalog
 
 NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 
@@ -292,3 +299,136 @@ async def test_runtime_handler_rejects_unmapped_owner_before_business_read() -> 
     with pytest.raises(Cycle2BusinessReadDispatchError):
         await handler(call, attempt, 137)
     assert search.queries == []
+
+
+@pytest.mark.parametrize(
+    ("fault_ref", "consumptions"),
+    (
+        (
+            "fault:get-shipment:transient-once-v1",
+            ((1, Cycle2FaultBoundary.BEFORE_DISPATCH, Cycle2FaultDirectiveKind.SYSTEM_FAILURE),),
+        ),
+        (
+            "fault:get-shipment:transient-always-v1",
+            (
+                (1, Cycle2FaultBoundary.BEFORE_DISPATCH, Cycle2FaultDirectiveKind.SYSTEM_FAILURE),
+                (2, Cycle2FaultBoundary.BEFORE_DISPATCH, Cycle2FaultDirectiveKind.SYSTEM_FAILURE),
+            ),
+        ),
+        (
+            "fault:get-shipment:source-integrity-v1",
+            ((1, Cycle2FaultBoundary.BEFORE_DISPATCH, Cycle2FaultDirectiveKind.SYSTEM_FAILURE),),
+        ),
+        (
+            "fault:get-shipment:timeout-after-dispatch-once-v1",
+            ((1, Cycle2FaultBoundary.AFTER_DISPATCH, Cycle2FaultDirectiveKind.TIMEOUT),),
+        ),
+        (
+            "fault:get-shipment:restart-after-retry-finalize-v1",
+            ((1, Cycle2FaultBoundary.AFTER_RETRY_FINALIZE, Cycle2FaultDirectiveKind.PROCESS_RESTART),),
+        ),
+        (
+            "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1",
+            ((1, Cycle2FaultBoundary.AFTER_RETRY_FINALIZE, Cycle2FaultDirectiveKind.PROCESS_RESTART),),
+        ),
+        (
+            "fault:get-shipment:restart-with-unfinished-attempt-v1",
+            ((1, Cycle2FaultBoundary.AFTER_ATTEMPT_START, Cycle2FaultDirectiveKind.PROCESS_RESTART),),
+        ),
+    ),
+)
+def test_w12_fault_controller_consumes_exact_attempt_and_boundary_once(
+    fault_ref: str,
+    consumptions: tuple[tuple[int, Cycle2FaultBoundary, Cycle2FaultDirectiveKind], ...],
+) -> None:
+    controller = build_cycle2_detached_fault_controller(
+        cycle2_w12_fault_catalog()[fault_ref]
+    )
+    assert controller.is_detached
+    controller.attach()
+    for attempt_no, boundary, expected_kind in consumptions:
+        directive = controller.consume(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=attempt_no,
+            boundary=boundary,
+        )
+        assert directive is not None
+        assert directive.kind is expected_kind
+    controller.assert_exhausted()
+    with pytest.raises(Cycle2FaultProtocolError):
+        controller.consume(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=consumptions[-1][0],
+            boundary=consumptions[-1][1],
+        )
+    controller.detach()
+    controller.dispose()
+    assert controller.is_disposed
+
+
+def test_w12_fault_controller_rejects_wrong_phase_tool_and_use_before_attach() -> None:
+    definition = cycle2_w12_fault_catalog()[
+        "fault:get-shipment:timeout-after-dispatch-once-v1"
+    ]
+    controller = build_cycle2_detached_fault_controller(definition)
+    with pytest.raises(Cycle2FaultProtocolError):
+        controller.consume(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            boundary=Cycle2FaultBoundary.AFTER_DISPATCH,
+        )
+    controller.attach()
+    with pytest.raises(Cycle2FaultProtocolError):
+        controller.consume(
+            canonical_tool_name=Cycle2ToolName.GET_ORDER,
+            attempt_no=1,
+            boundary=Cycle2FaultBoundary.AFTER_DISPATCH,
+        )
+    with pytest.raises(Cycle2FaultProtocolError):
+        controller.consume(
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+            boundary=Cycle2FaultBoundary.BEFORE_DISPATCH,
+        )
+
+
+async def test_timeout_after_dispatch_reads_real_row_then_returns_timeout() -> None:
+    closure, call, attempt = _graph(Cycle2ToolName.GET_SHIPMENT)
+    shipment = _ShipmentPort()
+    controller = build_cycle2_detached_fault_controller(
+        cycle2_w12_fault_catalog()[
+            "fault:get-shipment:timeout-after-dispatch-once-v1"
+        ]
+    )
+    controller.attach()
+    handler = Cycle2BusinessReadHandler(
+        runtime_record_port=_RecordPort(closure),
+        search_orders_port=_SearchPort(),
+        get_order_port=_OrderPort(),
+        get_shipment_port=shipment,
+        owner_scopes={closure.owner_scope.customer_id: closure.owner_scope},
+        clock=lambda: NOW + timedelta(microseconds=1),
+        fault_controller=controller,
+    )
+    result = await handler(call, attempt, 137)
+    assert len(shipment.queries) == 1
+    assert result.outcome is ToolResultOutcome.TIMEOUT
+    assert result.error_code == "TOOL_CALL_TIMEOUT"
+    assert result.retryable is True
+    controller.assert_exhausted()
+
+
+def test_retry_finalize_restart_is_consumed_only_by_explicit_lifecycle_hook() -> None:
+    controller = build_cycle2_detached_fault_controller(
+        cycle2_w12_fault_catalog()[
+            "fault:get-shipment:restart-after-retry-finalize-v1"
+        ]
+    )
+    controller.attach()
+    with pytest.raises(Cycle2InjectedProcessRestart, match="RETRY_RECOVERY"):
+        consume_cycle2_retry_finalize_boundary(
+            controller,
+            canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+            attempt_no=1,
+        )
+    controller.assert_exhausted()
