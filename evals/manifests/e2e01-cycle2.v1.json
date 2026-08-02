@@ -34,7 +34,7 @@
       "path": "evals/cases/e2e01-cycle2.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-cycle2-dataset-v1",
-      "sha256": "5026ab451a0ea60ffeb673ceb04626a1bfe4329b8be19c9c957322ce6cde8477"
+      "sha256": "4f8821bd0ca4dfe19521b3b889b13428f5722bf47263e87b7f60fd392aa6605a"
     },
     {
       "artifact_id": "e2e01-cycle2-model-scripts",
@@ -57,7 +57,7 @@
     "e2e01-cycle2-model-scripts",
     "e2e01-cycle2-lanes"
   ],
-  "case_lifecycle_status": "CONTRACT_DEFINED",
+  "case_lifecycle_status": "EXECUTABLE",
   "eval_result_artifacts_created": false,
   "baseline_result_artifacts_created": false
 }

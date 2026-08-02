@@ -13,6 +13,7 @@ from mini_agent.evaluation.artifacts import (
     ArtifactContractError,
     ArtifactIntegrityError,
     load_e2e01_artifacts,
+    load_e2e01_cycle2_artifacts,
 )
 
 
@@ -31,6 +32,13 @@ EXPECTED_HASHES = {
     REFERENCED[3]: "61e43e8a560c3b31d1444759360941bb038d41a94ee1326be7c8cce52808158d",
     MANIFEST: "cf7683133145cf5c2c161b396be852ce4c226e3bc9d3154fd2b1dc8149166cb9",
 }
+CYCLE2_MANIFEST = Path("evals/manifests/e2e01-cycle2.v1.json")
+CYCLE2_REFERENCED = (
+    Path("evals/fixtures/e2e01-cycle2.v1.json"),
+    Path("evals/cases/e2e01-cycle2.v1.json"),
+    Path("evals/model_scripts/e2e01-cycle2.v1.json"),
+    Path("evals/lanes/e2e01-cycle2.v1.json"),
+)
 
 
 def _copy_artifacts(tmp_path: Path) -> Path:
@@ -60,6 +68,43 @@ def _reauthenticate_manifest(
 ) -> None:
     digest = hashlib.sha256((root / MANIFEST).read_bytes()).hexdigest()
     monkeypatch.setattr(artifact_module, "EXPECTED_MANIFEST_SHA256", digest)
+
+
+def _copy_cycle2_artifacts(tmp_path: Path) -> Path:
+    for relative in (*CYCLE2_REFERENCED, CYCLE2_MANIFEST):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / relative, target)
+    return tmp_path
+
+
+def _reauthenticate_cycle2_manifest(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = hashlib.sha256((root / CYCLE2_MANIFEST).read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        artifact_module,
+        "CYCLE2_EXPECTED_MANIFEST_SHA256",
+        digest,
+    )
+
+
+def _reauthenticate_cycle2_cases(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _read_json(root, CYCLE2_MANIFEST)
+    case_entry = next(
+        entry
+        for entry in manifest["artifacts"]  # type: ignore[union-attr]
+        if entry["artifact_id"] == "e2e01-cycle2-cases"
+    )
+    case_entry["sha256"] = hashlib.sha256(
+        (root / CYCLE2_REFERENCED[1]).read_bytes()
+    ).hexdigest()
+    _write_json(root, CYCLE2_MANIFEST, manifest)
+    _reauthenticate_cycle2_manifest(root, monkeypatch)
 
 
 def test_loads_exact_five_artifacts_and_binds_caller_versions() -> None:
@@ -235,3 +280,72 @@ def test_caller_version_binding_rejects_missing_or_placeholder_values(
             candidate_version=candidate_version,
             runtime_version=runtime_version,
         )
+
+
+def test_cycle2_loads_the_atomic_executable_bundle() -> None:
+    bundle = load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="candidate:cycle2-executable",
+        runtime_version="runtime:cycle2-executable",
+    )
+
+    assert len(bundle.cases) == 27
+    assert {case.lifecycle_status for case in bundle.cases} == {"EXECUTABLE"}
+    assert bundle.manifest["case_lifecycle_status"] == "EXECUTABLE"
+    assert bundle.manifest["eval_result_artifacts_created"] is False
+    assert bundle.manifest["baseline_result_artifacts_created"] is False
+
+
+def test_cycle2_reauthenticated_manifest_lifecycle_downgrade_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    manifest = _read_json(root, CYCLE2_MANIFEST)
+    manifest["case_lifecycle_status"] = "CONTRACT_DEFINED"
+    _write_json(root, CYCLE2_MANIFEST, manifest)
+    _reauthenticate_cycle2_manifest(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="version manifest closed values are invalid",
+    ):
+        load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
+
+
+def test_cycle2_reauthenticated_mixed_case_lifecycle_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    cases = _read_json(root, CYCLE2_REFERENCED[1])
+    first_case = cases["cases"][0]  # type: ignore[index]
+    first_case["lifecycle_status"] = "CONTRACT_DEFINED"  # type: ignore[index]
+    _write_json(root, CYCLE2_REFERENCED[1], cases)
+    _reauthenticate_cycle2_cases(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="Case lifecycle or title is invalid",
+    ):
+        load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
+
+
+def test_cycle2_reauthenticated_registry_version_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    cases = _read_json(root, CYCLE2_REFERENCED[1])
+    first_case = cases["cases"][0]  # type: ignore[index]
+    first_case["version_manifest"]["tool_registry_version"] = (  # type: ignore[index]
+        "e2e01-cycle2-tools-v1"
+    )
+    _write_json(root, CYCLE2_REFERENCED[1], cases)
+    _reauthenticate_cycle2_cases(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="grading or version contract is invalid",
+    ):
+        load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
