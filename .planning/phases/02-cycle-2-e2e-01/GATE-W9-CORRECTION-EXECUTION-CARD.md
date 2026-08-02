@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_TYPED_READ_EXECUTION / 02-15R1_SECOND_REFREEZE_REVIEW`
+状态：`B_C2_W9_R1CD_OWNER_APPROVED / 02-15R1C_PLAN_REVIEW`
 
 ## Exact input
 
@@ -22,6 +22,11 @@
   `B_C2_W9_TYPED_READ_EXECUTION = 1fba65168fb487d3c4a8664213831a9c1c5dc815` /
   tree `ec3c8c501c3c6385cef834f8a5efd1056642087d`。focused `68 passed`、neighbor
   `446 passed`；R1 checkpoint仍未发布，必须从该真实successor重新实现。
+- PR #280已reviewed完成R1 second-refreeze planning；writer随后只读确认UNIQUE
+  search outcome没有durable verified-target capability/Core route。PR #281已reviewed
+  批准`02-15R1C → 02-15R1D`，当前36 slots / 16 wave labels；真实
+  `B_C2_W9_R1CD_OWNER_APPROVED = aef424c0fdd1b2c913a699b6a4f456e14b178eee` /
+  tree `dc4662ac4e994811cb8a2160f9678d8f86cfdf61`。旧R1 checkpoint继续未发布。
 
 ## Ordered dispatch
 
@@ -29,7 +34,9 @@
 02-15R0 exact Spec seed contract → review/merge B_C2_W9_SEED_CONTRACT
 → 02-15R1A Core initial product-description RU → review/merge B_C2_W9_INITIAL_RU
 → 02-15R1B typed read-execution envelope → review/merge B_C2_W9_TYPED_READ_EXECUTION
-→ refreeze 02-15R1 Application normal entry → review/merge
+→ 02-15R1C UNIQUE target durability Spec → review/merge B_C2_W9_UNIQUE_TARGET_CONTRACT
+→ 02-15R1D UNIQUE auto-target Core route → review/merge B_C2_W9_UNIQUE_TARGET_CORE
+→ third-refreeze 02-15R1 Application normal entry → review/merge
 → refreeze 02-15R2 Infrastructure normal evidence/dispatch/typed seed → review/merge
 → refreeze original 02-15 composition-only seam
 ```
@@ -44,4 +51,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R1` exact-six-file second-refreeze planning/review；R1实现、R2/02-15尚未冻结。
+当前只允许`02-15R1C` exact-one-file planning/review；R1C实现、R1D/R1/R2/02-15尚未冻结。
