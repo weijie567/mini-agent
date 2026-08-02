@@ -3773,14 +3773,15 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             or source.request_unit_id != expected_unit.request_unit_id
             or source.run_id != run.run_id
             or source.validated_task_state_version != expected_task.state_version
+            or source.finished_at is None
             or not (
                 run.started_at
                 <= query_binding.accepted_at
-                <= loaded.trusted_read_at
                 <= source.started_at
+                <= source.finished_at
+                <= loaded.trusted_read_at
+                <= observation.recorded_at
             )
-            or source.finished_at is None
-            or source.finished_at > observation.recorded_at
             or observation.source_tool_call_id != source.tool_call_id
             or candidate_set.source_tool_call_id != source.tool_call_id
             or candidate_set.task_id != expected_task.task_id
@@ -5092,8 +5093,11 @@ class ToolRetryRecoveryReadClosureV2(_StrictRuntimePrivateRecord):
         if (
             link.run_id != run.run_id
             or link.task_id != task.task_id
-            or link.base_task_state_version
-            != tool_call.validated_task_state_version
+            or (
+                link.base_task_state_version is not None
+                and link.base_task_state_version
+                > tool_call.validated_task_state_version
+            )
             or link.result_task_state_version is not None
         ):
             raise ValueError("recovery RunTaskLink does not match active Tool state")

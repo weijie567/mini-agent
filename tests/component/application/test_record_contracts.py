@@ -7757,7 +7757,7 @@ def _c2_search_runtime_fields(
         current_query_binding=query,
         current_task_record=task,
         current_request_unit_record=unit,
-        trusted_read_at=source.started_at,
+        trusted_read_at=candidate_set.created_at,
     )
     return {
         "loaded_read_closure": loaded,
@@ -8158,7 +8158,7 @@ def _c2_earlier_query_superseding_search_commands() -> tuple[
         current_query_binding=query_v2,
         current_task_record=task_v2,
         current_request_unit_record=unit_v2,
-        trusted_read_at=previous_source.started_at,
+        trusted_read_at=previous_observation.recorded_at,
     )
     previous_command = ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
@@ -8209,7 +8209,7 @@ def _c2_earlier_query_superseding_search_commands() -> tuple[
         current_search_observation_record=previous_observation,
         current_candidate_set_record=previous_candidate_set,
         current_auto_target_records=(previous_auto_target,),
-        trusted_read_at=current_seed.source_tool_call_record.started_at,
+        trusted_read_at=current_seed.search_observation_record.recorded_at,
     )
     current_command = ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
@@ -10638,6 +10638,29 @@ def test_cycle2_recovery_closure_derives_budget_and_exact_decision_child() -> No
         )
 
 
+def test_cycle2_recovery_closure_accepts_initial_or_earlier_run_baseline() -> None:
+    closure = _c2_retry_recovery_closure()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in type(closure).model_fields
+    }
+
+    for base_version in (None, 2):
+        rebuilt = ToolRetryRecoveryReadClosureV2(
+            **{
+                **values,
+                "active_run_task_link_record": _c2_project(
+                    closure.active_run_task_link_record,
+                    base_task_state_version=base_version,
+                ),
+            }
+        )
+        assert (
+            rebuilt.active_run_task_link_record.base_task_state_version
+            == base_version
+        )
+
+
 def test_cycle2_recovered_append_is_one_atomic_decision_and_attempt_fence() -> None:
     closure = _c2_retry_recovery_closure()
     child = _c2_recovery_decision_record(closure)
@@ -10835,7 +10858,7 @@ def test_cycle2_recovery_closure_fails_closed_on_stale_partial_or_duplicate_grap
             {
                 "active_run_task_link_record": _c2_project(
                     closure.active_run_task_link_record,
-                    base_task_state_version=2,
+                    base_task_state_version=4,
                 )
             },
             "RunTaskLink",

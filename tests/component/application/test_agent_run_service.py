@@ -51,6 +51,7 @@ from mini_agent.application.records import (
     RequestUnderstandingCandidateInvalidError,
     ToolDispatchFenceWriteResult,
 )
+from mini_agent.core.control_gateway import Cycle2ToolProgressFact
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ObservationVisibility,
@@ -3001,8 +3002,11 @@ def test_cycle2_execute_tool_builds_raw_closed_gateway_loaded_graph(
     class _GatewayCaptured(Exception):
         pass
 
+    real_gateway = agent_run_service_module.evaluate_cycle2_control_gateway
+
     def capture_gateway(**kwargs: object) -> object:
         gateway_inputs.update(kwargs)
+        gateway_inputs["gate"] = real_gateway(**kwargs)
         raise _GatewayCaptured
 
     handler._runtime_record_port = _InitialClosureRuntime()  # type: ignore[assignment]
@@ -3034,6 +3038,104 @@ def test_cycle2_execute_tool_builds_raw_closed_gateway_loaded_graph(
     loaded = gateway_inputs["loaded_closure"]
     assert loaded.customer_context.provenance == "SERVER_AUTH_ADAPTER"
     assert loaded.context_manifest == gateway_inputs["manifest"]
+    assert loaded.context_manifest.task_state_ref_and_version is None
+    assert gateway_inputs["candidate"].proposed_base_task_state_version is None
+    assert gateway_inputs["gate"].decision.value == "ACCEPT"
+    assert gateway_inputs["gate"].reason_code is None
+
+
+def test_cycle2_execute_tool_rebases_prior_progress_to_current_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
+    _, captured = _capture_cycle2_initial_turn(handler)
+    turn = captured["turn"]
+    previous_manifest_id = uuid4()
+    previous_state_version = 9
+    turn.tool_progress.append(
+        Cycle2ToolProgressFact(
+            tool_call_id=uuid4(),
+            run_id=turn.running_run.run_id,
+            context_manifest_id=previous_manifest_id,
+            tool_registry_version=(
+                handler._registry_snapshot.tool_registry_version
+            ),
+            model_visible_toolset_hash=(
+                handler._registry_snapshot.model_visible_toolset_hash
+            ),
+            canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+            validated_arguments={"product_description": "轻量跑鞋"},
+            task_state_version=previous_state_version,
+            argument_binding_refs=(
+                captured["input_bindings"][0].binding_id,
+            ),
+            verified_target_ref=None,
+        )
+    )
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=turn.owner_scope,
+        current_task_record=captured["task"],
+        current_request_unit_record=captured["request_unit"],
+        current_input_binding_records=captured["input_bindings"],
+        current_verified_order_targets=(),
+        current_target_observations=(),
+        trusted_read_at=NOW,
+    )
+    captured_gateway: dict[str, object] = {}
+
+    class _Runtime:
+        async def load_initial_tool_call_v2_closure_for_owner(
+            self,
+            **_kwargs: object,
+        ) -> InitialToolCallV2ReadClosure:
+            return closure
+
+    class _Context:
+        async def save_context_manifest(self, _record: object) -> None:
+            return None
+
+    class _Captured(Exception):
+        pass
+
+    def capture_gateway(**kwargs: object) -> object:
+        captured_gateway.update(kwargs)
+        raise _Captured
+
+    handler._runtime_record_port = _Runtime()  # type: ignore[assignment]
+    handler._context_record_port = _Context()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        agent_run_service_module,
+        "evaluate_cycle2_control_gateway",
+        capture_gateway,
+    )
+
+    with pytest.raises(_Captured):
+        asyncio.run(
+            handler._execute_tool(
+                command=AgentRunCommand(
+                    customer_context=_context(),
+                    message="查找轻量跑鞋订单",
+                ),
+                turn=turn,
+                task_id=captured["task"].task_id,
+                request_unit_id=captured["request_unit"].request_unit_id,
+                candidate_factory=captured["candidate_factory"],
+            )
+        )
+
+    candidate = captured_gateway["candidate"]
+    progress = captured_gateway["loaded_closure"].progress_snapshot
+    assert progress.context_manifest_id == candidate.context_manifest_id
+    assert progress.task_state_version == candidate.validated_task_state_version
+    assert progress.prior_tool_steps[0].context_manifest_id == (
+        candidate.context_manifest_id
+    )
+    assert progress.prior_tool_steps[0].task_state_version == (
+        candidate.validated_task_state_version
+    )
+    assert turn.tool_progress[0].context_manifest_id == previous_manifest_id
+    assert turn.tool_progress[0].task_state_version == previous_state_version
 
 
 def test_cycle2_search_conflict_finalizes_from_pre_cas_task_version() -> None:
@@ -3078,6 +3180,71 @@ def test_cycle2_search_conflict_finalizes_from_pre_cas_task_version() -> None:
     assert finalized["task"].state_version == 1
     assert finalized["request_unit"].state_version == 1
     assert finalized["step"].mapping.row_id == "RM-03"
+
+
+def test_cycle2_unique_search_commits_target_at_result_state_version() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2ProviderHarness()
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    multiple = _cycle2_multiple_search_result()
+    result = SearchOrdersResult(
+        outcome=SearchOrdersOutcome.UNIQUE,
+        candidates=(multiple.candidates[0],),
+        snapshot_resource_ref=multiple.snapshot_resource_ref,
+        snapshot_source_version=multiple.snapshot_source_version,
+        observed_at=multiple.observed_at,
+        failure_code=None,
+    )
+    get_order: dict[str, object] = {}
+
+    async def propose_followup(*_args: object) -> NextMove:
+        return NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-1001"},
+            base_task_state_version=2,
+        )
+
+    async def capture_get_order(**kwargs: object) -> AgentRunResult:
+        get_order.update(kwargs)
+        return sentinel
+
+    provider.propose_cycle2_search_followup = propose_followup  # type: ignore[method-assign]
+    handler._get_order = capture_get_order  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        handler._apply_successful_search(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message="查找轻量跑鞋订单",
+            ),
+            turn=captured["turn"],
+            task=task,
+            request_unit=unit,
+            input_bindings=captured["input_bindings"],
+            execution=_cycle2_search_execution(
+                turn=captured["turn"],
+                task=task,
+                unit=unit,
+                binding_ref=binding.binding_id,
+                result=result,
+            ),
+            result=result,
+        )
+    )
+
+    assert outbound is sentinel
+    search_command = runtime.search_commands[0]
+    assert search_command.auto_target_record.result_task_state_version == 2
+    assert search_command.auto_target_record.request_unit_id == (
+        search_command.next_request_unit_record.request_unit_id
+    )
+    assert get_order["task"] == search_command.next_task_record
+    assert get_order["request_unit"] == search_command.next_request_unit_record
 
 
 def test_cycle2_handler_continues_multiple_with_ordinal_without_research() -> None:
