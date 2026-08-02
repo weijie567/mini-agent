@@ -457,9 +457,23 @@ async def test_cycle2_unique_first_turn_persists_real_normal_graph_and_exact_evi
         assert result.outcome is AgentOutcome.COMPLETED
         assert evidence is not None
         assert evidence.terminal_result == result
+        assert evidence.supporting_run_records == ()
         assert len(evidence.task_records) == 1
         assert evidence.task_records[0].state_version == 3
         assert len(evidence.input_binding_records) == 1
+        assert evidence.task_state_transition_records == ()
+        assert len(evidence.candidate_set_records) == 1
+        assert evidence.candidate_selection_records == ()
+        assert len(evidence.search_observation_records) == 1
+        assert len(evidence.order_observation_records) == 1
+        assert evidence.shipment_observation_records == ()
+        assert len(evidence.observation_source_edges) == 2
+        assert evidence.shipment_assessment_records == ()
+        assert len(evidence.tool_call_records) == 2
+        assert evidence.recovery_decision_records == ()
+        assert evidence.superseded_run_finalizations == ()
+        assert len(evidence.context_manifest_records) == 2
+        assert len(evidence.model_visible_toolset_artifacts) == 1
         assert current is not None
         assert current.current_task_record == evidence.task_records[0]
         assert await records.load_cycle2_exact_run_evidence_for_owner(
