@@ -79,6 +79,7 @@ from mini_agent.application.records import (
     SaveObservationCommand,
     SaveRequestUnderstandingV2AcceptedCommand,
     SaveRequestUnderstandingV2NoTaskCommand,
+    SaveOrderObservationV2Command,
     TaskRecoveryAggregate,
     ShipmentAssessmentReadClosure,
     ShipmentNotReceivedClaimReadClosure,
@@ -118,6 +119,8 @@ from mini_agent.core.memory import (
     VersionedRecordRef,
 )
 from mini_agent.core.order import (
+    GetOrderOutcome,
+    GetOrderResult,
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
@@ -143,6 +146,7 @@ from mini_agent.core.task_state import (
     InputBindingV2,
     InputValidationStatus,
     ORDER_SEARCH_OBSERVATION_RECORD_SCHEMA_VERSION,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
     OrderCandidateSetEntry,
@@ -7847,6 +7851,27 @@ def _c2_unique_search_command() -> ApplyOrderSearchOutcomeV2Command:
         compute_order_candidate_set_version(**candidate_values)
     )
     candidate_set = OrderCandidateSetRecord.model_validate(candidate_values)
+    auto_target = OrderCandidateAutoTargetRecord(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=candidate_set.conversation_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        query_input_binding_ref=query_ref,
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        source_tool_call_id=source.tool_call_id,
+        search_observation_ref=observation.observation_id,
+        search_observation_record_schema_version=observation.record_schema_version,
+        search_observation_source_version=observation.source_version,
+        observation_candidate_ref=candidate.observation_candidate_ref,
+        candidate_source_version=candidate.candidate_source_version,
+        owner_scoped_order_target_ref=binding.owner_scoped_order_ref,
+        order_id=candidate.public_summary.order_number,
+        base_task_state_version=candidate_set.base_task_state_version,
+        result_task_state_version=candidate_set.result_task_state_version,
+        verified_at=observation.recorded_at,
+    )
     return ApplyOrderSearchOutcomeV2Command(
         owner_scope=owner,
         **_c2_search_runtime_fields(owner, candidate_set, source, task, unit),
@@ -7868,6 +7893,8 @@ def _c2_unique_search_command() -> ApplyOrderSearchOutcomeV2Command:
         candidate_set_record=candidate_set,
         current_query_binding_refs=(query_ref,),
         resolved_owner_scoped_order_target_ref=binding.owner_scoped_order_ref,
+        resolved_order_id=candidate.public_summary.order_number,
+        auto_target_record=auto_target,
     )
 
 
@@ -7945,6 +7972,8 @@ def test_cycle2_unique_search_closes_without_pending_question() -> None:
     assert command.next_task_record.status is TaskStatus.ACTIVE
     assert command.next_request_unit_record.open_questions == ()
     assert command.pending_candidate_set_ref is None
+    assert command.auto_target_record is not None
+    assert command.auto_target_record.verified_target_ref.version == 4
 
     values = {
         field_name: getattr(command, field_name)
@@ -8092,6 +8121,29 @@ def _c2_earlier_query_superseding_search_commands() -> tuple[
         **previous_values
     )
     previous_candidate_set = OrderCandidateSetRecord.model_validate(previous_values)
+    previous_auto_target = OrderCandidateAutoTargetRecord(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=task_v2.task_id,
+        request_unit_id=unit_v2.request_unit_id,
+        query_input_binding_ref=query_ref,
+        candidate_set_ref=previous_candidate_set.candidate_set_id,
+        candidate_set_version=previous_candidate_set.candidate_set_version,
+        source_tool_call_id=previous_source.tool_call_id,
+        search_observation_ref=previous_observation.observation_id,
+        search_observation_record_schema_version=(
+            previous_observation.record_schema_version
+        ),
+        search_observation_source_version=previous_observation.source_version,
+        observation_candidate_ref=previous_candidate_ref,
+        candidate_source_version=previous_candidate_version,
+        owner_scoped_order_target_ref=previous_target.owner_scoped_order_ref,
+        order_id=previous_safe_candidate.public_summary.order_number,
+        base_task_state_version=previous_candidate_set.base_task_state_version,
+        result_task_state_version=previous_candidate_set.result_task_state_version,
+        verified_at=previous_observation.recorded_at,
+    )
     previous_run = AgentRunRecordV2(
         run_id=previous_source.run_id,
         conversation_id=conversation.conversation_id,
@@ -8129,6 +8181,8 @@ def _c2_earlier_query_superseding_search_commands() -> tuple[
         resolved_owner_scoped_order_target_ref=(
             previous_target.owner_scoped_order_ref
         ),
+        resolved_order_id=previous_safe_candidate.public_summary.order_number,
+        auto_target_record=previous_auto_target,
     )
 
     current_candidate_set = _c2_rebuild_candidate_set(
@@ -8154,6 +8208,7 @@ def _c2_earlier_query_superseding_search_commands() -> tuple[
         current_candidate_source_tool_call_record=previous_source,
         current_search_observation_record=previous_observation,
         current_candidate_set_record=previous_candidate_set,
+        current_auto_target_records=(previous_auto_target,),
         trusted_read_at=current_seed.source_tool_call_record.started_at,
     )
     current_command = ApplyOrderSearchOutcomeV2Command(
@@ -8469,6 +8524,18 @@ def test_cycle2_search_rejects_supersession_authority_reuse(
             ),
         )
 
+    previous_auto_target = command.loaded_read_closure.current_auto_target_records[0]
+    previous_entry = previous_candidate_set.ordered_candidates[0]
+    previous_auto_target = _c2_project(
+        previous_auto_target,
+        candidate_set_ref=previous_candidate_set.candidate_set_id,
+        candidate_set_version=previous_candidate_set.candidate_set_version,
+        source_tool_call_id=previous_source.tool_call_id,
+        search_observation_ref=previous_observation.observation_id,
+        search_observation_source_version=previous_observation.source_version,
+        observation_candidate_ref=previous_entry.observation_candidate_ref,
+        candidate_source_version=previous_entry.candidate_source_version,
+    )
     loaded = OrderSearchCurrentReadClosure(
         **{
             **{
@@ -8478,6 +8545,7 @@ def test_cycle2_search_rejects_supersession_authority_reuse(
             "current_candidate_source_tool_call_record": previous_source,
             "current_search_observation_record": previous_observation,
             "current_candidate_set_record": previous_candidate_set,
+            "current_auto_target_records": (previous_auto_target,),
         }
     )
     values = {
@@ -9651,19 +9719,111 @@ def _c2_shipment_inputs() -> tuple[
         source_version=observation.source_version,
         observed_at=observation.observed_at,
     )
-    unit = _c2_project(
-        unit,
-        observation_refs=(observation.observation_id,),
-    )
     return owner, task, unit, source, result, observation
+
+
+def test_cycle2_order_observation_advances_task_graph_exactly_once() -> None:
+    owner = _owner_scope()
+    task = _task(state_version=3)
+    unit = _request_unit(task_id=task.task_id, state_version=3)
+    observation = _observation(
+        recorded_at=UTC_NOW + timedelta(seconds=1),
+        observed_at=UTC_NOW + timedelta(seconds=1),
+        source_version=(
+            "mock-order-source-version.p0.v1:sha256:" + "d" * 64
+        ),
+    )
+    source = _c2_tool_call(
+        name=Cycle2ToolName.GET_ORDER,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+    )
+    successful_attempt = _c2_attempt(
+        tool_call_id=source.tool_call_id,
+        finished_at=observation.observed_at,
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    source = _c2_project(
+        source,
+        attempts=(successful_attempt,),
+        attempt_count=1,
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=observation.observed_at,
+        result_ref=uuid4(),
+    )
+    result = GetOrderResult(
+        outcome=GetOrderOutcome.FOUND,
+        order_summary=observation.normalized_value,
+        source_version=observation.source_version,
+    )
+    next_task = _c2_project(
+        task,
+        state_version=task.state_version + 1,
+        updated_at=observation.recorded_at,
+    )
+    next_unit = _c2_project(
+        unit,
+        state_version=unit.state_version + 1,
+        updated_at=observation.recorded_at,
+        observation_refs=(*unit.observation_refs, observation.observation_id),
+    )
+
+    command = SaveOrderObservationV2Command(
+        owner_scope=owner,
+        expected_task_record=task,
+        next_task_record=next_task,
+        expected_request_unit_record=unit,
+        next_request_unit_record=next_unit,
+        source_tool_call_record=source,
+        source_result_ref=source.result_ref,
+        source_result=result,
+        observation_record=observation,
+        trusted_acceptance_now=observation.recorded_at,
+    )
+
+    assert command.next_task_record.state_version == 4
+    assert command.next_request_unit_record.observation_refs[-1] == (
+        observation.observation_id
+    )
+    command_values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    with pytest.raises(ValidationError, match="Task effect"):
+        SaveOrderObservationV2Command(
+            **{
+                **command_values,
+                "next_request_unit_record": _c2_project(
+                    next_unit,
+                    observation_refs=unit.observation_refs,
+                ),
+            }
+        )
 
 
 def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -> None:
     owner, task, unit, source, result, observation = _c2_shipment_inputs()
+    expected_task = task
+    expected_unit = unit
+    task = _c2_project(
+        expected_task,
+        state_version=expected_task.state_version + 1,
+        updated_at=observation.recorded_at,
+    )
+    unit = _c2_project(
+        expected_unit,
+        state_version=expected_unit.state_version + 1,
+        updated_at=observation.recorded_at,
+        observation_refs=(observation.observation_id,),
+    )
     SaveShipmentObservationV2Command(
         owner_scope=owner,
-        current_task_record=task,
-        current_request_unit_record=unit,
+        expected_task_record=expected_task,
+        next_task_record=task,
+        expected_request_unit_record=expected_unit,
+        next_request_unit_record=unit,
         source_tool_call_record=source,
         source_result_ref=source.result_ref,
         source_result=result,
@@ -9759,8 +9919,10 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="Task owner"):
         SaveShipmentObservationV2Command(
             owner_scope=_owner_scope("customer-B"),
-            current_task_record=task,
-            current_request_unit_record=unit,
+            expected_task_record=expected_task,
+            next_task_record=task,
+            expected_request_unit_record=expected_unit,
+            next_request_unit_record=unit,
             source_tool_call_record=source,
             source_result_ref=source.result_ref,
             source_result=result,
@@ -9770,8 +9932,10 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="source graph mismatch"):
         SaveShipmentObservationV2Command(
             owner_scope=owner,
-            current_task_record=task,
-            current_request_unit_record=unit,
+            expected_task_record=expected_task,
+            next_task_record=task,
+            expected_request_unit_record=expected_unit,
+            next_request_unit_record=unit,
             source_tool_call_record=source,
             source_result_ref=source.result_ref,
             source_result=result,
@@ -9789,8 +9953,10 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="source graph mismatch"):
         SaveShipmentObservationV2Command(
             owner_scope=owner,
-            current_task_record=task,
-            current_request_unit_record=unit,
+            expected_task_record=expected_task,
+            next_task_record=task,
+            expected_request_unit_record=expected_unit,
+            next_request_unit_record=unit,
             source_tool_call_record=_c2_project(
                 source,
                 attempts=(late_attempt,),
@@ -9804,8 +9970,10 @@ def test_cycle2_shipment_observation_precedes_exact_deterministic_assessment() -
     with pytest.raises(ValidationError, match="fresh at acceptance"):
         SaveShipmentObservationV2Command(
             owner_scope=owner,
-            current_task_record=task,
-            current_request_unit_record=unit,
+            expected_task_record=expected_task,
+            next_task_record=task,
+            expected_request_unit_record=expected_unit,
+            next_request_unit_record=unit,
             source_tool_call_record=source,
             source_result_ref=source.result_ref,
             source_result=result,
@@ -10906,10 +11074,25 @@ def test_cycle2_search_rejects_multi_binding_singleton_spoof_and_wrong_conversat
 
 def test_cycle2_shipment_rejects_result_drift_and_sanitizes_constructed_closure() -> None:
     owner, task, unit, source, result, observation = _c2_shipment_inputs()
+    expected_task = task
+    expected_unit = unit
+    task = _c2_project(
+        expected_task,
+        state_version=expected_task.state_version + 1,
+        updated_at=observation.recorded_at,
+    )
+    unit = _c2_project(
+        expected_unit,
+        state_version=expected_unit.state_version + 1,
+        updated_at=observation.recorded_at,
+        observation_refs=(observation.observation_id,),
+    )
     command_values = {
         "owner_scope": owner,
-        "current_task_record": task,
-        "current_request_unit_record": unit,
+        "expected_task_record": expected_task,
+        "next_task_record": task,
+        "expected_request_unit_record": expected_unit,
+        "next_request_unit_record": unit,
         "source_tool_call_record": source,
         "source_result_ref": source.result_ref,
         "source_result": result,
@@ -10932,8 +11115,14 @@ def test_cycle2_shipment_rejects_result_drift_and_sanitizes_constructed_closure(
         SaveShipmentObservationV2Command(
             **{
                 **command_values,
-                "current_task_record": _c2_project(task, state_version=2),
-                "current_request_unit_record": _c2_project(unit, state_version=2),
+                "expected_task_record": _c2_project(
+                    expected_task,
+                    state_version=2,
+                ),
+                "expected_request_unit_record": _c2_project(
+                    expected_unit,
+                    state_version=2,
+                ),
             }
         )
 
@@ -10987,6 +11176,17 @@ def test_cycle2_shipment_rejects_result_drift_and_sanitizes_constructed_closure(
 
 def test_cycle2_assessment_requires_current_exact_claim_binding() -> None:
     owner, task, unit, _, _, observation = _c2_shipment_inputs()
+    task = _c2_project(
+        task,
+        state_version=task.state_version + 1,
+        updated_at=observation.recorded_at,
+    )
+    unit = _c2_project(
+        unit,
+        state_version=unit.state_version + 1,
+        updated_at=observation.recorded_at,
+        observation_refs=(observation.observation_id,),
+    )
     conversation = _conversation(owner_customer_id=owner.customer_id)
     claim_ref = uuid4()
     unit = _c2_project(
