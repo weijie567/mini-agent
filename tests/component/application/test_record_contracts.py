@@ -7957,6 +7957,396 @@ def _c2_tool_call(
     )
 
 
+def _c2_exact_run_evidence_with_recovered_attempt(
+) -> tuple[
+    Cycle2ExactRunEvidenceClosure,
+    ToolRetryRecoveryDecisionRecordV2,
+]:
+    baseline = _cycle2_exact_run_evidence_with_task()
+    task = baseline.task_records[0]
+    unit = baseline.request_unit_records[0]
+    binding = baseline.input_binding_records[0]
+    run = _c2_project(
+        baseline.run_record,
+        status=AgentRunStatusV2.RUNNING,
+        completed_at=None,
+        stop_reason=None,
+    )
+    tool_call_id = uuid4()
+    first = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=UTC_NOW + timedelta(milliseconds=500),
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="SHIPMENT_SERVICE_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    decided_at = UTC_NOW + timedelta(seconds=1)
+    second = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=2,
+        started_at=UTC_NOW + timedelta(seconds=2),
+    )
+    tool_call = _c2_tool_call(
+        name=Cycle2ToolName.GET_SHIPMENT,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(binding.binding_id,),
+        status=ToolCallStatus.RUNNING,
+        attempts=(first, second),
+        run_id=run.run_id,
+    )
+    decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=uuid4(),
+        tool_call_id=tool_call.tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.APPEND_SECOND_ATTEMPT,
+        stable_reason_code="RETRY_REVALIDATED_CAS_REQUIRED",
+        candidate_next_attempt_no=2,
+        decided_at=decided_at,
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+    manifest = ContextManifest(
+        context_manifest_id=tool_call.context_manifest_id,
+        run_id=run.run_id,
+        model_call_id=tool_call.model_call_id,
+        tool_registry_version=tool_call.tool_registry_version,
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(baseline.message_records[0].message_id,),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=UTC_NOW,
+    )
+    return (
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **{
+                    field_name: getattr(baseline, field_name)
+                    for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+                },
+                "run_record": run,
+                "tool_call_records": (tool_call,),
+                "recovery_decision_records": (decision,),
+                "context_manifest_records": (manifest,),
+                "model_visible_toolset_artifacts": (artifact,),
+            }
+        ),
+        decision,
+    )
+
+
+def test_cycle2_exact_run_evidence_closes_successful_recovery_append_without_parent_ref() -> None:
+    closure, decision = _c2_exact_run_evidence_with_recovered_attempt()
+    running = closure.tool_call_records[0]
+
+    assert running.recovery_decision_ref is None
+    assert running.attempt_count == 2
+    assert closure.recovery_decision_records == (decision,)
+
+    completed_second = _c2_project(
+        running.attempts[1],
+        finished_at=UTC_NOW + timedelta(seconds=3),
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    terminal = _c2_project(
+        running,
+        attempts=(running.attempts[0], completed_second),
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=completed_second.finished_at,
+        result_ref=uuid4(),
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    terminal_closure = Cycle2ExactRunEvidenceClosure(
+        **{**values, "tool_call_records": (terminal,)}
+    )
+    assert terminal_closure.tool_call_records[0].recovery_decision_ref is None
+
+
+def _c2_exact_run_evidence_with_terminal_recovery() -> tuple[
+    Cycle2ExactRunEvidenceClosure,
+    ToolRetryRecoveryDecisionRecordV2,
+]:
+    baseline = _cycle2_exact_run_evidence_with_task()
+    task = baseline.task_records[0]
+    unit = baseline.request_unit_records[0]
+    binding = baseline.input_binding_records[0]
+    run = baseline.run_record
+    tool_call_id = uuid4()
+    first = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        started_at=UTC_NOW,
+        finished_at=UTC_NOW + timedelta(milliseconds=500),
+        outcome=ToolResultOutcome.SYSTEM_FAILURE,
+        failure_code="SHIPMENT_SERVICE_TRANSIENT",
+        retry_decision=ToolRetryDecision.RETRY_SCHEDULED,
+    )
+    decided_at = UTC_NOW + timedelta(seconds=1)
+    decision = ToolRetryRecoveryDecisionRecordV2(
+        recovery_decision_id=uuid4(),
+        tool_call_id=tool_call_id,
+        last_attempt_no=1,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="STATE_OR_BINDING_INVALIDATED",
+        decided_at=decided_at,
+    )
+    running = _c2_tool_call(
+        name=Cycle2ToolName.GET_SHIPMENT,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(binding.binding_id,),
+        status=ToolCallStatus.RUNNING,
+        attempts=(first,),
+        run_id=run.run_id,
+    )
+    terminal = _c2_project(
+        running,
+        status=ToolCallStatus.INTERRUPTED,
+        finished_at=decided_at,
+        interruption_reason="STATE_OR_BINDING_INVALIDATED",
+        recovery_disposition=(
+            ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED
+        ),
+        recovery_decision_ref=decision.recovery_decision_id,
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+    manifest = ContextManifest(
+        context_manifest_id=terminal.context_manifest_id,
+        run_id=run.run_id,
+        model_call_id=terminal.model_call_id,
+        tool_registry_version=terminal.tool_registry_version,
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(baseline.message_records[0].message_id,),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=UTC_NOW,
+    )
+    closure = Cycle2ExactRunEvidenceClosure(
+        **{
+            **{
+                field_name: getattr(baseline, field_name)
+                for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+            },
+            "run_record": run,
+            "tool_call_records": (terminal,),
+            "recovery_decision_records": (decision,),
+            "context_manifest_records": (manifest,),
+            "model_visible_toolset_artifacts": (artifact,),
+        }
+    )
+
+    return closure, decision
+
+
+def test_cycle2_exact_run_evidence_closes_terminal_recovery_with_parent_ref() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+
+    assert closure.recovery_decision_records == (decision,)
+    assert terminal.recovery_decision_ref == decision.recovery_decision_id
+
+
+def test_cycle2_exact_run_evidence_rejects_mismatched_terminal_recovery_child() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+    assert terminal.finished_at is not None
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    wrong_kind = _c2_project(
+        decision,
+        decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+        stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+    )
+    wrong_reason = _c2_project(
+        decision,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+    )
+    wrong_attempt = _c2_project(
+        decision,
+        decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+        stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+        last_attempt_no=2,
+    )
+    late_decision = _c2_project(
+        decision,
+        decided_at=terminal.finished_at + timedelta(microseconds=1),
+    )
+
+    for mismatched in (
+        wrong_kind,
+        wrong_reason,
+        wrong_attempt,
+        late_decision,
+    ):
+        with pytest.raises(ValidationError, match="recovery root mismatch"):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "recovery_decision_records": (mismatched,),
+                }
+            )
+
+
+@pytest.mark.parametrize("terminal_kind", ("unfinished", "budget_exhausted"))
+def test_cycle2_exact_run_evidence_closes_other_terminal_recovery_shapes(
+    terminal_kind: str,
+) -> None:
+    closure, state_decision = _c2_exact_run_evidence_with_terminal_recovery()
+    state_terminal = closure.tool_call_records[0]
+    first = state_terminal.attempts[0]
+    if terminal_kind == "unfinished":
+        attempt = _c2_project(
+            first,
+            finished_at=None,
+            outcome=None,
+            failure_code=None,
+            retry_decision=None,
+        )
+        decision = _c2_project(
+            state_decision,
+            decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+            stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+        )
+        terminal = _c2_project(
+            state_terminal,
+            attempts=(attempt,),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+            failure_code=None,
+            recovery_disposition=(
+                ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+            ),
+        )
+    else:
+        decision = _c2_project(
+            state_decision,
+            stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        )
+        terminal = _c2_project(
+            state_terminal,
+            status=ToolCallStatus.FAILED,
+            failure_code=first.failure_code,
+            interruption_reason=None,
+            recovery_disposition=(
+                ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+            ),
+        )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    rebuilt = Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "tool_call_records": (terminal,),
+            "recovery_decision_records": (decision,),
+        }
+    )
+
+    assert rebuilt.recovery_decision_records == (decision,)
+
+
+def test_cycle2_exact_run_evidence_rejects_cross_tool_terminal_recovery_ref() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+    other_tool_call_id = uuid4()
+    other_attempt = _c2_project(
+        terminal.attempts[0],
+        tool_call_id=other_tool_call_id,
+    )
+    other_terminal = _c2_project(
+        terminal,
+        tool_call_id=other_tool_call_id,
+        attempts=(other_attempt,),
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "tool_call_records": (terminal, other_terminal),
+                "recovery_decision_records": (decision,),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_rejects_unclosed_recovery_children() -> None:
+    closure, decision = _c2_exact_run_evidence_with_recovered_attempt()
+    tool_call = closure.tool_call_records[0]
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    missing_second = _c2_project(
+        tool_call,
+        attempts=(tool_call.attempts[0],),
+        attempt_count=1,
+    )
+    wrong_kind = _c2_project(
+        decision,
+        decision=ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        candidate_next_attempt_no=None,
+    )
+    duplicate = _c2_project(decision, recovery_decision_id=uuid4())
+    orphan = _c2_project(decision, tool_call_id=uuid4())
+    late_decision = _c2_project(
+        decision,
+        decided_at=tool_call.attempts[1].started_at + timedelta(microseconds=1),
+    )
+    wrong_run_tool_call = _c2_project(tool_call, run_id=uuid4())
+
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "tool_call_records": (missing_second,)}
+        )
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "recovery_decision_records": (wrong_kind,)}
+        )
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "recovery_decision_records": (decision, duplicate),
+            }
+        )
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "recovery_decision_records": (orphan,)}
+        )
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "recovery_decision_records": (late_decision,)}
+        )
+    with pytest.raises(ValidationError, match="ToolCall root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "tool_call_records": (wrong_run_tool_call,)}
+        )
+
+
 def _c2_search_graph() -> tuple[
     TrustedOwnerScope,
     TaskRecord,

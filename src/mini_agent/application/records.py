@@ -3528,18 +3528,100 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             record.recovery_decision_id: record
             for record in self.recovery_decision_records
         }
-        if any(
-            record.tool_call_id not in tool_calls
-            or tool_calls[record.tool_call_id].run_id != run.run_id
-            or tool_calls[record.tool_call_id].recovery_decision_ref
-            != record.recovery_decision_id
-            for record in self.recovery_decision_records
-        ) or any(
-            record.recovery_decision_ref is not None
-            and record.recovery_decision_ref not in recovery_decisions
-            for record in self.tool_call_records
-        ):
-            raise ValueError("Cycle 2 exact evidence recovery root mismatch")
+        recovery_decisions_by_tool_call: dict[
+            UUID, list[ToolRetryRecoveryDecisionRecordV2]
+        ] = {}
+        for record in self.recovery_decision_records:
+            recovery_decisions_by_tool_call.setdefault(
+                record.tool_call_id, []
+            ).append(record)
+            tool_call = tool_calls.get(record.tool_call_id)
+            if (
+                tool_call is None
+                or tool_call.run_id != run.run_id
+                or len(recovery_decisions_by_tool_call[record.tool_call_id]) != 1
+            ):
+                raise ValueError("Cycle 2 exact evidence recovery root mismatch")
+            if record.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT:
+                attempts = tool_call.attempts
+                if (
+                    len(attempts) != 2
+                    or attempts[0].attempt_no != 1
+                    or attempts[0].finished_at is None
+                    or attempts[0].retry_decision
+                    is not ToolRetryDecision.RETRY_SCHEDULED
+                    or record.last_attempt_no != 1
+                    or record.candidate_next_attempt_no != 2
+                    or record.decided_at < attempts[0].finished_at
+                    or attempts[1].attempt_no != 2
+                    or attempts[1].started_at < record.decided_at
+                    or tool_call.recovery_disposition is not None
+                    or tool_call.recovery_decision_ref is not None
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence recovery root mismatch"
+                    )
+            else:
+                terminal_shape = {
+                    ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED: (
+                        (ToolCallStatus.INTERRUPTED,),
+                        ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+                        "UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+                        "PROCESS_RESTART_DETECTED",
+                    ),
+                    ToolRecoveryDisposition.RETRY_SCHEDULED_STATE_INVALIDATED: (
+                        (ToolCallStatus.INTERRUPTED,),
+                        ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+                        "STATE_OR_BINDING_INVALIDATED",
+                        "STATE_OR_BINDING_INVALIDATED",
+                    ),
+                    ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED: (
+                        (ToolCallStatus.FAILED, ToolCallStatus.TIMED_OUT),
+                        ToolRecoveryDecision.TERMINATE_RETRY_PATH,
+                        "RUN_BUDGET_EXHAUSTED",
+                        None,
+                    ),
+                }.get(tool_call.recovery_disposition)
+                if terminal_shape is None:
+                    raise ValueError(
+                        "Cycle 2 exact evidence recovery root mismatch"
+                    )
+                (
+                    expected_statuses,
+                    expected_decision,
+                    expected_reason,
+                    expected_interruption,
+                ) = terminal_shape
+                if (
+                    tool_call.recovery_decision_ref
+                    != record.recovery_decision_id
+                    or tool_call.finished_at != record.decided_at
+                    or not tool_call.attempts
+                    or record.last_attempt_no
+                    != tool_call.attempts[-1].attempt_no
+                    or record.candidate_next_attempt_no is not None
+                    or tool_call.status not in expected_statuses
+                    or record.decision is not expected_decision
+                    or record.stable_reason_code != expected_reason
+                    or tool_call.interruption_reason
+                    != expected_interruption
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence recovery root mismatch"
+                    )
+        for tool_call in self.tool_call_records:
+            if tool_call.recovery_decision_ref is None:
+                continue
+            decision = recovery_decisions.get(
+                tool_call.recovery_decision_ref
+            )
+            if (
+                decision is None
+                or decision.tool_call_id != tool_call.tool_call_id
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence recovery root mismatch"
+                )
         if any(
             record.run_id not in run_by_id
             for record in self.context_manifest_records
