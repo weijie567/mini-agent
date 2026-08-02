@@ -116,6 +116,9 @@ from mini_agent.core.task_state import (
     TaskRecord,
     TaskStateTransition,
 )
+from mini_agent.core.request_processing import (
+    Cycle2OrdinalSelectionRejectionReason,
+)
 from mini_agent.core.tool_system import (
     GateDecision,
     GateDecisionV2,
@@ -215,6 +218,24 @@ _PHYSICAL_OBSERVATION_RECORD_CODES = (
     P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
     P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
 )
+
+
+def _cycle2_owner_order_ref(owner_customer_id: str, order_id: str) -> str:
+    payload = {
+        "ref_schema": "mock-owner-order-ref.p0.v1",
+        "owner_customer_id": owner_customer_id,
+        "order_id": order_id,
+    }
+    digest = sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"mock-owner-order-ref.p0.v1:sha256:{digest}"
 _CYCLE2_MODEL_BY_PAIR = MappingProxyType(
     {
         (P0RecordCode.INPUT_BINDING_RECORD, "input_binding_record.p0.v2"): InputBindingV2,
@@ -5320,11 +5341,30 @@ class PostgresRecordAdapter:
                 == task.state_version
             )
         )
-        if len(current_sets) > 1:
-            raise _integrity(
-                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+        rejection_hint = (
+            Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE
+            if len(current_sets) > 1
+            else None
+        )
+        if not current_sets and superseded_refs:
+            rejection_hint = Cycle2OrdinalSelectionRejectionReason.SUPERSEDED
+        if not current_sets and not superseded_refs:
+            other_task_sets = tuple(
+                cast(OrderCandidateSetRecord, decoded.source_record)
+                for _, decoded in cls._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+                    for_update=for_update,
+                )
+                if type(decoded.source_record) is OrderCandidateSetRecord
+                and decoded.source_record.conversation_id
+                == link.conversation_id
+                and decoded.source_record.task_id != task.task_id
             )
-        observations: list[SearchOrdersObservation] = []
+            if other_task_sets:
+                rejection_hint = Cycle2OrdinalSelectionRejectionReason.CROSS_TASK
+        observations_by_id: dict[UUID, SearchOrdersObservation] = {}
         auto_targets: list[OrderCandidateAutoTargetRecord] = []
         if current_sets:
             candidate_set = current_sets[0]
@@ -5345,12 +5385,31 @@ class PostgresRecordAdapter:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
                 )
-            observations.append(
-                cast(
-                    SearchOrdersObservation,
-                    loaded_observation[1].source_record,
-                )
+            observation = cast(
+                SearchOrdersObservation,
+                loaded_observation[1].source_record,
             )
+            observations_by_id[observation.observation_id] = observation
+            for public_candidate in observation.normalized_value.ordered_candidates:
+                targets = tuple(
+                    target
+                    for target in observation.candidate_target_bindings
+                    if target.observation_candidate_ref
+                    == public_candidate.observation_candidate_ref
+                    and target.candidate_source_version
+                    == public_candidate.candidate_source_version
+                )
+                if (
+                    len(targets) != 1
+                    or targets[0].owner_scoped_order_ref
+                    != _cycle2_owner_order_ref(
+                        owner,
+                        public_candidate.public_summary.order_number,
+                    )
+                ):
+                    rejection_hint = (
+                        Cycle2OrdinalSelectionRejectionReason.OWNER_MISMATCH
+                    )
             for _, decoded in cls._cycle2_rows(
                 session,
                 owner_customer_id=owner,
@@ -5390,6 +5449,53 @@ class PostgresRecordAdapter:
                 decoded.source_record.selected_target_ref
             ) is None
         )
+        order_observations: list[OrderObservation] = []
+        shipment_observations: list[ShipmentObservation] = []
+        for observation_ref in unit.observation_refs:
+            order_loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.OBSERVATION_RECORD,
+                logical_identity=(("observation_id", observation_ref),),
+                for_update=for_update,
+            )
+            shipment_loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
+                logical_identity=(("observation_id", observation_ref),),
+                for_update=for_update,
+            )
+            physical = tuple(
+                loaded
+                for loaded in (order_loaded, shipment_loaded)
+                if loaded is not None
+            )
+            if len(physical) > 1:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
+            if not physical:
+                continue
+            source = physical[0][1].source_record
+            if type(source) is OrderObservation:
+                order_observations.append(source)
+            elif type(source) is ShipmentObservation:
+                shipment_observations.append(source)
+            else:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+        superseded_order_refs = {
+            record.supersedes
+            for record in order_observations
+            if record.supersedes is not None
+        }
+        superseded_shipment_refs = {
+            record.supersedes
+            for record in shipment_observations
+            if record.supersedes is not None
+        }
         return Cycle2CurrentSessionTaskClosure(
             owner_scope=owner_scope,
             session_ref_hash=session_ref_hash,
@@ -5401,10 +5507,23 @@ class PostgresRecordAdapter:
             current_request_unit_record=unit,
             current_input_binding_records=bindings,
             current_candidate_set_records=current_sets,
-            current_search_observation_records=tuple(observations),
+            current_search_observation_records=tuple(
+                observations_by_id[key] for key in sorted(observations_by_id, key=str)
+            ),
             current_auto_target_records=tuple(auto_targets),
+            current_order_observation_records=tuple(
+                record
+                for record in order_observations
+                if record.observation_id not in superseded_order_refs
+            ),
+            current_shipment_observation_records=tuple(
+                record
+                for record in shipment_observations
+                if record.observation_id not in superseded_shipment_refs
+            ),
             superseded_candidate_set_refs=superseded_refs,
             existing_selection_records=selections,
+            ordinal_selection_rejection_hint=rejection_hint,
             trusted_now=trusted_now,
         )
 
@@ -8137,6 +8256,21 @@ class PostgresRecordAdapter:
         )
         if len(matching_targets) != 1:
             raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        public_candidates = tuple(
+            candidate
+            for candidate in observation.normalized_value.ordered_candidates
+            if candidate.observation_candidate_ref
+            == selected.observation_candidate_ref
+            and candidate.candidate_source_version
+            == selected.candidate_source_version
+        )
+        if len(public_candidates) != 1:
+            raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
+        if matching_targets[0].owner_scoped_order_ref != _cycle2_owner_order_ref(
+            owner,
+            public_candidates[0].public_summary.order_number,
+        ):
+            return None
         run_rows = cls._cycle2_rows(
             session,
             owner_customer_id=owner,
