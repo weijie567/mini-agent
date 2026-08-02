@@ -55,10 +55,10 @@ reviewed完成W7并冻结`B_C2_RUNTIME = d02b8f2e...` / tree `8bd3ba88...`。PR 
 又完成W8并冻结`B_C2_EVAL_MACHINERY = d6fdcbb3...` / tree `8ab6f2ae...`。PR #268/#269
 批准W9 `02-15R0/R1/R2` corrections；PR #270/#271已reviewed完成R0。PR #272完成R1
 planning后，PR #273确认Core blocker并批准`02-15R1A`；PR #274/#275已reviewed完成
-R1A并冻结`B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准R1B，当前34 slots /
-16 wave labels。PR #278/#279已reviewed完成R1B并冻结
-`B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` / tree `ec3c8c50...`；当前从真实successor
-第二次重冻结R1，旧dirty checkpoint未发布。
+R1A并冻结`B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准R1B。PR #278/#279
+已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` / tree
+`ec3c8c50...`；PR #280完成R1 second-refreeze planning后，PR #281批准R1C/R1D，
+当前36 slots / 16 wave labels并审核R1C exact Plan；旧R1 dirty checkpoint未发布。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -194,7 +194,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W9_R1_SECOND_REFREEZE / R1_CHECKPOINT_UNPUBLISHED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W9_R1C_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -216,7 +216,7 @@ ruling 中把 `02-09R1/R2/R3` 加入前置修复链；PR #241又把`02-09R4/W4R2
 `02-07R`，不新增wave label。Adapter preflight确认既有物理承载缺口后，用户又批准
 `02-10R`且PR #254 reviewed merge。02-11 targeted验证确认OA-10 history physical
 BLOCK后，PR #259又批准`02-11R`且不新增wave；后续PR #268/#269、#273、#277把
-W9 owner corrections扩展为当前34 slots / 16 wave labels，
+W9 owner corrections经PR #281扩展为当前36 slots / 16 wave labels，
 最大并发仍为`2`。
 `02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
@@ -247,8 +247,9 @@ PR #255/#256已reviewed完成并冻结`B_C2_SEARCH_AUTHORITY_PHYSICAL`。PR #257
 PR #268/#269批准W9 correction链；PR #270/#271完成R0并冻结
 `B_C2_W9_SEED_CONTRACT`；PR #273批准R1A，PR #274/#275完成并冻结
 `B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准其前置R1B；PR #278/#279
-已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`。当前审核`02-15R1`
-second-refrozen exact Plan，R2/02-15未冻结。
+已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`。PR #280完成R1
+second-refreeze planning，PR #281又批准R1C/R1D；当前审核`02-15R1C` exact Plan，
+R1D/R1/R2/02-15未冻结。
 
 **Branch mapping**:
 
@@ -440,10 +441,10 @@ PR #250 owner-ruling successor为`89041f73...` / tree `3364efa2...`；PR #251/#2
 与29 slots；PR #260/#261已reviewed形成真实history successor，PR #262/#263已在
 其上完成02-11并冻结`B_C2_INFRA`。PR #264/#265又完成W7并冻结真实
 `B_C2_RUNTIME`；PR #266/#267又冻结`B_C2_EVAL_MACHINERY`，PR #268/#269批准
-`02-15R0/R1A/R1B/R1/R2`。R0已形成`B_C2_W9_SEED_CONTRACT`，R1A已形成
+`02-15R0/R1A/R1B/R1C/R1D/R1/R2`。R0已形成`B_C2_W9_SEED_CONTRACT`，R1A已形成
 `B_C2_W9_INITIAL_RU`；PR #277又批准R1B，PR #278/#279已从真实successor完成R1B并
-形成`B_C2_W9_TYPED_READ_EXECUTION`。当前只能从该真实successor第二次重冻结并执行
-R1；旧 `B_C2_APP_CONTRACT`、
+形成`B_C2_W9_TYPED_READ_EXECUTION`。PR #281批准R1C/R1D后，当前只能先完成R1C，
+再从各自真实successor冻结R1D与third-refrozen R1；旧 `B_C2_APP_CONTRACT`、
 `B_C2_W4_READY` 与旧 02-09 literals 均不得作为当前 dispatch base。
 
 ### Phase 3: Cycle 3a｜RAG、Evidence 与资格判断
@@ -523,7 +524,7 @@ R1；旧 `B_C2_APP_CONTRACT`、
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 28/34 | `W1-W8 + 02-15R0/R1A/R1B complete；02-15R1 second-refreeze；old checkpoint unpublished；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
+| 2. 完成 E2E-01 | 28/36 | `W1-W8 + 02-15R0/R1A/R1B complete；02-15R1C plan review；old R1 checkpoint unpublished；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
