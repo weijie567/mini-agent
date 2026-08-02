@@ -57,6 +57,7 @@ from mini_agent.core.task_state import (
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
+    InputBindingV2,
     InputValidationStatus,
     RequestUnderstandingRecordV2,
     RequestUnitRecord,
@@ -3826,6 +3827,193 @@ def test_cycle2_exact_profile_consumes_only_typed_actual_evidence() -> None:
         "grader_results",
         "schema_assertions_pass",
     }.isdisjoint(Cycle2EvalEvidence.model_fields)
+
+
+def test_real_cycle2_case_cannot_vacuously_pass_with_only_run_stop_evidence() -> None:
+    artifacts = load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="git:grader-completeness-red",
+        runtime_version="git:grader-completeness-red",
+    )
+    case = artifacts.case_by_id(
+        "E2E01-02/unique-own-with-foreign-decoy"
+    )
+    expectations = build_authenticated_cycle2_expectations(
+        artifacts=artifacts,
+        case=case,
+    )
+    evidence = _minimal_cycle2_evidence().model_copy(
+        update={
+            "case_id": case.case_id,
+            "response_policy": expectations.expected_response_policy,
+        }
+    )
+
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        evidence,
+        expectations,
+    )
+
+    assert outcome.status is EvalResultStatus.FAIL
+    schema = outcome.grader_results[0]
+    assert schema.grader_name == "SchemaGrader"
+    assert schema.status is EvalGraderStatus.FAIL
+    assert schema.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+def _binding_complete_cycle2_evidence(
+    *,
+    duplicate_current_binding: bool = False,
+) -> Cycle2EvalEvidence:
+    binding_id = UUID(int=9851)
+    binding = InputBindingV2(
+        binding_id=binding_id,
+        name="product_description",
+        normalized_value="跑鞋",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(UUID(int=9852),),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    bindings = (binding,)
+    if duplicate_current_binding:
+        bindings = (
+            binding,
+            binding.model_copy(update={"binding_id": UUID(int=9853)}),
+        )
+    task_id = UUID(int=9854)
+    task = TaskRecord(
+        task_id=task_id,
+        owner_customer_id="customer-A",
+        status=TaskStatus.ACTIVE,
+        state_version=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    unit = RequestUnitRecord(
+        request_unit_id=UUID(int=9855),
+        task_id=task_id,
+        goal_text="查询跑鞋订单",
+        goal_source_refs=(UUID(int=9856),),
+        input_binding_refs=tuple(item.binding_id for item in bindings),
+        status=TaskStatus.ACTIVE,
+        state_version=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    evidence = _minimal_cycle2_evidence()
+    gate_event = TraceEventV2(
+        trace_event_id=UUID(int=9857),
+        event_type=TraceEventType.NEXT_MOVE_REVALIDATED,
+        occurred_at=NOW + timedelta(milliseconds=500),
+        run_id=evidence.run_record.run_id,
+        validated_task_state_version=1,
+        argument_binding_refs=(binding_id,),
+    )
+    return evidence.model_copy(
+        update={
+            "input_bindings": bindings,
+            "task_records": (task,),
+            "request_units": (unit,),
+            "trace_events": (
+                evidence.trace_events[0],
+                gate_event,
+                evidence.trace_events[1],
+            ),
+        }
+    )
+
+
+def _binding_cycle2_expectations() -> Cycle2EvalExpectations:
+    return _minimal_cycle2_expectations().model_copy(
+        update={
+            "required_predicates": (
+                Cycle2Predicate(
+                    name="REQ_BINDING",
+                    operands=(
+                        "product_description",
+                        "$QUERY_BINDING_REF",
+                        "$TASK_VERSION_AT_GATE",
+                    ),
+                ),
+                Cycle2Predicate(
+                    name="REQ_STOP",
+                    operands=("COMPLETED", "GOAL_COMPLETED"),
+                ),
+            )
+        }
+    )
+
+
+def test_cycle2_required_binding_matches_one_current_typed_record() -> None:
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        _binding_complete_cycle2_evidence(),
+        _binding_cycle2_expectations(),
+    )
+    assert outcome.status is EvalResultStatus.PASS
+
+
+@pytest.mark.parametrize("mutation", ("missing", "duplicate"))
+def test_cycle2_required_binding_missing_or_ambiguous_fails_closed(
+    mutation: str,
+) -> None:
+    evidence = _binding_complete_cycle2_evidence(
+        duplicate_current_binding=mutation == "duplicate"
+    )
+    if mutation == "missing":
+        evidence = evidence.model_copy(
+            update={
+                "input_bindings": (),
+                "task_records": (),
+                "request_units": (),
+            }
+        )
+
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        evidence,
+        _binding_cycle2_expectations(),
+    )
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.MISSING_RECORD
+    )
+
+
+def test_cycle2_required_pair_needs_typed_actual_execution_context() -> None:
+    expectations = _minimal_cycle2_expectations().model_copy(
+        update={
+            "required_predicates": (
+                Cycle2Predicate(
+                    name="REQ_PAIR",
+                    operands=(
+                        "PAIR-E2E01-05-V1",
+                        "$REGISTRY_SNAPSHOT_DIGEST",
+                        "$MODEL_VISIBLE_TOOLSET_HASH",
+                        "$PROVIDER_MAPPING_DIGEST",
+                        "$OWNER_ORDER_INITIAL_STATE_DIGEST",
+                    ),
+                ),
+                Cycle2Predicate(
+                    name="REQ_STOP",
+                    operands=("COMPLETED", "GOAL_COMPLETED"),
+                ),
+            )
+        }
+    )
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        _minimal_cycle2_evidence(),
+        expectations,
+    )
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.MISSING_RECORD
+    )
 
 
 @pytest.mark.parametrize(
