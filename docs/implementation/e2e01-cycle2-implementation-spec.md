@@ -1,25 +1,29 @@
 # E2E-01 Cycle 2｜订单搜索、候选澄清与按需物流 Implementation Spec
 
-> **SCOPED_ACTIVE_IMPLEMENTATION_OWNER / CONTRACT_ACTIVE / READY_FOR_PLANNING**
+> **SCOPED_ACTIVE_IMPLEMENTATION_OWNER / CONTRACT_ACTIVE / W12_IN_PROGRESS**
 >
-> 本文是 Phase 2 scoped active implementation owner；其状态只在以
-> `9ee260f12a82b706269f8a62c460c781c64f1f47` 为精确 base 的独立 Activation PR
-> 取得 final exact-head `PASS` 并合并后生效。它只拥有下述 scoped 编码，不改变
-> 任何 Case lifecycle，也不证明 Plan、Task Packet、Worktree、源码、测试、
-> migration 或 Eval artifact 已存在。
+> 本文是 Phase 2 scoped active implementation owner；历史 activation evidence见
+> 第10.2节。它只拥有下述 scoped编码，不自行改变Case lifecycle；当前源码、测试、
+> migration、artifact与reviewed barrier是否存在必须分别引用可复现证据。
 >
-> 当前 Phase 2 为 `CONTRACT_ACTIVE / READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为
-> `CONTRACT_DEFINED`。本文中的目标文件、逻辑记录、命令和 Eval artifact 均是
-> 待实现契约，不能描述为已实现、已验证或可运行。
+> 当前 Phase 2 已完成 scoped contract activation、master planning与 W1–W11 实现；
+> 27 个 physical artifact 已原子序列化为 `lifecycle_status = EXECUTABLE`，但 Coverage
+> Matrix 与 `AGENTS.md` 的 current-state prose 仍写为 `CONTRACT_DEFINED`。这个
+> cross-owner 状态冲突为 `CONFIRMED`，必须由后续独立 owner-alignment Packet 关闭；
+> 在此之前本文不裁决 effective Case lifecycle。27 个 physical Case 仍没有 Phase 2
+> lifecycle-valid Result。本文同时包含已实现合同与 W12 待实现 correction，具体状态
+> 必须以源码、测试、reviewed barrier和第 9.2.3 节边界逐项判断，不能整体描述为
+> complete。
 
 - **Created:** 2026-07-31
-- **Review status:** `OWNER_ALIGNMENT_R6_PASS / PR_201_MERGED / ACTIVATION_EXACT_HEAD_REVIEW_AND_MERGE_REQUIRED`
+- **Review status:** `CONTRACT_ACTIVE / W11_ARTIFACT_SYNCED / OWNER_STATE_ALIGNMENT_PENDING / W12_CORRECTION_IN_PROGRESS`
 - **Target phase:** Phase 2｜Cycle 2｜完成 E2E-01
 - **Target cases:** `E2E01-02/03/05/06`
 - **Preliminary ambiguity score:** `0.12`（仅评价草案内部清晰度；不是 activation gate）
 - **Draft requirements:** 18
-- **Activation:** `ACTIVE / READY_FOR_PLANNING`
-- **Implementation:** `NOT_STARTED`
+- **Activation:** `SCOPED_CONTRACT_ACTIVE`
+- **Case lifecycle:** `27 ARTIFACTS_SERIALIZED_EXECUTABLE / OWNER_CURRENT_STATE_ALIGNMENT_PENDING / 0 PHASE_2_RESULTS`
+- **Implementation:** `PARTIAL / W12_RESULTS_NOT_YET_AVAILABLE`
 
 ## 1. 权威边界
 
@@ -72,7 +76,7 @@ alignment 已合并；scoped contract 仍须服从各 owner，不能仅凭本文
 | `OA-08` | `D1/D5/D6` | Business、Memory、Tool | `CONDITIONALLY_APPROVED`：Business 拥有 source authority 语义；本文拥有具体 producer implementation、canonical bytes 与传播编码，Infrastructure Adapter 不是业务 owner | `CLOSED / PR #201` |
 | `OA-09` | `D1/D2/D5/D6` | Tool、Business、Project Direction | `APPROVED`：确认现有 visible / private / hash 通则；本文只拥有两个 Tool 的 exact Schema | `CLOSED / PR #201` |
 | `OA-10` | `D1–D8` | Business、Application `RunResultMapper`、Core Trace、Memory | `USER_APPROVED / OWNER_RULE_EVOLUTION`：obsolete Run 使用 `SUPERSEDED + STATE_OR_BINDING_INVALIDATED`；无 Agent result / Message / ResponseRendered / Task / RequestUnit write，`RunStopped.user_outcome=BLOCKED` 仅作 audit disposition，shared Trace structure 不变 | `CLOSED / PR #201` |
-| `OA-11` | Eval Contract | Eval Strategy、Coverage Matrix、各专项 Trace owner | `APPROVED + LIFECYCLE_HOLD`：本文 Activation 后拥有 exact 14 + 13 physical mapping；第 13 个 Trajectory 专门证明 OA-10 no-result closure；Case 仍为 `CONTRACT_DEFINED` | `CLOSED / PR #201` |
+| `OA-11` | Eval Contract | Eval Strategy、Coverage Matrix、各专项 Trace owner | `APPROVED + LIFECYCLE_HOLD`：本文 Activation 后拥有 exact 14 + 13 physical mapping；第 13 个 Trajectory 专门证明 OA-10 no-result closure；owner-alignment 当时 Case 保持 `CONTRACT_DEFINED` | `CLOSED / PR #201` |
 
 后续若任一 owner 发现新冲突，必须按项目契约演进规则显式阻断并重新对齐；不得让
 Plan 或实现以 scoped Spec 较新为由静默覆盖 canonical owner。
@@ -113,30 +117,36 @@ Plan 或实现以 scoped Spec 较新为由静默覆盖 canonical owner。
 
 - Phase 1 `E2E01-01/04` 已完成 scoped release transition 并进入默认本地
   `REGRESSION_GATE`。
-- 当前 Core / Application / Infrastructure / Eval 纵向链只实现具体
-  `get_order`。
-- 当前 RegistrySnapshot 只注册 `get_order`。
-- 当前 `ReadToolExecutor.execute_get_order` 要求 `max_attempts == 1`。
-- 当前标准 Observation 具体类型只覆盖 Phase 1 `OrderObservation`。
-- 当前不存在 `search_orders`、`get_shipment`、`OrderCandidateSetRecord`、
-  `ShipmentObservation` 或 Phase 2 可执行 Dataset。
+- reviewed Core / Application / Infrastructure 已实现 `search_orders`、候选澄清、
+  `get_order`、`get_shipment`、freshness / assessment、有限重试 / recovery 与
+  PostgreSQL exact owner-scoped evidence reader；RegistrySnapshot 同时包含三个
+  READ tools。
+- reviewed Eval bundle、15-grader profile、Harness route与 atomic lifecycle /
+  manifest / loader sync 已存在，27 个 physical artifact 均序列化为
+  `lifecycle_status = EXECUTABLE`；Coverage Matrix 与 `AGENTS.md` 的 current-state
+  prose 尚未同步，effective Case lifecycle 仍待对应 owner 独立裁决 / 对齐。
+- W9 direct non-Harness seam与后续 OA-10 exact reader focused/integration evidence
+  可复现，但不等于 14 个 longitudinal或13个mandatory trajectory Result。
+- W12 preflight确认现有 typed seed loader只能解析2/27 Case组合，Scripted Provider、
+  完整 fault/crash setup、actual mapper capture、complete Eval adapter与real Cycle 2
+  Composition SUT仍未闭合。
 
 ### 3.2 Phase 2 目标差异
 
-Phase 2 必须新增：
+W12 仍必须新增或修正：
 
-1. 本人范围的自然语言近期订单搜索。
-2. owner-validated `SearchOrdersObservation`，以及只引用该 Observation 的不可变、
-   带版本与过期时间的候选选择能力。
-3. “第二个”等序号回答的确定性绑定。
-4. 与 `get_order` 同时可用的 `get_shipment`。
-5. 新鲜度检查、按需刷新和确定性物流判断。
-6. Read transient failure 的一次有限自动重试。
-7. `E2E01-02/03/05/06` 的 Component、Trajectory 与 E2E Eval。
+1. 全部 23 fixture refs 与 7 fault refs 的 W12 authenticated setup闭包。
+2. Scripted Provider 在真实 RU/control/fault边界的 0/1/2-control exact消费。
+3. `order_id` Claim、ordinal negative accepted binding与rejected selection的确定性
+   Core/Application路径。
+4. actual mapper outcome capture与完整 root/supporting evidence adapter。
+5. 13个trajectory-only artifact的`expected_http_status=null / NOT_APPLICABLE`、
+   manifest/loader/grader原子同步；14个longitudinal继续捕获真实HTTP `200`。
+6. real Cycle 2 Composition SUT上的14个HTTP longitudinal、13个non-HTTP trajectory
+   lifecycle-valid Results及Phase 1 16 variants回归。
 
-上述目标不表示本文已经决定源码文件拆分、物理表名、migration revision、Packet
-数量、writer 或执行 Wave；这些内容只能在 activation 后由独立 Plan / Task Packet
-决定。
+上述差异不否定已合并的组件实现，也不表示本 correction 已经实现。文件拆分、Packet、
+writer与执行顺序由独立 reviewed master execution Plan拥有；本文只冻结 scoped contract。
 
 ## 4. 用户冻结的 Decision Ledger
 
@@ -170,92 +180,92 @@ Phase 2 必须新增：
 ## 5. Scoped Requirements
 
 1. **状态与证据真实性**：Phase 2 合同、activation、Case lifecycle、实现和验证状态必须分开记录。
-   - Current：Phase 2 为 `CONTRACT_ACTIVE / READY_FOR_PLANNING`，四个 Case 为 `CONTRACT_DEFINED`。
+   - Current：scoped contract与master Plan已激活，27个physical artifact已序列化为`EXECUTABLE`，但Coverage Matrix与`AGENTS.md`的current-state prose仍为`CONTRACT_DEFINED`；W12尚无Phase 2 lifecycle-valid Result。
    - Target：本文在审阅、activation、实现和 Eval 各阶段使用不重叠状态，不因文档或 Fixture 出现就声明 `EXECUTABLE`。
-   - Acceptance：在实现证据出现前，仓库中不存在把 Phase 2 描述为已实现、已验证、`EXECUTABLE` 或 `REGRESSION_GATE` 的 active 文本。
+   - Acceptance：任何“已实现/已验证/`EXECUTABLE`”表述都引用对应源码、测试或owner ruling；`EXECUTABLE`不得写成已有Result或`REGRESSION_GATE`。
 
 2. **可信 owner-scoped 搜索**：`search_orders` 必须在业务边界以服务端可信身份限定本人订单。
-   - Current：只有 `(customer_id, order_id)` 的 `get_order` 查询。
+   - Current：owner-scoped `search_orders` Port / Adapter / Runtime与direct evidence已存在；W12完整fixture与Result证据未闭合。
    - Target：Runtime 注入 `customer_id`；模型输入和用户消息不能生成、覆盖或扩大 owner scope。
    - Acceptance：包含其他用户更优匹配订单的 Fixture 仍只返回当前用户候选，且其他用户内容不进入模型、Memory、标准 Observation 或普通 Trace。
 
 3. **确定性近期窗口、matching 与排序**：自然语言搜索使用固定、可重放的查询语义。
-   - Current：没有 `search_orders` 的时间窗口、上限或排序合同。
+   - Current：窗口、matching、上限、排序合同及实现已有focused evidence；W12 exact Case结果未运行。
    - Target：使用可信时钟形成闭区间 `[trusted_now - 90 days, trusted_now]`，按第 7.2 节 exact normalization / matching 规则查询，最多返回 5 个候选，按 `ordered_at DESC, order_number ASC` 排序。
    - Acceptance：同一 Fixture、matching rule / alias version、可信时间、query binding 和 owner scope 产生字节级一致的搜索 Observation；窗口外、未来订单和未匹配订单不进入候选。
 
 4. **候选最小披露**：搜索结果只投影完成澄清所需的精确白名单。
-   - Current：现有 `OrderSummaryProjection` 面向单订单结果，没有多候选专用投影。
+   - Current：多候选safe projection、Presentation与direct tests已存在；完整27-Case disclosure结果未运行。
    - Target：Agent-visible / HTTP / Renderer 候选条目只含 ordinal、订单号、UTC 下单日期、按源 line ordinal 选择的最多 3 个匹配商品名与数量、订单状态；不含 `additional_matching_item_count` 或完整时间戳。
    - Acceptance：各可见域白名单逐字段 exact match；Schema、Renderer、HTTP、ModelVisibleContext 和普通 Trace 拒绝价格、支付、地址、物流、`customer_id`、完整 `ordered_at`、额外匹配数量、原始 payload 和其他未批准字段。
 
 5. **Observation 与候选能力分离**：非空搜索结果先形成业务 Observation，再形成只引用它的候选选择能力。
-   - Current：没有 `SearchOrdersObservation`、候选集 durable record 或 exact version。
+   - Current：Search Observation、CandidateSet / AutoTarget / Selection记录与exact version已实现；W12 setup尚未物化全部negative graph。
    - Target：`SearchOrdersObservation` 保存 owner-validated 时间点搜索事实，并在不可见 authority metadata 中保存每个 `observation_candidate_ref` 到 owner-scoped order target 的一一映射；`OrderCandidateSetRecord` 只保存 owner / Task 绑定、base/result/selection expected versions、query refs、源 ToolCall、Observation / candidate refs、顺序、TTL 与 supersession，不复制订单事实或 target。
    - Acceptance：CandidateSet 出现订单号、摘要、target 或 raw result，缺少 exact Observation ref、candidate target mapping、版本闭包、候选顺序、owner / Task binding，或 hash bytes 不匹配时，strict writer / reader 均 fail closed。
 
 6. **当前候选集序号绑定**：“第二个”等回答只能通过 CAS 解析当前唯一有效集合。
-   - Current：Intent owner 只有通用“当前可信候选集”语义，没有 scoped durable 编码。
+   - Current：正向ordinal selection与持久化closure已实现；四个negative trajectory仍缺accepted binding / rejected selection实际证据。
    - Target：Runtime 从当前 pending question 解析 CandidateSet，验证 owner、Task、RequestUnit、Conversation、`selection_expected_task_state_version`、有效期和 ordinal，再通过 Search Observation 的 Runtime-private mapping 在当前可信 owner scope 中解析 order target，以 CAS 写入新的 verified target ref 和 append-only `OrderCandidateSelectionRecord`。
    - Acceptance：当前集合的 ordinal `2` 精确绑定 Observation 中第二个 candidate ref 及其唯一 owner-scoped order target；mapping 缺失 / 重复 / wrong-owner、过期、跨 Task、被 supersede、无集合、多集合、版本漂移或越界均不创建 selection record / ToolCall，并返回 `ASK_USER`。
 
 7. **搜索 cardinality 路由**：唯一、多候选、无结果和系统失败必须走不同的有界路径。
-   - Current：没有自然语言搜索路径。
+   - Current：UNIQUE与MULTIPLE real direct路径已验证；W12 NO_MATCH及全部lifecycle-valid route尚未聚合。
    - Target：`UNIQUE` 自动绑定并继续；`MULTIPLE` 持久化候选集后 `ASK_USER`；`NO_MATCH` 对外折叠为 `NOT_FOUND_OR_NOT_ACCESSIBLE`；`SYSTEM_FAILURE` 安全 `BLOCKED`。
    - Acceptance：四种 outcome 的 Task 状态、ToolCall 数、Observation 写入和用户结果均有 Component 与 Trajectory 断言，且不得把 `NO_MATCH` 伪装成已验证订单事实。
 
 8. **已验证订单到物流的关系绑定**：`get_shipment` 只接受当前有效的 verified order target。
-   - Current：没有 Shipment Port 或 Tool；模型可见词汇中的 `order_id` 尚不能触发物流查询。
+   - Current：Shipment Port / Tool / Gateway与verified target读取已存在；Scripted Provider尚不能把`order_id`作为受控Claim走真实continuation边界。
    - Target：Gateway 要求 `order_id` 精确绑定当前 verified target ref；Runtime 注入 owner scope，并在业务边界解析最多一个 active Package。
    - Acceptance：用户 Claim、旧 InputBinding、其他 Task target、模型替换的 `order_id` 或模型生成的 `package_id` 均在 ToolCall 前被拒绝。
 
 9. **Shipment 最小投影、source version 与 Observation**：已通过归属校验的物流结果形成带来源、版本和时效的标准 Observation。
-   - Current：只有 `OrderObservation`。
+   - Current：Order / Search / Shipment Observation与source-version实现已存在；Eval evidence尚未承接Order Observation与source-edge family。
    - Target：Runtime-private `FOUND` 保存安全 Shipment 投影、source resource ref、exact source version 和可信 `observed_at`；`ShipmentObservation` byte-for-byte 传播这些 authority metadata，并增加 `recorded_at`、`valid_until` 和可见性。
    - Acceptance：`FOUND` 只有在 owner、`0..1` relation、投影不变量、fresh-at-acceptance 与 source version 全部验证后才写 Observation；其他 outcome 或不完整 / 畸形 authority metadata 不写部分 Observation。
 
 10. **物流新鲜度与强制刷新**：异常判断不得使用过期 Shipment Observation。
-    - Current：Memory owner 定义通用 TTL 策略，但 Phase 2 没有具体值。
+    - Current：5分钟TTL、refresh与birth-stale gate已实现；W12 born-stale exact fixture/result尚未运行。
     - Target：`valid_until = observed_at + 5 minutes`；当 `trusted_now >= valid_until`、没有 Observation 或绑定版本失效时调用 `get_shipment` 刷新。
     - Acceptance：stale Fixture 必须出现新 ToolCall；刷新失败时旧事实不进入判断、Renderer 或用户回复。
 
 11. **确定性物流判断**：物流结果由带版本的程序规则根据最新 Observation 与当前有效 Claim 计算。
-    - Current：不存在配送异常判定实现。
+    - Current：deterministic ShipmentAssessment实现与focused evidence已存在；完整四类actual Result仍待W12。
    - Target：只在完整 truth-table 输入上，用可信 `assessed_at` 和 `shipment-assessment-rules.p0.v1` 按 `DELIVERED_NOT_RECEIVED > STALLED > DELAYED > NORMAL` 选择 primary result，并保留全部适用 reason code；停滞阈值固定为 120 小时。
    - Acceptance：字段 / 时间不变量、事实不足、边界时间、同时 delayed + stalled、delivered + 当前有效未收到 Claim、无效 / 被纠正 Claim 和 Claim / Observation 冲突均有确定性测试；模型不能生成或改写事实值、reason code 与 primary result。
 
 12. **Read 有限重试与 attempt 证据**：只有明确 transient 失败在同一 ToolCall 内最多重试一次。
-    - Current：现有具体 Executor 只允许 `max_attempts == 1`。
+    - Current：Cycle 2 read executor、attempt history与restart recovery已实现；W12只支持一个authenticated runtime fault，剩余六类未装配。
    - Target：`search_orders` 与 `get_shipment` 每 attempt 最多 500ms、`max_attempts = 2`；每次 attempt 追加 durable record，并精确保存 outcome、failure code、timeout phase、retry decision 和 recovery disposition；`TIMEOUT ⇔ TOOL_CALL_TIMEOUT ⇔ timeout_phase present`。
    - Acceptance：truth table 拒绝 timeout code / phase 缺失或出现在非 timeout outcome；一次 timeout / transient 后成功恰有 2 个 attempt，attempt 1 的失败证据不会被 ToolCall 最终成功覆盖；第二次失败后无第三次 dispatch；进程在 attempt finalize / retry fence 任一边界重启时仍得到唯一、可解释终态。
 
 13. **确定性失败不重试**：业务结果、绑定错误、状态漂移和协议错误不能消耗第二次 attempt。
-    - Current：Phase 1 所有 `get_order` 失败均不重试。
+    - Current：deterministic non-retry与bounded retry contract已有component/integration evidence；W12完整fault matrix尚未运行。
     - Target：只允许 scoped retryable code；`NOT_FOUND_OR_NOT_ACCESSIBLE`、`NO_MATCH`、`NO_SHIPMENT`、`FACTS_INSUFFICIENT`、候选集失效、binding/version mismatch、Schema / Provider / source-version 错误均不重试。
     - Acceptance：每个 deterministic failure Fixture 都只有一个或零个 attempt，且不存在模型发起的无进展循环。
 
 14. **安全停止映射**：全部内部 outcome 到外部结果必须有完整、互斥、owner-approved 映射。
-    - Current：Phase 1 已在第一最薄切片合同中完整拥有既有 Request Understanding、Gateway、`get_order`、Presentation、Renderer、restart 的确定性映射；本文不得复制或改写，其中包括 `GATE_REJECTED` 与 `ORDER_SERVICE_UNAVAILABLE`。
+    - Current：imported Phase 1与Cycle 2 mapper delta已实现；W12尚无expectation-free actual mapper observation输出。
    - Target：候选歧义 / 失效返回 `ASK_USER`；资源安全失败返回统一 safe outcome；两个 service-unavailable code、transient 耗尽、协议 / source integrity / cardinality failure 返回 `BLOCKED`；owner-scoped 关系读取成功但没有 active Package，或业务源明确返回可判定的 `FACTS_INSUFFICIENT` 时返回 `NEED_HUMAN`；有效 assessment 返回 `COMPLETED`；`INTERRUPTED` 按 authoritative Run / response-channel ownership 唯一选择 blocked、持久化无补发或 obsolete Run suppression。
    - Acceptance：effective Mapper contract 是 imported Phase 1 mappings 与 Phase 2 delta `RM-* / RM-I*` 的不重叠并集；每个 outcome、failure code 和 interruption reason 必须在该并集中恰好命中一行。obsolete Run 不出站，restart 不补发旧 HTTP 回复，失败回复不包含内部原因、其他用户信息、attempt 细节或旧物流事实。
 
 15. **动态工具选择**：Registry 中同时存在三个 Read Tool 时，路径仍由当前目标和最新状态形成。
-    - Current：Phase 1 Registry 只有 `get_order`，不能证明动态不选 `get_shipment`。
+    - Current：同一RegistrySnapshot已包含三个READ tools且pair producer/consumer已对齐；W12两个paired lifecycle-valid Results尚未产生。
     - Target：Phase 2 RegistrySnapshot 同时包含 `search_orders`、`get_order`、`get_shipment`；只问订单时不查物流，询问位置 / 时效 / 异常时在 verified order 后按需查询。
     - Acceptance：`E2E01-05` 配对 Case 的 registry version 和 model-visible toolset hash 完全相同；order-only 的 `get_shipment` 调用数为 0，物流 Case 至少一次。
 
 16. **持久化、Trace 与恢复闭合**：搜索 Observation、候选能力、selection、attempt、Shipment Observation、判断和停止原因必须能从权威记录重放。
-    - Current：Phase 1 记录图不包含候选集或 Shipment。
+    - Current：Cycle 2 v2 record graph、migration与PostgreSQL exact reader已实现；Eval adapter仍丢失supporting / OrderObservation / source-edge closure。
    - Target：新增五个版本化逻辑记录 / projection；Search Observation 持久化不可见 candidate target mapping；多候选 `WAITING_USER` 与 CandidateSet 原子闭合；selection 使用 owner-scoped exact reader、CAS 和 append-only record；Trace 只保存安全引用、版本、ordinal、freshness / retry decision 和 reason code。
    - Acceptance：重启后可以在 owner scope 内从 CandidateSet → Search Observation → candidate target mapping 恢复唯一 verified order target；半写、dangling ref、mapping 缺失 / 重复 / wrong-owner、CandidateSet 复制业务事实、错误 ordinal / version、attempt 漂移或未写 Observation 的判断均被 exact reader 拒绝。
 
 17. **四个 Case 的三层 Eval**：`E2E01-02/03/05/06` 必须同时具有 Component、Trajectory 和 HTTP E2E 证据。
-    - Current：只有 Phase 1 六个 authenticated physical Case / 16 variants 具有 lifecycle-valid Result。
+    - Current：Phase 1 16 variants具有真实Result；Phase 2 27个artifact已序列化为`EXECUTABLE`，owner current-state alignment尚未关闭，13个T2仍错误携带HTTP `200`，且仍为0 lifecycle-valid Result。
    - Target：四个逻辑 Case与本文定义的 14 个 Phase 2 required offline variants，以及 13 个具备完整 input / predicate / state / disclosure / `CF-*` mapping 的强制 Trajectory Case，形成版本化、authenticated artifact bundle；第 13 个 Case 专门证明 OA-10 no-result closure。
    - Acceptance：每个 physical Case 可从本文唯一编码通用 EvalCase 必填字段、grading 和 version manifest；predicate arity / symbol 解析可机械验证；默认离线 Harness 对全部 Phase 1 + 2 variants 产生完整 Result；任何 Critical failure、execution failure、缺失 Case 或 digest mismatch 使 Gate 失败。
 
 18. **Phase 2 总门禁与三轴 lifecycle 纪律**：实现完成不自动推进 Contract、Planning、Case 或 Phase。
-    - Current：Phase 2 contract 已激活为 `READY_FOR_PLANNING`，但尚无 Plan 或实现。
+    - Current：Contract、Planning、W1–W11实现与artifact atomic sync已完成；Coverage / project-instruction current-state alignment、W12 correction与final Results尚未完成。
    - Target：Document / Contract、Planning 和 EvalCase lifecycle 分轴推进；依次完成 contract activation、Plan / Task Packet、实现、review / fix、Validation、Eval / Security、Controlled UAT、Coverage Matrix owner lifecycle 裁决和显式 release。
    - Acceptance：任一文档、Plan、artifact、Fixture、测试或实现的出现都不自动推进另一轴；只有 canonical owner 基于 exact artifact 与可复现结果更新 Case lifecycle 后，Integrator 才手工同步 `.planning/`；无真实凭据时 Qwen 保持诚实 `NOT_RUN`。
 
@@ -371,7 +381,7 @@ inactive-until-cutover 的 `InputBindingV2`，不得修改 v1 owner model 后继
 |---|---|---|
 | `order_id` | Phase 1 exact `O-[0-9]{4,20}` string | `USER_CLAIM / confirmed_by_user=true` |
 | `product_description` | 本节 normalization 后的 1..80 Unicode scalar string | `USER_CLAIM / confirmed_by_user=true` |
-| `candidate_ordinal` | strict positive integer `1..5`；是否命中当前集合仍由第 7.4 节验证 | `USER_CLAIM / confirmed_by_user=true` |
+| `candidate_ordinal` | strict positive integer `1..99`；这只是可持久化 Claim domain，是否命中当前 `1..5` CandidateSet capability 仍由第 7.4 节验证 | `USER_CLAIM / confirmed_by_user=true` |
 | `shipment_not_received` | strict boolean；只有 current `true` 触发对应 assessment precedence | `USER_CLAIM / confirmed_by_user=true` |
 
 name 与 value type / range 必须交叉校验；`true` 不能作为 ordinal，数字或字符串也
@@ -2128,7 +2138,7 @@ stale ShipmentObservation
 
 ### 9.1 目标 artifact bundle
 
-activation 后的实现必须创建并 exact-digest 绑定：
+当前 reviewed implementation 已创建并 exact-digest 绑定：
 
 ```text
 evals/cases/e2e01-cycle2.v1.json
@@ -2138,8 +2148,13 @@ evals/manifests/e2e01-cycle2.v1.json
 evals/lanes/e2e01-cycle2.v1.json
 ```
 
-本文不创建这些文件。目标 bundle 必须服从 Eval owner 的 Dataset lifecycle、
-loader、manifest、SUT、Grader、Result 和 critical failure 规则。
+本文不修改这些文件。W10 Coverage owner ruling 曾批准 bundle 进入 `EXECUTABLE`，
+W11 atomic consumer sync 已把 27 个 physical artifact 序列化为该值；但 Coverage
+Matrix 与 `AGENTS.md` 的 current-state prose 仍保留 `CONTRACT_DEFINED`。因此本
+Spec 只记录 `CONFIRMED` 的 artifact 状态与冲突，不自行裁决 effective lifecycle；
+W12 final lifecycle-valid dispatch 必须先由独立 owner-alignment Packet 关闭冲突。
+bundle 继续服从 Eval owner 的 Dataset lifecycle、loader、manifest、SUT、Grader、
+Result 和 critical failure 规则。
 
 ### 9.2 EvalCase reference vocabulary
 
@@ -2178,7 +2193,7 @@ A=AUDITABILITY`。
 
 ```text
 title = exact case_id string
-lifecycle_status = CONTRACT_DEFINED
+lifecycle_status = EXECUTABLE
 trusted_context_fixture_ref = session:alice
 model_script_refs = ["script:" + exact case_id]
 
@@ -2399,10 +2414,11 @@ W9 direct matrix对reference-only artifact fixture使用下列等价真实入口
 | stale → refresh success | 使用`fx-dynamic-tool-pair-owner-a-v1`在trusted clock `2026-07-31T09:06:00Z`先POST `MSG-LOGISTICS`；随后clock推进至`12:00:00Z`并以`fx-shipment-refresh-stalled-owner-a-v1`原子替换Mock source，再POST同一物流目标 |
 | transient once → success | 使用`fx-dynamic-tool-pair-owner-a-v1`加exact fault ref，从同一新HTTP turn内完成get_order、attempt 1 transient与attempt 2 current Shipment success |
 
-上述direct flows只证明pre-activation execution seam；artifact中
+上述direct flows只证明pre-activation execution seam；W9当时artifact中
 `fx-current-candidate-set-owner-a-v1`、`fx-stale-shipment-observation-owner-a-v1`、
 `fx-verified-order-target-o1001-owner-a-v1`等reference-only ref仍不可由W9 loader
-dispatch，Case lifecycle仍为`CONTRACT_DEFINED`。
+dispatch，Case lifecycle保持`CONTRACT_DEFINED`；后续W10/W11状态变化不把这些
+direct flows追认成actual Case Result。
 
 ##### E2E01-05 real seed digest
 
@@ -2481,10 +2497,352 @@ owner_order_initial_state_digest = 022fced2373c4a83413c00b647b6badf158f8da9eb681
 这些值是上述算法在当前typed source上的consumer快照，算法与typed source才是
 authority。W12发现已reviewed `02-17` consumer没有同步W9已要求重算的seed值，且
 其余pair常量也不等于当前Registry/toolset/provider projection。修正合并前，两个
-`E2E01-05` Case虽已标记`EXECUTABLE`，仍必须在`REQ_PAIR` grading处fail closed，
+`E2E01-05` physical artifact虽序列化为`EXECUTABLE`，仍必须在`REQ_PAIR` grading处fail closed，
 不得产生有效PASS Result。reviewed `02-18R3`先冻结本契约，随后由Core producer与
 Eval consumer各自single-writer Packet实现和原子同步；本scoped Spec Packet自身不
 修改artifact、manifest、loader、Harness、Result或lifecycle。
+
+#### 9.2.3 W12 post-activation authenticated execution contract
+
+本节是 `02-18R13` 的 scoped owner correction。W12 preflight 在真实
+`B_C2_OA10_INFRASTRUCTURE_EVIDENCE` 上确认：已原子序列化为 `EXECUTABLE` 的 27 个
+Cycle 2 physical artifact 中，W9 loader 只能解析两个 fixture 组合；当前 Scripted Provider 没有实现
+Cycle 2 Provider Port；fault catalog 只支持 transient-once；当前 Harness 使用
+synthetic Cycle 2 SUT，且 Eval evidence 无法无损承接 reviewed exact reader 的完整
+root / supporting record closure。artifact 中的 `EXECUTABLE` 值不等于 current-state
+owner prose 已对齐，也不等于 W12 已经存在 27 个 lifecycle-valid Result。
+
+本 correction 不撤销 W9 的 direct-seam 合同，也不改变 Case identity、业务
+outcome / stop / response expectation、grader判定语义、metric、threshold或
+lifecycle；它只把 non-HTTP trajectory 原本不适用的transport status从合成`200`
+纠正为`null / NOT_APPLICABLE`，使actual-evidence边界可实现。W9 第 9.2.2 节继续只拥有 pre-activation 的五个
+dispatchable fixture refs、一个 fault ref 与空 Runtime graph；W12 使用下列独立
+schema，不能扩大 W9 loader 或把 direct flow 重命名为 actual Case Result。
+
+##### Authenticated setup 与 authority 分离
+
+W12 唯一允许的 setup aggregate 为：
+
+```text
+Cycle2ExecutionSetupPlanV1 {
+  setup_schema_version: literal "cycle2-execution-setup.p0.v1"
+  fixture_catalog_version: literal "e2e01-cycle2-fixture-v1"
+  trusted_context_fixture_ref: literal "session:alice"
+  owner_customer_id: literal "customer-A"
+  trusted_clock_profile_ref: literal "clock:cycle2-w12-v1"
+  fixture_refs: unique tuple[str]
+  business_rows: Cycle2BusinessSeedRowsV1
+  runtime_state: Cycle2RuntimeSetupV1
+  foreign_control_rows: Cycle2ForeignControlRowsV1
+  fault_plan: Cycle2ExecutionFaultPlanV1 | null
+  pair_evidence: Cycle2PairExecutionEvidenceV1 | null
+  setup_digest: literal "sha256:<64 lower hex>"
+}
+```
+
+`Cycle2RuntimeSetupV1` 是只在 offline composition 可用的 exact typed family；它只
+能包含现有 canonical record 类型：Conversation / ConversationTaskLink、Task、
+RequestUnit、InputBinding、CandidateSet / AutoTarget / Selection、Order / Search /
+Shipment Observation、ShipmentAssessment、source AgentRun / RunTaskLink / ToolCall、
+ContextManifest / toolset artifact 与适用的 recovery logical child；`MessageRecord`
+只允许下述唯一recovery-root历史USER provenance例外。它不得接收
+`dict[str, object]`、任意 SQL、任意 record code 或省略 schema version 的 payload。
+每个 record 必须由下方 closed catalog 的 builder 产生；普通 Case 不能携带
+`deliberate_integrity_vector`，只有表中明确列出的 negative fixture 可以携带一个
+closed integrity vector，并仍须通过身份最小披露校验。
+
+Runtime setup 内部固定分为 `base_records` 与 `overlays`。普通 fixture只能提供
+base records；overlay必须携带 exact prerequisite fixture ref、expected pre-image与
+next record，且只允许在完整plan预验证期间fold一次。fold后才执行identity/conflict
+检查并写入最终record graph；不得把pre-image和next record同时写入current表，也不得
+把任意duplicate伪装成overlay。
+
+`foreign_control_rows` 默认 exact empty，只允许
+`fx-search-unique-owner-a-with-foreign-decoy-v1` 与
+`fx-candidate-owner-mismatch-owner-a-v1` 写入 closed customer-B control namespace。
+这些 rows 必须显式带 owner-B，不能进入 owner-A runtime graph、pair digest、exact
+reader、model context、Trace 或 reply；它们只用于证明 owner-scoped query / mapping
+返回不可区分的 absent。其他 fixture 的非空 foreign family一律拒绝。
+
+setup aggregate 及其任何 child **禁止**包含：
+
+```text
+case_id
+model_script_ref / script behavior
+expected outcome / stop reason / response policy
+required / forbidden predicate
+grader name / result / pass flag
+最终 reply 或期望 Trace
+```
+
+解析顺序固定为：
+
+1. loader 只从 authenticated Case execution input 取得 trusted-context、initial、
+   environment 与 fault refs；普通Case的消息仍来自Case的exact `messages[]`且不属于
+   setup。唯一例外是下述recovery-root fixture：它必须把该Case唯一USER message按
+   closed规则物化为旧Run的历史source record，而不是新入站消息。
+2. pre-fold gate 只验证全部 ref 的存在性、schema/version、declared owner、closed
+   fixture family、overlay prerequisite、expected pre-image 与 integrity-vector
+   allowlist；unknown、missing、cross-owner、mixed schema/version、未授权 integrity
+   vector 或 prerequisite/pre-image mismatch立即拒绝。该阶段不能对尚未fold的
+   pre-image/next record执行final graph identity选择。
+3. 在内存中按catalog固定tuple顺序fold每个closed overlay且只fold一次；fold后重复的
+   exact logical row / record可以按canonical identity去重，同identity不同payload必须
+   拒绝，不能last-write-wins。
+4. post-fold gate 对最终graph执行identity、relationship、clock、conflict、dangling
+   ref、current-cardinality、owner隔离、source closure与canonical order全量验证，并
+   冻结immutable plan；任何失败都发生在write之前。上一段closed foreign-control
+   family只在隔离namespace接受同等级验证，不进入owner-A graph。
+5. session、clock与fault controller必须先构造为未激活、已完整验证的detached对象。
+   business rows与Runtime records随后在同一PostgreSQL setup transaction中全有或
+   全无写入，并在commit前把detached对象attach到本次全新isolated composition；只有
+   row writes与全部attach都成功才commit。任一步失败必须rollback、dispose controller
+   与composition且不留下可复用namespace，不创建EvalRun / EvalResult；commit后不得
+   再执行可能失败的setup安装步骤。
+6. production bootstrap、credentialed provider、真实外部系统与普通用户 HTTP
+   请求都不能调用本 setup Port；`customer_id` 仍只来自 server-side Session。
+
+`setup_digest` 对 aggregate 除自身之外的全部字段执行第 9.2.2 节 canonical JSON /
+SHA-256 规则；tuple顺序由 closed catalog固定。它只用于重放与pair/debug审计，不授予
+owner权限，也不进入model-visible或用户可见域。
+
+所有 deterministic setup UUID 使用下面的 exact UUIDv4-compatible producer，避免
+测试运行时随机 identity，同时满足现有 v4 validator：
+
+```text
+seed_bytes = UTF8("e2e01-cycle2-w12|" + fixture_ref + "|" + role)
+raw = first_16_bytes(SHA256(seed_bytes))
+raw[6] = (raw[6] & 0x0f) | 0x40       # UUID version 4 bits
+raw[8] = (raw[8] & 0x3f) | 0x80       # RFC 4122 variant bits
+uuid = UUID(bytes=raw)
+```
+
+同一 `(fixture_ref, role)` 必须得到同一 UUID；role 使用 closed builder field path，
+不得来自 Case ID、expectation 或执行顺序。W12 trusted clock profile 的 current time
+固定为 `2026-07-31T12:00:00Z`；这只是 offline composition 的可信 clock 配置，
+不得写入 Shipment business payload 来冒充 `observed_at` 或
+`trusted_acceptance_now`。
+
+所有 preseed Runtime graph 还必须满足：
+
+- current ConversationTaskLink、Task、RequestUnit、binding refs、pending refs 与 state
+  version形成一个exact closure；historical/other-Task records不能被current reader误选。
+- 每条 preseed Observation都有唯一 supporting AgentRun / RunTaskLink / terminal
+  ToolCall / result ref与`Cycle2ObservationSourceEdge`；supporting identity与之后才分配的
+  evaluated root Run严格不同。
+- current verified target只能从 owner-scoped AutoTarget或Selection closure派生，不能
+  由fixture直接写一个无来源order id；negative mapping只存在于上述foreign-control
+  family。
+- ordinary preseed graph不能包含本次evaluated message、root Run、root ToolCall、
+  root Trace、root terminal result、expected mapper row或reply；任何fixture都不得
+  预置ASSISTANT Message、terminal-output Message或回复。supporting历史Run只保留其
+  真实provenance closure。
+- 唯一 recovery-root 例外是closed catalog明确标记的
+  `fx-retry-scheduled-obsolete-run-owner-a-v1`：它可以预置一个唯一
+  `recovery_subject_run_id`、该Run的active link、同identity ToolCall与已finalize的
+  attempt 1 `RETRY_SCHEDULED` closure，供本次recovery/OA-10实际执行。该Run就是
+  evaluated root，绝不进入supporting family；setup不得预置其terminal Run、terminal
+  link、`RunStopped`、Agent result、ASSISTANT或下述唯一USER以外的Message、
+  `ResponseRendered`、Task transition、attempt 2或reply。SUT返回的root `run_id`必须exact等于该
+  `recovery_subject_run_id`，其余Case仍由执行期分配全新root identity。
+- 上述例外还必须预置且只预置一个`direction=USER`的历史`MessageRecord`，其content
+  exact等于authenticated Case input中唯一USER message，conversation id exact等于
+  owner-A trusted Session的current Conversation，received_at不得晚于旧Run
+  `started_at`。旧RequestUnit goal refs、InputBinding `source_refs`、ContextManifest
+  selected-message refs与适用Trace message ref对该message形成exact referenced set；
+  不允许额外、missing或其他Conversation message。该record进入完整`setup_digest`，
+  但不作为本次新入站消息，不产生ASSISTANT/output authority，也不进入普通Trace正文。
+
+##### W12 complete fixture catalog
+
+下表关闭 27 Case 输入所引用的全部 fixture ref。`W9 primitive` 表示复用第 9.2.2
+节 exact business fragment；`current graph` 表示 exact current
+Conversation / Task / RequestUnit / InputBinding 与所列 records 同时存在。未列出的
+ref 一律 unknown，不允许按命名约定自动生成。
+
+| Fixture ref | Exact W12 materialization |
+|---|---|
+| `fx-search-unique-owner-a-with-foreign-decoy-v1` | 复用 W9 customer-A `ORDER/SEARCH-A-1001`；customer-B control rows 位于隔离 owner namespace并进入完整`setup_digest`，但绝不进入owner-order pair digest、A exact reader、Trace或reply |
+| `fx-search-no-match-owner-a-v1` | customer-A trusted session；order/search/shipment/runtime tuples 全空，`鞋` 查询得到真实 owner-scoped zero-row read |
+| `fx-search-multiple-owner-a-v1` | 复用 W9 `ORDER/SEARCH-A-1001/A-1002` |
+| `fx-order-targets-owner-a-v1` | 复用 W9 `ORDER-A-1001/A-1002`；与 candidate setup 的 observation target mapping identity 精确一致 |
+| `fx-current-candidate-set-owner-a-v1` | current `WAITING_USER` graph；一个 MULTIPLE CandidateSet，entries `1→O-1001`、`2→O-1002`，pending ref/current Task version/15-minute TTL/source Search Observation 与两个 runtime-private target mappings 全部闭合 |
+| `fx-expired-candidate-set-owner-a-v1` | 与 current fixture 同形，但 trusted now 已满足 `now >= valid_until`；没有其他 current CandidateSet |
+| `fx-candidate-set-other-task-owner-a-v1` | customer-A current Session Task 与 CandidateSet 所属 customer-A other Task 精确不同；current Task 不拥有该 pending ref，且不包含 foreign owner data |
+| `fx-verified-order-target-o1001-owner-a-v1` | current ACTIVE graph；accepted `order_id=O-1001` Claim、唯一 verified target 与 target Observation 由同 owner/current Task/version闭合；不预置本次 evaluated Run 的 ToolCall/Result |
+| `fx-dynamic-tool-pair-owner-a-v1` | 复用 W9 `ORDER/SEARCH-A-1001 + SHIPMENT-A-1001-NORMAL`；pair evidence 必须从本次 resolved rows 与实际 RegistrySnapshot 重算 |
+| `fx-stale-shipment-observation-owner-a-v1` | 与 verified O-1001 target 同一 current graph；一条 historical ShipmentObservation 满足 `now >= valid_until`，且其 source Run/Link/ToolCall/source edge 可由 exact reader还原 |
+| `fx-candidate-owner-mismatch-owner-a-v1` | current WAITING_USER graph；A 的 CandidateSet entry 只引用 observation candidate ref，唯一 target mapping 是 owner-B scoped control record，A reader必须得到 indistinguishable absent；`integrity_vector=CANDIDATE_MAPPING_OWNER_MISMATCH` |
+| `fx-superseded-candidate-set-owner-a-v1` | current WAITING_USER graph 仅把被 supersede 的 CandidateSet 留作 historical；pending/current set closure为空；`superseded_candidate_set_refs`精确包含该 ref |
+| `fx-zero-or-multiple-current-candidate-set-owner-a-v1` | current WAITING_USER graph 精确含两个都自称 current、同 expected Task version 的 CandidateSet；reader/gate必须因 cardinality=2拒绝，不能择一 |
+| `fx-corrected-not-received-claim-owner-a-v1` | overlay-only，必须与`fx-verified-order-target-o1001-owner-a-v1`组合；复用该fixture产生的Conversation/Task/RequestUnit/target identities，以exact pre-image→next-version替换保存historical `shipment_not_received=true` binding及current `false` correction binding；fold后只有一个current graph，旧Claim / Assessment均不得current |
+| `fx-retry-scheduled-obsolete-run-owner-a-v1` | exact Run/Task/ToolCall attempt-1 `RETRY_SCHEDULED` closure已持久化，但同 Task/binding已推进到新版本；recovery revalidation必须得到 `STATE_OR_BINDING_INVALIDATED` |
+| `fx-shipment-refresh-stalled-owner-a-v1` | 复用 W9 `SHIPMENT-A-1001-STALLED`，只替换同 fixture transaction 中的 NORMAL source row |
+| `fx-shipment-current-owner-a-v1` | 复用 W9 `SHIPMENT-A-1001-NORMAL` |
+| `fx-shipment-missing-promise-owner-a-v1` | customer-A/O-1001/PKG-1001，`IN_TRANSIT + IN_TRANSIT`，`promised_delivery_at=null`，其他 envelope/identity/time合法，稳定得到 `SHIPMENT_PROMISE_MISSING_FOR_ACTIVE_DELIVERY` |
+| `fx-order-zero-active-package-owner-a-v1` | verified O-1001 order relation真实存在，但该 owner/order 下 active Shipment row精确为零；不得以未授权 order 或查询失败代替 |
+| `fx-shipment-delayed-boundary-owner-a-v1` | 一个合法 fresh `IN_TRANSIT` snapshot；`latest_event_at` 在 120h 以内，`promised_delivery_at` 严格早于 assessed_at 一个微秒，唯一命中 DELAYED 而非 STALLED |
+| `fx-shipment-delivered-owner-a-v1` | 一个合法 fresh `DELIVERED + DELIVERED` snapshot，`delivered_at == latest_event_at`；是否为 DNR 只由 current Claim binding决定 |
+| `fx-shipment-refresh-born-stale-owner-a-v1` | Adapter 返回 syntactically valid FOUND，但 `trusted_acceptance_now >= observed_at + 5 minutes`；保留成功 ToolCall/attempt，不写新 Observation |
+| `fx-two-active-packages-owner-a-v1` | customer-A/O-1001 下精确两个 active Package control rows；Adapter只返回 cardinality violation，不泄露数量、package identity或partial projection |
+
+`fx-current-candidate-set-owner-a-v1` 的 negative ordinal message 保持 exact
+`第六个` / strict integer `6`。模型 schema 允许的 Claim domain 固定为 strict int
+`1..99`；CandidateSet entry domain仍固定为 `1..5`。`6` 只是一条 accepted user
+Claim，绝不成为 selection capability。Core 必须返回 typed
+`accepted-claim / rejected-selection` decision；Application 以单一 CAS 保存该 binding
+并保持 `NO_SELECTION_RECORD / NO_TARGET_MUTATION`。该规则覆盖**所有**已通过 Claim
+Schema、但 selection authority 校验失败的ordinal路径，不能只覆盖数值越界。exact六条
+required路径是：out-of-range、expired、cross-task、owner mismatch、superseded 与
+zero-or-multiple-current；六条都必须保存accepted Claim binding，同时由current
+CandidateSet closure拒绝业务选择authority。
+
+新增 Shipment fragment 的 source fields仍服从第 7.5.3 节 truth table；具体 timestamp
+必须由 builder 断言上述边界关系，而不是把 `expected primary_result` 写进 fixture。
+source version只能由 Mock Adapter 对真实 seeded row重算。任何 builder 直接填入
+source hash、Assessment、expected outcome 或 response policy 都属于 contract failure。
+
+##### W12 fault catalog 与 crash point
+
+`Cycle2ExecutionFaultPlanV1` 是 extra-forbid、attempt-indexed closed type：
+
+| Fault ref | Exact injected boundary / actual evidence |
+|---|---|
+| `fault:get-shipment:transient-once-v1` | attempt 1 `SYSTEM_FAILURE / SHIPMENT_SERVICE_TRANSIENT / RETRY_SCHEDULED`；attempt 2读取当前真实row并成功 |
+| `fault:get-shipment:transient-always-v1` | attempts 1、2均为同一 transient failure；attempt 2 `MAX_ATTEMPTS_REACHED`，最终stop为`DEPENDENCY_RETRY_EXHAUSTED`，不得attempt 3 |
+| `fault:get-shipment:source-integrity-v1` | attempt 1 `SHIPMENT_SOURCE_INTEGRITY / NOT_RETRYABLE`；不得attempt 2 |
+| `fault:get-shipment:timeout-after-dispatch-once-v1` | attempt 1只在真实 dispatch 后注入 `TIMEOUT / TOOL_CALL_TIMEOUT / AFTER_DISPATCH / RETRY_SCHEDULED`；attempt 2成功且沿用同一 ToolCall identity |
+| `fault:get-shipment:restart-after-retry-finalize-v1` | attempt 1 terminal retry已持久化、attempt 2 fence前停止当前 process；新 recovery service revalidate PASS并只追加一次attempt 2 |
+| `fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1` | 同一 crash point，但使用 obsolete-run setup；revalidate FAIL，原Run形成 OA-10 durable no-result closure且不发出回复 |
+| `fault:get-shipment:restart-with-unfinished-attempt-v1` | attempt 1 dispatch/start已持久化但没有 terminal attempt；restart只形成 `INCOMPLETE / PROCESS_RESTART_DETECTED / INTERRUPT_NO_REDISPATCH`，不得补造attempt outcome或retroactive reply |
+
+`FAULT_DIRECTIVE` 只证明 authenticated script 在该真实 boundary 请求启用 fault；exact
+fault kind、attempt outcome 与 crash point只能来自 execution input 的 `fault_ref` 经本
+catalog解析。二者不一致、fault ref存在但 script step缺失、script step存在但 plan为
+`null`、或在错误 Tool / attempt / phase消费，都必须在 SUT / Result 前 fail closed。
+
+##### Scripted Provider 的真实消费边界
+
+当前 artifact 的 exact step cardinality 为：27 个 `REQUEST_UNDERSTANDING`、26 个
+`CONTROL_CANDIDATE`（分布在 25 个 script）与 7 个 `FAULT_DIRECTIVE`。两个 no-outbound
+recovery script没有 control；`logistics-required-uses-shipment`有两个 control。不得把
+“每个 script 一个 control”写入代码，也不得在 test adapter 末尾静默 drain。
+
+`REQUEST_UNDERSTANDING` 与 `CONTROL_CANDIDATE` 必须保持两个独立 provider call：
+
+| Script behavior | Real boundary | Deterministic authority |
+|---|---|---|
+| `PROPOSE_SEARCH_ORDERS` | 无 current Task 的 initial RU | Core只接受 product Claim并验证 search next move |
+| `PROPOSE_CANDIDATE_SELECTION` | current continuation RU | 只提出 ordinal Claim；binding与selection结果由 Core/Application closure决定 |
+| `PROPOSE_GET_ORDER` / `PROPOSE_GET_SHIPMENT`（RU） | current continuation RU | 只提出 strict `order_id` Claim；必须 exact-match current owner-scoped verified target，模型不创建target |
+| `PROPOSE_GET_ORDER`（control） | UNIQUE search或成功 ordinal gate后 | Gateway对已验证target形成 candidate；script的空 arguments不得生成order id |
+| `PROPOSE_CANDIDATE_QUESTION` | MULTIPLE search state已原子保存后 | deterministic mapper/renderer拥有问题与minimum summary |
+| `PROPOSE_FIXED_RESPONSE` | no-match、selection reject、dependency/integrity/human terminal boundary | 只能接受/拒绝“结束”候选；exact policy/text来自 mapper/renderer |
+| `PROPOSE_ORDER_SUMMARY` | successful get_order Observation已保存后 | 只能选择 order-only finish；业务字段来自Observation |
+| `PROPOSE_GET_SHIPMENT`（control） | successful get_order且current goal需要物流后 | Gateway只使用current verified order target |
+| `PROPOSE_SHIPMENT_ASSESSMENT` | deterministic Assessment或freshness gate完成后 | 模型不提出primary result/reason/facts；renderer只消费实际Assessment |
+
+Core model contract新增 `order_id` 只作为 `USER_CLAIM`，strict pattern继续服从 P0 order
+identifier；`customer_id`、owner scope、verified target ref、source version、Task version
+仍禁止进入模型输出。现有 continuation proposal 中把 Claim 与 next move绑成一个对象的
+shape必须拆开：RU call只返回 Claim；每个实际 control boundary 再返回一个 typed
+control candidate。Provider protocol error只能进入既有安全 mapping，不得 fallback
+到 script expectation。
+
+一个 ordinary script只有在最后一个真实 boundary消费完最后一步后才允许
+`assert_exhausted()`；两个 no-result recovery script在 fault/recovery terminal 后直接
+exhausted，不得制造 control call。0/1/2-control paths 都必须有 cursor-order、wrong
+purpose、missing、extra与duplicate negative tests。
+
+##### Actual mapping 与 complete evidence adapter
+
+W12 需要 Application-owned、in-process、expectation-free 的
+`Cycle2ExecutionOutcomeObservationV1` 输出：
+
+```text
+Cycle2ExecutionOutcomeObservationV1 {
+  run_id
+  mapping_source_kind: IMPORTED_PHASE1 | CYCLE2_DELTA
+  imported_reference: ImportedMapperReference | null
+  cycle2_signal: Cycle2MapperSignal | null
+  mapper_row_id
+  mapper_disposition: MapperDisposition | null
+  observed_outcome
+  stop_reason
+  response_policy
+  agent_result_emitted: strict bool
+}
+```
+
+它是effective Mapper union的actual observation，而不是只观察Cycle 2 delta。
+`IMPORTED_PHASE1`必须携带且只携带一个真实调用过的`ImportedMapperReference`，
+`mapper_row_id`等于该reference，`cycle2_signal / mapper_disposition=null`；
+`CYCLE2_DELTA`必须携带且只携带一个真实`Cycle2MapperSignal`及其唯一
+`Cycle2ResultMapping`，`imported_reference=null`，row/disposition/stop/outcome/policy
+必须exact-match。两种branch都只能在对应mapper/reference实际通过、真实result已成功
+持久化/finalize后、Application返回结果前产生；不得因为最终outcome相同就把imported
+row伪造为Cycle 2 row。offline composition注入capture Port，production使用no-op。
+该 observation 不持久化、不进入HTTP/Trace/Memory、不改变控制流，不含原始token、
+用户原文或私有业务payload。capture missing/failure必须使 offline Eval execution
+fail closed且不创建EvalResult；已经完成的SUT records保持真实，不回滚或伪造。
+production no-op不得引入新失败。OA-10与unfinished-restart的no-result path不伪造
+mapper observation；其 `response_policy=NONE`、outcome与stop reason由 exact terminal
+Run/Link/Trace closure确定。
+
+`Cycle2ExactRunEvidenceClosure → UnboundCycle2EvalEvidence` 的 W12 mapping固定为：
+
+| Exact closure source | Eval actual field / rule |
+|---|---|
+| `run_record` | evaluated root `run_record` |
+| `supporting_run_records` | 新增 `supporting_run_records`；只用于provenance，不参与root attempt/result cardinality |
+| root/supporting `run_task_link_records` | 分区为 root-only `run_task_links` 与 `supporting_run_task_links` |
+| root/supporting `tool_call_records` | 分区为 root-only `tool_calls` 与 `supporting_tool_calls`；source-edge grader可读取supporting，retry grader只读root |
+| `order/search/shipment_observation_records` | 分别进入 `order_observations / search_observations / shipment_observations` |
+| `observation_source_edges` | 新增同名 actual family；每条 Observation必须精确闭合到source ToolCall/result/run |
+| remaining record families | exact-copy到既有 typed fields；不得按timestamp、payload相似度或expectation过滤 |
+| `terminal_result` + actual outcome observation | 形成0/1 `agent_results`、actual `mapper_evidence`、`observed_outcome`与`response_policy`；不得推导transport status |
+| longitudinal真实HTTP response | 直接捕获actual `http_status`；不得由mapper、expected outcome或reply反推 |
+| non-HTTP `T2-*` trajectory | `http_status=null / NOT_APPLICABLE`；不得合成`200`或虚构HTTP response |
+
+root/supporting partition只按 exact `run_id` 和 reader返回的 supporting run identities，
+不能按时间排序猜测。所有 tuple保持 deterministic canonical order并进行 identity去重；
+missing/dangling/duplicate/cross-owner/cross-root/source-edge mismatch必须在 grader 前成为
+execution failure。`UnboundCycle2EvalEvidence` 继续禁止 `case_id`、script、expectation、
+predicate与grader result；Harness只在 SUT 返回并完成canonical round-trip后绑定自己的
+authenticated Case ID。
+
+E2E01-05 的 `Cycle2PairExecutionEvidenceV1` 只能由本次 resolved pair setup和同一个
+实际 `RegistrySnapshot` 计算：`pair_id`来自 authenticated fixture catalog 对
+`fx-dynamic-tool-pair-owner-a-v1` 的固定映射，其余四个值服从第 9.2.2 节 producer
+算法。其中owner-order initial-state输入必须取post-fold、post-validation的最终owner-A
+business/runtime graph；closed foreign-control rows不进入该digest。Registry、toolset与
+provider值必须取真正执行这两个HTTP variant的同一Composition实例的actual
+`RegistrySnapshot`，不能由setup catalog预填。不得从 Case expectation、pair
+manifest consumer值或另一个paired execution复制。两个执行的
+fixture/registry/toolset/provider digest任一不同，`REQ_PAIR` fail。
+
+##### Real execution modes 与 owner handoff
+
+- 14 个 longitudinal variants 必须使用 real authenticated HTTP → Session → Runtime
+  → Mock business adapters → PostgreSQL → mapper/response → exact reader → actual
+  evidence adapter → 15-grader profile；每个 variant单独产生一个 lifecycle-valid
+  Result。
+- 13 个 `T2-*` 必须使用 real Application / Infrastructure trajectory seam，并读取同一
+  PostgreSQL exact closure；它们保持 non-HTTP，不能由 longitudinal Result或Component
+  test抵扣。
+- synthetic/fake `Cycle2EvalCaseSutResult`、根据expectation构造evidence、最终回复分类、
+  手工 drain script或直接调用 grader helper都不能成为 W12 evidence。
+- credential-aware Qwen lane继续诚实执行既有 Phase 1 baseline / 无凭据 skip；W12
+  `B_C2_VERTICAL` 不新增 credentialed Phase 2 baseline要求。
+- 全链仍只注册三个 READ tools；不得出现 Action、confirmation、ActionPolicy、
+  idempotency、Action Ledger或`RESULT_UNKNOWN` side-effect recovery。
+
+后续实现必须按ownership串行冻结：master execution Plan → Coverage lifecycle
+current-state owner → `AGENTS.md` project-status consumer → Intent lifecycle-status
+consumer → Core → Application → Infrastructure → Eval（同时原子修复T2 nullable
+transport applicability）→ Composition → refrozen final `02-18` aggregate。任一Packet
+若需要跨owner或Composition Root hotspot，必须停止并新增独立reviewed Packet，不能
+扩大原allowlist。
 
 ### 9.3 四个逻辑 Case、14 个 required offline variants
 
@@ -2554,7 +2912,7 @@ JSON string array；`[]` 是显式空数组。
 | `E2E01-06/insufficient-promise-need-human` | `MSG-LOGISTICS` | `[fx-verified-order-target-o1001-owner-a-v1]` | `[fx-shipment-missing-promise-owner-a-v1]` | `NONE` | `SHIPMENT_DATA_UNAVAILABLE / FACTS_INSUFFICIENT_NEED_HUMAN_FIXED` |
 | `E2E01-06/no-shipment-need-human` | `MSG-LOGISTICS` | `[fx-verified-order-target-o1001-owner-a-v1]` | `[fx-order-zero-active-package-owner-a-v1]` | `NONE` | `SHIPMENT_DATA_UNAVAILABLE / NO_SHIPMENT_NEED_HUMAN_FIXED` |
 
-每个 Case 的 `expectations.expected_http_status = 200`。表中 stop reason 与第 9.3.1
+本节14个longitudinal Case的 `expectations.expected_http_status = 200`。表中stop reason与第9.3.1
 节 expected user outcome 共同编码 `expectations.expected_user_outcome`、
 `expected_stop_reason` 和 `response_policy`；任何行若不能在第 7.10 节唯一命中
 `RM-*`，artifact validation 必须失败。
@@ -2755,8 +3113,9 @@ required offline variants 仍是最小纵向集。
 - finalized retry 在 attempt 2 fence 前发现 exact state / binding invalidation 时，
   旧 Run 从同一 snapshot 形成 exact `SupersededRunFinalizationEvidenceV2`，其中
   `SUPERSEDED` no-result Run、null link result、audit-only
-  `RunStopped(BLOCKED)` 三者闭合；同时不存在 attempt 2、Agent result、Message、
-  `ResponseRendered` 和 Task / RequestUnit mutation。
+  `RunStopped(BLOCKED)` 三者闭合；finalization不新增Message，且不存在attempt 2、
+  Agent result、ASSISTANT / terminal-output Message、`ResponseRendered`和Task /
+  RequestUnit mutation；第9.2.3节唯一历史USER provenance必须原样保留。
 
 Trajectory Grader 不要求所有表达使用同一自然语言，但必须对关键记录和路径做
 确定性断言。
@@ -2765,7 +3124,13 @@ Trajectory Grader 不要求所有表达使用同一自然语言，但必须对�
 它们逐 Case 重复第 9.2.1 节 `title / lifecycle_status / trusted context / grading /
 version_manifest / model_script_refs`；`scope_levels=["TRAJECTORY"]`，
 `quality_dimensions=["CORRECTNESS","GROUNDING","SAFETY","ROBUSTNESS",
-"EFFICIENCY","AUDITABILITY"]`。表中 input profile 必须展开，`NONE` fault 必须省略
+"EFFICIENCY","AUDITABILITY"]`，且
+`expectations.expected_http_status=null`，语义为`NOT_APPLICABLE`。这个nullable编码只
+允许stable `T2-*`且exact trajectory-only scope；第9.3节14个longitudinal Case仍必须
+是integer `200`并由真实HTTP response证明。当前artifact把13个T2也写为`200`是
+`CONFIRMED`的transport-applicability encoding defect；后续Eval single-writer Packet
+必须原子同步Case bytes、manifest/loader model、grader与consistency tests，任何一边
+未同步都在SUT前fail closed。表中 input profile 必须展开，`NONE` fault 必须省略
 optional key：
 
 `T2-candidate-owner-mismatch-rejected` 的 `dataset_category=ADVERSARIAL`；
@@ -2906,19 +3271,30 @@ Phase 2 release 前至少要求：
 
 当前允许：
 
-- 用户审阅本文。
-- 只读 dependency / ownership / risk 分析。
-- 在 dedicated planning-status Worktree 中准备和审阅 Phase 2 Plan。
-- 在 Plan 获批后准备精确 Task Packet 提案。
+- 从真实 reviewed integration successor 为 W12 correction 逐个冻结 exact Plan /
+  Task Packet、独立 Worktree、feature branch 与 draft PR。
+- 按 Core → Application → Infrastructure → Eval → Composition 的 ownership 顺序
+  实现第 9.2.3 节，并在每个 exact head 独立 review 后串行合并。
+- 对当前 27 个已序列化 artifact 运行不声称 lifecycle-valid Result 的 pre-dispatch、
+  RED、focused 与 neighbor 验证；final lifecycle-valid dispatch 必须先完成独立
+  owner current-state alignment，且只有 final `02-18` 才生成并汇总 W12 Results。
 
 当前禁止：
 
-- 在 Plan、Task Packet、exact base 与 Wave 获用户批准前创建代码 Worktree 或
-  feature branch。
-- 创建 Eval artifact、migration、源码或测试。
-- 把 Case 推进为 `EXECUTABLE`。
+- 把 W9 direct flow、synthetic SUT、Component test 或 artifact existence 写成
+  Phase 2 Result。
+- 在未 reviewed 的未来 base 上并行创建跨 owner writer，或让一个 Packet 同时修改
+  Eval 与 Composition Root。
+- 从 Case expectation、script、grader 或 reply 反推 setup、fault、mapper或业务
+  evidence。
+- 在 owner current-state alignment、27 个真实 Result 与 final gate 出现前声称
+  `B_C2_VERTICAL`、Phase 2 complete、
+  `REGRESSION_GATE`、production readiness 或 end-user UAT 已完成。
 
 ### 10.2 Contract activation gate
+
+本节记录历史 activation gate；其通过只使 scoped contract 生效，不能替代后续
+planning、implementation或Eval lifecycle evidence。
 
 Activation PR 内部可在提交时证明的条件：
 
@@ -2954,13 +3330,22 @@ Activation PR 内部可在提交时证明的条件：
 CONTRACT_ACTIVE / READY_FOR_PLANNING
 ```
 
-四个 Case 仍保持：
+Activation 当时四个 logical Case 仍保持：
 
 ```text
 CONTRACT_DEFINED
 ```
 
+后续 W10 Coverage owner ruling 批准本 bundle 进入 `EXECUTABLE`，W11 atomic
+consumer sync 已把 27 个 physical artifact 序列化为该值；但 Coverage Matrix 与
+`AGENTS.md` 的 current-state prose 仍为 `CONTRACT_DEFINED`。该冲突必须由后续独立
+owner-alignment Packet 关闭；截至第 9.2.3 节 correction 起点仍没有 Phase 2
+lifecycle-valid Result。
+
 ### 10.3 Planning activation gate
+
+本节记录历史 planning activation gate；当前 master Plan已批准，W12 correction仍须
+逐 Packet使用真实 predecessor SHA/tree重冻结，不能复用旧 future base。
 
 Contract activation 合并后，Integrator 才能：
 
@@ -2992,21 +3377,22 @@ PASS 都不能在 PR 合并前把本文加入 active owner 清单。
 
 ```text
 NOT_STARTED
-→ READY_FOR_PLANNING                   # 当前
+→ READY_FOR_PLANNING
 → PLAN_REVIEW_DRAFT
 → PLAN_APPROVED
-→ TASK_PACKETS_FROZEN
+→ TASK_PACKETS_FROZEN                  # 当前；W12 correction逐Packet重冻结
 ```
 
 Plan、Task Packet、exact base SHA、Worktree / branch activation 只属于本轴；它们不
-改变 EvalCase 状态。当前为 `READY_FOR_PLANNING`，但尚无 Plan。
+改变 EvalCase 状态。W12 新发现的阻塞必须增加独立 correction Packet，不回退或伪造
+已经合并的历史 barrier。
 
 #### C. EvalCase lifecycle axis
 
 ```text
-CONTRACT_DEFINED                       # E2E01-02/03/05/06 当前状态
+CONTRACT_DEFINED
 → Coverage Matrix owner ruling
-→ EXECUTABLE
+→ EXECUTABLE                           # W10 ruling + W11 artifact value；current-state prose alignment pending
 → lifecycle-valid Results + regression synchronization
 → Coverage Matrix owner ruling
 → REGRESSION_GATE
@@ -3107,6 +3493,10 @@ exact-head review 与 merge 证据。
 | 16 | W4 02-09 owner-gap ruling | reviewed Core / Application contract 能否持久化 exact restart recovery | 02-09 preflight 只读证明现有 Port / command 缺少 unfinished parent-only terminal、durable recovery decision child 与 `RETRY_SCHEDULED + RUN_BUDGET_EXHAUSTED` terminal；裁决采用 ToolCall v2 logical decision child、可信 budget evidence 与三个 single-writer correction Packet，02-09 source 保持 clean，Case lifecycle 不变 |
 | 17 | W4 02-09 dispatch-grant ruling | durable attempt fence 是否同时关闭 current-state 与 timeout authority | 02-09 exact-head review证明 initial bare ToolCall CAS 可在 Task/binding drift 后 dispatch，recovered writer只返回 enum会让Executor继续使用pre-CAS budget。裁决采用Application-private非持久化`Cycle2ReadDispatchGrant`、initial atomic wrapper与initial/recovered same-CAS timeout grant；增加`02-09R4 / W4R2` single-writer correction，02-09 head不发布，Case lifecycle不变 |
 | 18 | W12 OA-10 durable read-evidence ruling | exact reader 能否把瞬时 finalization command 当作 actual evidence | W12 preflight 证明 PostgreSQL 只持久化 terminal Run / no-result Link / RunStopped Trace，无法重放 `FinalizeSupersededRunV2Command.loaded_closure`；用户授权按建议持续修正到 W12 完成。裁决以同一 owner-scoped snapshot 的 exact terminal triplet形成 `SupersededRunFinalizationEvidenceV2`，禁止反推 replacement Run / trusted time，不新增 record、migration或shared Trace字段；后续 Application / Eval / Infrastructure 分别 single-writer 实现 |
+| 19 | W12 authenticated execution contract ruling | 已原子序列化的 27 Case artifact 能否由原三测试文件直接形成真实 Result | mechanical preflight确认 seed只有2/27组合可解析、Scripted Provider未实现Cycle 2 Port、7类fault/crash仅1类可运行、synthetic Harness与root-only Eval evidence无法承接完整exact closure。裁决新增W12-only authenticated setup、0/1/2-control真实消费、accepted ordinal Claim/rejected selection、actual mapper observation与root/supporting evidence adapter；同时记录Coverage Matrix与`AGENTS.md` current-state prose仍为`CONTRACT_DEFINED`的`CONFIRMED`冲突。Spec、master Plan、owner-alignment、Core、Application、Infrastructure、Eval、Composition保持串行single-writer，本裁决不自行推进lifecycle且不生成Result |
+| 20 | W12 execution-contract exact-review remediation | ordinal、transport、mapper、recovery与setup是否形成单一可实现合同 | 63355354 exact review以`2 BLOCK + 3 HIGH + 1 MEDIUM`拒绝：旧binding仍限`1..5`、non-HTTP T2只能合成HTTP 200、actual observation遗漏imported mapper、recovery root被ordinary preseed禁令误伤、overlay顺序矛盾且两条longitudinal reject缺binding总规则。修正将Claim domain统一为`1..99`而CandidateSet capability保持`1..5`；T2 transport改为nullable `NOT_APPLICABLE`并要求Eval原子sync；mapper observation使用imported/delta closed union；只给exact recovery fixture开放non-terminal root；setup使用pre-fold/fold/post-fold/write两阶段门禁；六条schema-valid selection reject都保存Claim且不创建Selection/target |
+| 21 | W12 recovery-root provenance remediation | closed recovery root是否能满足InputBinding source closure | ed66bab第二轮exact review确认旧六项已关闭，但发现absolute no-Message preseed使`InputBinding.source_refs`必然dangling。修正只允许closed obsolete-run fixture预置一个owner-A/current Conversation下、与authenticated Case唯一USER input exact一致的历史USER Message；RequestUnit / binding / manifest / applicable Trace refs必须形成exact set，ASSISTANT、terminal output、额外或跨Conversation Message继续禁止 |
+| 22 | W12 recovery trajectory assertion remediation | OA-10 no-output断言是否错误删除历史输入provenance | 871e6b2第三轮exact review确认recovery主合同已闭合，但第9.5节总断言仍禁止任何Message，因而会拒绝强制历史USER source。修正为finalization不新增Message、只禁止ASSISTANT / terminal output并保留第9.2.3节唯一历史USER provenance；no-result/no-state/no-response语义不变 |
 
 ## 14. Review checklist
 
@@ -3141,11 +3531,22 @@ Reviewer 应重点判断：
 11. 组件 ownership 矩阵是否正确区分 semantic、Python source、Port、Adapter 与
    shared / specialized Trace ownership。
 12. 14 个 variants 是否逐项满足通用 EvalCase 字段、grading、version manifest、
-    typed predicate grammar、`CF-*` mapping 与 pair identity，且 13 个额外
-    Trajectory Case 是否具有可唯一编码的完整 mapping。
+    typed predicate grammar、`CF-*` mapping 与 pair identity并捕获真实HTTP `200`，
+    且13个额外Trajectory Case是否以nullable `NOT_APPLICABLE` transport形成可唯一
+    编码的完整non-HTTP mapping。
 13. Document / Contract、Planning 与 EvalCase lifecycle 是否完全分轴。
 14. D1–D8 当前 task 冻结证据是否被诚实限定，且 exact-head full-contract approval
     仍明确是 activation gate。
+15. 第 9.2.3 节是否关闭全部 27 Case fixture/fault refs，同时保持 setup、script、
+    expectation、grader与result分离，并使全部六条schema-valid ordinal reject保存
+    Claim而不获得Selection / target authority。
+16. Scripted Provider 是否只在真实 0/1/2-control boundaries消费步骤，actual mapper
+    imported/delta union observation与root/supporting evidence partition是否完全来自
+    SUT且不允许synthetic/expectation-derived evidence。
+17. setup是否严格经过pre-fold / fold / post-fold / atomic-write门禁，recovery-root
+    例外是否只允许唯一non-terminal subject及其exact历史USER source closure，并持续
+    禁止ASSISTANT / terminal output；detached controller安装失败是否仍保持PostgreSQL
+    零部分提交与composition不可复用。
 
 ---
 
@@ -3156,6 +3557,8 @@ Reviewer 应重点判断：
 *Activated through an independent exact-head reviewed PR from base
 `9ee260f12a82b706269f8a62c460c781c64f1f47`.*
 
-*Next allowed step: 只读完成 dependency / ownership / risk map，并在 dedicated
-planning-status Worktree 中准备 Plan；用户批准 Plan、Task Packet、exact base 与
-Wave 前不得创建代码 Worktree、feature branch 或功能代码。*
+*Next allowed step: 本W12 execution-contract correction通过independent exact-head
+review并合并后，只能从其真实successor冻结master execution Plan correction；随后先
+串行关闭Coverage / `AGENTS.md` / Intent current-state alignment，再按Core、
+Application、Infrastructure、Eval、Composition推进。final lifecycle-valid dispatch
+在上述owner barriers全部reviewed前保持禁止。*
