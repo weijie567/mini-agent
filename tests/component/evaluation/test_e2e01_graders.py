@@ -21,14 +21,10 @@ from mini_agent.application.records import (
     EvalResultStatus,
     MessageDirection,
     MessageRecord,
-    FinalizeSupersededRunV2Command,
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
-    SupersededRunInvalidationKind,
-    SupersededRunReadClosure,
-    TrustedOwnerScope,
+    SupersededRunFinalizationEvidenceV2,
 )
-from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
@@ -4195,36 +4191,12 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
     task_id = UUID(int=9911)
     request_unit_id = UUID(int=9912)
     run_id = UUID(int=9913)
-    current_run_id = UUID(int=9914)
     binding_ref = UUID(int=9915)
-    owner = TrustedOwnerScope.from_customer_context(
-        CustomerContext(
-            subject_ref="subject-customer-A",
-            customer_id="customer-A",
-            auth_scopes=frozenset({"orders:read"}),
-            authenticated_at=NOW,
-            session_ref_hash="safe-session-customer-A",
-        )
-    )
-    active = AgentRunRecordV2(
-        run_id=run_id,
-        conversation_id=conversation_id,
-        status=AgentRunStatusV2.RUNNING,
-        provider_lane="offline_gate",
-        started_at=NOW,
-    )
     link = RunTaskLinkRecordV2(
         run_id=run_id,
         task_id=task_id,
         base_task_state_version=3,
         result_task_state_version=None,
-    )
-    current_run = AgentRunRecordV2(
-        run_id=current_run_id,
-        conversation_id=conversation_id,
-        status=AgentRunStatusV2.RUNNING,
-        provider_lane="offline_gate",
-        started_at=NOW + timedelta(seconds=1),
     )
     current_task = TaskRecord(
         task_id=task_id,
@@ -4245,36 +4217,11 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
         created_at=NOW,
         updated_at=NOW + timedelta(seconds=1),
     )
-    obsolete_task = current_task.model_copy(
-        update={"state_version": 3, "updated_at": NOW}
-    )
-    obsolete_unit = current_unit.model_copy(
-        update={"state_version": 3, "updated_at": NOW}
-    )
     conversation = ConversationRecord(
         schema_version="application-records-v1",
         conversation_id=conversation_id,
         owner_customer_id="customer-A",
         created_at=NOW,
-    )
-    closure = SupersededRunReadClosure(
-        owner_scope=owner,
-        trusted_conversation_record=conversation,
-        expected_active_run_record=active,
-        expected_active_link_record=link,
-        current_authoritative_run_record=current_run,
-        current_authoritative_link_record=RunTaskLinkRecordV2(
-            run_id=current_run_id,
-            task_id=task_id,
-            base_task_state_version=4,
-            result_task_state_version=None,
-        ),
-        current_task_record=current_task,
-        current_request_unit_record=current_unit,
-        obsolete_task_record=obsolete_task,
-        obsolete_request_unit_record=obsolete_unit,
-        trusted_current_evidence_at=NOW + timedelta(seconds=1),
-        invalidation_kind=SupersededRunInvalidationKind.TASK_VERSION_ADVANCED,
     )
     terminal = AgentRunRecordV2(
         run_id=run_id,
@@ -4295,8 +4242,7 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
         user_outcome=AgentOutcome.BLOCKED,
         stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
     )
-    finalization = FinalizeSupersededRunV2Command(
-        loaded_closure=closure,
+    finalization = SupersededRunFinalizationEvidenceV2(
         superseded_run_record=terminal,
         no_result_link_record=link,
         run_stopped_trace_record=stopped,
@@ -4325,12 +4271,97 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
 
 
 def test_oa10_exact_typed_no_result_closure_passes_all_cycle2_graders() -> None:
+    evidence = _oa10_cycle2_evidence()
     outcome = grade_cycle2_evidence(
         CYCLE2_GRADER_NAMES,
-        _oa10_cycle2_evidence(),
+        evidence,
         _oa10_cycle2_expectations(),
     )
     assert outcome.status is EvalResultStatus.PASS
+    assert Cycle2EvalEvidence.model_fields[
+        "superseded_run_finalizations"
+    ].annotation == tuple[SupersededRunFinalizationEvidenceV2, ...]
+    assert set(
+        type(evidence.superseded_run_finalizations[0]).model_fields
+    ) == {
+        "superseded_run_record",
+        "no_result_link_record",
+        "run_stopped_trace_record",
+    }
+
+
+def test_oa10_duplicate_durable_projection_identity_is_rejected() -> None:
+    evidence = _oa10_cycle2_evidence()
+    finalization = evidence.superseded_run_finalizations[0]
+    values = {
+        field_name: getattr(evidence, field_name)
+        for field_name in Cycle2EvalEvidence.model_fields
+    }
+
+    with pytest.raises(ValueError, match="identities must be unique"):
+        Cycle2EvalEvidence(
+            **{
+                **values,
+                "superseded_run_finalizations": (
+                    finalization,
+                    finalization,
+                ),
+            }
+        )
+
+
+def test_non_superseded_evidence_cannot_carry_oa10_projection() -> None:
+    evidence = _minimal_cycle2_evidence()
+    root = evidence.run_record
+    completed_at = NOW + timedelta(seconds=2)
+    superseded = AgentRunRecordV2(
+        run_id=root.run_id,
+        conversation_id=root.conversation_id,
+        status=AgentRunStatusV2.SUPERSEDED,
+        provider_lane=root.provider_lane,
+        started_at=NOW,
+        completed_at=completed_at,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    link = RunTaskLinkRecordV2(
+        run_id=root.run_id,
+        task_id=UUID(int=9920),
+        result_task_state_version=None,
+    )
+    finalization = SupersededRunFinalizationEvidenceV2(
+        superseded_run_record=superseded,
+        no_result_link_record=link,
+        run_stopped_trace_record=TraceEventV2(
+            trace_event_id=UUID(int=9921),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=root.run_id,
+            task_id=link.task_id,
+            request_unit_id=UUID(int=9922),
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+        ),
+    )
+    values = {
+        field_name: getattr(evidence, field_name)
+        for field_name in Cycle2EvalEvidence.model_fields
+    }
+    contaminated = Cycle2EvalEvidence(
+        **{**values, "superseded_run_finalizations": (finalization,)}
+    )
+
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        contaminated,
+        _minimal_cycle2_expectations(),
+    )
+    assert outcome.status is EvalResultStatus.FAIL
+    persistence = next(
+        result
+        for result in outcome.grader_results
+        if result.grader_name == "PersistenceGrader"
+    )
+    assert persistence.reason_code is EvalGraderReasonCode.ASSERTION_FAILED
 
 
 @pytest.mark.parametrize(

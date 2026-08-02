@@ -27,7 +27,7 @@ from mini_agent.application.records import (
     MessageRecord,
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
-    FinalizeSupersededRunV2Command,
+    SupersededRunFinalizationEvidenceV2,
     ToolRetryRecoveryDecisionRecordV2,
 )
 from mini_agent.application.run_result_mapper import (
@@ -521,7 +521,7 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     tool_calls: tuple[ToolCallRecordV2, ...] = ()
     recovery_decisions: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
     superseded_run_finalizations: tuple[
-        FinalizeSupersededRunV2Command,
+        SupersededRunFinalizationEvidenceV2,
         ...,
     ] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
@@ -546,6 +546,10 @@ class Cycle2EvalEvidence(AuditOnlyModel):
             tuple(
                 record.recovery_decision_id
                 for record in self.recovery_decisions
+            ),
+            tuple(
+                record.superseded_run_record.run_id
+                for record in self.superseded_run_finalizations
             ),
             tuple(record.trace_event_id for record in self.trace_events),
         )
@@ -4044,7 +4048,11 @@ def _cycle2_oa10_reason(
     evidence: Cycle2EvalEvidence,
 ) -> EvalGraderReasonCode | None:
     if evidence.run_record.status is not AgentRunStatusV2.SUPERSEDED:
-        return None
+        return (
+            EvalGraderReasonCode.ASSERTION_FAILED
+            if evidence.superseded_run_finalizations
+            else None
+        )
     if (
         evidence.run_record.stop_reason
         is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
