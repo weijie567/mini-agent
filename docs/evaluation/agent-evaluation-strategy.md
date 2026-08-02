@@ -465,7 +465,7 @@ EvalExecutionFailureRecord
 
 该记录使对应命令和 Eval Run 失败，但不把基础设施 / Harness 故障误报成 Case 业务断言结果，也不计入 `PASS / FAIL / SKIPPED / NOT_RUN`。如果失败前已经形成满足上表的安全 Trace、Outcome 和至少一个 Grader 结果，则可以正常落盘 `FAIL`；否则 expected Case result 缺失本身由 `RESULT_COMPLETENESS` failure 记录并使命令失败。Failure Record 只保存安全 reason code 和受限诊断引用，不保存 secret、原始 Token、完整 Prompt 或不必要 PII。
 
-当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT。真实 authenticated artifacts 当前为 `REGRESSION_GATE`；默认离线门禁已对六 Case / 16 authenticated variants 生成并 reload lifecycle-valid PostgreSQL `PASS` Result，聚合证据见 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。测试隔离 schema teardown 后清理 Result rows；该报告不等于 production retention。derived `CONTRACT_DEFINED` bundle 仍用于验证 Harness 在 SUT / Provider / Trace / Grader / Result 前整批 fail closed。
+当前仓库已实现上述 `EvalResultRecord`、`EvalExecutionFailureRecord`、`EvalResultPort`、PostgreSQL record Adapter 的 append / load / list 投影，以及 `OfflineEvalHarness` 对完整 Case Result 与 execution failure 的分流。`OfflineE2E01Composition` 已把真实 HTTP Runtime、PostgreSQL exact owner-scoped `EvalEvidence` reader、Trace callback 与 Result Port 装配进离线 SUT。Cycle 1 的六个真实 authenticated artifacts 当前为 `REGRESSION_GATE`；默认离线门禁已对其 16 个 authenticated variants 生成并 reload lifecycle-valid PostgreSQL `PASS` Result，聚合证据见 [Phase 01 Eval Results](../../.planning/phases/01-cycle-1-e2e-01/01-EVAL-RESULTS.md)。测试隔离 schema teardown 后清理 Result rows；该报告不等于 production retention。derived `CONTRACT_DEFINED` bundle 仍用于验证 Harness 在 SUT / Provider / Trace / Grader / Result 前整批 fail closed。Cycle 2 的四个 logical Case families / 27 个 authenticated physical artifacts 当前为 `EXECUTABLE`，但尚无 Phase 2 lifecycle-valid Result，也未进入 `REGRESSION_GATE`。
 
 ## 9. P0 Coverage 与激活顺序
 
@@ -480,14 +480,15 @@ EvalExecutionFailureRecord
 5. 进入 E2E-02，增加 RAG、ActionPolicy、安全副作用和故障恢复。
 6. 运行 Baseline 后再设置普通质量 Gate。
 
-`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。Coverage Matrix owner 已完成 `EXECUTABLE` 与 `REGRESSION_GATE` 两次裁决；PR #184 完成 artifact / manifest / loader 原子同步和独立审查，全部 16 authenticated variants 的 lifecycle-valid offline Results 已进入默认测试命令。`E2E01-05` 延至 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段。
+`E2E01-01/04` 的双轨编码、Fixture、持久化投影与目标命令由 [E2E-01 Thin Slice Implementation Spec](../implementation/e2e01-thin-slice-implementation-spec.md) 收窄。Coverage Matrix owner 已完成 `EXECUTABLE` 与 `REGRESSION_GATE` 两次裁决；PR #184 完成 artifact / manifest / loader 原子同步和独立审查，全部 16 authenticated variants 的 lifecycle-valid offline Results 已进入默认测试命令。`E2E01-05` 曾延期到 `get_order` 与 `get_shipment` 同时可用的 E2E-01 扩展阶段；该阶段现由下述已激活的 Cycle 2 scoped Spec 收窄。
 
-对 `E2E01-02/03/05/06`，本文作出条件式 scoped delegation：只有
+对 `E2E01-02/03/05/06`，本文曾作出条件式 scoped delegation：只有
 [E2E-01 Cycle 2 Implementation Spec](../implementation/e2e01-cycle2-implementation-spec.md)
 正式 Activation 后，该 Spec 才拥有本阶段 14 个 longitudinal physical variants、
 13 个 mandatory Trajectory cases、typed predicate grammar、pair identity、完整
-input / grading / version manifest 和 `CF-*` 引用的 exact encoding。该 delegation
-不转移下列 ownership：
+input / grading / version manifest 和 `CF-*` 引用的 exact encoding。PR #201 已完成
+该 scoped Activation，因此当前 exact encoding 由该 Spec 拥有。该 delegation 不转移
+下列 ownership：
 
 - 业务结果、source authority、阈值和最小披露服从 Business owner。
 - ordinal binding、attempt / retry / recovery、Observation / derivation 和 Run /
@@ -495,9 +496,13 @@ input / grading / version manifest 和 `CF-*` 引用的 exact encoding。该 del
 - Eval predicate alias 只能引用 owner 已批准的记录或事件，不能反向创造字段、
   outcome、stop reason 或共享 `TraceEvent` structure。
 
-Coverage Matrix 对四个 Case 继续执行 `LIFECYCLE_HOLD`：scoped contract、
-Fixture、测试或实现的出现都不能自行把 `CONTRACT_DEFINED` 推进为
-`EXECUTABLE`。Core Runtime owner 已为 OA-10 裁决 obsolete Run 使用
+在 W10 owner ruling 与 W11 atomic synchronization 之前，Coverage Matrix 对四个
+Case 执行 `LIFECYCLE_HOLD`；当时 scoped contract、Fixture、测试或实现的出现都不能
+自行把 `CONTRACT_DEFINED` 推进为 `EXECUTABLE`。PR #321 随后按 owner 裁决原子同步
+27 个 Case、manifest、loader authentication 与 versioned contract tests，当前
+effective lifecycle 为 `EXECUTABLE`；这不产生 Phase 2 lifecycle-valid Result，也不
+授权 `REGRESSION_GATE`。上述自激活禁令继续有效。Core Runtime owner 已为 OA-10
+裁决 obsolete Run 使用
 `SUPERSEDED + STATE_OR_BINDING_INVALIDATED`，且不得产生 `AgentRunResult`、
 ASSISTANT Message、`ResponseRendered` 或 Task / RequestUnit mutation。该分支不能
 通过普通 HTTP Result 路径评价，必须由 exact closure / Trajectory evidence 同时
@@ -523,8 +528,11 @@ ASSISTANT Message、`ResponseRendered` 或 Task / RequestUnit mutation。该分�
 `tool_call_record.p0.v2`（含 attempt child）、`agent_run_record.p0.v2`、
 `run_task_link_record.p0.v2` 与 `trace_event_record.p0.v2` 语义，不能自行兼容
 v1 / v2 或反向创造 attempt / terminal contract。上述 owner ruling 与 mapping
-不推进 Case lifecycle；owner alignment 独立 exact-file review、合并和 scoped
-Spec Activation 仍然缺失。
+本身不推进 Case lifecycle。Owner alignment 的 independent exact-file review 与
+scoped Spec Activation 已由 PR #201 完成，W10 Coverage ruling 与 W11 PR #321 又
+分别完成 lifecycle 批准和 atomic synchronization；当前四个 logical families / 27
+个 physical artifacts 为 `EXECUTABLE`，Phase 2 lifecycle-valid Result 仍为 0 且无
+`REGRESSION_GATE`。
 
 ## 10. Eval 作为架构决策证据
 
@@ -560,6 +568,7 @@ Spec Activation 仍然缺失。
 - P0 至少需要 Component、Trajectory 和 E2E 三层 Eval。
 - 第一最薄 E2E-01 已有 scoped 双轨 Eval 编码契约、versioned Fixture / Case / script / lane artifacts 与 loader、双 Provider Adapter、13 个确定性 Grader、`OfflineEvalHarness`、结构化 Result / Failure machinery、真实 `EvalCaseSut`、PostgreSQL `EvalEvidence` reader 和离线 Composition Root。
 - 六个 authenticated physical Cases 当前为 `REGRESSION_GATE`；真实 HTTP → Runtime → PostgreSQL exhaustive lane 已覆盖全部 16 authenticated variants，聚合结果为 `16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，exact security re-review tree 的 full offline gate 为 `2007 passed, 1 deselected, 12 warnings`。
+- Cycle 2 scoped Spec 已激活，四个 logical Case families / 27 个 authenticated physical artifacts 当前为 `EXECUTABLE`；Phase 2 lifecycle-valid Result 仍为 0，且没有 `REGRESSION_GATE`。
 
 ### 11.2 `NOT_FOUND`
 
