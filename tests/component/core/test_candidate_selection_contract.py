@@ -456,8 +456,12 @@ def test_current_candidate_selection_rejects_multiple_superseded_and_bad_ordinal
         )
     with pytest.raises(ValidationError):
         _selection_request(ordinal=0)
+    ordinal_six = _selection_request(ordinal=6)
+    assert ordinal_six.ordinal == 6
+    with pytest.raises(ValueError, match="outside"):
+        _validate_success(candidate_set, ordinal_six)
     with pytest.raises(ValidationError):
-        _selection_request(ordinal=6)
+        _selection_request(ordinal=100)
 
 
 def _selection_record(

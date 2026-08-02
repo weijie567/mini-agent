@@ -34,7 +34,7 @@ from .identity import CustomerContext
 from .memory import ContextManifest
 from .order_search import normalize_product_description
 from .request_processing import RevalidatedNextMove
-from .request_understanding import InputAuthority
+from .request_understanding import CYCLE2_ORDINAL_CLAIM_MAX, InputAuthority
 from .task_state import InputBinding, RequestUnitRecord, TaskRecord, TaskStatus
 from .tool_system import (
     AuthorizedToolCommandV2,
@@ -107,10 +107,10 @@ class Cycle2AcceptedBindingFacts(RuntimePrivateModel):
         elif self.name == "candidate_ordinal":
             if (
                 type(self.normalized_value) is not int
-                or not 1 <= self.normalized_value <= 5
+                or not 1 <= self.normalized_value <= CYCLE2_ORDINAL_CLAIM_MAX
             ):
                 raise ValueError(
-                    "candidate_ordinal must be a strict integer from 1 to 5"
+                    "candidate_ordinal must be a strict integer from 1 to 99"
                 )
         elif type(self.normalized_value) is not bool:
             raise ValueError("shipment_not_received must be a strict boolean")

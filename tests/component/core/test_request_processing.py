@@ -31,10 +31,12 @@ from mini_agent.core.order_search import (
     OrderCandidatePublicSummary,
 )
 from mini_agent.core.request_processing import (
+    Cycle2AcceptedClaimRejectedSelection,
     Cycle2InitialAcceptedTaskGraphV2,
     Cycle2InitialRequestDecisionV2,
     Cycle2ContinuationBindingDecision,
     Cycle2OrdinalSelectionPreparation,
+    Cycle2OrdinalSelectionRejectionReason,
     InitialAcceptedTaskGraphV2,
     InitialRequestNoTaskDecisionV2,
     InitialRequestRoutableTaskGraphDecisionV2,
@@ -46,7 +48,10 @@ from mini_agent.core.request_processing import (
     RevalidatedNextMove,
     build_cycle2_unique_auto_target_record,
     build_request_understanding_closure_v2,
+    materialize_cycle2_control_next_move,
+    prepare_cycle2_ordinal_claim,
     prepare_cycle2_ordinal_selection,
+    reject_cycle2_ordinal_selection,
     revalidate_next_move_v2,
     reduce_cycle2_continuation_candidate,
     route_cycle2_continuation_next_move,
@@ -57,6 +62,8 @@ from mini_agent.core.request_processing import (
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -6190,6 +6197,58 @@ def test_cycle2_ordinal_preparation_requires_current_candidate_capability() -> N
     assert "verified_target_ref" not in type(preparation).model_fields
 
 
+@pytest.mark.parametrize("reason", tuple(Cycle2OrdinalSelectionRejectionReason))
+def test_cycle2_valid_ordinal_claim_can_be_typed_rejected_without_authority(
+    reason: Cycle2OrdinalSelectionRejectionReason,
+) -> None:
+    arguments = _cycle2_ordinal_case()
+    message_ref = arguments["request_input"].message_ref
+    arguments["request_input"] = _request_input_v2(
+        message_ref=message_ref,
+        message="第六个",
+        run_id=arguments["request_input"].run_id,
+    )
+    arguments["authoritative_messages"] = {message_ref: "第六个"}
+    arguments["candidate"] = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="candidate_ordinal",
+        value=6,
+        quote="第六个",
+    )
+    claim = prepare_cycle2_ordinal_claim(
+        **{
+            key: arguments[key]
+            for key in (
+                "request_input",
+                "candidate",
+                "authoritative_messages",
+                "customer_context",
+                "current_task",
+                "current_request_unit",
+                "current_input_bindings",
+                "binding_id",
+                "now",
+            )
+        }
+    )
+    rejected = reject_cycle2_ordinal_selection(
+        claim=claim,
+        reason=reason,
+    )
+
+    assert isinstance(rejected, Cycle2AcceptedClaimRejectedSelection)
+    assert rejected.ordinal_input_binding.normalized_value == 6
+    assert rejected.selection_request.ordinal == 6
+    assert rejected.rejection_reason is reason
+    assert {
+        "selection_id",
+        "candidate_set_ref",
+        "verified_target_ref",
+        "selected_target_ref",
+        "tool_call_id",
+    }.isdisjoint(type(rejected).model_fields)
+
+
 @pytest.mark.parametrize(
     "variant",
     [
@@ -6633,6 +6692,148 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
             trusted_now=NOW,
         )
 
+
+def test_cycle2_control_candidate_materializes_only_from_verified_order_id() -> None:
+    control = Cycle2ControlCandidate(
+        kind=Cycle2ControlCandidateKind.CALL_TOOL,
+        requested_tool_name="get_order",
+    )
+    move = materialize_cycle2_control_next_move(
+        candidate=control,
+        current_task_state_version=7,
+        verified_order_id="O-1001",
+    )
+
+    assert move.arguments == {"order_id": "O-1001"}
+    assert move.base_task_state_version == 7
+    with pytest.raises(RequestProcessingError):
+        materialize_cycle2_control_next_move(
+            candidate=control,
+            current_task_state_version=7,
+            verified_order_id="O-123",
+        )
+
+    finish = materialize_cycle2_control_next_move(
+        candidate=Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.FINISH,
+        ),
+        current_task_state_version=7,
+        verified_order_id=None,
+    )
+    assert finish.kind is NextMoveKind.FINISH
+    assert finish.arguments is None
+
+
+@pytest.mark.parametrize(
+    ("requested_tool_name", "expected_verified_target"),
+    [("get_order", False), ("get_shipment", True)],
+)
+def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
+    requested_tool_name: str,
+    expected_verified_target: bool,
+) -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="查询订单 O-1001",
+        run_id=uuid4(),
+    )
+    old_binding = _cycle2_binding(name="order_id", value="O-1001")
+    task, unit = _cycle2_current_task_graph(binding=old_binding)
+    decision = reduce_cycle2_continuation_candidate(
+        request_input=request_input,
+        candidate=_cycle2_input_candidate(
+            message_ref=message_ref,
+            name="order_id",
+            value="O-1001",
+            quote="O-1001",
+        ),
+        authoritative_messages={message_ref: "查询订单 O-1001"},
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(old_binding,),
+        binding_id=uuid4(),
+        now=NOW,
+    )
+    next_task = task.model_copy(
+        update={"state_version": task.state_version + 1, "updated_at": NOW}
+    )
+    next_unit = unit.model_copy(
+        update={
+            "input_binding_refs": (decision.input_binding.binding_id,),
+            "state_version": unit.state_version + 1,
+            "updated_at": NOW,
+        }
+    )
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=next_task.owner_customer_id,
+        owner_customer_id=next_task.owner_customer_id,
+        task_id=next_task.task_id,
+        request_unit_id=next_unit.request_unit_id,
+        task_state_version=next_task.state_version,
+        order_id="O-1001",
+        source_observation_ref=uuid4(),
+        source_observation_version="order-observation-v1",
+        input_binding_refs=(decision.input_binding.binding_id,),
+    )
+    next_unit = next_unit.model_copy(
+        update={"observation_refs": (target.source_observation_ref,)}
+    )
+    observation = Cycle2TargetObservationFacts(
+        observation_ref=target.source_observation_ref,
+        observation_version=target.source_observation_version,
+        private_owner_scope_ref=target.private_owner_scope_ref,
+        owner_customer_id=target.owner_customer_id,
+        task_id=target.task_id,
+        request_unit_id=target.request_unit_id,
+        task_state_version=target.task_state_version,
+        verified_target_ref=target.verified_target_ref,
+        input_binding_refs=target.input_binding_refs,
+    )
+    move = materialize_cycle2_control_next_move(
+        candidate=Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.CALL_TOOL,
+            requested_tool_name=requested_tool_name,
+        ),
+        current_task_state_version=next_task.state_version,
+        verified_order_id=target.order_id,
+    )
+    routed = route_cycle2_continuation_next_move(
+        request_input=request_input,
+        decision=decision,
+        next_move=move,
+        customer_context=_customer_context(),
+        current_task=next_task,
+        current_request_unit=next_unit,
+        current_input_bindings=(decision.input_binding,),
+        verified_target=target,
+        verified_target_observation=observation,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        trusted_now=NOW,
+    )
+    assert routed.argument_binding_refs == (decision.input_binding.binding_id,)
+    assert (routed.verified_target_ref == target.verified_target_ref) is (
+        expected_verified_target
+    )
+
+    with pytest.raises(RequestProcessingError):
+        route_cycle2_continuation_next_move(
+            request_input=request_input,
+            decision=decision,
+            next_move=move,
+            customer_context=_customer_context(),
+            current_task=next_task,
+            current_request_unit=next_unit,
+            current_input_bindings=(decision.input_binding,),
+            verified_target=target.model_copy(update={"order_id": "O-1002"}),
+            verified_target_observation=observation,
+            model_call_id=uuid4(),
+            context_manifest_id=uuid4(),
+            trusted_now=NOW,
+        )
 
 @pytest.mark.parametrize(
     ("origin_name", "origin_value"),

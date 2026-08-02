@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from enum import StrEnum
@@ -37,6 +38,8 @@ Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
 PositiveStateVersion = Annotated[int, Field(ge=1)]
 
 THIN_SLICE_REQUEST_SCHEMA_VERSION = "e2e01-thin-v1"
+CYCLE2_ORDINAL_CLAIM_MAX = 99
+_CYCLE2_ORDER_ID_PATTERN = re.compile(r"^O-[0-9]{4,20}$")
 
 
 class ModelVisibleTaskSummary(ModelVisibleModel):
@@ -187,6 +190,7 @@ class Cycle2InputCandidate(ModelVisibleModel):
     """Inactive model Claim with no owner, target, or Observation authority."""
 
     name: Literal[
+        "order_id",
         "product_description",
         "candidate_ordinal",
         "shipment_not_received",
@@ -199,17 +203,47 @@ class Cycle2InputCandidate(ModelVisibleModel):
     @model_validator(mode="after")
     def name_value_pair_is_exact(self) -> Self:
         value = self.candidate_value
-        if self.name == "product_description":
+        if self.name == "order_id":
+            if (
+                type(value) is not str
+                or _CYCLE2_ORDER_ID_PATTERN.fullmatch(value) is None
+            ):
+                raise ValueError("order_id must match O-[0-9]{4,20}")
+        elif self.name == "product_description":
             if type(value) is not str:
                 raise ValueError("product_description must be a strict string")
             normalize_product_description(value)
         elif self.name == "candidate_ordinal":
-            if type(value) is not int or not 1 <= value <= 5:
+            if (
+                type(value) is not int
+                or not 1 <= value <= CYCLE2_ORDINAL_CLAIM_MAX
+            ):
                 raise ValueError(
-                    "candidate_ordinal must be a strict integer from 1 to 5"
+                    "candidate_ordinal must be a strict integer from 1 to 99"
                 )
         elif type(value) is not bool:
             raise ValueError("shipment_not_received must be a strict boolean")
+        return self
+
+
+class Cycle2ControlCandidateKind(StrEnum):
+    CALL_TOOL = "CALL_TOOL"
+    FINISH = "FINISH"
+
+
+class Cycle2ControlCandidate(ModelVisibleModel):
+    """Argument-free model choice; deterministic code owns target materialization."""
+
+    kind: Cycle2ControlCandidateKind
+    requested_tool_name: Literal["get_order", "get_shipment"] | None = None
+
+    @model_validator(mode="after")
+    def tool_name_matches_kind(self) -> Self:
+        if self.kind is Cycle2ControlCandidateKind.CALL_TOOL:
+            if self.requested_tool_name is None:
+                raise ValueError("CALL_TOOL control candidate requires a tool name")
+        elif self.requested_tool_name is not None:
+            raise ValueError("FINISH control candidate cannot request a tool")
         return self
 
 

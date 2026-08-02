@@ -4,6 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -469,6 +471,68 @@ def test_cycle2_input_candidate_has_exact_claim_only_surface(
     }.isdisjoint(type(candidate).model_fields)
 
 
+def test_cycle2_w12_claim_domain_accepts_order_id_and_ordinal_99() -> None:
+    message_ref = uuid4()
+
+    order_claim = Cycle2InputCandidate(
+        name="order_id",
+        candidate_value="O-1001",
+        source_ref=message_ref,
+        source_quote="订单 O-1001",
+        confidence=0.99,
+    )
+    ordinal_claim = Cycle2InputCandidate(
+        name="candidate_ordinal",
+        candidate_value=99,
+        source_ref=message_ref,
+        source_quote="第九十九个",
+        confidence=0.99,
+    )
+
+    assert order_claim.candidate_value == "O-1001"
+    assert ordinal_claim.candidate_value == 99
+
+    for name, value in (("order_id", "O-123"), ("candidate_ordinal", 100)):
+        with pytest.raises(ValidationError):
+            Cycle2InputCandidate(
+                name=name,
+                candidate_value=value,
+                source_ref=message_ref,
+                source_quote="当前消息",
+                confidence=0.99,
+            )
+
+
+def test_cycle2_control_candidate_has_no_argument_or_authority_surface() -> None:
+    call = Cycle2ControlCandidate(
+        kind=Cycle2ControlCandidateKind.CALL_TOOL,
+        requested_tool_name="get_order",
+    )
+    finish = Cycle2ControlCandidate(
+        kind=Cycle2ControlCandidateKind.FINISH,
+        requested_tool_name=None,
+    )
+
+    assert tuple(type(call).model_fields) == ("kind", "requested_tool_name")
+    assert finish.kind is Cycle2ControlCandidateKind.FINISH
+    for forbidden_field in (
+        "arguments",
+        "order_id",
+        "customer_id",
+        "verified_target_ref",
+        "task_state_version",
+        "reply_text",
+    ):
+        with pytest.raises(ValidationError):
+            Cycle2ControlCandidate.model_validate(
+                {
+                    "kind": "CALL_TOOL",
+                    "requested_tool_name": "get_order",
+                    forbidden_field: "attacker-selected",
+                }
+            )
+
+
 @pytest.mark.parametrize(
     ("name", "candidate_value"),
     [
@@ -477,7 +541,7 @@ def test_cycle2_input_candidate_has_exact_claim_only_surface(
         ("candidate_ordinal", True),
         ("candidate_ordinal", "2"),
         ("candidate_ordinal", 0),
-        ("candidate_ordinal", 6),
+        ("candidate_ordinal", 100),
         ("shipment_not_received", 1),
         ("shipment_not_received", "true"),
     ],
