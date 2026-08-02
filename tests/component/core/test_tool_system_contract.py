@@ -46,6 +46,8 @@ from mini_agent.core.tool_system import (
     build_cycle2_registry_snapshot,
     cycle2_tool_profiles,
     compute_model_visible_toolset_hash,
+    compute_provider_mapping_digest,
+    compute_registry_snapshot_digest,
     convert_gate_decision_v1_to_v2,
     decide_cycle2_tool_recovery,
     decide_cycle2_tool_retry,
@@ -98,10 +100,12 @@ def _registration(
         effect=ToolEffect.READ,
         risk="LOW",
         idempotency="READ_ONLY",
+        unknown_result_recovery=None,
         handler_ref=handler_ref,
         execution_policy=ExecutionPolicy(
             timeout_ms=500,
             max_attempts=1,
+            retryable_failure_codes=(),
             interrupt_behavior="MARK_INTERRUPTED",
         ),
     )
@@ -171,6 +175,146 @@ def test_registry_snapshot_excludes_private_registration_changes_from_hash() -> 
         first.provider_visible_toolset[0].input_schema["properties"]["injected"] = {
             "type": "string"
         }
+
+
+def test_cycle2_registry_and_provider_mapping_digests_match_exact_snapshot() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+
+    assert compute_registry_snapshot_digest(snapshot) == (
+        "8c8535246587423132362dbc13dcb42fdf15a4fa7a1891c59ebd8a9645067725"
+    )
+    assert compute_provider_mapping_digest(snapshot) == (
+        "8b1e0b50d8f9b88b5a303be5cdb1d9f3d29376f443eccdaf97b00b7d6ded3c47"
+    )
+
+
+def test_cycle2_registry_digests_are_order_independent() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    reversed_snapshot = RegistrySnapshot.build(
+        tool_registry_version=snapshot.tool_registry_version,
+        registrations=tuple(reversed(snapshot.canonical_registrations)),
+    )
+
+    assert compute_registry_snapshot_digest(reversed_snapshot) == (
+        compute_registry_snapshot_digest(snapshot)
+    )
+    assert compute_provider_mapping_digest(reversed_snapshot) == (
+        compute_provider_mapping_digest(snapshot)
+    )
+
+
+def test_cycle2_registry_digests_are_projection_sensitive() -> None:
+    base = RegistrySnapshot.build(
+        tool_registry_version="runtime-tools-v1",
+        registrations=(_registration("first_read"),),
+    )
+    changed_version = RegistrySnapshot.build(
+        tool_registry_version="runtime-tools-v2",
+        registrations=(_registration("first_read"),),
+    )
+    changed_private_registration = RegistrySnapshot.build(
+        tool_registry_version="runtime-tools-v1",
+        registrations=(
+            _registration("first_read", handler_ref="handlers.replaced"),
+        ),
+    )
+    changed_provider_name = RegistrySnapshot.build(
+        tool_registry_version="runtime-tools-v1",
+        registrations=(
+            _registration("first_read", provider_name="provider_first_read"),
+        ),
+    )
+
+    assert compute_registry_snapshot_digest(changed_version) != (
+        compute_registry_snapshot_digest(base)
+    )
+    assert compute_provider_mapping_digest(changed_version) != (
+        compute_provider_mapping_digest(base)
+    )
+    assert compute_registry_snapshot_digest(changed_private_registration) != (
+        compute_registry_snapshot_digest(base)
+    )
+    assert compute_provider_mapping_digest(changed_private_registration) == (
+        compute_provider_mapping_digest(base)
+    )
+    assert compute_registry_snapshot_digest(changed_provider_name) != (
+        compute_registry_snapshot_digest(base)
+    )
+    assert compute_provider_mapping_digest(changed_provider_name) != (
+        compute_provider_mapping_digest(base)
+    )
+
+
+def test_cycle2_registry_digests_reject_non_exact_or_bypassed_snapshots() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    bypassed = snapshot.model_copy(
+        update={"model_visible_toolset_hash": f"sha256:{'0' * 64}"}
+    )
+
+    with pytest.raises(TypeError, match="exact RegistrySnapshot"):
+        compute_registry_snapshot_digest(object())  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="ToolSpec hash mismatch"):
+        compute_registry_snapshot_digest(bypassed)
+    with pytest.raises(ValidationError, match="ToolSpec hash mismatch"):
+        compute_provider_mapping_digest(bypassed)
+
+
+def test_cycle2_registry_digests_reject_raw_or_hidden_nested_storage() -> None:
+    class DerivedToolSpec(ToolSpec):
+        pass
+
+    snapshot = build_cycle2_registry_snapshot()
+    registration = snapshot.canonical_registrations[0]
+    raw_enum_registration = registration.model_copy(update={"effect": "READ"})
+    raw_enum_snapshot = snapshot.model_copy(
+        update={
+            "canonical_registrations": (
+                raw_enum_registration,
+                *snapshot.canonical_registrations[1:],
+            )
+        }
+    )
+    hidden_outer = snapshot.model_copy(update={"unexpected_field": "unexpected"})
+    private_nested = registration.model_copy(deep=True)
+    object.__setattr__(
+        private_nested,
+        "__pydantic_private__",
+        {"_unexpected": "unexpected"},
+    )
+    private_snapshot = snapshot.model_copy(
+        update={
+            "canonical_registrations": (
+                private_nested,
+                *snapshot.canonical_registrations[1:],
+            )
+        }
+    )
+    subclass_registration = registration.model_copy(
+        update={
+            "tool_spec": DerivedToolSpec.model_validate(
+                registration.tool_spec.model_dump(mode="python")
+            )
+        }
+    )
+    subclass_snapshot = snapshot.model_copy(
+        update={
+            "canonical_registrations": (
+                subclass_registration,
+                *snapshot.canonical_registrations[1:],
+            )
+        }
+    )
+
+    for malformed in (
+        raw_enum_snapshot,
+        hidden_outer,
+        private_snapshot,
+        subclass_snapshot,
+    ):
+        with pytest.raises(TypeError, match="exact RegistrySnapshot"):
+            compute_registry_snapshot_digest(malformed)
+        with pytest.raises(TypeError, match="exact RegistrySnapshot"):
+            compute_provider_mapping_digest(malformed)
 
 
 def test_toolset_json_blocks_mutation_aliases_and_preserves_hash() -> None:

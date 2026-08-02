@@ -27,6 +27,8 @@ from pydantic_core import PydanticSerializationError
 
 from .common import (
     AuditOnlyModel,
+    FrozenJsonDict,
+    FrozenJsonList,
     ModelVisibleModel,
     RuntimePrivateModel,
     find_trusted_argument_field,
@@ -279,6 +281,124 @@ class RegistrySnapshot(RuntimePrivateModel):
             model_visible_toolset_hash=self.model_visible_toolset_hash,
             provider_visible_tool_specs=self.provider_visible_toolset,
         )
+
+
+def _validated_registry_snapshot_payload(
+    snapshot: RegistrySnapshot,
+) -> dict[str, Any]:
+    """Revalidate an exact snapshot before using it as digest evidence."""
+
+    if (
+        type(snapshot) is not RegistrySnapshot
+        or not cycle2_pydantic_model_graph_is_raw_closed(snapshot)
+        or not _registry_snapshot_storage_graph_is_closed(snapshot)
+    ):
+        raise TypeError("registry snapshot digest requires an exact RegistrySnapshot")
+    serialized = snapshot.model_dump_json(round_trip=True, warnings="error")
+    validated = RegistrySnapshot.model_validate_json(serialized, strict=True)
+    if not _cycle2_raw_value_is_exact(snapshot, validated):
+        raise ValueError("registry snapshot digest input changed during round trip")
+    return validated.model_dump(mode="json", warnings="error")
+
+
+def _registry_snapshot_storage_graph_is_closed(root: object) -> bool:
+    """Reject hidden Pydantic state and non-canonical nested storage."""
+
+    seen: set[int] = set()
+
+    def visit(value: object) -> bool:
+        if isinstance(value, BaseModel):
+            private = value.__pydantic_private__
+            if private is not None and (type(private) is not dict or private):
+                return False
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(
+                visit(value.__dict__[field_name])
+                for field_name in type(value).model_fields
+            )
+        if type(value) is FrozenJsonDict:
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(type(key) is str and visit(item) for key, item in value.items())
+        if type(value) in {tuple, FrozenJsonList}:
+            value_id = id(value)
+            if value_id in seen:
+                return True
+            seen.add(value_id)
+            return all(visit(item) for item in value)
+        return value is None or type(value) in {
+            bool,
+            int,
+            float,
+            str,
+            ToolEffect,
+        }
+
+    try:
+        return visit(root)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return False
+
+
+def _compute_cycle2_contract_digest(payload: Mapping[str, Any]) -> str:
+    canonical_json = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_json).hexdigest()
+
+
+def compute_registry_snapshot_digest(snapshot: RegistrySnapshot) -> str:
+    """Digest the complete, order-independent Cycle 2 registry snapshot."""
+
+    validated = _validated_registry_snapshot_payload(snapshot)
+    registrations = sorted(
+        validated["canonical_registrations"],
+        key=lambda registration: registration["tool_spec"]["name"],
+    )
+    provider_toolset = sorted(
+        validated["provider_visible_toolset"],
+        key=lambda tool_spec: tool_spec["name"],
+    )
+    bindings = sorted(
+        validated["provider_name_to_canonical_name"],
+        key=lambda binding: binding["provider_visible_name"],
+    )
+    return _compute_cycle2_contract_digest(
+        {
+            "digest_schema": "cycle2-registry-snapshot.p0.v1",
+            "tool_registry_version": validated["tool_registry_version"],
+            "canonical_registrations": registrations,
+            "provider_visible_toolset": provider_toolset,
+            "provider_name_to_canonical_name": bindings,
+            "model_visible_toolset_hash": validated["model_visible_toolset_hash"],
+        }
+    )
+
+
+def compute_provider_mapping_digest(snapshot: RegistrySnapshot) -> str:
+    """Digest the exact Cycle 2 provider-name mapping projection."""
+
+    validated = _validated_registry_snapshot_payload(snapshot)
+    bindings = sorted(
+        validated["provider_name_to_canonical_name"],
+        key=lambda binding: binding["provider_visible_name"],
+    )
+    return _compute_cycle2_contract_digest(
+        {
+            "digest_schema": "cycle2-provider-mapping.p0.v1",
+            "tool_registry_version": validated["tool_registry_version"],
+            "provider_name_to_canonical_name": bindings,
+        }
+    )
 
 
 class GateDecisionValue(StrEnum):
