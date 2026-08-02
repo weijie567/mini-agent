@@ -900,6 +900,19 @@ product-description Claim升级为订单事实，也不创建新的 `order_id` C
 直接order-id路径和第7.4节ordinal selected-target路径保持各自既有binding规则，三者
 不得混合或fallback。
 
+该同一次搜索闭包之后的普通 continuation 是另一条路径。current RequestUnit 可以同时
+保留形成 UNIQUE auto-target 的 `product_description` query binding，以及一条独立的
+current `order_id` Claim；两者的 identity、source message 和 authority role 不得合并。
+当本次新消息的 strict `order_id` 与 closed target 精确相等时，它仍按 Intent owner
+形成 fresh accepted binding、只 supersede 旧的同名 `order_id` Claim，并以真实
+Task / RequestUnit CAS 推进版本；不同名的 query binding继续current，因此 immutable
+AutoTarget 的 origin 不 dangling，也不需要 successor target或repair-on-read。随后直接
+`get_order` 必须使用本次 fresh `order_id` binding 且
+`verified_target_ref = null`；`get_shipment` 必须使用 AutoTarget 的 current query
+origin且exact-copy `verified_target_ref`。Runtime必须同时验证order value与完整target
+closure，但禁止要求这两个不同角色的 binding UUID 相等。不同order value、任一binding
+缺失/非current或target closure不唯一时全部fail closed。
+
 ### 7.4 序号回答绑定
 
 当用户回复“第二个”时：
@@ -1022,6 +1035,14 @@ GetShipmentInput
   `candidate_ordinal` binding。模型候选的 `order_id` 必须与 closed target 的
   `order_id` 精确相等；Runtime 不比较或改写 product description / ordinal Claim 的
   value 来制造订单事实，也不得为后两条路径伪造新的 `order_id` USER_CLAIM。
+- 对第 7.3.4 节已经形成 UNIQUE AutoTarget 的普通 continuation，本轮消息形成的 fresh
+  `order_id` Claim 可以与该 `product_description` query target origin并存；它证明本轮
+  用户输入和 exact order value，不会替换target origin，也不会自动进入
+  `get_shipment.argument_binding_refs`。如果本轮先走direct `get_order`，该ToolCall使用
+  fresh order binding / null target；后续或direct `get_shipment`仍只使用该AutoTarget
+  自己的query origin binding / verified target。不得把两个binding ref混为一个、同时
+  塞入ToolCall或按值相等伪造identity相等。本裁决不改变第 7.4 节 ordinal
+  selected-target family，ordinal与fresh order Claim的并存语义仍不在本切片范围内。
 - current target 通过独立 `verified_target_ref` 在 GateDecisionV2、
   AuthorizedToolCommandV2 与 ToolCallRecordV2 中 exact-copy。Gateway 必须同时复核
   binding ref / name、target、owner、Task / RequestUnit / state version 与 source
@@ -2545,8 +2566,12 @@ Cycle2ExecutionSetupPlanV1 {
 能包含现有 canonical record 类型：Conversation / ConversationTaskLink、Task、
 RequestUnit、InputBinding、CandidateSet / AutoTarget / Selection、Order / Search /
 Shipment Observation、ShipmentAssessment、source AgentRun / RunTaskLink / ToolCall、
-ContextManifest / toolset artifact 与适用的 recovery logical child；`MessageRecord`
-只允许下述唯一recovery-root历史USER provenance例外。它不得接收
+ContextManifest / toolset artifact 与适用的 recovery logical child。`base_records`
+可以包含同一Conversation内、被该preseed graph的goal / binding / manifest / Trace
+exact引用的历史USER `MessageRecord`；每个ref必须闭合且不得出现未引用、ASSISTANT、
+terminal-output或本次evaluated message identity。独立的
+`historical_user_messages` auxiliary family只允许下述唯一recovery-root历史USER
+provenance例外，普通fixture必须保持该family为空。setup不得接收
 `dict[str, object]`、任意 SQL、任意 record code 或省略 schema version 的 payload。
 每个 record 必须由下方 closed catalog 的 builder 产生；普通 Case 不能携带
 `deliberate_integrity_vector`，只有表中明确列出的 negative fixture 可以携带一个
@@ -2633,7 +2658,28 @@ uuid = UUID(bytes=raw)
   evaluated root Run严格不同。
 - current verified target只能从 owner-scoped AutoTarget或Selection closure派生，不能
   由fixture直接写一个无来源order id；negative mapping只存在于上述foreign-control
-  family。
+  family。第 7.3.4 节 UNIQUE AutoTarget的current `product_description` query origin可以
+  与独立current `order_id` Claim并存；后者必须有下述同Conversation历史USER Message
+  source closure，但不得被fixture或reader改写成target origin。该规则不扩展到Selection
+  / ordinal family。
+- `fx-verified-order-target-o1001-owner-a-v1` base graph及复用它的fixture必须精确包含一条
+  `record_role=message.historical_user.order_id`的普通历史消息，且同一fold后graph不得有
+  第二条该role。其`message_id`由`(fixture_ref, record_role)`确定性导出，
+  `conversation_id`等于owner-A trusted Session的current Conversation，
+  `direction=USER`，`content`精确等于`我要查询订单 O-1001。`。与之成对的唯一
+  `record_role=binding.order_id`必须是`name=order_id`、
+  `normalized_value=O-1001`、`authority=USER_CLAIM`、`validation_status=ACCEPTED`、
+  `confirmed_by_user=true`、`source_refs=(该message_id,)`、`supersedes=null`；其
+  `created_at=updated_at=message.received_at`，并满足current search message / query
+  binding时间严格早于该时间、该时间不晚于preseed Task / RequestUnit `updated_at`。
+  除下述recovery snapshot carve-out外，ordinary folded current RequestUnit的
+  `input_binding_refs`必须同时且只一次引用query binding与该order binding；在recovery
+  的pre-CAS v2 snapshot中也必须保持这一组pre-image refs。该普通order消息的完整
+  referenced set精确等于order binding的
+  `source_refs`，不得进入goal refs、supporting Run的ContextManifest / Trace、evaluated
+  root或下述recovery auxiliary family。它与本次authenticated Case message的identity、
+  content和接收时间均不同；setup validation必须验证消息content内唯一order token经
+  Phase 1 exact normalization得到同一个`O-1001`，不能只比较fixture expectation。
 - ordinary preseed graph不能包含本次evaluated message、root Run、root ToolCall、
   root Trace、root terminal result、expected mapper row或reply；任何fixture都不得
   预置ASSISTANT Message、terminal-output Message或回复。supporting历史Run只保留其
@@ -2646,13 +2692,40 @@ uuid = UUID(bytes=raw)
   link、`RunStopped`、Agent result、ASSISTANT或下述唯一USER以外的Message、
   `ResponseRendered`、Task transition、attempt 2或reply。SUT返回的root `run_id`必须exact等于该
   `recovery_subject_run_id`，其余Case仍由执行期分配全新root identity。
-- 上述例外还必须预置且只预置一个`direction=USER`的历史`MessageRecord`，其content
-  exact等于authenticated Case input中唯一USER message，conversation id exact等于
-  owner-A trusted Session的current Conversation，received_at不得晚于旧Run
-  `started_at`。旧RequestUnit goal refs、InputBinding `source_refs`、ContextManifest
-  selected-message refs与适用Trace message ref对该message形成exact referenced set；
-  不允许额外、missing或其他Conversation message。该record进入完整`setup_digest`，
-  但不作为本次新入站消息，不产生ASSISTANT/output authority，也不进入普通Trace正文。
+- 上述例外还必须在`historical_user_messages` auxiliary family中预置且只预置一个
+  `direction=USER`的历史`MessageRecord`；这里的“只预置一个”只约束该auxiliary family，
+  不排除同一base graph中上段已经exact引用的search / ordinary-order supporting消息。
+  其content exact等于authenticated Case input中唯一USER message，conversation id exact
+  等于owner-A trusted Session的current Conversation，且search / ordinary-order source
+  message时间严格早于`received_at = old Run.started_at <= fresh-order binding time <=`
+  `ContextManifest.assembled_at / Gate.decided_at / ToolCall.started_at`；这些后继时间之间
+  仍须服从各自canonical record的非递减约束。
+- recovery graph必须物化原root crash前已经提交的fresh continuation effect，而不是把
+  ordinary旧Claim或query binding改写成该auxiliary message的来源。唯一合法版本链是：
+  search / ordinary-order pre-image Task与RequestUnit均为v2；fresh
+  `binding.order_id.recovery_root`为`name=order_id`、`normalized_value=O-1001`、
+  `USER_CLAIM / ACCEPTED / confirmed_by_user=true`，`source_refs`精确等于上述auxiliary
+  message id，`supersedes`精确等于ordinary `binding.order_id`，并以
+  `created_at=updated_at`不早于message / old Run start且不晚于Manifest / Gate / Tool的
+  可信时间形成v2→v3 CAS。
+  v3 RequestUnit refs精确以fresh binding替换ordinary旧order binding并保留原
+  `product_description` query binding；goal refs仍精确引用原search source message。
+- old RunTaskLink的`base_task_state_version=2`；其ContextManifest
+  `selected_message_refs`精确等于auxiliary message id并绑定Task v3；old Gate与ToolCall
+  `validated_task_state_version=3`，Gate / ToolCall的`argument_binding_refs`仍精确等于
+  AutoTarget的`product_description` query origin，且exact-copy verified target ref。
+  MessageAccepted Trace的message ref也精确等于auxiliary message id。对该auxiliary
+  message的完整referenced set仅为fresh order binding source、该Manifest与该Trace；
+  ordinary order binding仍只引用ordinary-order message，query / goal / supporting
+  Search closure仍只引用search message，三条provenance不得互相改写。
+- attempt 1 finalize为`RETRY_SCHEDULED`之后、recovery开始之前，fixture必须把current
+  Task / RequestUnit从v3推进到v4但保持v3的query + fresh-order current binding refs，
+  `updated_at`严格晚于attempt 1 `finished_at`；这一个版本差异是
+  `STATE_OR_BINDING_INVALIDATED`的唯一注入点。recovery读取和no-result finalization不得
+  再创建binding或改变v4 Task / RequestUnit。上述v2 pre-image、v3 Gate snapshot与v4
+  final-current关系必须由setup validator整体验证，任一版本、ref、时间或source漂移都
+  fail closed。该auxiliary record进入完整`setup_digest`，但不作为本次新入站消息，
+  不产生ASSISTANT/output authority，也不进入普通Case的Trace正文。
 
 ##### W12 complete fixture catalog
 
@@ -2670,7 +2743,7 @@ ref 一律 unknown，不允许按命名约定自动生成。
 | `fx-current-candidate-set-owner-a-v1` | current `WAITING_USER` graph；一个 MULTIPLE CandidateSet，entries `1→O-1002`、`2→O-1001`，该顺序由 D1 `ordered_at DESC, order_number ASC` 与 W9 exact dates 唯一导出；pending ref/current Task version/15-minute TTL/source Search Observation 与两个 runtime-private target mappings 全部闭合 |
 | `fx-expired-candidate-set-owner-a-v1` | 与 current fixture 同形，但 trusted now 已满足 `now >= valid_until`；没有其他 current CandidateSet |
 | `fx-candidate-set-other-task-owner-a-v1` | customer-A current Session Task 与 CandidateSet 所属 customer-A other Task 精确不同；current Task 不拥有该 pending ref，且不包含 foreign owner data |
-| `fx-verified-order-target-o1001-owner-a-v1` | current ACTIVE graph；accepted `order_id=O-1001` Claim、唯一 verified target 与 target Observation 由同 owner/current Task/version闭合；不预置本次 evaluated Run 的 ToolCall/Result |
+| `fx-verified-order-target-o1001-owner-a-v1` | current ACTIVE graph；精确一条`message.historical_user.order_id`普通历史USER消息及其exact-one source的accepted `binding.order_id=O-1001` Claim，具体content、identity、时间、normalized relation与referenced set服从上文；它与一个current `product_description` query binding并存。唯一 verified target 与 target Observation 只由后者的Search Observation / UNIQUE CandidateSet / AutoTarget closure形成，并由同owner/current Task/version闭合；不预置本次evaluated message或其Run / ToolCall / Result |
 | `fx-dynamic-tool-pair-owner-a-v1` | 复用 W9 `ORDER/SEARCH-A-1001 + SHIPMENT-A-1001-NORMAL`；pair evidence 必须从本次 resolved rows 与实际 RegistrySnapshot 重算 |
 | `fx-stale-shipment-observation-owner-a-v1` | 与 verified O-1001 target 同一 current graph；一条 historical ShipmentObservation 满足 `now >= valid_until`，且其 source Run/Link/ToolCall/source edge 可由 exact reader还原 |
 | `fx-candidate-owner-mismatch-owner-a-v1` | current WAITING_USER graph；A 的 CandidateSet entry 只引用 observation candidate ref，唯一 target mapping 是 owner-B scoped control record，A reader必须得到 indistinguishable absent；`integrity_vector=CANDIDATE_MAPPING_OWNER_MISMATCH` |
@@ -3014,6 +3087,31 @@ RunStopped audit outcome 相等；若对应 `RM-I*` 明确 `NO AgentRunResult`�
 `"NONE"` 或缺失字段代替；本阶段唯一合法 tuple 是
 `(SUPERSEDED,STATE_OR_BINDING_INVALIDATED,BLOCKED,NONE)`。
 
+`REQ_BINDING(kind,ref,$TASK_VERSION_AT_GATE)`证明对应accepted Claim在适用
+owner / Task / RequestUnit graph中于实际Gateway版本current，且binding时间不得晚于
+该Gate；它不等价于“每个ToolCall都把该ref作为argument binding”。Tool实际消费哪个
+binding仍必须由同一GateDecision / ToolCall的exact `argument_binding_refs`、verified
+target closure与适用forbidden predicate独立证明。对所有由本次authenticated USER
+message产生strict `order_id` candidate的普通Run，
+`REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE)`必须解析为本轮fresh
+accepted child：`source_refs`精确等于本次保存的USER message id，`supersedes`精确等于
+fixture中此前current的同名order Claim，旧Claim在CAS后不再current，且Task / RequestUnit
+真实推进到包含fresh binding的result version；binding / Task / RequestUnit时间和实际
+Gateway validated version必须形成同一closure。Grader不得用preseed旧Claim满足该
+predicate，也不得只凭value相等、current标记或Tool成功推断fresh CAS。
+
+本阶段唯一例外是`T2-retry-finalize-before-second-fence-state-invalidated`：该Case使用
+preseed recovery root且明确`FORBID_TASK_OR_REQUEST_UNIT_MUTATION`，因此
+`$ORDER_BINDING_REF`必须解析为上述原root crash前已经持久化的v3 fresh accepted child，
+其source为auxiliary authenticated USER message、`supersedes`为v2 ordinary旧Claim，并以
+旧Run的Gateway / ToolCall validated v3验证；不能解析为`supersedes=null`的旧Claim，
+也不能要求recovery创建新binding。final current Task / RequestUnit为不变的v4，fresh
+binding仍current，但版本差异令revalidation fail closed。
+无论普通或该例外，`REQ_BINDING(order_id)`都不得冒充使用UNIQUE query origin的
+`get_shipment`授权证据。`$SELECTION_EXPECTED_TASK_VERSION`路径继续要求ordinal binding
+与Selection/CandidateSet exact closure，不适用上述Gate版本解释；本裁决也不定义
+ordinal与fresh order Claim并存语义。
+
 以 `$` 开头的 operand 是 fixture / exact evidence reader 的 typed symbolic ref，
 artifact 保存该 exact token，Grader 必须从 authenticated Fixture 或实际记录图解析，
 不能把它当自由字符串：
@@ -3022,7 +3120,7 @@ artifact 保存该 exact token，Grader 必须从 authenticated Fixture 或实�
 |---|---|
 | `$QUERY_BINDING_REF` | 当前 accepted product-description InputBinding ref；UNIQUE auto-target 路径可作为 Shipment target-origin binding |
 | `$ORDINAL_BINDING_REF` | 当前 accepted ordinal InputBinding ref；ordinal selected-target 路径可作为 Shipment target-origin binding |
-| `$ORDER_BINDING_REF` | 当前 order_id InputBinding ref；只表示直接订单号 target-origin binding，verified target 仍是独立受控引用 |
+| `$ORDER_BINDING_REF` | 普通strict-order Run解析为本次USER message形成、exact supersede fixture旧Claim并进入Task / RequestUnit CAS result的fresh current `order_id` InputBinding ref；唯一state-invalidated recovery no-mutation Case解析为原root crash前已提交、source=auxiliary message、supersedes=v2 ordinary旧Claim且由旧Gate validated v3的fresh child，不得解析为旧Claim。两者都只证明accepted order Claim，不自动表示get_shipment target origin，verified target与Tool argument provenance仍是独立受控引用 |
 | `$CLAIM_BINDING_REF` | 当前有效“未收到” Claim binding ref |
 | `$TASK_VERSION_AT_GATE` | 实际 Gateway validated Task version |
 | `$SEARCH_BASE_TASK_VERSION` | 搜索 effect CAS base Task version |
@@ -3518,6 +3616,7 @@ exact-head review 与 merge 证据。
 | 22 | W12 recovery trajectory assertion remediation | OA-10 no-output断言是否错误删除历史输入provenance | 871e6b2第三轮exact review确认recovery主合同已闭合，但第9.5节总断言仍禁止任何Message，因而会拒绝强制历史USER source。修正为finalization不新增Message、只禁止ASSISTANT / terminal output并保留第9.2.3节唯一历史USER provenance；no-result/no-state/no-response语义不变 |
 | 23 | W12 CandidateSet ordinal mapping remediation | fixture序号是否服从已冻结排序与W9 exact dates | R17实现预检确认D1与production Core均固定`ordered_at DESC, order_number ASC`，W9冻结O-1002日期晚于O-1001，因此唯一合法映射为`1→O-1002、2→O-1001`；第9.2.3节原反向fixture行属于scoped Spec内部矛盾。本owner显式修正该行，不改变排序算法、种子日期、Case身份、期望结果或lifecycle；旧`02-18R17`控制包因消费错误Spec blob而失效，必须从本修正真实successor重冻结replacement R17 |
 | 24 | W12 E2E01-05 post-order control remediation | order-only与logistics-required能否在active argument-free control边界真实分流 | R17R1 neighbor审查确认旧integration harness首先引用已移除proposal wrapper；继续沿active flow证明普通logistics goal在`get_order`后受未授权先验`requires_shipment=false`阻断，无法消费已认证`PROPOSE_GET_SHIPMENT` script step。裁决以Application-private`PROPOSE_POST_ORDER`统一post-order purpose，只允许`FINISH`或无参数`get_shipment`两个closed behavior；verified target/order id仍仅由Gateway注入。不得新增Intent/InputBinding/关键词heuristic/Case expectation authority；Application、integration test、Eval adapter与Composition继续分离single-writer，Case/predicate/digest/lifecycle不变 |
+| 25 | W12 current order Claim / target-origin remediation | fresh `order_id` Claim是否必须与既有UNIQUE target origin使用同一binding identity | R19真实pair首先证明Core的UUID相等条件不可满足；随后cross-owner审查确认fresh order Claim仍须服从Intent accepted-delta / Task effect，而AutoTarget只能保留其Search query origin。裁决令fixture同时闭合历史source的current order Claim与product-description AutoTarget origin，并区分ordinary `base_records`中的exact-referenced历史USER Message和只对recovery开放的`historical_user_messages` auxiliary family；本轮order Claim继续fresh CAS并只supersede同名旧Claim，`get_order`使用fresh order/null target，`get_shipment`使用query origin/verified target。state-invalidated recovery另冻结原root已提交的v2旧Claim→v3 fresh child / Gate→v4 invalidated-current链，recovery不得补建binding或用旧Claim满足`REQ_BINDING`。该predicate只证明accepted Claim及Gateway版本，不替代Tool argument provenance；Core、Fixture、Eval继续分离single-writer，Case predicate bytes与lifecycle不变 |
 
 ## 14. Review checklist
 
