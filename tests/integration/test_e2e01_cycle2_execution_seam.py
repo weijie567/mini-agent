@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ from mini_agent.core.request_understanding import (
     QueryContextualizationCandidateV2,
 )
 from mini_agent.core.task_state import (
+    InputBindingV2,
     TaskDeltaOperation,
     TaskStateTransition,
     TaskStatus,
@@ -533,6 +535,66 @@ def _insert_unrelated_task_pair(
     return unrelated_task, unrelated_unit
 
 
+def _replace_current_binding_but_keep_historical_reference(
+    composition: Cycle2OfflineComposition,
+    evidence: Cycle2ExactRunEvidenceClosure,
+) -> tuple[InputBindingV2, InputBindingV2]:
+    records = composition._records
+    unit = evidence.request_unit_records[0]
+    historical_binding_ref = (
+        evidence.candidate_set_records[0].query_binding_refs[0]
+    )
+    historical = next(
+        binding
+        for binding in evidence.input_binding_records
+        if binding.binding_id == historical_binding_ref
+    )
+    replacement = historical.model_copy(
+        update={
+            "binding_id": uuid4(),
+            "created_at": unit.updated_at + timedelta(microseconds=1),
+            "updated_at": unit.updated_at + timedelta(microseconds=1),
+            "supersedes": historical.binding_id,
+        }
+    )
+    next_unit = unit.model_copy(
+        update={
+            "input_binding_refs": (replacement.binding_id,),
+            "updated_at": replacement.updated_at,
+        }
+    )
+    with records.session_factory.begin() as session:
+        records._cycle2_insert(
+            session,
+            (
+                records._cycle2_encode_input_binding(
+                    replacement,
+                    request_unit_id=unit.request_unit_id,
+                ),
+            ),
+            owner_customer_id=evidence.owner_scope.customer_id,
+        )
+        row = session.scalar(
+            select(P0RecordModel).where(
+                P0RecordModel.record_code
+                == P0RecordCode.REQUEST_UNIT_RECORD.value,
+                P0RecordModel.request_unit_id == unit.request_unit_id,
+            )
+        )
+        assert row is not None
+        records._cycle2_replace(
+            session,
+            row,
+            owner_customer_id=evidence.owner_scope.customer_id,
+            expected_record=unit,
+            next_envelope=records._cycle2_encode(
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                next_unit,
+            ),
+        )
+    return historical, replacement
+
+
 def _tamper_order_observation_source_call(
     composition: Cycle2OfflineComposition,
     evidence: Cycle2ExactRunEvidenceClosure,
@@ -905,6 +967,66 @@ async def test_exact_reader_rejects_tampered_observation_source_edge(
         engine.dispose()
 
 
+async def test_exact_reader_loads_referenced_binding_absent_from_current_unit(
+    eval_postgres_namespace,
+) -> None:
+    engine, _session_factory, composition = await _start(
+        eval_postgres_namespace,
+        fixture_refs=("fx-search-unique-owner-a-with-foreign-decoy-v1",),
+    )
+    try:
+        result = await _post(
+            composition.build_case_app(
+                provider=_Cycle2DirectProvider(
+                    product_description="轻量跑鞋"
+                )
+            ),
+            "帮我查找最近购买的轻量跑鞋订单",
+        )
+        evidence = await composition.load_exact_run_evidence(result.run_id)
+        historical, replacement = (
+            _replace_current_binding_but_keep_historical_reference(
+                composition,
+                evidence,
+            )
+        )
+        reread = await composition.load_exact_run_evidence(result.run_id)
+
+        assert reread.request_unit_records[0].input_binding_refs == (
+            replacement.binding_id,
+        )
+        assert {
+            binding.binding_id for binding in reread.input_binding_records
+        } == {historical.binding_id, replacement.binding_id}
+        assert historical.binding_id in (
+            reread.candidate_set_records[0].query_binding_refs
+        )
+        with composition._records.session_factory.begin() as session:
+            historical_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.INPUT_BINDING_RECORD.value,
+                    P0RecordModel.logical_identity
+                    == [["binding_id", str(historical.binding_id)]],
+                )
+            )
+            assert historical_row is not None
+            corrupted_envelope = json.loads(
+                json.dumps(historical_row.envelope)
+            )
+            corrupted_envelope["record_schema_version"] = (
+                "input_binding_record.p0.v1"
+            )
+            historical_row.envelope = corrupted_envelope
+        with pytest.raises(P0PersistenceIntegrityError):
+            await composition._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=evidence.owner_scope,
+                run_id=result.run_id,
+            )
+    finally:
+        engine.dispose()
+
+
 async def test_multiple_then_second_uses_current_candidate_without_research(
     eval_postgres_namespace,
 ) -> None:
@@ -1072,6 +1194,23 @@ async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds
             is ToolRetryDecision.NOT_APPLICABLE
         )
 
+        task = evidence.task_records[0]
+        unit = evidence.request_unit_records[0]
+        persisted_history = TaskStateTransition(
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            from_status=TaskStatus.ACTIVE,
+            to_status=TaskStatus.WAITING_USER,
+            base_state_version=1,
+            result_state_version=2,
+            reason_ref=result.run_id,
+            changed_at=task.updated_at,
+        )
+        _replace_task_transition_children(
+            composition,
+            evidence,
+            children=(persisted_history,),
+        )
         oa10_run = _seed_oa10_projection_root(
             composition,
             evidence,
