@@ -2427,8 +2427,8 @@ class Cycle2AgentRunHandler:
             auto_target = build_cycle2_unique_auto_target_record(
                 customer_context=command.customer_context,
                 current_conversation_id=turn.conversation.conversation_id,
-                current_task=task,
-                current_request_unit=request_unit,
+                current_task=next_task,
+                current_request_unit=next_unit,
                 current_input_bindings=input_bindings,
                 candidate_set=candidate_set,
                 search_observation=observation,
@@ -3447,6 +3447,11 @@ class Cycle2AgentRunHandler:
             raise AgentRunExecutionError("current ToolCall closure unavailable")
         model_call_id = self._uuid_factory()
         manifest_id = self._uuid_factory()
+        candidate = candidate_factory(
+            closure,
+            model_call_id,
+            manifest_id,
+        )
         manifest = ContextManifest(
             context_manifest_id=manifest_id,
             run_id=turn.running_run.run_id,
@@ -3456,9 +3461,13 @@ class Cycle2AgentRunHandler:
                 self._registry_snapshot.model_visible_toolset_hash
             ),
             selected_message_refs=(turn.user_message.message_id,),
-            task_state_ref_and_version=TaskStateRefAndVersion(
-                task_id=closure.current_task_record.task_id,
-                state_version=closure.current_task_record.state_version,
+            task_state_ref_and_version=(
+                None
+                if candidate.proposed_base_task_state_version is None
+                else TaskStateRefAndVersion(
+                    task_id=closure.current_task_record.task_id,
+                    state_version=candidate.proposed_base_task_state_version,
+                )
             ),
             observation_refs_and_versions=tuple(
                 VersionedRecordRef(
@@ -3478,11 +3487,6 @@ class Cycle2AgentRunHandler:
             assembled_at=closure.trusted_read_at,
         )
         await self._context_record_port.save_context_manifest(manifest)
-        candidate = candidate_factory(
-            closure,
-            model_call_id,
-            manifest_id,
-        )
         binding_facts = tuple(
             Cycle2AcceptedBindingFacts(
                 binding_id=binding.binding_id,
@@ -3549,7 +3553,17 @@ class Cycle2AgentRunHandler:
                 ),
                 task_state_version=closure.current_task_record.state_version,
                 history_complete=True,
-                prior_tool_steps=tuple(turn.tool_progress),
+                prior_tool_steps=tuple(
+                    progress.model_copy(
+                        update={
+                            "context_manifest_id": manifest_id,
+                            "task_state_version": (
+                                closure.current_task_record.state_version
+                            ),
+                        }
+                    )
+                    for progress in turn.tool_progress
+                ),
             ),
         )
         gate = evaluate_cycle2_control_gateway(
