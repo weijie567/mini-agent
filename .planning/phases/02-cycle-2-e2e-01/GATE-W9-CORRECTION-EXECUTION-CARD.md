@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_R1B_OWNER_APPROVED / 02-15R1B_PLANNING_REVIEW`
+状态：`B_C2_W9_TYPED_READ_EXECUTION / 02-15R1_SECOND_REFREEZE_REVIEW`
 
 ## Exact input
 
@@ -18,6 +18,10 @@
   tree `b0dfc7802b81bee21168c4e79e2d046a642d0162`。
 - PR #276已reviewed重冻结R1；success-path executor gap经PR #277 reviewed批准
   `02-15R1B`，当前34 slots / 16 wave labels；R1 checkpoint未发布。
+- PR #278/#279已reviewed完成R1B；真实
+  `B_C2_W9_TYPED_READ_EXECUTION = 1fba65168fb487d3c4a8664213831a9c1c5dc815` /
+  tree `ec3c8c501c3c6385cef834f8a5efd1056642087d`。focused `68 passed`、neighbor
+  `446 passed`；R1 checkpoint仍未发布，必须从该真实successor重新实现。
 
 ## Ordered dispatch
 
@@ -40,4 +44,4 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R1B` exact-two-file executor correction；R1待second-refreeze，R2/02-15尚未冻结。
+当前只允许`02-15R1` exact-six-file second-refreeze planning/review；R1实现、R2/02-15尚未冻结。
