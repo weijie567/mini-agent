@@ -2179,7 +2179,7 @@ version_manifest.dataset_version = e2e01-cycle2-dataset-v1
 version_manifest.fixture_versions = [e2e01-cycle2-fixture-v1]
 version_manifest.model_config_version = scripted-model-provider-config-v1
 version_manifest.prompt_version = e2e01-cycle2-prompt-v1
-version_manifest.tool_registry_version = e2e01-cycle2-tools-v1
+version_manifest.tool_registry_version = e2e01-cycle2-tools.p0.v1
 version_manifest.corpus_version = null
 version_manifest.runtime_version =
   BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID
