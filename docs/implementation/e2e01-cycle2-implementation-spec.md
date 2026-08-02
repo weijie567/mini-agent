@@ -1005,11 +1005,18 @@ GetShipmentInput
 - `order_id` 必须来自当前 Task 的 verified target ref。
 - 用户消息中的订单号、搜索 Candidate 或旧 InputBinding 本身不足以授权调用。
 - 模型不能提供 `customer_id`、`package_id`、source version 或 freshness metadata。
-- `get_shipment` 的 `argument_binding_refs` 只保存形成该 target 的 current `order_id`
-  InputBinding ref；current target 通过独立 `verified_target_ref` 在
-  GateDecisionV2、AuthorizedToolCommandV2 与 ToolCallRecordV2 中 exact-copy。不得把
-  target ref 塞进 `argument_binding_refs`，也不得只凭 order-id Claim 跳过 target
-  closure。
+- `get_shipment` 的 `argument_binding_refs` 必须精确等于形成 current verified
+  target 的唯一 origin InputBinding ref，且只允许三种互斥来源：直接订单号路径的
+  current `order_id` binding、第 7.3.4 节 UNIQUE auto-target 的 current
+  `product_description` query binding，或第 7.4 节 ordinal selected-target 的 current
+  `candidate_ordinal` binding。模型候选的 `order_id` 必须与 closed target 的
+  `order_id` 精确相等；Runtime 不比较或改写 product description / ordinal Claim 的
+  value 来制造订单事实，也不得为后两条路径伪造新的 `order_id` USER_CLAIM。
+- current target 通过独立 `verified_target_ref` 在 GateDecisionV2、
+  AuthorizedToolCommandV2 与 ToolCallRecordV2 中 exact-copy。Gateway 必须同时复核
+  binding ref / name、target、owner、Task / RequestUnit / state version 与 source
+  Observation closure；三种 binding family 不得互相 fallback。不得把 target ref 塞进
+  `argument_binding_refs`，也不得只凭任一 Claim 或 public summary 跳过 target closure。
 
 Runtime-private query：
 
@@ -2548,9 +2555,9 @@ artifact 保存该 exact token，Grader 必须从 authenticated Fixture 或实�
 
 | Symbol | 必须解析为 |
 |---|---|
-| `$QUERY_BINDING_REF` | 当前 accepted product-description InputBinding ref |
-| `$ORDINAL_BINDING_REF` | 当前 accepted ordinal InputBinding ref |
-| `$ORDER_BINDING_REF` | 当前 order_id InputBinding ref；verified target 仍是独立受控引用 |
+| `$QUERY_BINDING_REF` | 当前 accepted product-description InputBinding ref；UNIQUE auto-target 路径可作为 Shipment target-origin binding |
+| `$ORDINAL_BINDING_REF` | 当前 accepted ordinal InputBinding ref；ordinal selected-target 路径可作为 Shipment target-origin binding |
+| `$ORDER_BINDING_REF` | 当前 order_id InputBinding ref；只表示直接订单号 target-origin binding，verified target 仍是独立受控引用 |
 | `$CLAIM_BINDING_REF` | 当前有效“未收到” Claim binding ref |
 | `$TASK_VERSION_AT_GATE` | 实际 Gateway validated Task version |
 | `$SEARCH_BASE_TASK_VERSION` | 搜索 effect CAS base Task version |
