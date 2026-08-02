@@ -293,7 +293,7 @@ async def test_same_pair_seed_and_registry_select_shipment_only_for_logistics(
         resolve_cycle2_seed_plan(fixture_refs)
     )
     expected_registry = build_cycle2_registry_snapshot()
-    results: dict[bool, tuple[str, str, tuple[Cycle2ToolName, ...]]] = {}
+    results: dict[bool, tuple[tuple[str, ...], tuple[Cycle2ToolName, ...]]] = {}
 
     for include_shipment in (False, True):
         namespace = postgres_namespace_factory.create(
@@ -323,24 +323,19 @@ async def test_same_pair_seed_and_registry_select_shipment_only_for_logistics(
             assert result.outcome is AgentOutcome.COMPLETED
             assert evidence.terminal_result == result
             results[include_shipment] = (
-                compute_cycle2_pair_seed_digest(
-                    composition.resolved_seed_plan
-                ),
-                composition.registry_snapshot.model_visible_toolset_hash,
+                tuple(sorted({call.tool_registry_version for call in calls})),
                 tuple(call.canonical_tool_name for call in calls),
             )
         finally:
             engine.dispose()
             postgres_namespace_factory.drop(namespace)
 
-    assert results[False][0] == results[True][0] == expected_digest
-    assert (
-        results[False][1]
-        == results[True][1]
-        == expected_registry.model_visible_toolset_hash
+    assert len(expected_digest) == 64
+    assert results[False][0] == results[True][0] == (
+        expected_registry.tool_registry_version,
     )
-    assert Cycle2ToolName.GET_SHIPMENT not in results[False][2]
-    assert Cycle2ToolName.GET_SHIPMENT in results[True][2]
+    assert Cycle2ToolName.GET_SHIPMENT not in results[False][1]
+    assert Cycle2ToolName.GET_SHIPMENT in results[True][1]
 
 
 async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds(

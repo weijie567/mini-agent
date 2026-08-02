@@ -1199,16 +1199,6 @@ class Cycle2OfflineComposition:
     def ready(self) -> bool:
         return self._ready
 
-    @property
-    def resolved_seed_plan(self) -> ResolvedCycle2SeedPlan:
-        self._ensure_ready()
-        return self._plan
-
-    @property
-    def registry_snapshot(self) -> RegistrySnapshot:
-        self._ensure_ready()
-        return self._registry_snapshot
-
     def _ensure_ready(self) -> None:
         if not self._ready:
             raise _fresh_composition_error()
