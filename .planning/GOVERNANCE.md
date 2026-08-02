@@ -112,7 +112,7 @@ Phase-specific branch mapping：
 | Phase | Integration branch | 状态与 base chain |
 |---|---|---|
 | Phase 1 / Cycle 1 | `integration/e2e01-thin` | `HISTORICAL / RELEASED`；保留原 PR、Activation 与 release 证据，不重命名、不复用 |
-| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W8 + R0 + R1A + R1B + R1C COMPLETE / W9 02-15R1D PLAN REVIEW`；真实 current integration `dd1e972763534198e6d2601baa2b60bb3312ad80` / tree `394d022adfa80ef4d935216393fecf19892d4316`；PR #282/#283已reviewed完成UNIQUE target durability contract，当前36 slots / 16 wave labels；旧R1 dirty checkpoint未发布且必须在R1D真实successor后第三次重冻结；Case仍为`CONTRACT_DEFINED`，W9 correction/full均不推进Phase 2 Harness dispatch/Result |
+| Phase 2 / Cycle 2 | `integration/e2e01-cycle2` | `ACTIVE / W8 + R0 + R1A-R1H COMPLETE / W9 02-15R1I PLAN REVIEW`；真实 current integration `24f1e181b54b0ae4d2889c653f4651064ce081e1` / tree `99f48fcde988b71adb5d0e19df99f69fd1b8854b`；PR #284-#296已reviewed完成R1D-R1H与R1第六次重冻结，当前41 slots / 16 wave labels；R1 WIP未发布且必须在R1I真实successor后第七次重冻结；Case仍为`CONTRACT_DEFINED`，W9 correction/full均不推进Phase 2 Harness dispatch/Result |
 
 `.planning/config.json` 的 `git.base_branch=integration/e2e01-cycle2` 只提供 branch
 mapping，不授权 GSD 创建、合并、清理 Worktree 或绕过 exact Task Packet。Gate P2-C

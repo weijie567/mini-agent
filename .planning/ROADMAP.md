@@ -59,7 +59,9 @@ R1A并冻结`B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准R1B。PR #2
 已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` / tree
 `ec3c8c50...`；PR #280完成R1 second-refreeze planning后，PR #281批准R1C/R1D。
 PR #282/#283已reviewed完成R1C并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e9727...` /
-tree `394d022a...`；当前36 slots / 16 wave labels并审核R1D exact Plan；旧R1 dirty checkpoint未发布。
+tree `394d022a...`。PR #284-#296又reviewed完成R1D-R1H与R1第六次重冻结；当前
+integration `24f1e181...` / tree `99f48fcd...`，41 slots / 16 wave labels并审核R1I
+exact Plan；R1 WIP未发布。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -195,7 +197,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W9_R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W9_R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -217,7 +219,7 @@ ruling 中把 `02-09R1/R2/R3` 加入前置修复链；PR #241又把`02-09R4/W4R2
 `02-07R`，不新增wave label。Adapter preflight确认既有物理承载缺口后，用户又批准
 `02-10R`且PR #254 reviewed merge。02-11 targeted验证确认OA-10 history physical
 BLOCK后，PR #259又批准`02-11R`且不新增wave；后续PR #268/#269、#273、#277把
-W9 owner corrections经PR #281扩展为当前36 slots / 16 wave labels，
+W9 owner corrections经PR #281及PR #284-#296扩展为当前41 slots / 16 wave labels，
 最大并发仍为`2`。
 `02-00/01/02/03` 已批准并执行；PR #214 完成 repaired status alignment，
 PR #215 reviewed merge 形成 W1 barrier `B_C2_CORE_123 = 241cf6b...`；PR #216/#217
@@ -250,7 +252,8 @@ PR #268/#269批准W9 correction链；PR #270/#271完成R0并冻结
 `B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准其前置R1B；PR #278/#279
 已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`。PR #280完成R1
 second-refreeze planning，PR #281又批准R1C/R1D；PR #282/#283已reviewed完成R1C并
-冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`；当前审核`02-15R1D` exact Plan，R1/R2/02-15未冻结。
+冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`；PR #284-#296又完成R1D-R1H及R1第六次
+重冻结；当前审核`02-15R1I` exact Plan，R1 WIP未发布，R2/02-15未冻结。
 
 **Branch mapping**:
 
@@ -526,7 +529,7 @@ third-refrozen R1；旧 `B_C2_APP_CONTRACT`、
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 29/36 | `W1-W8 + 02-15R0/R1A/R1B/R1C complete；02-15R1D plan review；old R1 checkpoint unpublished；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
+| 2. 完成 E2E-01 | 34/41 | `W1-W8 + 02-15R0/R1A-R1H complete；02-15R1I plan review；R1 WIP unpublished；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |
