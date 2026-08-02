@@ -6329,15 +6329,7 @@ class PostgresRecordAdapter:
                 )
             )
 
-        referenced_message_ids = {
-            message.message_id
-            for message in all_messages
-            if message.received_at == run.started_at
-            or (
-                run.completed_at is not None
-                and message.received_at == run.completed_at
-            )
-        }
+        referenced_message_ids: set[UUID] = set()
         referenced_message_ids.update(
             trace.message_ref
             for trace in traces
@@ -6357,6 +6349,18 @@ class PostgresRecordAdapter:
             for manifest in manifests
             for ref in manifest.selected_message_refs
         )
+        if run.status is AgentRunStatusV2.COMPLETED:
+            terminal_assistants = tuple(
+                message
+                for message in all_messages
+                if message.direction is MessageDirection.ASSISTANT
+                and message.received_at == run.completed_at
+            )
+            if len(terminal_assistants) != 1:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
+            referenced_message_ids.add(terminal_assistants[0].message_id)
         messages = tuple(
             sorted(
                 (

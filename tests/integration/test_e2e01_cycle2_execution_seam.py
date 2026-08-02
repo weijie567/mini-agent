@@ -5,11 +5,13 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from mini_agent.application.persistence import (
     P0PersistenceIntegrityError,
+    P0PersistenceEnvelope,
     P0RecordCode,
+    P0RecordReference,
 )
 from mini_agent.application.records import (
     AgentRunResult,
@@ -28,7 +30,11 @@ from mini_agent.core.request_understanding import (
     NextMoveKind,
     QueryContextualizationCandidateV2,
 )
-from mini_agent.core.task_state import TaskDeltaOperation
+from mini_agent.core.task_state import (
+    TaskDeltaOperation,
+    TaskStateTransition,
+    TaskStatus,
+)
 from mini_agent.core.tool_system import (
     Cycle2ToolName,
     ToolCallRecordV2,
@@ -342,8 +348,10 @@ def _seed_oa10_projection_root(
     source_evidence: Cycle2ExactRunEvidenceClosure,
     *,
     trace_mode: str,
+    link_mode: str = "exact",
 ) -> AgentRunRecordV2:
     assert trace_mode in {"exact", "missing", "wrong", "duplicate"}
+    assert link_mode in {"exact", "missing", "wrong", "extra"}
     source_completed_at = source_evidence.run_record.completed_at
     assert source_completed_at is not None
     assert len(source_evidence.task_records) == 1
@@ -373,7 +381,9 @@ def _seed_oa10_projection_root(
         run_id=run.run_id,
         task_id=task.task_id,
         base_task_state_version=task.state_version,
-        result_task_state_version=None,
+        result_task_state_version=(
+            task.state_version if link_mode == "wrong" else None
+        ),
     )
 
     def stopped_trace(*, exact: bool) -> TraceEventV2:
@@ -404,22 +414,177 @@ def _seed_oa10_projection_root(
         ),
     }[trace_mode]
     records = composition._records
-    envelopes = (
+    envelopes = [
         records._cycle2_encode(P0RecordCode.MESSAGE_RECORD, message),
         records._cycle2_encode(P0RecordCode.AGENT_RUN_RECORD, run),
-        records._cycle2_encode(P0RecordCode.RUN_TASK_LINK_RECORD, link),
         *(
+            ()
+            if link_mode == "missing"
+            else (
+                records._cycle2_encode(
+                    P0RecordCode.RUN_TASK_LINK_RECORD,
+                    link,
+                ),
+            )
+        ),
+        *[
             records._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, trace)
             for trace in traces
-        ),
+        ],
+    ]
+    if link_mode == "extra":
+        extra_task_id = uuid4()
+        extra_unit_id = uuid4()
+        extra_task = task.model_copy(update={"task_id": extra_task_id})
+        extra_unit = unit.model_copy(
+            update={
+                "request_unit_id": extra_unit_id,
+                "task_id": extra_task_id,
+            }
+        )
+        envelopes.extend(
+            (
+                records._cycle2_encode(
+                    P0RecordCode.TASK_RECORD,
+                    extra_task,
+                ),
+                records._cycle2_encode(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    extra_unit,
+                ),
+                records._cycle2_encode(
+                    P0RecordCode.RUN_TASK_LINK_RECORD,
+                    RunTaskLinkRecordV2(
+                        run_id=run.run_id,
+                        task_id=extra_task_id,
+                        base_task_state_version=extra_task.state_version,
+                        result_task_state_version=None,
+                    ),
+                ),
+            )
+        )
+    with records.session_factory.begin() as session:
+        records._cycle2_insert(
+            session,
+            tuple(envelopes),
+            owner_customer_id=source_evidence.owner_scope.customer_id,
+        )
+    return run
+
+
+def _replace_task_transition_children(
+    composition: Cycle2OfflineComposition,
+    evidence: Cycle2ExactRunEvidenceClosure,
+    *,
+    children: tuple[TaskStateTransition, ...],
+) -> None:
+    records = composition._records
+    task = evidence.task_records[0]
+    with records.session_factory.begin() as session:
+        row = session.scalar(
+            select(P0RecordModel).where(
+                P0RecordModel.record_code == P0RecordCode.TASK_RECORD.value,
+                P0RecordModel.task_id == task.task_id,
+            )
+        )
+        assert row is not None
+        records._cycle2_replace(
+            session,
+            row,
+            owner_customer_id=evidence.owner_scope.customer_id,
+            expected_record=task,
+            next_envelope=records._cycle2_encode(
+                P0RecordCode.TASK_RECORD,
+                task,
+                logical_children=children,
+            ),
+        )
+
+
+def _insert_unrelated_task_pair(
+    composition: Cycle2OfflineComposition,
+    evidence: Cycle2ExactRunEvidenceClosure,
+) -> tuple[object, object]:
+    records = composition._records
+    task = evidence.task_records[0]
+    unit = evidence.request_unit_records[0]
+    unrelated_task = task.model_copy(update={"task_id": uuid4()})
+    unrelated_unit = unit.model_copy(
+        update={
+            "request_unit_id": uuid4(),
+            "task_id": unrelated_task.task_id,
+        }
     )
     with records.session_factory.begin() as session:
         records._cycle2_insert(
             session,
-            envelopes,
-            owner_customer_id=source_evidence.owner_scope.customer_id,
+            (
+                records._cycle2_encode(
+                    P0RecordCode.TASK_RECORD,
+                    unrelated_task,
+                ),
+                records._cycle2_encode(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    unrelated_unit,
+                ),
+            ),
+            owner_customer_id=evidence.owner_scope.customer_id,
         )
-    return run
+    return unrelated_task, unrelated_unit
+
+
+def _tamper_order_observation_source_call(
+    composition: Cycle2OfflineComposition,
+    evidence: Cycle2ExactRunEvidenceClosure,
+) -> None:
+    records = composition._records
+    order_observation = evidence.order_observation_records[0]
+    wrong_call = next(
+        call
+        for call in evidence.tool_call_records
+        if call.canonical_tool_name is Cycle2ToolName.SEARCH_ORDERS
+    )
+    with records.session_factory.begin() as session:
+        row = session.scalar(
+            select(P0RecordModel).where(
+                P0RecordModel.record_code
+                == P0RecordCode.OBSERVATION_RECORD.value,
+                P0RecordModel.logical_identity
+                == [["observation_id", str(order_observation.observation_id)]],
+            )
+        )
+        assert row is not None
+        envelope = P0PersistenceEnvelope.model_validate(row.envelope)
+        references = tuple(
+            P0RecordReference(
+                relation=reference.relation,
+                target_record_code=reference.target_record_code,
+                target_logical_identity=(
+                    ("tool_call_id", str(wrong_call.tool_call_id)),
+                ),
+            )
+            if reference.relation == "source_tool_call_id"
+            else reference
+            for reference in envelope.record_references
+        )
+        decoded = records._cycle2_decode_row(
+            session,
+            row,
+            owner_customer_id=evidence.owner_scope.customer_id,
+            expected_code=P0RecordCode.OBSERVATION_RECORD,
+        )
+        records._cycle2_replace(
+            session,
+            row,
+            owner_customer_id=evidence.owner_scope.customer_id,
+            expected_record=decoded.source_record,
+            expected_children=decoded.logical_children,
+            next_envelope=records._cycle2_encode(
+                P0RecordCode.OBSERVATION_RECORD,
+                decoded.source_record,
+                external_references=references,
+            ),
+        )
 
 
 async def test_unique_search_runs_through_authenticated_http_and_exact_evidence(
@@ -462,6 +627,280 @@ async def test_unique_search_runs_through_authenticated_http_and_exact_evidence(
             Cycle2ToolName.SEARCH_ORDERS,
             Cycle2ToolName.GET_ORDER,
         )
+
+        run = evidence.run_record
+        assert run.completed_at is not None
+        timestamp_collisions = (
+            MessageRecord(
+                schema_version="message_record.p0.v1",
+                message_id=uuid4(),
+                conversation_id=run.conversation_id,
+                direction=MessageDirection.USER,
+                content="未引用的 started_at 碰撞消息",
+                received_at=run.started_at,
+            ),
+            MessageRecord(
+                schema_version="message_record.p0.v1",
+                message_id=uuid4(),
+                conversation_id=run.conversation_id,
+                direction=MessageDirection.USER,
+                content="未引用的 completed_at 碰撞消息",
+                received_at=run.completed_at,
+            ),
+            MessageRecord(
+                schema_version="message_record.p0.v1",
+                message_id=uuid4(),
+                conversation_id=run.conversation_id,
+                direction=MessageDirection.ASSISTANT,
+                content="非 terminal assistant",
+                received_at=run.started_at,
+            ),
+        )
+        with composition._records.session_factory.begin() as session:
+            composition._records._cycle2_insert(
+                session,
+                tuple(
+                    composition._records._cycle2_encode(
+                        P0RecordCode.MESSAGE_RECORD,
+                        message,
+                    )
+                    for message in timestamp_collisions
+                ),
+                owner_customer_id=evidence.owner_scope.customer_id,
+            )
+        isolated = await composition.load_exact_run_evidence(result.run_id)
+        assert not {
+            message.message_id for message in timestamp_collisions
+        } & {message.message_id for message in isolated.message_records}
+
+        duplicate_terminal = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=uuid4(),
+            conversation_id=run.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content="伪造的 terminal assistant",
+            received_at=run.completed_at,
+        )
+        with composition._records.session_factory.begin() as session:
+            composition._records._cycle2_insert(
+                session,
+                (
+                    composition._records._cycle2_encode(
+                        P0RecordCode.MESSAGE_RECORD,
+                        duplicate_terminal,
+                    ),
+                ),
+                owner_customer_id=evidence.owner_scope.customer_id,
+            )
+        with pytest.raises(P0PersistenceIntegrityError):
+            await composition._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=evidence.owner_scope,
+                run_id=result.run_id,
+            )
+    finally:
+        engine.dispose()
+
+
+async def test_exact_reader_uses_one_repeatable_read_snapshot(
+    eval_postgres_namespace,
+) -> None:
+    engine, session_factory, composition = await _start(
+        eval_postgres_namespace,
+        fixture_refs=("fx-search-unique-owner-a-with-foreign-decoy-v1",),
+    )
+    try:
+        result = await _post(
+            composition.build_case_app(
+                provider=_Cycle2DirectProvider(
+                    product_description="轻量跑鞋"
+                )
+            ),
+            "帮我查找最近购买的轻量跑鞋订单",
+        )
+        with session_factory() as session:
+            run_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                    P0RecordModel.run_id == result.run_id,
+                )
+            )
+            assert run_row is not None
+            run = composition._records._cycle2_decode_row(
+                session,
+                run_row,
+                owner_customer_id="customer-A",
+                expected_code=P0RecordCode.AGENT_RUN_RECORD,
+            ).source_record
+        assert type(run) is AgentRunRecordV2
+        assert run.completed_at is not None
+        concurrent_terminal = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=uuid4(),
+            conversation_id=run.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content="在 reader 首次 SELECT 后提交",
+            received_at=run.completed_at,
+        )
+        state = {"injected": False, "saw_repeatable_read": False}
+
+        def inject_after_snapshot_select(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            normalized = " ".join(statement.upper().split())
+            if normalized.startswith(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            ):
+                state["saw_repeatable_read"] = True
+                return
+            if (
+                state["injected"]
+                or not state["saw_repeatable_read"]
+                or not normalized.startswith("SELECT")
+                or "P0_RECORD" not in normalized
+            ):
+                return
+            state["injected"] = True
+            with session_factory.begin() as other_session:
+                composition._records._cycle2_insert(
+                    other_session,
+                    (
+                        composition._records._cycle2_encode(
+                            P0RecordCode.MESSAGE_RECORD,
+                            concurrent_terminal,
+                        ),
+                    ),
+                    owner_customer_id="customer-A",
+                )
+
+        event.listen(engine, "after_cursor_execute", inject_after_snapshot_select)
+        try:
+            evidence = await composition.load_exact_run_evidence(result.run_id)
+        finally:
+            event.remove(
+                engine,
+                "after_cursor_execute",
+                inject_after_snapshot_select,
+            )
+        assert state == {"injected": True, "saw_repeatable_read": True}
+        assert concurrent_terminal not in evidence.message_records
+        with pytest.raises(P0PersistenceIntegrityError):
+            await composition._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=evidence.owner_scope,
+                run_id=result.run_id,
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("transition_mode", ("valid", "wrong_request_unit"))
+async def test_exact_reader_bounds_persisted_task_transitions(
+    eval_postgres_namespace,
+    transition_mode: str,
+) -> None:
+    engine, _session_factory, composition = await _start(
+        eval_postgres_namespace,
+        fixture_refs=("fx-search-unique-owner-a-with-foreign-decoy-v1",),
+    )
+    try:
+        result = await _post(
+            composition.build_case_app(
+                provider=_Cycle2DirectProvider(
+                    product_description="轻量跑鞋"
+                )
+            ),
+            "帮我查找最近购买的轻量跑鞋订单",
+        )
+        evidence = await composition.load_exact_run_evidence(result.run_id)
+        task = evidence.task_records[0]
+        unit = evidence.request_unit_records[0]
+        link = next(
+            record
+            for record in evidence.run_task_link_records
+            if record.run_id == result.run_id
+        )
+        assert link.result_task_state_version is not None
+        valid = TaskStateTransition(
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            from_status=TaskStatus.ACTIVE,
+            to_status=TaskStatus.WAITING_USER,
+            base_state_version=1,
+            result_state_version=2,
+            reason_ref=result.run_id,
+            changed_at=task.updated_at,
+        )
+        if transition_mode == "valid":
+            outside = TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.WAITING_USER,
+                to_status=TaskStatus.COMPLETED,
+                base_state_version=link.result_task_state_version,
+                result_state_version=link.result_task_state_version + 1,
+                reason_ref=result.run_id,
+                changed_at=task.updated_at + timedelta(microseconds=1),
+            )
+            _replace_task_transition_children(
+                composition,
+                evidence,
+                children=(valid, outside),
+            )
+            reread = await composition.load_exact_run_evidence(result.run_id)
+            assert reread.task_state_transition_records == (valid,)
+        else:
+            _, unrelated_unit = _insert_unrelated_task_pair(
+                composition,
+                evidence,
+            )
+            wrong = valid.model_copy(
+                update={"request_unit_id": unrelated_unit.request_unit_id}
+            )
+            _replace_task_transition_children(
+                composition,
+                evidence,
+                children=(wrong,),
+            )
+            with pytest.raises(P0PersistenceIntegrityError):
+                await (
+                    composition._records
+                    .load_cycle2_exact_run_evidence_for_owner(
+                        owner_scope=evidence.owner_scope,
+                        run_id=result.run_id,
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
+async def test_exact_reader_rejects_tampered_observation_source_edge(
+    eval_postgres_namespace,
+) -> None:
+    engine, _session_factory, composition = await _start(
+        eval_postgres_namespace,
+        fixture_refs=("fx-search-unique-owner-a-with-foreign-decoy-v1",),
+    )
+    try:
+        result = await _post(
+            composition.build_case_app(
+                provider=_Cycle2DirectProvider(
+                    product_description="轻量跑鞋"
+                )
+            ),
+            "帮我查找最近购买的轻量跑鞋订单",
+        )
+        evidence = await composition.load_exact_run_evidence(result.run_id)
+        _tamper_order_observation_source_call(composition, evidence)
+        with pytest.raises(P0PersistenceIntegrityError):
+            await composition._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=evidence.owner_scope,
+                run_id=result.run_id,
+            )
     finally:
         engine.dispose()
 
@@ -498,6 +937,19 @@ async def test_multiple_then_second_uses_current_candidate_without_research(
         assert len(second_evidence.candidate_set_records) == 1
         assert len(second_evidence.candidate_selection_records) == 1
         assert len(second_evidence.observation_source_edges) == 2
+        historical_binding_refs = set(
+            second_evidence.candidate_set_records[0].query_binding_refs
+        )
+        historical_bindings = tuple(
+            binding
+            for binding in second_evidence.input_binding_records
+            if binding.binding_id in historical_binding_refs
+        )
+        assert historical_bindings
+        assert all(
+            binding.created_at < second_evidence.run_record.started_at
+            for binding in historical_bindings
+        )
         assert {
             call.run_id for call in second_evidence.tool_call_records
         } == {first.run_id, second.run_id}
@@ -660,6 +1112,22 @@ async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds
                 composition,
                 evidence,
                 trace_mode=trace_mode,
+            )
+            with pytest.raises(P0PersistenceIntegrityError):
+                await (
+                    composition._records
+                    .load_cycle2_exact_run_evidence_for_owner(
+                        owner_scope=evidence.owner_scope,
+                        run_id=invalid.run_id,
+                    )
+                )
+
+        for link_mode in ("missing", "wrong", "extra"):
+            invalid = _seed_oa10_projection_root(
+                composition,
+                evidence,
+                trace_mode="exact",
+                link_mode=link_mode,
             )
             with pytest.raises(P0PersistenceIntegrityError):
                 await (
