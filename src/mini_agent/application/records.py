@@ -3027,17 +3027,41 @@ class FinalizeCycle2RunCommand(_StrictRuntimePrivateRecord):
         return self
 
 
+class Cycle2ObservationSourceEdge(_StrictAuditOnlyRecord):
+    """Authoritative persistence edge from one Observation to its ToolCall."""
+
+    observation_ref: UUID
+    source_tool_call_id: UUID
+    source_run_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+
+
 class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     """Expectation-free exact logical evidence for one owner-scoped v2 Run."""
 
     owner_scope: TrustedOwnerScope
     conversation_record: ConversationRecord
     run_record: AgentRunRecordV2
+    supporting_run_records: tuple[AgentRunRecordV2, ...] = ()
     message_records: Annotated[tuple[MessageRecord, ...], Field(min_length=1)]
     run_task_link_records: tuple[RunTaskLinkRecordV2, ...]
     task_records: tuple[TaskRecord, ...]
     request_unit_records: tuple[RequestUnitRecord, ...]
     input_binding_records: tuple[InputBindingV2, ...]
+    task_state_transition_records: tuple[TaskStateTransition, ...] = ()
+    candidate_set_records: tuple[OrderCandidateSetRecord, ...] = ()
+    candidate_selection_records: tuple[OrderCandidateSelectionRecord, ...] = ()
+    order_observation_records: tuple[OrderObservation, ...] = ()
+    search_observation_records: tuple[SearchOrdersObservation, ...] = ()
+    shipment_observation_records: tuple[ShipmentObservation, ...] = ()
+    observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...] = ()
+    shipment_assessment_records: tuple[ShipmentAssessment, ...] = ()
+    tool_call_records: tuple[ToolCallRecordV2, ...] = ()
+    recovery_decision_records: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
+    superseded_run_finalizations: tuple[FinalizeSupersededRunV2Command, ...] = ()
+    context_manifest_records: tuple[ContextManifest, ...] = ()
+    model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
     trace_records: Annotated[tuple[TraceEventV2, ...], Field(min_length=1)]
     terminal_result: AgentRunResult | None = None
 
@@ -3054,35 +3078,123 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             optional_model_fields={"terminal_result": AgentRunResult},
             tuple_model_fields={
                 "message_records": MessageRecord,
+                "supporting_run_records": AgentRunRecordV2,
                 "run_task_link_records": RunTaskLinkRecordV2,
                 "task_records": TaskRecord,
                 "request_unit_records": RequestUnitRecord,
                 "input_binding_records": InputBindingV2,
+                "task_state_transition_records": TaskStateTransition,
+                "candidate_set_records": OrderCandidateSetRecord,
+                "candidate_selection_records": OrderCandidateSelectionRecord,
+                "order_observation_records": OrderObservation,
+                "search_observation_records": SearchOrdersObservation,
+                "shipment_observation_records": ShipmentObservation,
+                "observation_source_edges": Cycle2ObservationSourceEdge,
+                "shipment_assessment_records": ShipmentAssessment,
+                "tool_call_records": ToolCallRecordV2,
+                "context_manifest_records": ContextManifest,
+                "model_visible_toolset_artifacts": ModelVisibleToolsetArtifact,
                 "trace_records": TraceEventV2,
             },
+        )
+
+    @field_validator(
+        "recovery_decision_records",
+        "superseded_run_finalizations",
+        mode="before",
+    )
+    @classmethod
+    def later_defined_children_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> tuple[BaseModel, ...]:
+        if type(value) is not tuple:
+            raise ValueError(f"{info.field_name} must be an exact tuple")
+        expected_type = (
+            ToolRetryRecoveryDecisionRecordV2
+            if info.field_name == "recovery_decision_records"
+            else FinalizeSupersededRunV2Command
+        )
+        return tuple(
+            _require_exact_cycle2_model(
+                item,
+                expected_type,
+                field_name=info.field_name,
+            )
+            for item in value
         )
 
     @model_validator(mode="after")
     def evidence_graph_is_exact(self) -> Self:
         conversation = self.conversation_record
         run = self.run_record
+        supporting_runs = {
+            record.run_id: record for record in self.supporting_run_records
+        }
+        run_by_id = {run.run_id: run, **supporting_runs}
         if (
             conversation.owner_customer_id != self.owner_scope.customer_id
             or run.conversation_id != conversation.conversation_id
+            or run.run_id in supporting_runs
+            or any(
+                record.conversation_id != conversation.conversation_id
+                for record in self.supporting_run_records
+            )
             or any(
                 message.conversation_id != conversation.conversation_id
                 for message in self.message_records
             )
-            or any(link.run_id != run.run_id for link in self.run_task_link_records)
             or any(trace.run_id != run.run_id for trace in self.trace_records)
         ):
             raise ValueError("Cycle 2 exact evidence root mismatch")
         families = (
+            tuple(record.run_id for record in self.supporting_run_records),
             tuple(message.message_id for message in self.message_records),
-            tuple(link.task_id for link in self.run_task_link_records),
+            tuple(
+                (link.run_id, link.task_id)
+                for link in self.run_task_link_records
+            ),
             tuple(task.task_id for task in self.task_records),
             tuple(unit.request_unit_id for unit in self.request_unit_records),
             tuple(binding.binding_id for binding in self.input_binding_records),
+            tuple(
+                (transition.task_id, transition.result_state_version)
+                for transition in self.task_state_transition_records
+            ),
+            tuple(record.candidate_set_id for record in self.candidate_set_records),
+            tuple(
+                record.selection_id for record in self.candidate_selection_records
+            ),
+            tuple(
+                record.observation_id for record in self.order_observation_records
+            ),
+            tuple(
+                record.observation_id for record in self.search_observation_records
+            ),
+            tuple(
+                record.observation_id
+                for record in self.shipment_observation_records
+            ),
+            tuple(
+                record.observation_ref
+                for record in self.observation_source_edges
+            ),
+            tuple(
+                record.assessment_id for record in self.shipment_assessment_records
+            ),
+            tuple(record.tool_call_id for record in self.tool_call_records),
+            tuple(
+                record.recovery_decision_id
+                for record in self.recovery_decision_records
+            ),
+            tuple(
+                record.context_manifest_id for record in self.context_manifest_records
+            ),
+            tuple(
+                record.model_visible_toolset_hash
+                for record in self.model_visible_toolset_artifacts
+            ),
             tuple(trace.trace_event_id for trace in self.trace_records),
         )
         if any(len(values) != len(set(values)) for values in families):
@@ -3090,18 +3202,399 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         tasks = {task.task_id: task for task in self.task_records}
         units = {unit.task_id: unit for unit in self.request_unit_records}
         bindings = {binding.binding_id: binding for binding in self.input_binding_records}
+        messages = {message.message_id: message for message in self.message_records}
+        task_ids = set(tasks)
+        unit_by_id = {
+            unit.request_unit_id: unit for unit in self.request_unit_records
+        }
+        tool_calls = {
+            record.tool_call_id: record for record in self.tool_call_records
+        }
+        current_links = tuple(
+            link for link in self.run_task_link_records if link.run_id == run.run_id
+        )
+        supporting_links = tuple(
+            link for link in self.run_task_link_records if link.run_id != run.run_id
+        )
         if (
-            set(tasks) != set(units)
-            or any(link.task_id not in tasks for link in self.run_task_link_records)
+            len(tasks) != len(self.task_records)
+            or len(units) != len(self.request_unit_records)
+            or set(tasks) != set(units)
+            or {link.task_id for link in current_links} != task_ids
+            or any(
+                link.run_id not in supporting_runs or link.task_id not in task_ids
+                for link in supporting_links
+            )
             or any(
                 task.owner_customer_id != self.owner_scope.customer_id
+                or unit.task_id != task.task_id
+                or unit.status is not task.status
                 or unit.state_version != task.state_version
                 or any(ref not in bindings for ref in unit.input_binding_refs)
+                or any(ref not in messages for ref in unit.goal_source_refs)
                 for task_id, task in tasks.items()
                 for unit in (units[task_id],)
             )
         ):
             raise ValueError("Cycle 2 exact evidence Task graph mismatch")
+        if any(
+            transition.task_id not in task_ids
+            or transition.request_unit_id not in unit_by_id
+            or unit_by_id[transition.request_unit_id].task_id != transition.task_id
+            for transition in self.task_state_transition_records
+        ):
+            raise ValueError("Cycle 2 exact evidence transition root mismatch")
+        owner = self.owner_scope.customer_id
+        task_unit_children = (
+            *self.candidate_set_records,
+            *self.candidate_selection_records,
+            *self.shipment_observation_records,
+            *self.shipment_assessment_records,
+        )
+        if any(
+            record.task_id not in task_ids
+            or record.request_unit_id not in unit_by_id
+            or unit_by_id[record.request_unit_id].task_id != record.task_id
+            for record in task_unit_children
+        ):
+            raise ValueError("Cycle 2 exact evidence child Task root mismatch")
+        if any(
+            record.private_owner_scope_ref != owner
+            for record in self.candidate_set_records
+        ) or any(
+            record.private_owner_scope_ref != owner
+            for record in self.candidate_selection_records
+        ) or any(
+            record.private_owner_scope != owner
+            for record in self.search_observation_records
+        ) or any(
+            record.private_owner_scope != owner
+            for record in self.shipment_observation_records
+        ) or any(
+            record.private_owner_scope_ref != owner
+            for record in self.shipment_assessment_records
+        ):
+            raise ValueError("Cycle 2 exact evidence child owner mismatch")
+
+        order_observations = {
+            record.observation_id: record
+            for record in self.order_observation_records
+        }
+        search_observations = {
+            record.observation_id: record
+            for record in self.search_observation_records
+        }
+        shipment_observations = {
+            record.observation_id: record
+            for record in self.shipment_observation_records
+        }
+        observation_by_id = {
+            **order_observations,
+            **search_observations,
+            **shipment_observations,
+        }
+        observation_ids = (
+            set(order_observations)
+            | set(search_observations)
+            | set(shipment_observations)
+        )
+        rooted_observation_refs = tuple(
+            observation_ref
+            for unit in self.request_unit_records
+            for observation_ref in unit.observation_refs
+        )
+        rooted_observation_counts = Counter(rooted_observation_refs)
+        if (
+            len(observation_by_id)
+            != len(order_observations)
+            + len(search_observations)
+            + len(shipment_observations)
+            or observation_ids != set(rooted_observation_refs)
+            or any(count != 1 for count in rooted_observation_counts.values())
+        ):
+            raise ValueError("Cycle 2 exact evidence Observation root mismatch")
+        if any(
+            observation.supersedes is not None
+            and observation.supersedes not in order_observations
+            for observation in self.order_observation_records
+        ):
+            raise ValueError("Cycle 2 exact evidence Order Observation graph mismatch")
+        for observation in self.shipment_observation_records:
+            if observation.supersedes is None:
+                continue
+            previous = shipment_observations.get(observation.supersedes)
+            if previous is None:
+                raise ValueError(
+                    "Cycle 2 exact evidence Shipment Observation graph mismatch"
+                )
+            validate_shipment_observation_supersession(
+                current=observation,
+                previous=previous,
+            )
+
+        for candidate_set in self.candidate_set_records:
+            observation = search_observations.get(
+                candidate_set.search_observation_ref
+            )
+            if (
+                candidate_set.conversation_id != conversation.conversation_id
+                or not set(candidate_set.query_binding_refs).issubset(bindings)
+                or observation is None
+            ):
+                raise ValueError("Cycle 2 exact evidence CandidateSet graph mismatch")
+            validate_search_candidate_set_observation_closure(
+                candidate_set=candidate_set,
+                observation=observation,
+            )
+            source_call = tool_calls.get(candidate_set.source_tool_call_id)
+            if source_call is None or (
+                source_call.canonical_tool_name.value != "search_orders"
+                or source_call.task_id != candidate_set.task_id
+                or source_call.request_unit_id != candidate_set.request_unit_id
+            ):
+                raise ValueError("Cycle 2 exact evidence CandidateSet ToolCall mismatch")
+
+        candidate_sets = {
+            record.candidate_set_id: record
+            for record in self.candidate_set_records
+        }
+        for selection in self.candidate_selection_records:
+            candidate_set = candidate_sets.get(selection.candidate_set_ref)
+            observation = search_observations.get(
+                selection.search_observation_ref
+            )
+            ordinal_binding = bindings.get(selection.ordinal_input_binding_ref)
+            if (
+                selection.conversation_id != conversation.conversation_id
+                or selection.source_message_ref not in messages
+                or candidate_set is None
+                or observation is None
+                or ordinal_binding is None
+                or ordinal_binding.name != "candidate_ordinal"
+                or type(ordinal_binding.normalized_value) is not int
+                or selection.candidate_set_version
+                != candidate_set.candidate_set_version
+                or selection.search_observation_ref
+                != candidate_set.search_observation_ref
+                or selection.search_observation_record_schema_version
+                != observation.record_schema_version
+            ):
+                raise ValueError("Cycle 2 exact evidence Selection graph mismatch")
+            ordinal = ordinal_binding.normalized_value
+            selected = next(
+                (
+                    candidate
+                    for candidate in candidate_set.ordered_candidates
+                    if candidate.ordinal == ordinal
+                ),
+                None,
+            )
+            target = next(
+                (
+                    binding
+                    for binding in observation.candidate_target_bindings
+                    if binding.observation_candidate_ref
+                    == selection.observation_candidate_ref
+                    and binding.candidate_source_version
+                    == selection.candidate_source_version
+                ),
+                None,
+            )
+            if (
+                selected is None
+                or selected.observation_candidate_ref
+                != selection.observation_candidate_ref
+                or selected.candidate_source_version
+                != selection.candidate_source_version
+                or target is None
+                or target.owner_scoped_order_ref
+                != selection.owner_scoped_order_target_ref
+            ):
+                raise ValueError("Cycle 2 exact evidence Selection target mismatch")
+
+        for assessment in self.shipment_assessment_records:
+            observation = shipment_observations.get(
+                assessment.shipment_observation_ref
+            )
+            if (
+                observation is None
+                or assessment.shipment_observation_source_version
+                != observation.source_version
+                or assessment.verified_order_target_ref
+                != observation.verified_order_target_ref
+                or (
+                    assessment.claim_binding_ref is not None
+                    and assessment.claim_binding_ref not in bindings
+                )
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Shipment Assessment graph mismatch"
+                )
+        if any(
+            record.run_id not in run_by_id
+            or record.task_id not in task_ids
+            or record.request_unit_id not in unit_by_id
+            or unit_by_id[record.request_unit_id].task_id != record.task_id
+            or record.private_owner_scope_ref != owner
+            or any(ref not in bindings for ref in record.argument_binding_refs)
+            for record in self.tool_call_records
+        ):
+            raise ValueError("Cycle 2 exact evidence ToolCall root mismatch")
+        supporting_tool_calls = tuple(
+            record
+            for record in self.tool_call_records
+            if record.run_id != run.run_id
+        )
+        if (
+            set(supporting_runs)
+            != {record.run_id for record in supporting_tool_calls}
+            or {
+                (link.run_id, link.task_id) for link in supporting_links
+            }
+            != {
+                (record.run_id, record.task_id)
+                for record in supporting_tool_calls
+            }
+        ):
+            raise ValueError("Cycle 2 exact evidence supporting Run graph mismatch")
+
+        source_edges = {
+            record.observation_ref: record
+            for record in self.observation_source_edges
+        }
+        source_call_ids: set[UUID] = set()
+        for observation_id, observation in observation_by_id.items():
+            edge = source_edges.get(observation_id)
+            source_call = (
+                tool_calls.get(edge.source_tool_call_id)
+                if edge is not None
+                else None
+            )
+            rooted_units = tuple(
+                unit
+                for unit in self.request_unit_records
+                if observation_id in unit.observation_refs
+            )
+            if (
+                edge is None
+                or source_call is None
+                or len(rooted_units) != 1
+                or edge.source_run_id != source_call.run_id
+                or edge.task_id != source_call.task_id
+                or edge.request_unit_id != source_call.request_unit_id
+                or rooted_units[0].task_id != edge.task_id
+                or rooted_units[0].request_unit_id != edge.request_unit_id
+                or source_call.status is not ToolCallStatus.SUCCEEDED
+                or source_call.result_ref is None
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Observation source edge mismatch"
+                )
+            source_call_ids.add(source_call.tool_call_id)
+            if observation_id in order_observations:
+                if source_call.canonical_tool_name.value != "get_order":
+                    raise ValueError(
+                        "Cycle 2 exact evidence Order source ToolCall mismatch"
+                    )
+            elif observation_id in search_observations:
+                if (
+                    source_call.canonical_tool_name.value != "search_orders"
+                    or observation.source_tool_call_id
+                    != source_call.tool_call_id
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence Search source ToolCall mismatch"
+                    )
+            elif (
+                source_call.canonical_tool_name.value != "get_shipment"
+                or observation.source_tool_call_id != source_call.tool_call_id
+                or observation.raw_result_ref != str(source_call.result_ref)
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Shipment source ToolCall mismatch"
+                )
+        if (
+            set(source_edges) != observation_ids
+            or len(source_call_ids) != len(source_edges)
+            or any(
+                record.tool_call_id not in source_call_ids
+                for record in supporting_tool_calls
+            )
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence Observation source family mismatch"
+            )
+        recovery_decisions = {
+            record.recovery_decision_id: record
+            for record in self.recovery_decision_records
+        }
+        if any(
+            record.tool_call_id not in tool_calls
+            or tool_calls[record.tool_call_id].run_id != run.run_id
+            or tool_calls[record.tool_call_id].recovery_decision_ref
+            != record.recovery_decision_id
+            for record in self.recovery_decision_records
+        ) or any(
+            record.recovery_decision_ref is not None
+            and record.recovery_decision_ref not in recovery_decisions
+            for record in self.tool_call_records
+        ):
+            raise ValueError("Cycle 2 exact evidence recovery root mismatch")
+        if any(
+            record.run_id not in run_by_id
+            for record in self.context_manifest_records
+        ):
+            raise ValueError("Cycle 2 exact evidence manifest root mismatch")
+        for manifest in self.context_manifest_records:
+            if any(ref not in messages for ref in manifest.selected_message_refs):
+                raise ValueError("Cycle 2 exact evidence manifest Message mismatch")
+            if manifest.task_state_ref_and_version is not None:
+                task_ref = manifest.task_state_ref_and_version
+                task = tasks.get(task_ref.task_id)
+                if task is None or task_ref.state_version > task.state_version:
+                    raise ValueError("Cycle 2 exact evidence manifest Task mismatch")
+            for versioned_ref in manifest.observation_refs_and_versions:
+                observation = observation_by_id.get(versioned_ref.record_ref)
+                if (
+                    observation is None
+                    or observation.source_version != versioned_ref.version
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence manifest Observation mismatch"
+                    )
+            if manifest.evidence_refs_and_versions or manifest.action_record_refs:
+                raise ValueError(
+                    "Cycle 2 exact evidence cannot contain Evidence or Action refs"
+                )
+        manifests = {
+            record.context_manifest_id: record
+            for record in self.context_manifest_records
+        }
+        if any(
+            (manifest := manifests.get(record.context_manifest_id)) is None
+            or record.model_call_id != manifest.model_call_id
+            or record.tool_registry_version != manifest.tool_registry_version
+            or record.validated_task_state_version
+            > tasks[record.task_id].state_version
+            for record in self.tool_call_records
+        ):
+            raise ValueError("Cycle 2 exact evidence ToolCall manifest mismatch")
+        artifact_hashes = {
+            record.model_visible_toolset_hash
+            for record in self.model_visible_toolset_artifacts
+        }
+        if artifact_hashes != {
+            manifest.model_visible_toolset_hash
+            for manifest in self.context_manifest_records
+        }:
+            raise ValueError("Cycle 2 exact evidence toolset root mismatch")
+        if any(
+            record.superseded_run_record != run
+            or record.no_result_link_record not in self.run_task_link_records
+            or record.run_stopped_trace_record not in self.trace_records
+            for record in self.superseded_run_finalizations
+        ):
+            raise ValueError("Cycle 2 exact evidence finalization root mismatch")
         if run.status is AgentRunStatusV2.SUPERSEDED:
             if self.terminal_result is not None or any(
                 message.direction is MessageDirection.ASSISTANT
@@ -6348,6 +6841,7 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
 
 
 FinalizeStateInvalidatedToolRecoveryV2Command.model_rebuild()
+Cycle2ExactRunEvidenceClosure.model_rebuild()
 
 
 class TaskRecoveryAggregate(_StrictRuntimePrivateRecord):

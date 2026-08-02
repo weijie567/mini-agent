@@ -25,6 +25,8 @@ from mini_agent.application.records import (
     ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
     Cycle2DispatchFenceWriteResult,
+    Cycle2ExactRunEvidenceClosure,
+    Cycle2ObservationSourceEdge,
     Cycle2ReadDispatchGrant,
     Cycle2RunBudgetPolicyEvidence,
     Cycle2WriteResult,
@@ -367,6 +369,393 @@ def _customer_context(customer_id: str = "customer-A") -> CustomerContext:
 
 def _owner_scope(customer_id: str = "customer-A") -> TrustedOwnerScope:
     return TrustedOwnerScope.from_customer_context(_customer_context(customer_id))
+
+
+def _minimal_cycle2_exact_run_evidence() -> Cycle2ExactRunEvidenceClosure:
+    conversation = _conversation()
+    run_id = uuid4()
+    run = AgentRunRecordV2(
+        run_id=run_id,
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.SUPERSEDED,
+        provider_lane="offline_cycle2",
+        started_at=UTC_NOW,
+        completed_at=UTC_NOW,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+        incomplete_reason=None,
+    )
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=_owner_scope(),
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(
+            _message(
+                conversation_id=conversation.conversation_id,
+                received_at=UTC_NOW,
+            ),
+        ),
+        run_task_link_records=(),
+        task_records=(),
+        request_unit_records=(),
+        input_binding_records=(),
+        trace_records=(
+            TraceEventV2(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=UTC_NOW,
+                run_id=run_id,
+            ),
+        ),
+        terminal_result=None,
+    )
+
+
+def test_cycle2_exact_run_evidence_exposes_complete_expectation_free_families() -> None:
+    closure = _minimal_cycle2_exact_run_evidence()
+    expected_families = {
+        "supporting_run_records",
+        "task_state_transition_records",
+        "candidate_set_records",
+        "candidate_selection_records",
+        "order_observation_records",
+        "search_observation_records",
+        "shipment_observation_records",
+        "observation_source_edges",
+        "shipment_assessment_records",
+        "tool_call_records",
+        "recovery_decision_records",
+        "superseded_run_finalizations",
+        "context_manifest_records",
+        "model_visible_toolset_artifacts",
+    }
+
+    assert expected_families <= set(Cycle2ExactRunEvidenceClosure.model_fields)
+    assert all(getattr(closure, field_name) == () for field_name in expected_families)
+    assert not {
+        "case_id",
+        "fixture_ref",
+        "predicates",
+        "grader_results",
+        "assertions_pass",
+    }.intersection(Cycle2ExactRunEvidenceClosure.model_fields)
+
+
+def test_cycle2_exact_run_evidence_rejects_raw_or_cross_run_children() -> None:
+    closure = _minimal_cycle2_exact_run_evidence()
+    closure_values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    raw_trace = closure.trace_records[0].model_copy(
+        update={"event_type": TraceEventType.RUN_STARTED.value}
+    )
+    foreign_manifest = ContextManifest(
+        context_manifest_id=uuid4(),
+        run_id=uuid4(),
+        model_call_id=uuid4(),
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        model_visible_toolset_hash=build_cycle2_registry_snapshot().model_visible_toolset_hash,
+        selected_message_refs=(),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=UTC_NOW,
+    )
+
+    with pytest.raises(ValidationError, match="trace_records"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **closure_values,
+                "trace_records": (raw_trace,),
+            }
+        )
+    with pytest.raises(ValidationError, match="manifest root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **closure_values,
+                "context_manifest_records": (foreign_manifest,),
+            }
+        )
+
+
+def _cycle2_exact_run_evidence_with_task() -> Cycle2ExactRunEvidenceClosure:
+    closure = _minimal_cycle2_exact_run_evidence()
+    message = closure.message_records[0]
+    task = _task()
+    binding = _input_binding_v2(
+        source_refs=(message.message_id,),
+    )
+    unit = _request_unit(
+        task_id=task.task_id,
+        goal_source_refs=(message.message_id,),
+        input_binding_refs=(binding.binding_id,),
+    )
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **{
+                field_name: getattr(closure, field_name)
+                for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+            },
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=closure.run_record.run_id,
+                    task_id=task.task_id,
+                ),
+            ),
+            "task_records": (task,),
+            "request_unit_records": (unit,),
+            "input_binding_records": (binding,),
+        }
+    )
+
+
+def test_cycle2_exact_run_evidence_rejects_cross_paired_task_unit_child() -> None:
+    closure = _cycle2_exact_run_evidence_with_task()
+    message = closure.message_records[0]
+    second_task = _task(
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        updated_at=UTC_NOW + timedelta(seconds=1),
+    )
+    second_binding = _input_binding_v2(source_refs=(message.message_id,))
+    second_unit = _request_unit(
+        task_id=second_task.task_id,
+        goal_source_refs=(message.message_id,),
+        input_binding_refs=(second_binding.binding_id,),
+        status=TaskStatus.WAITING_USER,
+        state_version=2,
+        updated_at=UTC_NOW + timedelta(seconds=1),
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="transition root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    *closure.run_task_link_records,
+                    RunTaskLinkRecordV2(
+                        run_id=closure.run_record.run_id,
+                        task_id=second_task.task_id,
+                    ),
+                ),
+                "task_records": (*closure.task_records, second_task),
+                "request_unit_records": (
+                    *closure.request_unit_records,
+                    second_unit,
+                ),
+                "input_binding_records": (
+                    *closure.input_binding_records,
+                    second_binding,
+                ),
+                "task_state_transition_records": (
+                    TaskStateTransition(
+                        task_id=closure.task_records[0].task_id,
+                        request_unit_id=second_unit.request_unit_id,
+                        from_status=TaskStatus.ACTIVE,
+                        to_status=TaskStatus.WAITING_USER,
+                        base_state_version=1,
+                        result_state_version=2,
+                        reason_ref=message.message_id,
+                        changed_at=UTC_NOW + timedelta(seconds=1),
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_rejects_order_observation_without_source_edge() -> None:
+    closure = _cycle2_exact_run_evidence_with_task()
+    observation = _observation()
+    unit = closure.request_unit_records[0].model_copy(
+        update={"observation_refs": (observation.observation_id,)}
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="Observation source edge mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (unit,),
+                "order_observation_records": (observation,),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None:
+    owner, task, unit, source, observation, candidate_set, query_ref, ordinal_ref = (
+        _c2_search_graph()
+    )
+    conversation = _conversation(
+        conversation_id=candidate_set.conversation_id,
+        owner_customer_id=owner.customer_id,
+    )
+    message = _message(
+        message_id=unit.goal_source_refs[0],
+        conversation_id=conversation.conversation_id,
+    )
+    run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.SUPERSEDED,
+        provider_lane="offline_cycle2",
+        started_at=UTC_NOW,
+        completed_at=UTC_NOW,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    query_binding = _input_binding_v2(
+        binding_id=query_ref,
+        name="product_description",
+        normalized_value="示例鞋",
+        source_refs=(message.message_id,),
+    )
+    ordinal_binding = _input_binding_v2(
+        binding_id=ordinal_ref,
+        name="candidate_ordinal",
+        normalized_value=1,
+        source_refs=(message.message_id,),
+    )
+    rooted_unit = _c2_project(
+        unit,
+        input_binding_refs=(query_ref, ordinal_ref),
+        observation_refs=(observation.observation_id,),
+    )
+    selected = candidate_set.ordered_candidates[0]
+    selection = OrderCandidateSelectionRecord(
+        selection_id=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        source_message_ref=message.message_id,
+        ordinal_input_binding_ref=ordinal_ref,
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        search_observation_ref=observation.observation_id,
+        search_observation_record_schema_version=observation.record_schema_version,
+        observation_candidate_ref=selected.observation_candidate_ref,
+        candidate_source_version=selected.candidate_source_version,
+        owner_scoped_order_target_ref=(
+            observation.candidate_target_bindings[0].owner_scoped_order_ref
+        ),
+        selected_target_ref=str(uuid4()),
+        base_task_state_version=3,
+        result_task_state_version=4,
+        selected_at=UTC_NOW + timedelta(seconds=2),
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+    source_manifest = ContextManifest(
+        context_manifest_id=source.context_manifest_id,
+        run_id=source.run_id,
+        model_call_id=source.model_call_id,
+        tool_registry_version=source.tool_registry_version,
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(message.message_id,),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=UTC_NOW,
+    )
+    supporting_run = AgentRunRecordV2(
+        run_id=source.run_id,
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="offline_cycle2",
+        started_at=UTC_NOW,
+        completed_at=source.finished_at,
+        stop_reason=StopReasonV2.CANDIDATE_CLARIFICATION_REQUIRED,
+    )
+    source_edge = Cycle2ObservationSourceEdge(
+        observation_ref=observation.observation_id,
+        source_tool_call_id=source.tool_call_id,
+        source_run_id=source.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+    )
+    common = {
+        "owner_scope": owner,
+        "conversation_record": conversation,
+        "run_record": run,
+        "supporting_run_records": (supporting_run,),
+        "message_records": (message,),
+        "run_task_link_records": (
+            RunTaskLinkRecordV2(run_id=run.run_id, task_id=task.task_id),
+            RunTaskLinkRecordV2(
+                run_id=source.run_id,
+                task_id=task.task_id,
+            ),
+        ),
+        "task_records": (task,),
+        "request_unit_records": (rooted_unit,),
+        "input_binding_records": (query_binding, ordinal_binding),
+        "search_observation_records": (observation,),
+        "observation_source_edges": (source_edge,),
+        "tool_call_records": (source,),
+        "context_manifest_records": (source_manifest,),
+        "model_visible_toolset_artifacts": (artifact,),
+        "trace_records": (
+            TraceEventV2(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=UTC_NOW,
+                run_id=run.run_id,
+            ),
+        ),
+    }
+
+    historical = Cycle2ExactRunEvidenceClosure(
+        **{
+            **common,
+            "candidate_set_records": (candidate_set,),
+        }
+    )
+    assert historical.supporting_run_records == (supporting_run,)
+
+    with pytest.raises(ValidationError, match="CandidateSet ToolCall mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **common,
+                "supporting_run_records": (),
+                "run_task_link_records": common["run_task_link_records"][:1],
+                "candidate_set_records": (candidate_set,),
+                "observation_source_edges": (),
+                "tool_call_records": (),
+                "context_manifest_records": (),
+                "model_visible_toolset_artifacts": (),
+            }
+        )
+
+    foreign_observation = observation.model_copy(
+        update={"observation_id": uuid4()}
+    )
+    foreign_observation_unit = _c2_project(
+        rooted_unit,
+        observation_refs=(foreign_observation.observation_id,),
+    )
+    with pytest.raises(ValidationError, match="CandidateSet graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **common,
+                "request_unit_records": (foreign_observation_unit,),
+                "search_observation_records": (foreign_observation,),
+                "candidate_set_records": (candidate_set,),
+            }
+        )
+    with pytest.raises(ValidationError, match="Selection graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **common,
+                "candidate_selection_records": (selection,),
+            }
+        )
 
 
 def _input_binding(**updates: object) -> InputBinding:
