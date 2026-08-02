@@ -8,12 +8,16 @@ import pytest
 from sqlalchemy import select
 
 from mini_agent.application.persistence import (
+    P0PersistenceIntegrityError,
     P0RecordCode,
 )
 from mini_agent.application.records import (
     AgentRunResult,
     Cycle2ContinuationProviderProposal,
     Cycle2ExactRunEvidenceClosure,
+    MessageDirection,
+    MessageRecord,
+    RunTaskLinkRecordV2,
 )
 from mini_agent.bootstrap import Cycle2OfflineComposition
 from mini_agent.core.request_understanding import (
@@ -33,7 +37,14 @@ from mini_agent.core.tool_system import (
     ToolRetryDecision,
     build_cycle2_registry_snapshot,
 )
-from mini_agent.core.trace import AgentOutcome
+from mini_agent.core.trace import (
+    AgentOutcome,
+    AgentRunRecordV2,
+    AgentRunStatusV2,
+    StopReasonV2,
+    TraceEventType,
+    TraceEventV2,
+)
 from mini_agent.infrastructure.cycle2_fixture_seed import (
     TRUSTED_CLOCK,
     ResolvedCycle2SeedPlan,
@@ -326,6 +337,91 @@ async def _start(
     return engine, session_factory, composition
 
 
+def _seed_oa10_projection_root(
+    composition: Cycle2OfflineComposition,
+    source_evidence: Cycle2ExactRunEvidenceClosure,
+    *,
+    trace_mode: str,
+) -> AgentRunRecordV2:
+    assert trace_mode in {"exact", "missing", "wrong", "duplicate"}
+    source_completed_at = source_evidence.run_record.completed_at
+    assert source_completed_at is not None
+    assert len(source_evidence.task_records) == 1
+    assert len(source_evidence.request_unit_records) == 1
+    task = source_evidence.task_records[0]
+    unit = source_evidence.request_unit_records[0]
+    started_at = source_completed_at + timedelta(microseconds=10)
+    completed_at = started_at + timedelta(microseconds=1)
+    run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=source_evidence.conversation_record.conversation_id,
+        status=AgentRunStatusV2.SUPERSEDED,
+        provider_lane="offline_cycle2",
+        started_at=started_at,
+        completed_at=completed_at,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=source_evidence.conversation_record.conversation_id,
+        direction=MessageDirection.USER,
+        content="恢复时发现旧 Run 已失效",
+        received_at=started_at,
+    )
+    link = RunTaskLinkRecordV2(
+        run_id=run.run_id,
+        task_id=task.task_id,
+        base_task_state_version=task.state_version,
+        result_task_state_version=None,
+    )
+
+    def stopped_trace(*, exact: bool) -> TraceEventV2:
+        return TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=run.run_id,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            user_outcome=(
+                AgentOutcome.BLOCKED if exact else AgentOutcome.COMPLETED
+            ),
+            stop_reason=(
+                StopReasonV2.STATE_OR_BINDING_INVALIDATED
+                if exact
+                else StopReasonV2.GOAL_COMPLETED
+            ),
+        )
+
+    traces = {
+        "exact": (stopped_trace(exact=True),),
+        "missing": (),
+        "wrong": (stopped_trace(exact=False),),
+        "duplicate": (
+            stopped_trace(exact=True),
+            stopped_trace(exact=True),
+        ),
+    }[trace_mode]
+    records = composition._records
+    envelopes = (
+        records._cycle2_encode(P0RecordCode.MESSAGE_RECORD, message),
+        records._cycle2_encode(P0RecordCode.AGENT_RUN_RECORD, run),
+        records._cycle2_encode(P0RecordCode.RUN_TASK_LINK_RECORD, link),
+        *(
+            records._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, trace)
+            for trace in traces
+        ),
+    )
+    with records.session_factory.begin() as session:
+        records._cycle2_insert(
+            session,
+            envelopes,
+            owner_customer_id=source_evidence.owner_scope.customer_id,
+        )
+    return run
+
+
 async def test_unique_search_runs_through_authenticated_http_and_exact_evidence(
     eval_postgres_namespace,
 ) -> None:
@@ -348,6 +444,20 @@ async def test_unique_search_runs_through_authenticated_http_and_exact_evidence(
         assert result.outcome is AgentOutcome.COMPLETED
         assert type(evidence) is Cycle2ExactRunEvidenceClosure
         assert evidence.terminal_result == result
+        assert evidence.supporting_run_records == ()
+        assert evidence.task_state_transition_records == ()
+        assert len(evidence.candidate_set_records) == 1
+        assert evidence.candidate_selection_records == ()
+        assert len(evidence.search_observation_records) == 1
+        assert len(evidence.order_observation_records) == 1
+        assert evidence.shipment_observation_records == ()
+        assert len(evidence.observation_source_edges) == 2
+        assert evidence.shipment_assessment_records == ()
+        assert len(evidence.tool_call_records) == 2
+        assert evidence.recovery_decision_records == ()
+        assert evidence.superseded_run_finalizations == ()
+        assert len(evidence.context_manifest_records) == 2
+        assert len(evidence.model_visible_toolset_artifacts) == 1
         assert tuple(call.canonical_tool_name for call in calls) == (
             Cycle2ToolName.SEARCH_ORDERS,
             Cycle2ToolName.GET_ORDER,
@@ -377,6 +487,20 @@ async def test_multiple_then_second_uses_current_candidate_without_research(
         assert second.outcome is AgentOutcome.COMPLETED
         assert first_evidence.terminal_result == first
         assert second_evidence.terminal_result == second
+        assert len(second_evidence.supporting_run_records) == 1
+        assert second_evidence.supporting_run_records[0].run_id == first.run_id
+        supporting_links = tuple(
+            link
+            for link in second_evidence.run_task_link_records
+            if link.run_id == first.run_id
+        )
+        assert len(supporting_links) == 1
+        assert len(second_evidence.candidate_set_records) == 1
+        assert len(second_evidence.candidate_selection_records) == 1
+        assert len(second_evidence.observation_source_edges) == 2
+        assert {
+            call.run_id for call in second_evidence.tool_call_records
+        } == {first.run_id, second.run_id}
         assert tuple(call.canonical_tool_name for call in calls).count(
             Cycle2ToolName.SEARCH_ORDERS
         ) == 1
@@ -474,6 +598,13 @@ async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds
 
         assert result.outcome is AgentOutcome.COMPLETED
         assert evidence.terminal_result == result
+        assert len(evidence.search_observation_records) == 1
+        assert len(evidence.order_observation_records) == 1
+        assert len(evidence.shipment_observation_records) == 1
+        assert len(evidence.shipment_assessment_records) == 1
+        assert len(evidence.observation_source_edges) == 3
+        assert len(evidence.tool_call_records) == 3
+        assert len(evidence.recovery_decision_records) == 1
         assert len(shipment_calls) == 1
         call = shipment_calls[0]
         assert call.status is ToolCallStatus.SUCCEEDED
@@ -488,5 +619,55 @@ async def test_authenticated_transient_shipment_fault_retries_once_then_succeeds
             call.attempts[1].retry_decision
             is ToolRetryDecision.NOT_APPLICABLE
         )
+
+        oa10_run = _seed_oa10_projection_root(
+            composition,
+            evidence,
+            trace_mode="exact",
+        )
+        oa10_evidence = await (
+            composition._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=evidence.owner_scope,
+                run_id=oa10_run.run_id,
+            )
+        )
+        assert oa10_evidence is not None
+        assert len(oa10_evidence.superseded_run_finalizations) == 1
+        assert (
+            oa10_evidence.superseded_run_finalizations[0]
+            .superseded_run_record
+            == oa10_run
+        )
+        assert oa10_evidence.terminal_result is None
+        assert oa10_evidence.task_state_transition_records == ()
+        assert len(oa10_evidence.supporting_run_records) == 1
+        assert oa10_evidence.supporting_run_records[0].run_id == result.run_id
+        supporting_links = tuple(
+            link
+            for link in oa10_evidence.run_task_link_records
+            if link.run_id == result.run_id
+        )
+        assert len(supporting_links) == 1
+        assert {
+            tool_call.run_id
+            for tool_call in oa10_evidence.tool_call_records
+        } == {result.run_id}
+        assert len(oa10_evidence.tool_call_records) == 3
+        assert oa10_evidence.recovery_decision_records == ()
+
+        for trace_mode in ("missing", "wrong", "duplicate"):
+            invalid = _seed_oa10_projection_root(
+                composition,
+                evidence,
+                trace_mode=trace_mode,
+            )
+            with pytest.raises(P0PersistenceIntegrityError):
+                await (
+                    composition._records
+                    .load_cycle2_exact_run_evidence_for_owner(
+                        owner_scope=evidence.owner_scope,
+                        run_id=invalid.run_id,
+                    )
+                )
     finally:
         engine.dispose()

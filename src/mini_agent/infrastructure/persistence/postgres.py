@@ -53,6 +53,7 @@ from mini_agent.application.records import (
     Cycle2DispatchFenceWriteResult,
     Cycle2CurrentSessionTaskClosure,
     Cycle2ExactRunEvidenceClosure,
+    Cycle2ObservationSourceEdge,
     Cycle2ReadDispatchGrant,
     Cycle2RunBudgetPolicyEvidence,
     Cycle2WriteResult,
@@ -91,6 +92,7 @@ from mini_agent.application.records import (
     ShipmentAssessmentReadClosure,
     ShipmentNotReceivedClaimReadClosure,
     StartCycle2RunCommand,
+    SupersededRunFinalizationEvidenceV2,
     SupersededRunInvalidationKind,
     SupersededRunReadClosure,
 )
@@ -5736,16 +5738,15 @@ class PostgresRecordAdapter:
             return Cycle2WriteResult.PROJECTION_CONFLICT
         return Cycle2WriteResult.APPLIED
 
-    @classmethod
     def _cycle2_exact_run_evidence(
-        cls,
+        self,
         session: Session,
         *,
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
     ) -> Cycle2ExactRunEvidenceClosure | None:
         owner = owner_scope.customer_id
-        run_loaded = cls._cycle2_row(
+        run_loaded = self._cycle2_row(
             session,
             owner_customer_id=owner,
             record_code=P0RecordCode.AGENT_RUN_RECORD,
@@ -5758,7 +5759,7 @@ class PostgresRecordAdapter:
             raise _integrity(
                 P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
             )
-        conversation_loaded = cls._cycle2_row(
+        conversation_loaded = self._cycle2_row(
             session,
             owner_customer_id=owner,
             record_code=P0RecordCode.CONVERSATION_RECORD,
@@ -5768,27 +5769,20 @@ class PostgresRecordAdapter:
             raise _integrity(
                 P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
             )
-        message_rows = cls._cycle2_rows(
+        all_message_rows = self._cycle2_rows(
             session,
             owner_customer_id=owner,
             record_code=P0RecordCode.MESSAGE_RECORD,
             predicates=(P0RecordModel.conversation_id == run.conversation_id,),
         )
-        messages = tuple(
+        all_messages = tuple(
             cast(MessageRecord, decoded.source_record)
-            for _, decoded in message_rows
+            for _, decoded in all_message_rows
             if type(decoded.source_record) is MessageRecord
-            and (
-                decoded.source_record.received_at == run.started_at
-                or (
-                    run.completed_at is not None
-                    and decoded.source_record.received_at == run.completed_at
-                )
-            )
         )
-        links = tuple(
+        root_links = tuple(
             cast(RunTaskLinkRecordV2, decoded.source_record)
-            for _, decoded in cls._cycle2_rows(
+            for _, decoded in self._cycle2_rows(
                 session,
                 owner_customer_id=owner,
                 record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
@@ -5799,8 +5793,21 @@ class PostgresRecordAdapter:
         tasks: list[TaskRecord] = []
         units: list[RequestUnitRecord] = []
         bindings: list[InputBindingV2] = []
-        for link in links:
-            unit_rows = cls._cycle2_rows(
+        transitions: list[TaskStateTransition] = []
+        observation_rows: dict[
+            UUID,
+            tuple[
+                P0RecordModel,
+                OrderObservation
+                | SearchOrdersObservation
+                | ShipmentObservation,
+            ],
+        ] = {}
+        candidate_sets: list[OrderCandidateSetRecord] = []
+        selections: list[OrderCandidateSelectionRecord] = []
+        assessments: list[ShipmentAssessment] = []
+        for link in root_links:
+            unit_rows = self._cycle2_rows(
                 session,
                 owner_customer_id=owner,
                 record_code=P0RecordCode.REQUEST_UNIT_RECORD,
@@ -5815,7 +5822,7 @@ class PostgresRecordAdapter:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
                 )
-            current = cls._cycle2_current_task_unit_bindings(
+            current = self._cycle2_current_task_unit_bindings(
                 session,
                 owner_scope=owner_scope,
                 task_id=link.task_id,
@@ -5829,15 +5836,539 @@ class PostgresRecordAdapter:
             tasks.append(task)
             units.append(current_unit)
             bindings.extend(current_bindings)
+
+            task_loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", task.task_id),),
+            )
+            if task_loaded is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            task_children = task_loaded[1].logical_children
+            if any(
+                type(child) is not TaskStateTransition
+                for child in task_children
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                )
+            if link.result_task_state_version is not None:
+                interval_start = (
+                    1
+                    if link.base_task_state_version is None
+                    else link.base_task_state_version
+                )
+                interval_transitions = tuple(
+                    cast(TaskStateTransition, child)
+                    for child in task_children
+                    if child.base_state_version >= interval_start
+                    and child.result_state_version
+                    <= link.result_task_state_version
+                )
+                if any(
+                    child.task_id != link.task_id
+                    or child.request_unit_id
+                    != current_unit.request_unit_id
+                    for child in interval_transitions
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                transitions.extend(interval_transitions)
+
+            for observation_ref in current_unit.observation_refs:
+                physical_matches: list[
+                    tuple[P0RecordModel, DecodedP0PersistenceRecord]
+                ] = []
+                for record_code in _PHYSICAL_OBSERVATION_RECORD_CODES:
+                    loaded = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=record_code,
+                        logical_identity=(("observation_id", observation_ref),),
+                    )
+                    if loaded is not None:
+                        physical_matches.append(loaded)
+                if len(physical_matches) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        if physical_matches
+                        else P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                observation_row, observation_decoded = physical_matches[0]
+                observation = observation_decoded.source_record
+                if type(observation) not in {
+                    OrderObservation,
+                    SearchOrdersObservation,
+                    ShipmentObservation,
+                }:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                    )
+                if observation_ref in observation_rows:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                observation_rows[observation_ref] = (
+                    observation_row,
+                    cast(Any, observation),
+                )
+
+            candidate_sets.extend(
+                cast(OrderCandidateSetRecord, decoded.source_record)
+                for _, decoded in self._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+                    predicates=(
+                        P0RecordModel.task_id == task.task_id,
+                        P0RecordModel.request_unit_id
+                        == current_unit.request_unit_id,
+                    ),
+                )
+                if type(decoded.source_record) is OrderCandidateSetRecord
+            )
+            selections.extend(
+                cast(OrderCandidateSelectionRecord, decoded.source_record)
+                for _, decoded in self._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=(
+                        P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD
+                    ),
+                    predicates=(
+                        P0RecordModel.task_id == task.task_id,
+                        P0RecordModel.request_unit_id
+                        == current_unit.request_unit_id,
+                    ),
+                )
+                if type(decoded.source_record)
+                is OrderCandidateSelectionRecord
+            )
+            assessments.extend(
+                cast(ShipmentAssessment, decoded.source_record)
+                for _, decoded in self._cycle2_rows(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.SHIPMENT_ASSESSMENT_RECORD,
+                    predicates=(
+                        P0RecordModel.task_id == task.task_id,
+                        P0RecordModel.request_unit_id
+                        == current_unit.request_unit_id,
+                    ),
+                )
+                if type(decoded.source_record) is ShipmentAssessment
+            )
+
+        root_tool_rows = self._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TOOL_CALL_RECORD,
+            predicates=(P0RecordModel.run_id == run_id,),
+        )
+        tool_rows_by_id: dict[
+            UUID,
+            tuple[P0RecordModel, DecodedP0PersistenceRecord],
+        ] = {
+            cast(
+                ToolCallRecordV2,
+                decoded.source_record,
+            ).tool_call_id: (row, decoded)
+            for row, decoded in root_tool_rows
+            if type(decoded.source_record) is ToolCallRecordV2
+        }
+        root_tool_call_ids = frozenset(tool_rows_by_id)
+
+        candidate_by_id = {
+            record.candidate_set_id: record for record in candidate_sets
+        }
+        ordinal_selections: list[OrderCandidateSelectionRecord] = []
+        for selection in selections:
+            candidate_set = candidate_by_id.get(selection.candidate_set_ref)
+            if candidate_set is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            if self._cycle2_auto_target_from_selection(
+                record=selection,
+                candidate_set=candidate_set,
+            ) is None:
+                ordinal_selections.append(selection)
+        selections = ordinal_selections
+
+        source_edge_facts: dict[
+            UUID,
+            tuple[UUID, UUID | None, UUID, UUID],
+        ] = {}
+        candidate_by_observation: dict[
+            UUID,
+            list[OrderCandidateSetRecord],
+        ] = {}
+        for candidate_set in candidate_sets:
+            candidate_by_observation.setdefault(
+                candidate_set.search_observation_ref,
+                [],
+            ).append(candidate_set)
+
+        for observation_id, (row, observation) in observation_rows.items():
+            if type(observation) is OrderObservation:
+                references = _exact_run_normalized_references(session, row)
+
+                def reference_uuid(relation: str) -> UUID:
+                    matches = tuple(
+                        reference
+                        for reference in references
+                        if reference.relation == relation
+                    )
+                    if len(matches) != 1:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        )
+                    identity = dict(matches[0].target_logical_identity)
+                    value = identity.get(
+                        {
+                            "source_tool_call_id": "tool_call_id",
+                            "source_run_id": "run_id",
+                            "source_task_id": "task_id",
+                            "source_request_unit_id": "request_unit_id",
+                        }[relation]
+                    )
+                    try:
+                        return UUID(cast(str, value))
+                    except (TypeError, ValueError):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        ) from None
+
+                source_edge_facts[observation_id] = (
+                    reference_uuid("source_tool_call_id"),
+                    reference_uuid("source_run_id"),
+                    reference_uuid("source_task_id"),
+                    reference_uuid("source_request_unit_id"),
+                )
+            elif type(observation) is SearchOrdersObservation:
+                rooted_candidates = candidate_by_observation.get(
+                    observation_id,
+                    [],
+                )
+                if len(rooted_candidates) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        if rooted_candidates
+                        else P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                candidate = rooted_candidates[0]
+                source_edge_facts[observation_id] = (
+                    observation.source_tool_call_id,
+                    None,
+                    candidate.task_id,
+                    candidate.request_unit_id,
+                )
+            else:
+                source_edge_facts[observation_id] = (
+                    observation.source_tool_call_id,
+                    None,
+                    observation.task_id,
+                    observation.request_unit_id,
+                )
+
+        source_call_ids = {
+            facts[0] for facts in source_edge_facts.values()
+        } | {record.source_tool_call_id for record in candidate_sets}
+        for source_call_id in source_call_ids:
+            if source_call_id in tool_rows_by_id:
+                continue
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TOOL_CALL_RECORD,
+                logical_identity=(("tool_call_id", source_call_id),),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not ToolCallRecordV2
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            tool_rows_by_id[source_call_id] = loaded
+
+        tool_calls = tuple(
+            sorted(
+                (
+                    cast(ToolCallRecordV2, decoded.source_record)
+                    for _, decoded in tool_rows_by_id.values()
+                ),
+                key=lambda record: (
+                    record.started_at,
+                    str(record.tool_call_id),
+                ),
+            )
+        )
+        tool_by_id = {
+            record.tool_call_id: record for record in tool_calls
+        }
+        binding_by_id = {
+            record.binding_id: record for record in bindings
+        }
+        referenced_binding_ids = {
+            binding_ref
+            for candidate_set in candidate_sets
+            for binding_ref in candidate_set.query_binding_refs
+        }
+        referenced_binding_ids.update(
+            selection.ordinal_input_binding_ref for selection in selections
+        )
+        referenced_binding_ids.update(
+            assessment.claim_binding_ref
+            for assessment in assessments
+            if assessment.claim_binding_ref is not None
+        )
+        referenced_binding_ids.update(
+            binding_ref
+            for tool_call in tool_calls
+            for binding_ref in tool_call.argument_binding_refs
+        )
+        for binding_id in referenced_binding_ids:
+            if binding_id in binding_by_id:
+                continue
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", binding_id),),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not InputBindingV2
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            binding_by_id[binding_id] = cast(
+                InputBindingV2,
+                loaded[1].source_record,
+            )
+        bindings = sorted(
+            binding_by_id.values(),
+            key=lambda record: (
+                record.created_at,
+                str(record.binding_id),
+            ),
+        )
+        source_edges: list[Cycle2ObservationSourceEdge] = []
+        for observation_id, facts in source_edge_facts.items():
+            (
+                source_tool_call_id,
+                stored_run_id,
+                task_id,
+                request_unit_id,
+            ) = facts
+            source_call = tool_by_id.get(source_tool_call_id)
+            if (
+                source_call is None
+                or (
+                    stored_run_id is not None
+                    and stored_run_id != source_call.run_id
+                )
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            source_edges.append(
+                Cycle2ObservationSourceEdge(
+                    observation_ref=observation_id,
+                    source_tool_call_id=source_tool_call_id,
+                    source_run_id=source_call.run_id,
+                    task_id=task_id,
+                    request_unit_id=request_unit_id,
+                )
+            )
+
+        supporting_run_ids = {
+            record.run_id for record in tool_calls if record.run_id != run_id
+        }
+        supporting_runs: list[AgentRunRecordV2] = []
+        for supporting_run_id in supporting_run_ids:
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=(("run_id", supporting_run_id),),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not AgentRunRecordV2
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            supporting_runs.append(
+                cast(AgentRunRecordV2, loaded[1].source_record)
+            )
+
+        supporting_links_by_key: dict[
+            tuple[UUID, UUID],
+            RunTaskLinkRecordV2,
+        ] = {}
+        for call in tool_calls:
+            if call.run_id == run_id:
+                continue
+            key = (call.run_id, call.task_id)
+            if key in supporting_links_by_key:
+                continue
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                logical_identity=(
+                    ("run_id", call.run_id),
+                    ("task_id", call.task_id),
+                ),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record)
+                is not RunTaskLinkRecordV2
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            supporting_links_by_key[key] = cast(
+                RunTaskLinkRecordV2,
+                loaded[1].source_record,
+            )
+        supporting_links = tuple(supporting_links_by_key.values())
+
         traces = tuple(
             cast(TraceEventV2, decoded.source_record)
-            for _, decoded in cls._cycle2_rows(
+            for _, decoded in self._cycle2_rows(
                 session,
                 owner_customer_id=owner,
                 record_code=P0RecordCode.TRACE_EVENT_RECORD,
                 predicates=(P0RecordModel.run_id == run_id,),
             )
             if type(decoded.source_record) is TraceEventV2
+        )
+
+        manifest_by_id: dict[UUID, ContextManifest] = {}
+        for _, decoded in self._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONTEXT_MANIFEST_RECORD,
+            predicates=(P0RecordModel.run_id == run_id,),
+        ):
+            if type(decoded.source_record) is ContextManifest:
+                manifest = cast(ContextManifest, decoded.source_record)
+                manifest_by_id[manifest.context_manifest_id] = manifest
+        for call in tool_calls:
+            if call.context_manifest_id in manifest_by_id:
+                continue
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.CONTEXT_MANIFEST_RECORD,
+                logical_identity=(
+                    ("context_manifest_id", call.context_manifest_id),
+                ),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not ContextManifest
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            manifest_by_id[call.context_manifest_id] = cast(
+                ContextManifest,
+                loaded[1].source_record,
+            )
+        manifests = tuple(
+            sorted(
+                manifest_by_id.values(),
+                key=lambda record: (
+                    record.assembled_at,
+                    str(record.context_manifest_id),
+                ),
+            )
+        )
+
+        artifacts: list[ModelVisibleToolsetArtifact] = []
+        for toolset_hash in sorted(
+            {record.model_visible_toolset_hash for record in manifests}
+        ):
+            artifact_row = self._row_for_identity(
+                session,
+                record_code=P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT,
+                logical_identity=(
+                    ("model_visible_toolset_hash", toolset_hash),
+                ),
+            )
+            if artifact_row is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            artifact_decoded = self._validate_physical_projection(
+                session,
+                artifact_row,
+            )
+            if (
+                type(artifact_decoded.source_record)
+                is not ModelVisibleToolsetArtifact
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            artifacts.append(
+                cast(
+                    ModelVisibleToolsetArtifact,
+                    artifact_decoded.source_record,
+                )
+            )
+
+        referenced_message_ids = {
+            message.message_id
+            for message in all_messages
+            if message.received_at == run.started_at
+            or (
+                run.completed_at is not None
+                and message.received_at == run.completed_at
+            )
+        }
+        referenced_message_ids.update(
+            trace.message_ref
+            for trace in traces
+            if trace.message_ref is not None
+        )
+        referenced_message_ids.update(
+            ref for unit in units for ref in unit.goal_source_refs
+        )
+        referenced_message_ids.update(
+            ref for binding in bindings for ref in binding.source_refs
+        )
+        referenced_message_ids.update(
+            record.source_message_ref for record in selections
+        )
+        referenced_message_ids.update(
+            ref
+            for manifest in manifests
+            for ref in manifest.selected_message_refs
+        )
+        messages = tuple(
+            sorted(
+                (
+                    message
+                    for message in all_messages
+                    if message.message_id in referenced_message_ids
+                ),
+                key=lambda record: (
+                    record.received_at,
+                    str(record.message_id),
+                ),
+            )
         )
         terminal_result = None
         if run.status is AgentRunStatusV2.COMPLETED:
@@ -5861,24 +6392,122 @@ class PostgresRecordAdapter:
                 outcome=cast(Any, stopped[0].user_outcome),
                 message=assistants[0].content,
             )
-        return Cycle2ExactRunEvidenceClosure(
-            owner_scope=owner_scope,
-            conversation_record=cast(
-                ConversationRecord, conversation_loaded[1].source_record
-            ),
-            run_record=run,
-            message_records=tuple(
-                sorted(messages, key=lambda record: (record.received_at, str(record.message_id)))
-            ),
-            run_task_link_records=links,
-            task_records=tuple(tasks),
-            request_unit_records=tuple(units),
-            input_binding_records=tuple(bindings),
-            trace_records=tuple(
-                sorted(traces, key=lambda record: (record.occurred_at, str(record.trace_event_id)))
-            ),
-            terminal_result=terminal_result,
+        recovery_decisions = tuple(
+            sorted(
+                (
+                    cast(ToolRetryRecoveryDecisionRecordV2, child)
+                    for tool_call_id in root_tool_call_ids
+                    for child in tool_rows_by_id[
+                        tool_call_id
+                    ][1].logical_children
+                    if type(child)
+                    is ToolRetryRecoveryDecisionRecordV2
+                ),
+                key=lambda record: (
+                    record.decided_at,
+                    str(record.recovery_decision_id),
+                ),
+            )
         )
+
+        try:
+            superseded_finalizations: tuple[
+                SupersededRunFinalizationEvidenceV2,
+                ...,
+            ] = ()
+            if run.status is AgentRunStatusV2.SUPERSEDED:
+                run_stopped = tuple(
+                    trace
+                    for trace in traces
+                    if trace.event_type is TraceEventType.RUN_STOPPED
+                )
+                if len(root_links) != 1 or len(run_stopped) != 1:
+                    raise ValueError(
+                        "OA-10 requires one persisted Link and RunStopped Trace"
+                    )
+                superseded_finalizations = (
+                    SupersededRunFinalizationEvidenceV2(
+                        superseded_run_record=run,
+                        no_result_link_record=root_links[0],
+                        run_stopped_trace_record=run_stopped[0],
+                    ),
+                )
+
+            return Cycle2ExactRunEvidenceClosure(
+                owner_scope=owner_scope,
+                conversation_record=cast(
+                    ConversationRecord,
+                    conversation_loaded[1].source_record,
+                ),
+                run_record=run,
+                supporting_run_records=tuple(
+                    sorted(
+                        supporting_runs,
+                        key=lambda record: str(record.run_id),
+                    )
+                ),
+                message_records=messages,
+                run_task_link_records=tuple(
+                    sorted(
+                        (*root_links, *supporting_links),
+                        key=lambda record: (
+                            str(record.run_id),
+                            str(record.task_id),
+                        ),
+                    )
+                ),
+                task_records=tuple(tasks),
+                request_unit_records=tuple(units),
+                input_binding_records=tuple(bindings),
+                task_state_transition_records=tuple(
+                    sorted(
+                        transitions,
+                        key=lambda record: (
+                            record.changed_at,
+                            str(record.task_id),
+                            record.result_state_version,
+                        ),
+                    )
+                ),
+                candidate_set_records=tuple(candidate_sets),
+                candidate_selection_records=tuple(selections),
+                order_observation_records=tuple(
+                    cast(OrderObservation, record)
+                    for _, record in observation_rows.values()
+                    if type(record) is OrderObservation
+                ),
+                search_observation_records=tuple(
+                    cast(SearchOrdersObservation, record)
+                    for _, record in observation_rows.values()
+                    if type(record) is SearchOrdersObservation
+                ),
+                shipment_observation_records=tuple(
+                    cast(ShipmentObservation, record)
+                    for _, record in observation_rows.values()
+                    if type(record) is ShipmentObservation
+                ),
+                observation_source_edges=tuple(source_edges),
+                shipment_assessment_records=tuple(assessments),
+                tool_call_records=tool_calls,
+                recovery_decision_records=recovery_decisions,
+                superseded_run_finalizations=superseded_finalizations,
+                context_manifest_records=manifests,
+                model_visible_toolset_artifacts=tuple(artifacts),
+                trace_records=tuple(
+                    sorted(
+                        traces,
+                        key=lambda record: (
+                            record.occurred_at,
+                            str(record.trace_event_id),
+                        ),
+                    )
+                ),
+                terminal_result=terminal_result,
+            )
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            ) from None
 
     @_bounded_database_failures
     async def load_cycle2_exact_run_evidence_for_owner(
