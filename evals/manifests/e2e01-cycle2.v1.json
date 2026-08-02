@@ -34,7 +34,7 @@
       "path": "evals/cases/e2e01-cycle2.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-cycle2-dataset-v1",
-      "sha256": "0b6897a94e64c54951cd33d4b2544f8e0a3f3282015ee911180ed7bf65622a96"
+      "sha256": "c391094d6b92ca77844d557a25369ccde4d69ebae49a4d061932e3424b122c9d"
     },
     {
       "artifact_id": "e2e01-cycle2-model-scripts",

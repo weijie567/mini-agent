@@ -11,8 +11,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import pytest
 from pydantic import BaseModel
 
-from mini_agent.application.ports import ModelProviderV2
+from mini_agent.application.ports import (
+    Cycle2RequestUnderstandingProvider,
+    ModelProviderV2,
+)
 from mini_agent.application.records import (
+    Cycle2ControlPurpose,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
 )
@@ -27,8 +31,14 @@ from mini_agent.core.presentation import (
     PresentationPurpose,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidateKind,
+    Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
+)
+from mini_agent.core.request_processing import (
+    _canonical_cycle2_request_and_candidate,
 )
 from mini_agent.core.tool_system import ToolSpec, compute_model_visible_toolset_hash
 import mini_agent.evaluation.artifacts as artifact_module
@@ -72,6 +82,7 @@ def _tool_spec() -> ToolSpec:
 def _request(query: str = "查订单 O-1001") -> RequestUnderstandingInput:
     tool = _tool_spec()
     return RequestUnderstandingInput(
+        schema_version="e2e01-thin-v1",
         run_id=UUID("00000000-0000-4000-8000-000000000102"),
         message_ref=MESSAGE_REF,
         original_query=query,
@@ -631,6 +642,183 @@ def test_cycle2_provider_consumes_ordered_candidate_and_fault_directives() -> No
         fault_ref="fault:get-shipment:transient-once-v1",
     )
     provider.assert_exhausted()
+
+
+def test_cycle2_provider_implements_active_port_and_initial_claim() -> None:
+    provider = _cycle2_provider("E2E01-02/unique-own-with-foreign-decoy")
+    assert isinstance(provider, Cycle2RequestUnderstandingProvider)
+
+    output = asyncio.run(provider.propose_cycle2_initial(_request("最近买的鞋")))
+
+    assert type(output) is Cycle2InitialRequestUnderstandingOutputV2
+    assert output.message_ref == MESSAGE_REF
+    assert output.task_delta_candidates[0].input_candidates == (
+        Cycle2InputCandidate(
+            name="product_description",
+            candidate_value="鞋",
+            source_ref=MESSAGE_REF,
+            source_quote="鞋",
+            confidence=0.99,
+        ),
+    )
+    assert output.next_move_candidate.requested_tool_name == "search_orders"
+    assert output.next_move_candidate.arguments == {"product_description": "鞋"}
+
+
+@pytest.mark.parametrize(
+    ("case_id", "expected_name", "expected_value"),
+    (
+        ("E2E01-03/current-second-selected", "candidate_ordinal", 2),
+        ("T2-candidate-out-of-range-rejected", "candidate_ordinal", 6),
+        ("E2E01-05/order-only-no-shipment", "order_id", "O-1001"),
+        ("E2E01-06/stale-refresh-success", "order_id", "O-1001"),
+    ),
+)
+def test_cycle2_provider_projects_exact_continuation_claims(
+    case_id: str,
+    expected_name: str,
+    expected_value: object,
+) -> None:
+    provider = _cycle2_provider(case_id)
+
+    candidate = asyncio.run(provider.propose_cycle2_continuation(_request()))
+
+    assert type(candidate) is Cycle2InputCandidate
+    assert candidate.name == expected_name
+    assert candidate.candidate_value == expected_value
+    assert candidate.source_ref == MESSAGE_REF
+
+
+@pytest.mark.parametrize(
+    ("case_id", "message", "ordinal"),
+    (
+        ("E2E01-03/current-second-selected", "第二个", 2),
+        ("T2-candidate-out-of-range-rejected", "第六个", 6),
+    ),
+)
+def test_cycle2_provider_ordinal_quote_passes_core_provenance_gate(
+    case_id: str,
+    message: str,
+    ordinal: int,
+) -> None:
+    request = _request(message)
+    candidate = asyncio.run(
+        _cycle2_provider(case_id).propose_cycle2_continuation(request)
+    )
+
+    assert candidate == Cycle2InputCandidate(
+        name="candidate_ordinal",
+        candidate_value=ordinal,
+        source_ref=MESSAGE_REF,
+        source_quote=message,
+        confidence=0.99,
+    )
+    canonical_request, canonical_candidate, authoritative_message = (
+        _canonical_cycle2_request_and_candidate(
+            request_input=request,
+            candidate=candidate,
+            authoritative_messages={MESSAGE_REF: message},
+        )
+    )
+    assert canonical_request == request
+    assert canonical_candidate == candidate
+    assert authoritative_message == message
+
+
+def test_cycle2_provider_projects_exact_zero_one_two_control_matrix() -> None:
+    order_only = _cycle2_provider("E2E01-05/order-only-no-shipment")
+    asyncio.run(order_only.propose_cycle2_continuation(_request()))
+    summary = asyncio.run(
+        order_only.propose_cycle2_control(
+            _request(), Cycle2ControlPurpose.PROPOSE_POST_ORDER
+        )
+    )
+    assert summary.kind is Cycle2ControlCandidateKind.FINISH
+    order_only.assert_exhausted()
+
+    logistics = _cycle2_provider(
+        "E2E01-05/logistics-required-uses-shipment"
+    )
+    asyncio.run(logistics.propose_cycle2_continuation(_request()))
+    shipment = asyncio.run(
+        logistics.propose_cycle2_control(
+            _request(), Cycle2ControlPurpose.PROPOSE_POST_ORDER
+        )
+    )
+    assert shipment.kind is Cycle2ControlCandidateKind.CALL_TOOL
+    assert shipment.requested_tool_name == "get_shipment"
+    assessment = asyncio.run(
+        logistics.propose_cycle2_control(
+            _request(), Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT
+        )
+    )
+    assert assessment.kind is Cycle2ControlCandidateKind.FINISH
+    logistics.assert_exhausted()
+
+    no_result = _cycle2_provider(
+        "T2-retry-finalize-before-second-fence-state-invalidated"
+    )
+    asyncio.run(no_result.propose_cycle2_continuation(_request()))
+    no_result.take_cycle2_directive("FAULT_DIRECTIVE")
+    no_result.assert_exhausted()
+
+
+@pytest.mark.parametrize(
+    ("case_id", "purpose"),
+    (
+        (
+            "E2E01-02/unique-own-with-foreign-decoy",
+            Cycle2ControlPurpose.PROPOSE_GET_ORDER,
+        ),
+        (
+            "E2E01-03/multiple-minimum-summary",
+            Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION,
+        ),
+        (
+            "E2E01-06/stale-refresh-success",
+            Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
+        ),
+        (
+            "E2E01-06/no-shipment-need-human",
+            Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
+        ),
+    ),
+)
+def test_cycle2_provider_projects_matching_control_purposes(
+    case_id: str,
+    purpose: Cycle2ControlPurpose,
+) -> None:
+    provider = _cycle2_provider(case_id)
+    first = provider.take_cycle2_directive("REQUEST_UNDERSTANDING")
+    assert first.purpose == "REQUEST_UNDERSTANDING"
+
+    candidate = asyncio.run(provider.propose_cycle2_control(_request(), purpose))
+
+    if purpose is Cycle2ControlPurpose.PROPOSE_GET_ORDER:
+        assert candidate.kind is Cycle2ControlCandidateKind.CALL_TOOL
+        assert candidate.requested_tool_name == "get_order"
+    else:
+        assert candidate.kind is Cycle2ControlCandidateKind.FINISH
+        assert candidate.requested_tool_name is None
+    provider.assert_exhausted()
+
+
+def test_cycle2_provider_active_control_mismatch_and_duplicate_fail_closed() -> None:
+    provider = _cycle2_provider("E2E01-03/multiple-minimum-summary")
+    asyncio.run(provider.propose_cycle2_initial(_request("最近买的鞋")))
+
+    with pytest.raises(ProviderProtocolError):
+        asyncio.run(
+            provider.propose_cycle2_control(
+                _request(), Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE
+            )
+        )
+    with pytest.raises(ProviderProtocolError):
+        asyncio.run(
+            provider.propose_cycle2_control(
+                _request(), Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION
+            )
+        )
 
 
 def test_cycle2_provider_purpose_cursor_fails_closed() -> None:

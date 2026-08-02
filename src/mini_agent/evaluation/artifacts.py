@@ -25,7 +25,7 @@ EXPECTED_MANIFEST_SHA256 = (
 )
 CYCLE2_MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-cycle2.v1.json"
 CYCLE2_EXPECTED_MANIFEST_SHA256 = (
-    "c9093b00b11b6bdd3ea5b03d51d68b345348382aac31f79ae73d0def3be7bbf8"
+    "d71126be7ed32864688581e43929f0dde34dd9b8ab1f58a56409d0b4a2d6d4c9"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -835,19 +835,19 @@ _CYCLE2_CASE_CONTRACT_SHA256: Mapping[str, str] = {
     "E2E01-06/deterministic-source-integrity-no-retry": "f2416899453bcb75b1fecb07fc10ea3b6972b7cfae4f6fa2f85816766cf81ebe",
     "E2E01-06/insufficient-promise-need-human": "7fea580d4538fa85126c2a1b7373f41265f5d8c4849221e443f8d1815e4345a4",
     "E2E01-06/no-shipment-need-human": "a852aa4322553a5b87ae2534a86b2dd66a6fce6af6387c6df97d9208d653271f",
-    "T2-candidate-owner-mismatch-rejected": "8512f4c68133de9eec8a90b0dd862d0ba4a983dae23cf9442abddcc0bc859396",
-    "T2-candidate-superseded-rejected": "901b05cdd993db748c598655ba0c653d38a8dcf7a95820aadc22b41838cb8e29",
-    "T2-candidate-out-of-range-rejected": "150fad168ec7bad7d2056a9cc94c2087c960d5af6af08fc27b4c05de3c854345",
-    "T2-candidate-zero-or-multiple-current-rejected": "25755821f99a6777330f1acc89e3f135cf5fcb68705c3274601dd389bd5af956",
-    "T2-assessment-delayed-boundary": "34326ec0ab1bfa0fb1c881093d0d1d3e98c2a796aa383c23101b9648e59f10b6",
-    "T2-assessment-delivered-not-received-current-claim": "b88891fa9dae73389096f21b4b6db2190e5592dcf3e51fe907550bc3dadcdc36",
-    "T2-assessment-claim-corrected": "b2e53c34be5dd6fb75a2e5e5703f56ad7f82e2e68924db30bf586d87e9ce4a97",
-    "T2-timeout-after-dispatch-then-success": "4daf287449ba080ffb15b4000d0ec7756932ac8b76cb89c8432f0459ac07868f",
-    "T2-retry-finalize-before-second-fence-recovery": "837587ef1b2972c014565a9175d0614dfc7d5bf9084b6e6b04bb79de563f4dba",
-    "T2-retry-finalize-before-second-fence-state-invalidated": "2601c882b43ff3322fa97ce3c2a44b08788248ed0445b4d3c582fcc38ef78d8f",
-    "T2-retry-unfinished-attempt-restart-blocked": "d9329f8544cbaec2e28c64814e5756a8963636eb453271f561917d0a92c6d85c",
-    "T2-refresh-returns-already-stale-blocked": "4e632845dbaa56415516e827c49aeaa6e22f1fe3944de9035f851ba8de02a636",
-    "T2-two-active-packages-integrity-blocked": "ce8a4d7d1f36a6024a18eee52ab2f830aa8c12e5c58acc6f7e95fd8a39b19a13",
+    "T2-candidate-owner-mismatch-rejected": "83c8af58c3f9bc5d125ed407f52636f0f665e4ee3783e98d52d16d09a695a9d1",
+    "T2-candidate-superseded-rejected": "d00b4745c41f38da52bc2bcb62730bbaa27edffa95ff960a91fa3ce0342d33fa",
+    "T2-candidate-out-of-range-rejected": "2be5fbf789cbd066627046400d65d15254531a4640f9a370331af322d240d4ba",
+    "T2-candidate-zero-or-multiple-current-rejected": "59215aef52fd1e023551880e9292e12ce4f67ec8ee9b6469833efbd7bc213a36",
+    "T2-assessment-delayed-boundary": "44edf83b3f93f52b96a3bbe81519577beba72c9f3fed71c313cf7ebeec913c07",
+    "T2-assessment-delivered-not-received-current-claim": "d17411f76a8caf57301675f8bf89a970627e8640a80cdbf4320c864ecf6c58c6",
+    "T2-assessment-claim-corrected": "9a42397998834fc9b20413e6fac10b80bbdcf46bdbc179e52e8899c953d4737f",
+    "T2-timeout-after-dispatch-then-success": "c3af4d119790dd801f77c3b4fa3d1336c8493d20f87af8065c13dab48885a971",
+    "T2-retry-finalize-before-second-fence-recovery": "83512fb3a720fa24116c0f3be614cd1fba78f70ea916d1f3b3d5495b4b88ff7e",
+    "T2-retry-finalize-before-second-fence-state-invalidated": "4b8f7bd5eaa44ab0c65bcfa55f40a5cf905bb67767be312a4b7c2c3195885720",
+    "T2-retry-unfinished-attempt-restart-blocked": "0e8429a9097cdc338f003174ebac48ce11da2e5f665e93e5193535773fbdf9ec",
+    "T2-refresh-returns-already-stale-blocked": "6d98db02589d01dae1f10f607fa7dd77f2c52cbf2c289fd0f5770ce9f685374f",
+    "T2-two-active-packages-integrity-blocked": "4ad825bab0d5b8c787b8f21a7a687dae972b41115673b1122b1b41a7ddca8eb6",
 }
 _CYCLE2_SHARED_EXPECTATIONS = (
     "TRUSTED_IDENTITY_NOT_USER_CONTROLLED",
@@ -1241,9 +1241,10 @@ def _cycle2_validate_cases(
             for ref in requirement_refs
         ):
             raise ArtifactContractError("Cycle 2 requirement reference is invalid")
+        trajectory_only = str(case_id).startswith("T2-")
         expected_scope = (
             ["TRAJECTORY"]
-            if str(case_id).startswith("T2-")
+            if trajectory_only
             else ["COMPONENT", "TRAJECTORY", "E2E"]
         )
         if case.get("scope_levels") != expected_scope:
@@ -1339,7 +1340,17 @@ def _cycle2_validate_cases(
             ),
         ):
             raise ArtifactContractError("Cycle 2 stop predicate is inconsistent")
-        if expectations.get("expected_http_status") != 200:
+        expected_http_status = expectations.get("expected_http_status")
+        if (
+            trajectory_only
+            and expected_http_status is not None
+        ) or (
+            not trajectory_only
+            and (
+                type(expected_http_status) is not int
+                or expected_http_status != 200
+            )
+        ):
             raise ArtifactContractError("Cycle 2 expected HTTP status is invalid")
         for key in (
             "state_assertions",

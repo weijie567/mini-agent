@@ -25,15 +25,19 @@ from mini_agent.application.records import (
     EvalResultStatus,
     MessageDirection,
     MessageRecord,
+    Cycle2ObservationSourceEdge,
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
     SupersededRunFinalizationEvidenceV2,
     ToolRetryRecoveryDecisionRecordV2,
 )
 from mini_agent.application.run_result_mapper import (
+    Cycle2MappingSourceKind,
     Cycle2MapperSignal,
+    ImportedMapperReference,
     MapperDisposition,
     ResponsePolicy,
+    RunResultMapper,
 )
 from mini_agent.core.common import AuditOnlyModel
 from mini_agent.core.memory import (
@@ -87,6 +91,9 @@ from mini_agent.core.trace import (
     TraceEventType,
 )
 from mini_agent.core.shipment import ShipmentAssessment
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    Cycle2PairExecutionEvidenceV1,
+)
 
 
 GRADER_NAMES = (
@@ -434,7 +441,7 @@ class Cycle2EvalExpectations(AuditOnlyModel):
 
     case_id: str
     trusted_customer_id: str
-    expected_http_status: Annotated[int, Field(ge=100, le=599)]
+    expected_http_status: Annotated[int, Field(ge=100, le=599)] | None
     expected_outcome: AgentOutcome
     expected_stop_reason: StopReasonV2
     expected_response_policy: str
@@ -483,12 +490,42 @@ class Cycle2EvalExpectations(AuditOnlyModel):
 class Cycle2MapperEvidence(AuditOnlyModel):
     """Actual mapper projection captured from the SUT; never recomputed here."""
 
-    signal: Cycle2MapperSignal
+    mapping_source_kind: Cycle2MappingSourceKind
+    imported_reference: ImportedMapperReference | None = None
+    signal: Cycle2MapperSignal | None = None
     row_id: Annotated[str, Field(min_length=1)]
-    disposition: MapperDisposition
-    stop_reason: StopReasonV2 | None
-    outcome: AgentOutcome | None
+    disposition: MapperDisposition | None = None
+    stop_reason: StopReasonV2
+    outcome: AgentOutcome
     response_policy: ResponsePolicy
+
+    @model_validator(mode="after")
+    def mapper_branch_is_exact(self) -> "Cycle2MapperEvidence":
+        if self.mapping_source_kind is Cycle2MappingSourceKind.IMPORTED_PHASE1:
+            if (
+                type(self.imported_reference) is not ImportedMapperReference
+                or self.signal is not None
+                or self.disposition is not None
+                or self.row_id != self.imported_reference.value
+            ):
+                raise ValueError("imported mapper evidence branch mismatch")
+            return self
+        if (
+            self.imported_reference is not None
+            or type(self.signal) is not Cycle2MapperSignal
+        ):
+            raise ValueError("Cycle 2 mapper evidence branch mismatch")
+        mapping = RunResultMapper().map_cycle2(self.signal)
+        if (
+            mapping.disposition is not MapperDisposition.EMIT
+            or self.row_id != mapping.row_id
+            or self.disposition is not mapping.disposition
+            or self.stop_reason is not mapping.stop_reason
+            or self.outcome is not mapping.outcome
+            or self.response_policy is not mapping.response_policy
+        ):
+            raise ValueError("Cycle 2 mapper evidence row mismatch")
+        return self
 
 
 class Cycle2EvalEvidence(AuditOnlyModel):
@@ -504,6 +541,7 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     observed_outcome: AgentOutcome | None = None
     response_policy: str
     run_record: AgentRunRecordV2
+    supporting_run_records: tuple[AgentRunRecordV2, ...] = ()
     mapper_evidence: Cycle2MapperEvidence | None = None
     conversation_records: tuple[ConversationRecord, ...] = ()
     agent_results: tuple[AgentRunResult, ...] = ()
@@ -512,13 +550,17 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     task_records: tuple[TaskRecord, ...] = ()
     request_units: tuple[RequestUnitRecord, ...] = ()
     run_task_links: tuple[RunTaskLinkRecordV2, ...] = ()
+    supporting_run_task_links: tuple[RunTaskLinkRecordV2, ...] = ()
     task_state_transitions: tuple[TaskStateTransition, ...] = ()
     candidate_sets: tuple[OrderCandidateSetRecord, ...] = ()
     candidate_selections: tuple[OrderCandidateSelectionRecord, ...] = ()
+    order_observations: tuple[OrderObservation, ...] = ()
     search_observations: tuple[SearchOrdersObservation, ...] = ()
     shipment_observations: tuple[ShipmentObservation, ...] = ()
+    observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...] = ()
     shipment_assessments: tuple[ShipmentAssessment, ...] = ()
     tool_calls: tuple[ToolCallRecordV2, ...] = ()
+    supporting_tool_calls: tuple[ToolCallRecordV2, ...] = ()
     recovery_decisions: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
     superseded_run_finalizations: tuple[
         SupersededRunFinalizationEvidenceV2,
@@ -526,23 +568,37 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     ] = ()
     context_manifests: tuple[ContextManifest, ...] = ()
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
+    pair_evidence: Cycle2PairExecutionEvidenceV1 | None = None
     trace_events: tuple[TraceEventV2, ...]
 
     @model_validator(mode="after")
     def actual_record_graph_has_unique_identities(self) -> "Cycle2EvalEvidence":
         identity_sets: tuple[tuple[object, ...], ...] = (
+            tuple(record.run_id for record in self.supporting_run_records),
             tuple(record.conversation_id for record in self.conversation_records),
             tuple(record.message_id for record in self.message_records),
             tuple(record.binding_id for record in self.input_bindings),
             tuple(record.task_id for record in self.task_records),
             tuple(record.request_unit_id for record in self.request_units),
             tuple((record.run_id, record.task_id) for record in self.run_task_links),
+            tuple(
+                (record.run_id, record.task_id)
+                for record in self.supporting_run_task_links
+            ),
             tuple(record.candidate_set_id for record in self.candidate_sets),
             tuple(record.selection_id for record in self.candidate_selections),
+            tuple(record.observation_id for record in self.order_observations),
             tuple(record.observation_id for record in self.search_observations),
             tuple(record.observation_id for record in self.shipment_observations),
+            tuple(
+                record.observation_ref
+                for record in self.observation_source_edges
+            ),
             tuple(record.assessment_id for record in self.shipment_assessments),
-            tuple(record.tool_call_id for record in self.tool_calls),
+            tuple(
+                record.tool_call_id
+                for record in (*self.tool_calls, *self.supporting_tool_calls)
+            ),
             tuple(
                 record.recovery_decision_id
                 for record in self.recovery_decisions
@@ -561,6 +617,83 @@ class Cycle2EvalEvidence(AuditOnlyModel):
             raise ValueError("Cycle 2 RunTaskLink must belong to the evidenced Run")
         if any(call.run_id != self.run_record.run_id for call in self.tool_calls):
             raise ValueError("Cycle 2 ToolCall must belong to the evidenced Run")
+        supporting_ids = {record.run_id for record in self.supporting_run_records}
+        if (
+            self.run_record.run_id in supporting_ids
+            or any(
+                record.conversation_id != self.run_record.conversation_id
+                for record in self.supporting_run_records
+            )
+            or supporting_ids
+            != {link.run_id for link in self.supporting_run_task_links}
+            or supporting_ids
+            != {call.run_id for call in self.supporting_tool_calls}
+        ):
+            raise ValueError("Cycle 2 supporting Run partition is invalid")
+        if any(
+            link.run_id not in supporting_ids
+            for link in self.supporting_run_task_links
+        ) or any(
+            call.run_id not in supporting_ids
+            for call in self.supporting_tool_calls
+        ):
+            raise ValueError("Cycle 2 supporting record crossed its Run partition")
+        observations = {
+            record.observation_id: record
+            for record in (
+                *self.order_observations,
+                *self.search_observations,
+                *self.shipment_observations,
+            )
+        }
+        edges = {
+            record.observation_ref: record
+            for record in self.observation_source_edges
+        }
+        all_calls = {
+            call.tool_call_id: call
+            for call in (*self.tool_calls, *self.supporting_tool_calls)
+        }
+        if len(observations) != (
+            len(self.order_observations)
+            + len(self.search_observations)
+            + len(self.shipment_observations)
+        ) or set(observations) != set(edges):
+            raise ValueError("Cycle 2 Observation source family is incomplete")
+        source_call_ids: set[UUID] = set()
+        for observation_id, observation in observations.items():
+            edge = edges[observation_id]
+            source_call = all_calls.get(edge.source_tool_call_id)
+            if (
+                source_call is None
+                or edge.source_run_id != source_call.run_id
+                or edge.task_id != source_call.task_id
+                or edge.request_unit_id != source_call.request_unit_id
+                or source_call.status is not ToolCallStatus.SUCCEEDED
+                or source_call.result_ref is None
+                or source_call.canonical_tool_name.value
+                != observation.source_tool
+            ):
+                raise ValueError("Cycle 2 Observation source edge is invalid")
+            if type(observation) in {SearchOrdersObservation, ShipmentObservation} and (
+                observation.source_tool_call_id != source_call.tool_call_id
+            ):
+                raise ValueError("Cycle 2 Observation embedded source is invalid")
+            source_call_ids.add(source_call.tool_call_id)
+        if any(
+            call.tool_call_id not in source_call_ids
+            for call in self.supporting_tool_calls
+        ):
+            raise ValueError("Cycle 2 supporting ToolCall lacks Observation source")
+        if self.pair_evidence is not None:
+            if type(self.pair_evidence) is not Cycle2PairExecutionEvidenceV1:
+                raise ValueError("Cycle 2 pair evidence must be the actual typed record")
+            rebuilt_pair = Cycle2PairExecutionEvidenceV1.model_validate(
+                self.pair_evidence.model_dump(),
+                strict=True,
+            )
+            if rebuilt_pair != self.pair_evidence:
+                raise ValueError("Cycle 2 pair evidence is not canonical")
         return self
 
 
@@ -3010,7 +3143,8 @@ def _cycle2_input_reason(
     if no_outbound:
         if (
             evidence.http_status is not None
-            or evidence.observed_outcome is not None
+            or evidence.observed_outcome is not expectations.expected_outcome
+            or evidence.response_policy != "NONE"
             or evidence.agent_results
         ):
             return EvalGraderReasonCode.ASSERTION_FAILED
@@ -3630,9 +3764,23 @@ def _cycle2_required_predicate_matches(
         "REQ_RUN_NO_RESULT_CLOSURE": _cycle2_no_result_predicate_matches,
     }
     if predicate.name == "REQ_PAIR":
-        # Pair provenance is not present in Cycle2EvalEvidence yet.  The
-        # authenticated expectation must never satisfy itself.
-        return False
+        actual = evidence.pair_evidence
+        if actual is None or type(actual) is not Cycle2PairExecutionEvidenceV1:
+            return False
+        try:
+            rebuilt = Cycle2PairExecutionEvidenceV1.model_validate(
+                actual.model_dump(),
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            return False
+        return rebuilt == actual and predicate.operands == (
+            actual.pair_id,
+            "$REGISTRY_SNAPSHOT_DIGEST",
+            "$MODEL_VISIBLE_TOOLSET_HASH",
+            "$PROVIDER_MAPPING_DIGEST",
+            "$OWNER_ORDER_INITIAL_STATE_DIGEST",
+        )
     matcher = matchers.get(predicate.name)
     return matcher is not None and matcher(evidence, predicate.operands)
 
@@ -3692,6 +3840,12 @@ def _cycle2_raw_disclosure_tokens(evidence: Cycle2EvalEvidence) -> frozenset[str
     tokens.update(record.content for record in evidence.message_records)
     for binding in evidence.input_bindings:
         tokens.update(_nested_string_values(binding.normalized_value))
+    for record in evidence.order_observations:
+        tokens.add(record.source_resource_ref)
+        if record.source_version is not None:
+            tokens.add(record.source_version)
+        if record.raw_result_ref is not None:
+            tokens.add(record.raw_result_ref)
     for record in evidence.candidate_sets:
         tokens.add(record.private_owner_scope_ref)
         tokens.add(record.search_observation_source_version)
@@ -3737,7 +3891,7 @@ def _cycle2_raw_disclosure_tokens(evidence: Cycle2EvalEvidence) -> frozenset[str
                 record.shipment_observation_source_version,
             }
         )
-    for record in evidence.tool_calls:
+    for record in (*evidence.tool_calls, *evidence.supporting_tool_calls):
         tokens.add(record.private_owner_scope_ref)
     return frozenset(token for token in tokens if token)
 
@@ -3748,6 +3902,12 @@ def _cycle2_outbound_private_tokens(
     tokens: set[str] = set()
     tokens.update(record.owner_customer_id for record in evidence.conversation_records)
     tokens.update(record.owner_customer_id for record in evidence.task_records)
+    for record in evidence.order_observations:
+        tokens.add(record.source_resource_ref)
+        if record.source_version is not None:
+            tokens.add(record.source_version)
+        if record.raw_result_ref is not None:
+            tokens.add(record.raw_result_ref)
     for record in evidence.candidate_sets:
         tokens.update(
             {
@@ -3792,7 +3952,7 @@ def _cycle2_outbound_private_tokens(
                 record.shipment_observation_source_version,
             }
         )
-    for record in evidence.tool_calls:
+    for record in (*evidence.tool_calls, *evidence.supporting_tool_calls):
         tokens.add(record.private_owner_scope_ref)
     return frozenset(token for token in tokens if token)
 
@@ -3847,10 +4007,16 @@ def _cycle2_schema_reason(
             for family in (
                 evidence.trace_events,
                 evidence.tool_calls,
+                evidence.supporting_tool_calls,
+                evidence.supporting_run_records,
+                evidence.run_task_links,
+                evidence.supporting_run_task_links,
                 evidence.candidate_sets,
                 evidence.candidate_selections,
+                evidence.order_observations,
                 evidence.search_observations,
                 evidence.shipment_observations,
+                evidence.observation_source_edges,
                 evidence.shipment_assessments,
                 evidence.recovery_decisions,
             )
@@ -3886,7 +4052,7 @@ def _cycle2_binding_reason(
     binding_ids = {binding.binding_id for binding in evidence.input_bindings}
     referenced = {
         reference
-        for call in evidence.tool_calls
+        for call in (*evidence.tool_calls, *evidence.supporting_tool_calls)
         for reference in call.argument_binding_refs
     } | {
         reference
@@ -3909,9 +4075,15 @@ def _cycle2_task_reason(
         return reason
     task_by_id = {record.task_id: record for record in evidence.task_records}
     unit_by_id = {record.request_unit_id: record for record in evidence.request_units}
-    if any(link.task_id not in task_by_id for link in evidence.run_task_links):
+    if any(
+        link.task_id not in task_by_id
+        for link in (*evidence.run_task_links, *evidence.supporting_run_task_links)
+    ):
         return EvalGraderReasonCode.MISSING_RECORD
-    if any(call.task_id not in task_by_id or call.request_unit_id not in unit_by_id for call in evidence.tool_calls):
+    if any(
+        call.task_id not in task_by_id or call.request_unit_id not in unit_by_id
+        for call in (*evidence.tool_calls, *evidence.supporting_tool_calls)
+    ):
         return EvalGraderReasonCode.MISSING_RECORD
     return None
 
@@ -3923,7 +4095,10 @@ def _cycle2_tool_reason(
     reason = _cycle2_binding_reason(evidence, expectations)
     if reason is not None:
         return reason
-    if any(call.attempt_count != len(call.attempts) for call in evidence.tool_calls):
+    if any(
+        call.attempt_count != len(call.attempts)
+        for call in (*evidence.tool_calls, *evidence.supporting_tool_calls)
+    ):
         return EvalGraderReasonCode.ASSERTION_FAILED
     return None
 
@@ -3980,13 +4155,55 @@ def _cycle2_observation_reason(
     reason = _cycle2_input_reason(evidence, expectations)
     if reason is not None:
         return reason
-    call_by_id = {call.tool_call_id: call for call in evidence.tool_calls}
-    for observation in (*evidence.search_observations, *evidence.shipment_observations):
-        call = call_by_id.get(observation.source_tool_call_id)
+    call_by_id = {
+        call.tool_call_id: call
+        for call in (*evidence.tool_calls, *evidence.supporting_tool_calls)
+    }
+    observations = {
+        observation.observation_id: observation
+        for observation in (
+            *evidence.order_observations,
+            *evidence.search_observations,
+            *evidence.shipment_observations,
+        )
+    }
+    edges = {
+        edge.observation_ref: edge
+        for edge in evidence.observation_source_edges
+    }
+    if len(observations) != (
+        len(evidence.order_observations)
+        + len(evidence.search_observations)
+        + len(evidence.shipment_observations)
+    ) or len(edges) != len(evidence.observation_source_edges) or (
+        set(observations) != set(edges)
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
+    source_call_ids: set[UUID] = set()
+    for observation_id, observation in observations.items():
+        edge = edges[observation_id]
+        call = call_by_id.get(edge.source_tool_call_id)
         if call is None:
             return EvalGraderReasonCode.MISSING_RECORD
-        if call.canonical_tool_name != observation.source_tool:
+        if (
+            edge.source_run_id != call.run_id
+            or edge.task_id != call.task_id
+            or edge.request_unit_id != call.request_unit_id
+            or call.status is not ToolCallStatus.SUCCEEDED
+            or call.result_ref is None
+            or call.canonical_tool_name.value != observation.source_tool
+        ):
             return EvalGraderReasonCode.ASSERTION_FAILED
+        if type(observation) in {SearchOrdersObservation, ShipmentObservation} and (
+            observation.source_tool_call_id != call.tool_call_id
+        ):
+            return EvalGraderReasonCode.ASSERTION_FAILED
+        source_call_ids.add(call.tool_call_id)
+    if any(
+        call.tool_call_id not in source_call_ids
+        for call in evidence.supporting_tool_calls
+    ):
+        return EvalGraderReasonCode.MISSING_RECORD
     return None
 
 
@@ -4104,22 +4321,18 @@ def _cycle2_mapper_reason(
     if reason is not None:
         return reason
     actual = evidence.mapper_evidence
-    if actual is None:
-        return None
     no_outbound = expectations.expected_response_policy == "NONE"
     if no_outbound:
-        if (
-            actual.disposition
-            not in {
-                MapperDisposition.SUPPRESS_OBSOLETE_RUN,
-                MapperDisposition.NO_STATE_MUTATION,
-            }
-            or actual.outcome is not None
-            or actual.response_policy is not ResponsePolicy.NONE
-        ):
+        if actual is not None:
             return EvalGraderReasonCode.ASSERTION_FAILED
-    elif (
-        actual.disposition is not MapperDisposition.EMIT
+        return None
+    if actual is None:
+        return EvalGraderReasonCode.MISSING_RECORD
+    if (
+        (
+            actual.mapping_source_kind is Cycle2MappingSourceKind.CYCLE2_DELTA
+            and actual.disposition is not MapperDisposition.EMIT
+        )
         or actual.stop_reason is not expectations.expected_stop_reason
         or actual.outcome is not expectations.expected_outcome
         or actual.response_policy.value != expectations.expected_response_policy
@@ -4541,6 +4754,33 @@ def ordinary_trace_shape(
             )
         )
     return tuple(shape)
+
+
+def e2e01_05_pair_execution_evidence_match(
+    evidence_by_case: Mapping[str, object],
+) -> bool:
+    """Require both E2E01-05 executions to share one exact actual setup."""
+
+    expected_cases = {
+        "E2E01-05/order-only-no-shipment",
+        "E2E01-05/logistics-required-uses-shipment",
+    }
+    if set(evidence_by_case) != expected_cases:
+        return False
+    actual = tuple(evidence_by_case[case_id] for case_id in sorted(expected_cases))
+    if any(type(value) is not Cycle2PairExecutionEvidenceV1 for value in actual):
+        return False
+    try:
+        rebuilt = tuple(
+            Cycle2PairExecutionEvidenceV1.model_validate(
+                value.model_dump(),
+                strict=True,
+            )
+            for value in actual
+        )
+    except (TypeError, ValueError):
+        return False
+    return rebuilt == actual and actual[0] == actual[1]
 
 
 def e2e01_04_safe_observables_match(

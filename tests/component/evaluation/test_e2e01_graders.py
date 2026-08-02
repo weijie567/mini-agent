@@ -15,6 +15,8 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     CriticalFailureCode,
+    Cycle2ExactRunEvidenceClosure,
+    Cycle2ObservationSourceEdge,
     EvalGraderReasonCode,
     EvalGraderResult,
     EvalGraderStatus,
@@ -24,7 +26,17 @@ from mini_agent.application.records import (
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
     SupersededRunFinalizationEvidenceV2,
+    TrustedOwnerScope,
 )
+from mini_agent.application.run_result_mapper import (
+    Cycle2MappingSourceKind,
+    Cycle2MapperSignal,
+    ImportedMapperReference,
+    MapperDisposition,
+    ResponsePolicy,
+    RunResultMapper,
+)
+from mini_agent.core.identity import CustomerContext
 from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
@@ -67,11 +79,15 @@ from mini_agent.core.tool_system import (
     GateReasonCode,
     ModelVisibleToolsetArtifact,
     ToolAttemptRecord,
+    ToolAttemptRecordV2,
     ToolCallRecord,
+    ToolCallRecordV2,
     ToolCallStatus,
+    ToolRetryDecision,
     ToolEffect,
     ToolResultOutcome,
     ToolTimeoutPhase,
+    Cycle2ToolName,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -93,6 +109,7 @@ from mini_agent.evaluation.graders import (
     PHASE1_GRADER_NAMES,
     Cycle2EvalEvidence,
     Cycle2EvalExpectations,
+    Cycle2MapperEvidence,
     Cycle2Predicate,
     EvalCaseExpectations,
     EvalEvidence,
@@ -101,6 +118,7 @@ from mini_agent.evaluation.graders import (
     TraceEventCountExpectation,
     determine_result_status,
     e2e01_04_safe_observables_match,
+    e2e01_05_pair_execution_evidence_match,
     grade_evidence,
     grade_cycle2_evidence,
     grader_registry,
@@ -119,7 +137,11 @@ from mini_agent.evaluation.harness import (
     build_authenticated_cycle2_expectations,
     build_cycle2_execution_input,
     build_authenticated_case_expectations,
+    map_cycle2_exact_run_evidence_to_unbound,
     resolve_authenticated_grader_profile,
+)
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    Cycle2PairExecutionEvidenceV1,
 )
 
 
@@ -3744,6 +3766,15 @@ def _minimal_cycle2_evidence() -> Cycle2EvalEvidence:
         observed_outcome=AgentOutcome.COMPLETED,
         response_policy="SHIPMENT_ASSESSMENT_DETERMINISTIC",
         run_record=run,
+        mapper_evidence=Cycle2MapperEvidence(
+            mapping_source_kind=Cycle2MappingSourceKind.CYCLE2_DELTA,
+            signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+            row_id="RM-18",
+            disposition=MapperDisposition.EMIT,
+            stop_reason=StopReasonV2.GOAL_COMPLETED,
+            outcome=AgentOutcome.COMPLETED,
+            response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+        ),
         agent_results=(
             AgentRunResult(
                 run_id=RUN_ID,
@@ -3768,6 +3799,337 @@ def _minimal_cycle2_evidence() -> Cycle2EvalEvidence:
             ),
         ),
     )
+
+
+def _cycle2_owner_scope() -> TrustedOwnerScope:
+    return TrustedOwnerScope.from_customer_context(
+        CustomerContext(
+            subject_ref="subject-customer-A",
+            customer_id="customer-A",
+            auth_scopes=frozenset({"orders:read"}),
+            authenticated_at=NOW,
+            session_ref_hash="session-hash-customer-A",
+        )
+    )
+
+
+def _completed_cycle2_exact_closure() -> Cycle2ExactRunEvidenceClosure:
+    conversation = ConversationRecord(
+        schema_version="application-records-v1",
+        conversation_id=CONVERSATION_ID,
+        owner_customer_id="customer-A",
+        created_at=NOW,
+    )
+    run = AgentRunRecordV2(
+        run_id=RUN_ID,
+        conversation_id=CONVERSATION_ID,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="offline_gate",
+        started_at=NOW,
+        completed_at=NOW + timedelta(seconds=1),
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    result = AgentRunResult(
+        run_id=RUN_ID,
+        outcome=AgentOutcome.COMPLETED,
+        message="确定性安全结果。",
+    )
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=_cycle2_owner_scope(),
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(
+            MessageRecord(
+                schema_version="application-records-v1",
+                message_id=MESSAGE_REF,
+                conversation_id=CONVERSATION_ID,
+                direction=MessageDirection.USER,
+                content="订单 O-1001 到哪了？",
+                received_at=NOW,
+            ),
+            MessageRecord(
+                schema_version="application-records-v1",
+                message_id=UUID(int=9803),
+                conversation_id=CONVERSATION_ID,
+                direction=MessageDirection.ASSISTANT,
+                content=result.message,
+                received_at=NOW + timedelta(seconds=1),
+            ),
+        ),
+        run_task_link_records=(),
+        task_records=(),
+        request_unit_records=(),
+        input_binding_records=(),
+        trace_records=(
+            TraceEventV2(
+                trace_event_id=UUID(int=9801),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=NOW,
+                run_id=RUN_ID,
+            ),
+            TraceEventV2(
+                trace_event_id=UUID(int=9802),
+                event_type=TraceEventType.RUN_STOPPED,
+                occurred_at=NOW + timedelta(seconds=1),
+                run_id=RUN_ID,
+                user_outcome=AgentOutcome.COMPLETED,
+                stop_reason=StopReasonV2.GOAL_COMPLETED,
+            ),
+        ),
+        terminal_result=result,
+    )
+
+
+def _cycle2_pair_evidence() -> Cycle2PairExecutionEvidenceV1:
+    return Cycle2PairExecutionEvidenceV1(
+        registry_snapshot_digest="a" * 64,
+        model_visible_toolset_hash=f"sha256:{'b' * 64}",
+        provider_mapping_digest="c" * 64,
+        owner_order_initial_state_digest="d" * 64,
+    )
+
+
+def test_cycle2_exact_closure_adapter_maps_actual_result_mapper_and_pair() -> None:
+    closure = _completed_cycle2_exact_closure()
+    actual_mapping = RunResultMapper().observe_cycle2(
+        run_id=RUN_ID,
+        signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+        observed_outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+        response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+        agent_result_emitted=True,
+    )
+
+    unbound = map_cycle2_exact_run_evidence_to_unbound(
+        closure=closure,
+        outcome_observation=actual_mapping,
+        pair_evidence=_cycle2_pair_evidence(),
+        http_status=None,
+    )
+    evidence = Cycle2EvalEvidence(
+        case_id="T2-actual-adapter-component",
+        **{
+            field_name: getattr(unbound, field_name)
+            for field_name in type(unbound).model_fields
+        },
+    )
+
+    assert evidence.http_status is None
+    assert evidence.agent_results == (closure.terminal_result,)
+    assert evidence.mapper_evidence is not None
+    assert evidence.mapper_evidence.signal is (
+        Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY
+    )
+    assert evidence.pair_evidence == _cycle2_pair_evidence()
+    assert not evidence.supporting_run_records
+    assert not evidence.supporting_tool_calls
+
+
+def test_cycle2_exact_closure_adapter_requires_matching_actual_mapper_capture() -> None:
+    closure = _completed_cycle2_exact_closure()
+
+    with pytest.raises(ValueError, match="requires actual mapper capture"):
+        map_cycle2_exact_run_evidence_to_unbound(
+            closure=closure,
+            outcome_observation=None,
+            pair_evidence=None,
+            http_status=200,
+        )
+
+    mismatched = RunResultMapper().observe_cycle2(
+        run_id=OTHER_RUN_ID,
+        signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+        observed_outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+        response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+        agent_result_emitted=True,
+    )
+    with pytest.raises(ValueError, match="does not close the result"):
+        map_cycle2_exact_run_evidence_to_unbound(
+            closure=closure,
+            outcome_observation=mismatched,
+            pair_evidence=None,
+            http_status=200,
+        )
+
+
+def test_cycle2_exact_closure_adapter_preserves_imported_mapper_identity() -> None:
+    imported = RunResultMapper().observe_imported(
+        run_id=RUN_ID,
+        reference=ImportedMapperReference.ORDER_SUCCESS,
+        observed_outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+        response_policy=ResponsePolicy.DETERMINISTIC_ORDER_SUMMARY_V1,
+        agent_result_emitted=True,
+    )
+
+    unbound = map_cycle2_exact_run_evidence_to_unbound(
+        closure=_completed_cycle2_exact_closure(),
+        outcome_observation=imported,
+        pair_evidence=None,
+        http_status=200,
+    )
+
+    assert unbound.mapper_evidence is not None
+    assert unbound.mapper_evidence.mapping_source_kind is (
+        Cycle2MappingSourceKind.IMPORTED_PHASE1
+    )
+    assert unbound.mapper_evidence.imported_reference is (
+        ImportedMapperReference.ORDER_SUCCESS
+    )
+    assert unbound.mapper_evidence.signal is None
+    assert unbound.mapper_evidence.disposition is None
+
+
+def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
+    evidence = _binding_complete_cycle2_evidence()
+    task = evidence.task_records[0]
+    unit = evidence.request_units[0]
+    binding = evidence.input_bindings[0]
+    tool_call_id = UUID(int=9830)
+    attempt = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        started_at=NOW,
+        finished_at=NOW + timedelta(milliseconds=100),
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    supporting_run = AgentRunRecordV2(
+        run_id=OTHER_RUN_ID,
+        conversation_id=evidence.run_record.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="offline_gate",
+        started_at=NOW,
+        completed_at=NOW + timedelta(milliseconds=100),
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    supporting_call = ToolCallRecordV2(
+        tool_call_id=tool_call_id,
+        run_id=OTHER_RUN_ID,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=UUID(int=9831),
+        context_manifest_id=UUID(int=9832),
+        gate_decision_id=UUID(int=9833),
+        provider_tool_call_id="supporting-get-order",
+        canonical_tool_name=Cycle2ToolName.GET_ORDER,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref="customer-A",
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(binding.binding_id,),
+        verified_target_ref=UUID(int=9834),
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        attempts=(attempt,),
+        status=ToolCallStatus.SUCCEEDED,
+        started_at=NOW,
+        finished_at=NOW + timedelta(milliseconds=100),
+        result_ref=UUID(int=9835),
+    )
+    observation = OrderObservation(
+        observation_id=UUID(int=9836),
+        source_tool="get_order",
+        source_resource_ref="order:O-1001",
+        source_version="order-v1",
+        normalized_type="ORDER_SUMMARY",
+        normalized_value=OrderSummaryProjection(
+            order_number="O-1001",
+            status=OrderStatus.SHIPPED,
+            line_items=(
+                OrderLineSummary(product_name="轻量跑鞋", quantity=1),
+            ),
+            ordered_at="2026-07-20T02:15:00Z",
+            status_updated_at="2026-07-24T09:30:00Z",
+        ),
+        observed_at=NOW,
+        recorded_at=NOW + timedelta(milliseconds=100),
+        visibility=ObservationVisibility.AUDIT_ONLY,
+    )
+    values = {
+        field_name: getattr(evidence, field_name)
+        for field_name in Cycle2EvalEvidence.model_fields
+    }
+    return Cycle2EvalEvidence(
+        **{
+            **values,
+            "supporting_run_records": (supporting_run,),
+            "supporting_run_task_links": (
+                RunTaskLinkRecordV2(
+                    run_id=OTHER_RUN_ID,
+                    task_id=task.task_id,
+                    base_task_state_version=task.state_version,
+                    result_task_state_version=task.state_version,
+                ),
+            ),
+            "order_observations": (observation,),
+            "observation_source_edges": (
+                Cycle2ObservationSourceEdge(
+                    observation_ref=observation.observation_id,
+                    source_tool_call_id=tool_call_id,
+                    source_run_id=OTHER_RUN_ID,
+                    task_id=task.task_id,
+                    request_unit_id=unit.request_unit_id,
+                ),
+            ),
+            "supporting_tool_calls": (supporting_call,),
+        }
+    )
+
+
+def test_cycle2_supporting_source_is_available_to_provenance_not_root_retry() -> None:
+    evidence = _cycle2_evidence_with_supporting_order_source()
+    expectations = _minimal_cycle2_expectations()
+
+    assert grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        evidence,
+        expectations,
+    ).status is EvalResultStatus.PASS
+    assert cycle2_grader_registry()["ObservationGrader"].grade(
+        evidence,
+        expectations,
+    ).status is EvalGraderStatus.PASS
+
+    contaminated_support = evidence.supporting_tool_calls[0].model_copy(
+        update={"recovery_decision_ref": UUID(int=9837)}
+    )
+    retry_view = evidence.model_copy(
+        update={"supporting_tool_calls": (contaminated_support,)}
+    )
+    assert cycle2_grader_registry()["RetryRecoveryGrader"].grade(
+        retry_view,
+        expectations,
+    ).status is EvalGraderStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing_edge", "wrong_run", "duplicate_edge"),
+)
+def test_cycle2_supporting_source_graph_mismatch_fails_closed(
+    mutation: str,
+) -> None:
+    evidence = _cycle2_evidence_with_supporting_order_source()
+    edge = evidence.observation_source_edges[0]
+    updates: dict[str, object]
+    if mutation == "missing_edge":
+        updates = {"observation_source_edges": ()}
+    elif mutation == "wrong_run":
+        updates = {
+            "observation_source_edges": (
+                edge.model_copy(update={"source_run_id": RUN_ID}),
+            )
+        }
+    else:
+        updates = {"observation_source_edges": (edge, edge)}
+    tampered = evidence.model_copy(update=updates)
+
+    result = cycle2_grader_registry()["ObservationGrader"].grade(
+        tampered,
+        _minimal_cycle2_expectations(),
+    )
+    assert result.status is EvalGraderStatus.FAIL
 
 
 def test_phase1_and_cycle2_profiles_are_exact_separate_and_ordered() -> None:
@@ -4085,6 +4447,83 @@ def test_cycle2_required_pair_needs_typed_actual_execution_context() -> None:
     )
 
 
+def test_cycle2_required_pair_consumes_only_canonical_actual_evidence() -> None:
+    expectations = _minimal_cycle2_expectations().model_copy(
+        update={
+            "required_predicates": (
+                Cycle2Predicate(
+                    name="REQ_PAIR",
+                    operands=(
+                        "PAIR-E2E01-05-V1",
+                        "$REGISTRY_SNAPSHOT_DIGEST",
+                        "$MODEL_VISIBLE_TOOLSET_HASH",
+                        "$PROVIDER_MAPPING_DIGEST",
+                        "$OWNER_ORDER_INITIAL_STATE_DIGEST",
+                    ),
+                ),
+                Cycle2Predicate(
+                    name="REQ_STOP",
+                    operands=("COMPLETED", "GOAL_COMPLETED"),
+                ),
+            )
+        }
+    )
+    evidence = _minimal_cycle2_evidence().model_copy(
+        update={"pair_evidence": _cycle2_pair_evidence()}
+    )
+
+    assert grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        evidence,
+        expectations,
+    ).status is EvalResultStatus.PASS
+
+    noncanonical = _cycle2_pair_evidence().model_copy(
+        update={"pair_id": "PAIR-OTHER"}
+    )
+    tampered = evidence.model_copy(update={"pair_evidence": noncanonical})
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        tampered,
+        expectations,
+    )
+    assert outcome.status is EvalResultStatus.FAIL
+    assert outcome.grader_results[0].reason_code is (
+        EvalGraderReasonCode.MISSING_RECORD
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("registry_snapshot_digest", "e" * 64),
+        ("model_visible_toolset_hash", f"sha256:{'e' * 64}"),
+        ("provider_mapping_digest", "e" * 64),
+        ("owner_order_initial_state_digest", "e" * 64),
+    ),
+)
+def test_e2e01_05_pair_requires_both_actual_executions_to_match(
+    field_name: str,
+    replacement: str,
+) -> None:
+    pair_ids = {
+        "E2E01-05/order-only-no-shipment",
+        "E2E01-05/logistics-required-uses-shipment",
+    }
+    evidence = _cycle2_pair_evidence()
+    matching = {case_id: evidence for case_id in pair_ids}
+    assert e2e01_05_pair_execution_evidence_match(matching)
+
+    mismatched = dict(matching)
+    mismatched["E2E01-05/logistics-required-uses-shipment"] = (
+        evidence.model_copy(update={field_name: replacement})
+    )
+    assert not e2e01_05_pair_execution_evidence_match(mismatched)
+    assert not e2e01_05_pair_execution_evidence_match(
+        {"E2E01-05/order-only-no-shipment": evidence}
+    )
+
+
 @pytest.mark.parametrize(
     "injected_field",
     (
@@ -4155,7 +4594,7 @@ def _oa10_cycle2_expectations() -> Cycle2EvalExpectations:
     return Cycle2EvalExpectations(
         case_id="T2-retry-finalize-before-second-fence-state-invalidated",
         trusted_customer_id="customer-A",
-        expected_http_status=200,
+        expected_http_status=None,
         expected_outcome=AgentOutcome.BLOCKED,
         expected_stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
         expected_response_policy="NONE",
@@ -4250,7 +4689,7 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
     return Cycle2EvalEvidence(
         case_id="T2-retry-finalize-before-second-fence-state-invalidated",
         http_status=None,
-        observed_outcome=None,
+        observed_outcome=AgentOutcome.BLOCKED,
         response_policy="NONE",
         run_record=terminal,
         conversation_records=(conversation,),
@@ -4268,6 +4707,73 @@ def _oa10_cycle2_evidence() -> Cycle2EvalEvidence:
             stopped,
         ),
     )
+
+
+def _oa10_cycle2_exact_closure() -> Cycle2ExactRunEvidenceClosure:
+    evidence = _oa10_cycle2_evidence()
+    conversation = evidence.conversation_records[0]
+    task = evidence.task_records[0]
+    unit = evidence.request_units[0]
+    message_ref = unit.goal_source_refs[0]
+    binding_ref = unit.input_binding_refs[0]
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=_cycle2_owner_scope(),
+        conversation_record=conversation,
+        run_record=evidence.run_record,
+        message_records=(
+            MessageRecord(
+                schema_version="application-records-v1",
+                message_id=message_ref,
+                conversation_id=conversation.conversation_id,
+                direction=MessageDirection.USER,
+                content="订单 O-1001 到哪了？",
+                received_at=NOW,
+            ),
+        ),
+        run_task_link_records=evidence.run_task_links,
+        task_records=(task,),
+        request_unit_records=(unit,),
+        input_binding_records=(
+            InputBindingV2(
+                binding_id=binding_ref,
+                name="order_id",
+                normalized_value="O-1001",
+                authority=InputAuthority.USER_CLAIM,
+                source_refs=(message_ref,),
+                validation_status=InputValidationStatus.ACCEPTED,
+                confirmed_by_user=True,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ),
+        superseded_run_finalizations=evidence.superseded_run_finalizations,
+        trace_records=evidence.trace_events,
+        terminal_result=None,
+    )
+
+
+def test_cycle2_exact_no_result_adapter_never_fabricates_transport_or_mapper() -> None:
+    closure = _oa10_cycle2_exact_closure()
+    unbound = map_cycle2_exact_run_evidence_to_unbound(
+        closure=closure,
+        outcome_observation=None,
+        pair_evidence=None,
+        http_status=None,
+    )
+
+    assert unbound.http_status is None
+    assert unbound.observed_outcome is AgentOutcome.BLOCKED
+    assert unbound.response_policy == "NONE"
+    assert unbound.mapper_evidence is None
+    assert not unbound.agent_results
+
+    with pytest.raises(ValueError, match="no-result closure"):
+        map_cycle2_exact_run_evidence_to_unbound(
+            closure=closure,
+            outcome_observation=None,
+            pair_evidence=None,
+            http_status=200,
+        )
 
 
 def test_oa10_exact_typed_no_result_closure_passes_all_cycle2_graders() -> None:
@@ -4366,7 +4872,13 @@ def test_non_superseded_evidence_cannot_carry_oa10_projection() -> None:
 
 @pytest.mark.parametrize(
     "injection",
-    ("agent_result", "assistant_message", "response_rendered", "task_mutation"),
+    (
+        "agent_result",
+        "assistant_message",
+        "response_rendered",
+        "response_policy",
+        "task_mutation",
+    ),
 )
 def test_oa10_fabricated_outbound_or_state_mutation_fails_closed(
     injection: str,
@@ -4409,6 +4921,8 @@ def test_oa10_fabricated_outbound_or_state_mutation_fails_closed(
                 evidence.trace_events[1],
             )
         }
+    elif injection == "response_policy":
+        updates = {"response_policy": "FIXED_RESPONSE"}
     else:
         updates = {
             "task_state_transitions": (
