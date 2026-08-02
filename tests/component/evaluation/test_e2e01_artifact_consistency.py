@@ -22,6 +22,13 @@ from mini_agent.core.request_understanding import (
 from mini_agent.core.tool_system import (
     CYCLE2_TOOL_REGISTRY_VERSION,
     build_cycle2_registry_snapshot,
+    compute_model_visible_toolset_hash,
+    compute_provider_mapping_digest,
+    compute_registry_snapshot_digest,
+)
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    compute_cycle2_pair_seed_digest,
+    resolve_cycle2_seed_plan,
 )
 import mini_agent.evaluation.graders as graders_module
 import mini_agent.evaluation.harness as harness_module
@@ -1330,6 +1337,20 @@ def test_cycle2_bundle_has_exact_pair_lane_and_bidirectional_closure() -> None:
     assert shared_pair_fields["pair_fixture_ref"] == (
         "fx-dynamic-tool-pair-owner-a-v1"
     )
+    snapshot = build_cycle2_registry_snapshot()
+    assert shared_pair_fields == {
+        "pair_id": "PAIR-E2E01-05-V1",
+        "pair_fixture_ref": "fx-dynamic-tool-pair-owner-a-v1",
+        "pair_manifest_schema": "dynamic-tool-selection-pair.p0.v1",
+        "registry_snapshot_digest": compute_registry_snapshot_digest(snapshot),
+        "model_visible_toolset_hash": compute_model_visible_toolset_hash(
+            snapshot.provider_visible_toolset
+        ),
+        "provider_mapping_digest": compute_provider_mapping_digest(snapshot),
+        "owner_order_initial_state_digest": compute_cycle2_pair_seed_digest(
+            resolve_cycle2_seed_plan(("fx-dynamic-tool-pair-owner-a-v1",))
+        ),
+    }
     assert all(
         {
             key: case["pair_identity"][key]

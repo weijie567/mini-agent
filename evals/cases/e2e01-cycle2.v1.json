@@ -919,10 +919,10 @@
         "pair_id": "PAIR-E2E01-05-V1",
         "pair_fixture_ref": "fx-dynamic-tool-pair-owner-a-v1",
         "pair_manifest_schema": "dynamic-tool-selection-pair.p0.v1",
-        "registry_snapshot_digest": "242ecc99f4886e490d45ed90ba22ba4532178b7f15473d632fef464d58d0cb7e",
-        "model_visible_toolset_hash": "035f5af9b8a6c4f99e06e12ed7ce236e3b1caaa00452d8778da96516ebd3272f",
-        "provider_mapping_digest": "79f33f3a4cf2c38e182cac13b24fd13d25d5f4a7d94890322df757051fa928dd",
-        "owner_order_initial_state_digest": "617044627393c3e10a1def6f294bd62375b0204b999284cb85a0a0e1df0dcfae",
+        "registry_snapshot_digest": "8c8535246587423132362dbc13dcb42fdf15a4fa7a1891c59ebd8a9645067725",
+        "model_visible_toolset_hash": "sha256:e9d6ae60206aa7ed88aeefd78b016215782df03e0c45021cf3010c4e2f128aa8",
+        "provider_mapping_digest": "8b1e0b50d8f9b88b5a303be5cdb1d9f3d29376f443eccdaf97b00b7d6ded3c47",
+        "owner_order_initial_state_digest": "022fced2373c4a83413c00b647b6badf158f8da9eb681e9a99e78a4a5e7860b5",
         "input_goal": "ORDER_ONLY"
       }
     },
@@ -1061,10 +1061,10 @@
         "pair_id": "PAIR-E2E01-05-V1",
         "pair_fixture_ref": "fx-dynamic-tool-pair-owner-a-v1",
         "pair_manifest_schema": "dynamic-tool-selection-pair.p0.v1",
-        "registry_snapshot_digest": "242ecc99f4886e490d45ed90ba22ba4532178b7f15473d632fef464d58d0cb7e",
-        "model_visible_toolset_hash": "035f5af9b8a6c4f99e06e12ed7ce236e3b1caaa00452d8778da96516ebd3272f",
-        "provider_mapping_digest": "79f33f3a4cf2c38e182cac13b24fd13d25d5f4a7d94890322df757051fa928dd",
-        "owner_order_initial_state_digest": "617044627393c3e10a1def6f294bd62375b0204b999284cb85a0a0e1df0dcfae",
+        "registry_snapshot_digest": "8c8535246587423132362dbc13dcb42fdf15a4fa7a1891c59ebd8a9645067725",
+        "model_visible_toolset_hash": "sha256:e9d6ae60206aa7ed88aeefd78b016215782df03e0c45021cf3010c4e2f128aa8",
+        "provider_mapping_digest": "8b1e0b50d8f9b88b5a303be5cdb1d9f3d29376f443eccdaf97b00b7d6ded3c47",
+        "owner_order_initial_state_digest": "022fced2373c4a83413c00b647b6badf158f8da9eb681e9a99e78a4a5e7860b5",
         "input_goal": "LOGISTICS_REQUIRED"
       }
     },
