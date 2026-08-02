@@ -16,14 +16,21 @@ from mini_agent.api.http import create_agent_app
 from mini_agent.application.agent_run_service import (
     AfterRevalidationHook,
     AgentRunService,
+    Cycle2AgentRunHandler,
 )
 from mini_agent.application.deterministic_renderer import DeterministicRenderer
-from mini_agent.application.read_tool_executor import ReadToolExecutor
+from mini_agent.application.ports import Cycle2RequestUnderstandingProvider
+from mini_agent.application.read_tool_executor import (
+    Cycle2ReadToolExecutor,
+    ReadToolExecutor,
+)
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    Cycle2ExactRunEvidenceClosure,
+    Cycle2RunBudgetPolicyEvidence,
     ExactRunEvidenceClosure,
     RecoveryWriteResult,
     TrustedOwnerScope,
@@ -46,6 +53,7 @@ from mini_agent.core.tool_system import (
     RegistrySnapshot,
     ToolEffect,
     ToolRegistration,
+    build_cycle2_registry_snapshot,
     get_order_tool_spec,
 )
 from mini_agent.core.trace import TraceEvent, TraceEventType
@@ -67,10 +75,22 @@ from mini_agent.infrastructure.auth.p0_session import (
 from mini_agent.infrastructure.model.qwen_responses import (
     QwenResponsesAdapterV2,
 )
-from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    ResolvedCycle2SeedPlan,
+    apply_cycle2_seed_plan,
+    resolve_cycle2_seed_plan,
+)
+from mini_agent.infrastructure.cycle2_runtime import Cycle2BusinessReadHandler
+from mini_agent.infrastructure.order.postgres import (
+    PostgresGetOrderAdapter,
+    PostgresSearchOrdersAdapter,
+)
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
+)
+from mini_agent.infrastructure.shipment.postgres import (
+    PostgresGetShipmentAdapter,
 )
 
 
@@ -148,6 +168,7 @@ _EXPECTED_FIXTURE_COUNTS: Final = {
     "nonexistent_order_sentinels": 1,
 }
 _START_TOKEN: Final = object()
+_CYCLE2_START_TOKEN: Final = object()
 
 
 class OfflineCompositionError(RuntimeError):
@@ -1035,3 +1056,240 @@ class OfflineE2E01Composition:
             clock=self._clock,
             nonce_factory=nonce_factory,
         )
+
+
+class _Cycle2OwnerCapturingHandler:
+    __slots__ = ("_composition", "_service")
+
+    def __init__(
+        self,
+        *,
+        composition: Cycle2OfflineComposition,
+        service: Cycle2AgentRunHandler,
+    ) -> None:
+        self._composition = composition
+        self._service = service
+
+    async def handle(self, command: AgentRunCommand) -> AgentRunResult:
+        if type(command) is not AgentRunCommand:
+            raise _fresh_composition_error()
+        owner_scope = TrustedOwnerScope.from_customer_context(
+            command.customer_context
+        )
+        result = await self._service.handle(command)
+        self._composition._bind_owner_scope(
+            run_id=result.run_id,
+            owner_scope=owner_scope,
+        )
+        return result
+
+
+class Cycle2OfflineComposition:
+    """Explicit pre-activation wiring for direct Cycle 2 HTTP proofs."""
+
+    __slots__ = (
+        "_clock",
+        "_get_order",
+        "_get_shipment",
+        "_owner_scope_by_run",
+        "_owner_scopes",
+        "_plan",
+        "_ready",
+        "_records",
+        "_registry_snapshot",
+        "_search_orders",
+        "_session_auth",
+        "_uuid_factory",
+    )
+
+    def __init__(
+        self,
+        *,
+        _start_token: object,
+        plan: ResolvedCycle2SeedPlan,
+        session_factory: sessionmaker[Session],
+        clock: Callable[[], datetime],
+        uuid_factory: Callable[[], UUID],
+    ) -> None:
+        if _start_token is not _CYCLE2_START_TOKEN:
+            raise _fresh_composition_error()
+        self._plan = plan
+        self._clock = clock
+        self._uuid_factory = uuid_factory
+        self._records = PostgresRecordAdapter(
+            session_factory,
+            cycle2_clock=clock,
+            cycle2_run_budget_policy=Cycle2RunBudgetPolicyEvidence(
+                policy_version="cycle2-offline-composition-budget.p0.v1",
+                run_time_budget_ms=30_000,
+            ),
+            cycle2_session_owners=plan.session_owners_by_hash(),
+        )
+        self._search_orders = PostgresSearchOrdersAdapter(session_factory)
+        self._get_order = PostgresGetOrderAdapter(session_factory)
+        self._get_shipment = PostgresGetShipmentAdapter(session_factory)
+        self._session_auth = P0SessionAuthAdapter(
+            plan.session_fixtures(),
+            clock=clock,
+        )
+        self._registry_snapshot = build_cycle2_registry_snapshot()
+        self._owner_scopes: dict[str, TrustedOwnerScope] = {}
+        self._owner_scope_by_run: dict[UUID, TrustedOwnerScope] = {}
+        self._ready = False
+
+    @classmethod
+    async def start(
+        cls,
+        *,
+        fixture_refs: tuple[str, ...],
+        session_factory: sessionmaker[Session],
+        clock: Callable[[], datetime],
+        uuid_factory: Callable[[], UUID] = uuid4,
+    ) -> Cycle2OfflineComposition:
+        plan: ResolvedCycle2SeedPlan | None = None
+        try:
+            if (
+                type(fixture_refs) is not tuple
+                or any(type(ref) is not str or not ref for ref in fixture_refs)
+                or not isinstance(session_factory, sessionmaker)
+                or not callable(clock)
+                or not callable(uuid_factory)
+            ):
+                raise TypeError("invalid Cycle 2 Composition dependency")
+            plan = resolve_cycle2_seed_plan(fixture_refs)
+        except Exception:
+            raise _fresh_composition_error()
+
+        composition: Cycle2OfflineComposition | None = None
+        try:
+            composition = cls(
+                _start_token=_CYCLE2_START_TOKEN,
+                plan=plan,
+                session_factory=session_factory,
+                clock=clock,
+                uuid_factory=uuid_factory,
+            )
+            owner_scopes: dict[str, TrustedOwnerScope] = {}
+            for session_seed in plan.session_seeds:
+                context = await composition._session_auth.authenticate(
+                    session_seed.opaque_session_id
+                )
+                if context is None:
+                    raise ValueError("trusted Cycle 2 Session is unavailable")
+                owner_scope = TrustedOwnerScope.from_customer_context(context)
+                existing = owner_scopes.get(owner_scope.customer_id)
+                if existing is not None and existing != owner_scope:
+                    raise ValueError("Cycle 2 owner scope is ambiguous")
+                owner_scopes[owner_scope.customer_id] = owner_scope
+            if set(owner_scopes) != {plan.owner_customer_id}:
+                raise ValueError("Cycle 2 owner scope escaped seed plan")
+            composition._owner_scopes = owner_scopes
+            apply_cycle2_seed_plan(session_factory, plan)
+            await composition._records.put_toolset_artifact(
+                composition._registry_snapshot.artifact()
+            )
+        except Exception:
+            raise _fresh_composition_error()
+        if composition is None:
+            raise _fresh_composition_error()
+        composition._ready = True
+        return composition
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def resolved_seed_plan(self) -> ResolvedCycle2SeedPlan:
+        self._ensure_ready()
+        return self._plan
+
+    @property
+    def registry_snapshot(self) -> RegistrySnapshot:
+        self._ensure_ready()
+        return self._registry_snapshot
+
+    def _ensure_ready(self) -> None:
+        if not self._ready:
+            raise _fresh_composition_error()
+
+    def _bind_owner_scope(
+        self,
+        *,
+        run_id: UUID,
+        owner_scope: TrustedOwnerScope,
+    ) -> None:
+        if type(run_id) is not UUID or type(owner_scope) is not TrustedOwnerScope:
+            raise _fresh_composition_error()
+        expected = self._owner_scopes.get(owner_scope.customer_id)
+        if expected != owner_scope:
+            raise _fresh_composition_error()
+        existing = self._owner_scope_by_run.get(run_id)
+        if existing is not None and existing != owner_scope:
+            raise _fresh_composition_error()
+        self._owner_scope_by_run[run_id] = owner_scope
+
+    def build_case_app(
+        self,
+        *,
+        provider: Cycle2RequestUnderstandingProvider,
+    ) -> FastAPI:
+        self._ensure_ready()
+        if not isinstance(provider, Cycle2RequestUnderstandingProvider):
+            raise _fresh_composition_error()
+        try:
+            business_handler = Cycle2BusinessReadHandler(
+                runtime_record_port=self._records,
+                search_orders_port=self._search_orders,
+                get_order_port=self._get_order,
+                get_shipment_port=self._get_shipment,
+                owner_scopes=self._owner_scopes,
+                clock=self._clock,
+                fault_plan=self._plan.attempt_faults,
+            )
+            service = Cycle2AgentRunHandler(
+                runtime_record_port=self._records,
+                context_record_port=self._records,
+                request_understanding_provider=provider,
+                read_tool_executor=Cycle2ReadToolExecutor(
+                    runtime_record_port=self._records,
+                    handler=business_handler,
+                    uuid_factory=self._uuid_factory,
+                ),
+                deterministic_renderer=DeterministicRenderer(),
+                clock=self._clock,
+                uuid_factory=self._uuid_factory,
+                provider_lane="offline_cycle2",
+                redaction_policy_version="redaction-v1",
+            )
+        except Exception:
+            raise _fresh_composition_error()
+        return create_agent_app(
+            session_auth=self._session_auth,
+            handler=_Cycle2OwnerCapturingHandler(
+                composition=self,
+                service=service,
+            ),
+        )
+
+    async def load_exact_run_evidence(
+        self,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure:
+        self._ensure_ready()
+        closure: Cycle2ExactRunEvidenceClosure | None = None
+        try:
+            if type(run_id) is not UUID:
+                raise TypeError("invalid Cycle 2 Run reference")
+            owner_scope = self._owner_scope_by_run.get(run_id)
+            if owner_scope is None:
+                raise ValueError("Cycle 2 Run owner scope is unavailable")
+            closure = await self._records.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=owner_scope,
+                run_id=run_id,
+            )
+        except Exception:
+            raise _fresh_composition_error()
+        if type(closure) is not Cycle2ExactRunEvidenceClosure:
+            raise _fresh_composition_error()
+        return closure
