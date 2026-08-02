@@ -5081,7 +5081,48 @@ class PostgresRecordAdapter:
                     raise _integrity(
                         P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
                     )
-                order_id = entries[0].public_summary.order_number
+                observation_loaded = cls._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+                    logical_identity=(("observation_id", selection.search_observation_ref),),
+                    for_update=for_update,
+                )
+                if (
+                    observation_loaded is None
+                    or type(observation_loaded[1].source_record)
+                    is not SearchOrdersObservation
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                observation = cast(
+                    SearchOrdersObservation,
+                    observation_loaded[1].source_record,
+                )
+                public_candidates = tuple(
+                    candidate
+                    for candidate in observation.normalized_value.ordered_candidates
+                    if candidate.observation_candidate_ref
+                    == entries[0].observation_candidate_ref
+                    and candidate.candidate_source_version
+                    == entries[0].candidate_source_version
+                )
+                private_targets = tuple(
+                    target
+                    for target in observation.candidate_target_bindings
+                    if target.observation_candidate_ref
+                    == entries[0].observation_candidate_ref
+                    and target.candidate_source_version
+                    == entries[0].candidate_source_version
+                    and target.owner_scoped_order_ref
+                    == selection.owner_scoped_order_target_ref
+                )
+                if len(public_candidates) != 1 or len(private_targets) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                order_id = public_candidates[0].public_summary.order_number
                 input_ref = selection.ordinal_input_binding_ref
             capabilities.append(
                 (
@@ -6143,16 +6184,43 @@ class PostgresRecordAdapter:
                 )
                 if loaded is None:
                     raise _Cycle2NotApplicable() from None
+                decisions = tuple(
+                    child
+                    for child in loaded[1].logical_children
+                    if type(child) is ToolRetryRecoveryDecisionRecordV2
+                )
+                if len(decisions) > 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+                expected_children: tuple[BaseModel, ...] = (
+                    command.expected_running_record.attempts
+                    if not decisions
+                    else (
+                        command.expected_running_record.attempts[0],
+                        decisions[0],
+                        *command.expected_running_record.attempts[1:],
+                    )
+                )
+                next_children: tuple[BaseModel, ...] = (
+                    command.next_record.attempts
+                    if not decisions
+                    else (
+                        command.next_record.attempts[0],
+                        decisions[0],
+                        *command.next_record.attempts[1:],
+                    )
+                )
                 self._cycle2_replace(
                     session,
                     loaded[0],
                     owner_customer_id=owner,
                     expected_record=command.expected_running_record,
-                    expected_children=command.expected_running_record.attempts,
+                    expected_children=expected_children,
                     next_envelope=self._cycle2_encode(
                         P0RecordCode.TOOL_CALL_RECORD,
                         command.next_record,
-                        logical_children=command.next_record.attempts,
+                        logical_children=next_children,
                     ),
                 )
         except _Cycle2NotApplicable:
@@ -6326,9 +6394,11 @@ class PostgresRecordAdapter:
                 )
                 if loaded is None:
                     raise _Cycle2NotApplicable() from None
+                attempts = append_command.next_running_record.attempts
                 children: tuple[BaseModel, ...] = (
-                    *append_command.next_running_record.attempts,
-                    *((recovery_decision,) if recovery_decision is not None else ()),
+                    attempts
+                    if recovery_decision is None
+                    else (attempts[0], recovery_decision, *attempts[1:])
                 )
                 self._cycle2_replace(
                     session,
