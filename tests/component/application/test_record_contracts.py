@@ -8073,7 +8073,10 @@ def test_cycle2_exact_run_evidence_closes_successful_recovery_append_without_par
     assert terminal_closure.tool_call_records[0].recovery_decision_ref is None
 
 
-def test_cycle2_exact_run_evidence_closes_terminal_recovery_with_parent_ref() -> None:
+def _c2_exact_run_evidence_with_terminal_recovery() -> tuple[
+    Cycle2ExactRunEvidenceClosure,
+    ToolRetryRecoveryDecisionRecordV2,
+]:
     baseline = _cycle2_exact_run_evidence_with_task()
     task = baseline.task_records[0]
     unit = baseline.request_unit_records[0]
@@ -8148,8 +8151,145 @@ def test_cycle2_exact_run_evidence_closes_terminal_recovery_with_parent_ref() ->
         }
     )
 
+    return closure, decision
+
+
+def test_cycle2_exact_run_evidence_closes_terminal_recovery_with_parent_ref() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+
     assert closure.recovery_decision_records == (decision,)
     assert terminal.recovery_decision_ref == decision.recovery_decision_id
+
+
+def test_cycle2_exact_run_evidence_rejects_mismatched_terminal_recovery_child() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+    assert terminal.finished_at is not None
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    wrong_kind = _c2_project(
+        decision,
+        decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+        stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+    )
+    wrong_reason = _c2_project(
+        decision,
+        stable_reason_code="RUN_BUDGET_EXHAUSTED",
+    )
+    wrong_attempt = _c2_project(
+        decision,
+        decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+        stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+        last_attempt_no=2,
+    )
+    late_decision = _c2_project(
+        decision,
+        decided_at=terminal.finished_at + timedelta(microseconds=1),
+    )
+
+    for mismatched in (
+        wrong_kind,
+        wrong_reason,
+        wrong_attempt,
+        late_decision,
+    ):
+        with pytest.raises(ValidationError, match="recovery root mismatch"):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "recovery_decision_records": (mismatched,),
+                }
+            )
+
+
+@pytest.mark.parametrize("terminal_kind", ("unfinished", "budget_exhausted"))
+def test_cycle2_exact_run_evidence_closes_other_terminal_recovery_shapes(
+    terminal_kind: str,
+) -> None:
+    closure, state_decision = _c2_exact_run_evidence_with_terminal_recovery()
+    state_terminal = closure.tool_call_records[0]
+    first = state_terminal.attempts[0]
+    if terminal_kind == "unfinished":
+        attempt = _c2_project(
+            first,
+            finished_at=None,
+            outcome=None,
+            failure_code=None,
+            retry_decision=None,
+        )
+        decision = _c2_project(
+            state_decision,
+            decision=ToolRecoveryDecision.INTERRUPT_UNFINISHED_ATTEMPT,
+            stable_reason_code="UNFINISHED_ATTEMPT_OUTCOME_UNKNOWN",
+        )
+        terminal = _c2_project(
+            state_terminal,
+            attempts=(attempt,),
+            interruption_reason="PROCESS_RESTART_DETECTED",
+            failure_code=None,
+            recovery_disposition=(
+                ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
+            ),
+        )
+    else:
+        decision = _c2_project(
+            state_decision,
+            stable_reason_code="RUN_BUDGET_EXHAUSTED",
+        )
+        terminal = _c2_project(
+            state_terminal,
+            status=ToolCallStatus.FAILED,
+            failure_code=first.failure_code,
+            interruption_reason=None,
+            recovery_disposition=(
+                ToolRecoveryDisposition.RETRY_SCHEDULED_RUN_BUDGET_EXHAUSTED
+            ),
+        )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    rebuilt = Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "tool_call_records": (terminal,),
+            "recovery_decision_records": (decision,),
+        }
+    )
+
+    assert rebuilt.recovery_decision_records == (decision,)
+
+
+def test_cycle2_exact_run_evidence_rejects_cross_tool_terminal_recovery_ref() -> None:
+    closure, decision = _c2_exact_run_evidence_with_terminal_recovery()
+    terminal = closure.tool_call_records[0]
+    other_tool_call_id = uuid4()
+    other_attempt = _c2_project(
+        terminal.attempts[0],
+        tool_call_id=other_tool_call_id,
+    )
+    other_terminal = _c2_project(
+        terminal,
+        tool_call_id=other_tool_call_id,
+        attempts=(other_attempt,),
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="recovery root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "tool_call_records": (terminal, other_terminal),
+                "recovery_decision_records": (decision,),
+            }
+        )
 
 
 def test_cycle2_exact_run_evidence_rejects_unclosed_recovery_children() -> None:
