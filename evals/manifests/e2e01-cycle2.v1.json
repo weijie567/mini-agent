@@ -27,14 +27,14 @@
       "path": "evals/fixtures/e2e01-cycle2.v1.json",
       "version_field": "fixture_version",
       "version": "e2e01-cycle2-fixture-v1",
-      "sha256": "8264549476f84ace67bc0def471155beeafef8b9f7ee8e3ae214bf398381f8c2"
+      "sha256": "c4087f52ea85473efdefc95b97b52c830c86b66ccad5579f205a63b929ea67d9"
     },
     {
       "artifact_id": "e2e01-cycle2-cases",
       "path": "evals/cases/e2e01-cycle2.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-cycle2-dataset-v1",
-      "sha256": "4f8821bd0ca4dfe19521b3b889b13428f5722bf47263e87b7f60fd392aa6605a"
+      "sha256": "0b6897a94e64c54951cd33d4b2544f8e0a3f3282015ee911180ed7bf65622a96"
     },
     {
       "artifact_id": "e2e01-cycle2-model-scripts",

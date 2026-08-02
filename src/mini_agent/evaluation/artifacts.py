@@ -25,7 +25,7 @@ EXPECTED_MANIFEST_SHA256 = (
 )
 CYCLE2_MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-cycle2.v1.json"
 CYCLE2_EXPECTED_MANIFEST_SHA256 = (
-    "58d2127815c7ca9147d4694a15cdc081bcc4d2fd44c7964eabd38d8dc239304a"
+    "c9093b00b11b6bdd3ea5b03d51d68b345348382aac31f79ae73d0def3be7bbf8"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -827,8 +827,8 @@ _CYCLE2_CASE_CONTRACT_SHA256: Mapping[str, str] = {
     "E2E01-03/current-second-selected": "5ba183448cd6ac63af5f6d54e5d8e758a76f031b21803f65e1e060101cc394c9",
     "E2E01-03/expired-second-rejected": "9126c7d19560812bb1f108bdd74b1e6f23c09876db250a86b60fc69fdfb7d4ed",
     "E2E01-03/cross-task-second-rejected": "18b33a3dad2e2bac8c3e02505c908a46935c23648078d5f1d87e0c68974ee58e",
-    "E2E01-05/order-only-no-shipment": "25a945903f0af724109fc6b825118d37175cfaeab6355f1f02c39ac973b333ab",
-    "E2E01-05/logistics-required-uses-shipment": "39a6f3051320224e347f029e011e47312babe7e8fd9bd093f158ee658bb8252a",
+    "E2E01-05/order-only-no-shipment": "c08226b426e41c731564b83cc1aa3662cc1d3a3079ced1935b191e6cfd422910",
+    "E2E01-05/logistics-required-uses-shipment": "08fed8ff08bb78bcdc53c0d57a2d4789ccea0cce16f45e2e1d10b5e44e1e49c9",
     "E2E01-06/stale-refresh-success": "e80f4eae205bb424c5e3e7439624113ed494bd99b51e2fb55c5e650540843f4a",
     "E2E01-06/transient-once-then-success": "5b854aa16b740ec7fcf9eed573d19e5244adae8ccd176244820c860710bfc7d7",
     "E2E01-06/transient-exhausted-blocked": "7552cb8f0477d20fea4674a5e59e4d6aa946e7f9e05dccb82a1040639af921f3",
@@ -986,16 +986,16 @@ _CYCLE2_PAIR_COMMON = {
     "pair_fixture_ref": "fx-dynamic-tool-pair-owner-a-v1",
     "pair_manifest_schema": "dynamic-tool-selection-pair.p0.v1",
     "registry_snapshot_digest": (
-        "242ecc99f4886e490d45ed90ba22ba4532178b7f15473d632fef464d58d0cb7e"
+        "8c8535246587423132362dbc13dcb42fdf15a4fa7a1891c59ebd8a9645067725"
     ),
     "model_visible_toolset_hash": (
-        "035f5af9b8a6c4f99e06e12ed7ce236e3b1caaa00452d8778da96516ebd3272f"
+        "sha256:e9d6ae60206aa7ed88aeefd78b016215782df03e0c45021cf3010c4e2f128aa8"
     ),
     "provider_mapping_digest": (
-        "79f33f3a4cf2c38e182cac13b24fd13d25d5f4a7d94890322df757051fa928dd"
+        "8b1e0b50d8f9b88b5a303be5cdb1d9f3d29376f443eccdaf97b00b7d6ded3c47"
     ),
     "owner_order_initial_state_digest": (
-        "617044627393c3e10a1def6f294bd62375b0204b999284cb85a0a0e1df0dcfae"
+        "022fced2373c4a83413c00b647b6badf158f8da9eb681e9a99e78a4a5e7860b5"
     ),
 }
 
