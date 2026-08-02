@@ -28,6 +28,8 @@ from mini_agent.core.common import (
 )
 from mini_agent.core.control_gateway import (
     Cycle2GatewayCandidate,
+    Cycle2TargetObservationFacts,
+    Cycle2VerifiedOrderTargetFacts,
     build_cycle2_authorized_tool_command,
 )
 from mini_agent.core.identity import CustomerContext
@@ -40,8 +42,17 @@ from mini_agent.core.memory import (
     validate_search_candidate_set_observation_closure,
     validate_shipment_observation_supersession,
 )
-from mini_agent.core.request_processing import _normalize_order_id
-from mini_agent.core.request_understanding import InputAuthority, UncertaintyV2
+from mini_agent.core.order import GetOrderOutcome, GetOrderResult
+from mini_agent.core.request_processing import (
+    Cycle2InitialRequestDecisionV2,
+    _normalize_order_id,
+)
+from mini_agent.core.request_understanding import (
+    Cycle2InputCandidate,
+    InputAuthority,
+    NextMove,
+    UncertaintyV2,
+)
 from mini_agent.core.shipment import (
     GetShipmentOutcome,
     GetShipmentResult,
@@ -60,6 +71,7 @@ from mini_agent.core.task_state import (
     InputBinding,
     InputBindingV2,
     InputValidationStatus,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
     OrderCandidateSetOutcome,
@@ -2535,6 +2547,581 @@ class RunTaskLinkRecordV2(_StrictAuditOnlyRecord):
         return self
 
 
+class Cycle2ContinuationProviderProposal(_StrictRuntimePrivateRecord):
+    """One Claim/NextMove proposal with no identity or business authority."""
+
+    input_candidate: Cycle2InputCandidate
+    next_move_candidate: NextMove
+
+    @model_validator(mode="before")
+    @classmethod
+    def proposal_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "input_candidate": Cycle2InputCandidate,
+                "next_move_candidate": NextMove,
+            },
+        )
+
+    @model_validator(mode="after")
+    def proposal_is_narrowly_routable(self) -> Self:
+        candidate = self.input_candidate
+        move = self.next_move_candidate
+        arguments = move.arguments
+        if candidate.name == "candidate_ordinal":
+            expected_tool = "get_order"
+            expected_argument = "order_id"
+        elif candidate.name == "product_description":
+            expected_tool = "search_orders"
+            expected_argument = "product_description"
+        else:
+            expected_tool = "get_shipment"
+            expected_argument = "order_id"
+        if (
+            move.kind.value != "CALL_TOOL"
+            or move.requested_tool_name != expected_tool
+            or arguments is None
+            or set(arguments) != {expected_argument}
+        ):
+            raise ValueError("Cycle 2 continuation proposal is not narrowly routable")
+        return self
+
+
+class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
+    """Exact current Task selected only by trusted owner and Session scope."""
+
+    owner_scope: TrustedOwnerScope
+    session_ref_hash: NonEmptyString
+    conversation_record: ConversationRecord
+    current_conversation_task_link_record: ConversationTaskLinkRecord
+    current_task_record: TaskRecord
+    current_request_unit_record: RequestUnitRecord
+    current_input_binding_records: Annotated[
+        tuple[InputBindingV2, ...], Field(min_length=1)
+    ]
+    current_candidate_set_records: tuple[OrderCandidateSetRecord, ...] = ()
+    current_search_observation_records: tuple[SearchOrdersObservation, ...] = ()
+    current_auto_target_records: tuple[OrderCandidateAutoTargetRecord, ...] = ()
+    superseded_candidate_set_refs: tuple[UUID, ...] = ()
+    existing_selection_records: tuple[OrderCandidateSelectionRecord, ...] = ()
+    trusted_now: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def closure_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "conversation_record": ConversationRecord,
+                "current_conversation_task_link_record": ConversationTaskLinkRecord,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+            },
+            tuple_model_fields={
+                "current_input_binding_records": InputBindingV2,
+                "current_candidate_set_records": OrderCandidateSetRecord,
+                "current_search_observation_records": SearchOrdersObservation,
+                "current_auto_target_records": OrderCandidateAutoTargetRecord,
+                "existing_selection_records": OrderCandidateSelectionRecord,
+            },
+        )
+
+    @field_validator("trusted_now")
+    @classmethod
+    def current_time_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="current Session trusted_now")
+
+    @model_validator(mode="after")
+    def current_owner_session_graph_is_closed(self) -> Self:
+        conversation = self.conversation_record
+        link = self.current_conversation_task_link_record
+        task = self.current_task_record
+        unit = self.current_request_unit_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=self.owner_scope,
+            task_record=task,
+            request_unit_record=unit,
+        )
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or link.conversation_id != conversation.conversation_id
+            or link.task_id != task.task_id
+            or link.ended_at is not None
+            or task.updated_at > self.trusted_now
+            or unit.updated_at > self.trusted_now
+        ):
+            raise ValueError("current Session owner/Conversation/Task graph mismatch")
+        _require_complete_current_input_bindings_v2(
+            request_unit=unit,
+            bindings=self.current_input_binding_records,
+            trusted_now=self.trusted_now,
+        )
+        binding_names = tuple(
+            binding.name for binding in self.current_input_binding_records
+        )
+        candidate_ids = tuple(
+            record.candidate_set_id for record in self.current_candidate_set_records
+        )
+        observation_ids = tuple(
+            record.observation_id
+            for record in self.current_search_observation_records
+        )
+        auto_target_ids = tuple(
+            record.verified_target_ref
+            for record in self.current_auto_target_records
+        )
+        if (
+            len(binding_names) != len(set(binding_names))
+            or len(candidate_ids) != len(set(candidate_ids))
+            or len(observation_ids) != len(set(observation_ids))
+            or len(auto_target_ids) != len(set(auto_target_ids))
+            or len(self.superseded_candidate_set_refs)
+            != len(set(self.superseded_candidate_set_refs))
+            or any(
+                record.private_owner_scope_ref != self.owner_scope.customer_id
+                or record.conversation_id != conversation.conversation_id
+                or record.task_id != task.task_id
+                or record.request_unit_id != unit.request_unit_id
+                for record in self.current_candidate_set_records
+            )
+            or any(
+                record.private_owner_scope != self.owner_scope.customer_id
+                for record in self.current_search_observation_records
+            )
+            or any(
+                record.private_owner_scope_ref != self.owner_scope.customer_id
+                or record.conversation_id != conversation.conversation_id
+                or record.task_id != task.task_id
+                or record.request_unit_id != unit.request_unit_id
+                for record in self.current_auto_target_records
+            )
+            or any(
+                record.private_owner_scope_ref != self.owner_scope.customer_id
+                or record.conversation_id != conversation.conversation_id
+                or record.task_id != task.task_id
+                or record.request_unit_id != unit.request_unit_id
+                for record in self.existing_selection_records
+            )
+        ):
+            raise ValueError("current Session capability graph mismatch")
+        observations = {
+            record.observation_id: record
+            for record in self.current_search_observation_records
+        }
+        auto_targets = {
+            record.candidate_set_ref: record
+            for record in self.current_auto_target_records
+        }
+        if len(auto_targets) != len(self.current_auto_target_records):
+            raise ValueError("current Session auto-target graph is ambiguous")
+        for candidate_set in self.current_candidate_set_records:
+            observation = observations.get(candidate_set.search_observation_ref)
+            if observation is None:
+                raise ValueError("current CandidateSet lacks Search Observation")
+            validate_search_candidate_set_observation_closure(
+                candidate_set=candidate_set,
+                observation=observation,
+            )
+            auto_target = auto_targets.get(candidate_set.candidate_set_id)
+            if candidate_set.outcome is OrderCandidateSetOutcome.UNIQUE:
+                if (
+                    auto_target is None
+                    or auto_target.candidate_set_version
+                    != candidate_set.candidate_set_version
+                    or auto_target.search_observation_ref
+                    != observation.observation_id
+                    or auto_target.result_task_state_version
+                    != candidate_set.result_task_state_version
+                ):
+                    raise ValueError("current UNIQUE CandidateSet lacks auto target")
+            elif auto_target is not None:
+                raise ValueError("MULTIPLE CandidateSet cannot carry auto target")
+        if any(
+            record.candidate_set_ref not in set(candidate_ids)
+            for record in self.current_auto_target_records
+        ):
+            raise ValueError("current auto target lacks CandidateSet")
+        return self
+
+
+class CreateCycle2RunRootCommand(_StrictRuntimePrivateRecord):
+    """Insert a real USER-message/CREATED-Run root, never a preseeded graph."""
+
+    owner_scope: TrustedOwnerScope
+    session_ref_hash: NonEmptyString
+    current_session_closure: Cycle2CurrentSessionTaskClosure | None = None
+    conversation_record: ConversationRecord
+    user_message_record: MessageRecord
+    created_run_record: AgentRunRecordV2
+    active_run_task_link_record: RunTaskLinkRecordV2 | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def root_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "conversation_record": ConversationRecord,
+                "user_message_record": MessageRecord,
+                "created_run_record": AgentRunRecordV2,
+            },
+            optional_model_fields={
+                "current_session_closure": Cycle2CurrentSessionTaskClosure,
+                "active_run_task_link_record": RunTaskLinkRecordV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def real_turn_root_is_exact(self) -> Self:
+        conversation = self.conversation_record
+        message = self.user_message_record
+        run = self.created_run_record
+        closure = self.current_session_closure
+        link = self.active_run_task_link_record
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or message.direction is not MessageDirection.USER
+            or message.conversation_id != conversation.conversation_id
+            or run.conversation_id != conversation.conversation_id
+            or run.status is not AgentRunStatusV2.CREATED
+            or run.started_at != message.received_at
+            or message.received_at < conversation.created_at
+        ):
+            raise ValueError("Cycle 2 Run root owner/message/run mismatch")
+        if closure is None:
+            if link is not None or conversation.created_at != message.received_at:
+                raise ValueError("first Cycle 2 turn requires one clean new root")
+            return self
+        if (
+            closure.owner_scope != self.owner_scope
+            or closure.session_ref_hash != self.session_ref_hash
+            or closure.conversation_record != conversation
+            or message.received_at != closure.trusted_now
+            or link is None
+            or link.run_id != run.run_id
+            or link.task_id != closure.current_task_record.task_id
+            or link.base_task_state_version != closure.current_task_record.state_version
+            or link.result_task_state_version is not None
+        ):
+            raise ValueError("continuation Run root must close current Session Task")
+        return self
+
+
+class StartCycle2RunCommand(_StrictRuntimePrivateRecord):
+    """CAS one exact CREATED v2 Run root to RUNNING."""
+
+    owner_scope: TrustedOwnerScope
+    expected_created_run_record: AgentRunRecordV2
+    next_running_run_record: AgentRunRecordV2
+    expected_active_run_task_link_record: RunTaskLinkRecordV2 | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def start_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "expected_created_run_record": AgentRunRecordV2,
+                "next_running_run_record": AgentRunRecordV2,
+            },
+            optional_model_fields={
+                "expected_active_run_task_link_record": RunTaskLinkRecordV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def exact_start_transition(self) -> Self:
+        expected = self.expected_created_run_record
+        running = self.next_running_run_record
+        if (
+            expected.status is not AgentRunStatusV2.CREATED
+            or running.status is not AgentRunStatusV2.RUNNING
+            or any(
+                getattr(expected, field) != getattr(running, field)
+                for field in ("run_id", "conversation_id", "provider_lane", "started_at")
+            )
+        ):
+            raise ValueError("Cycle 2 Run start is not exact CREATED-to-RUNNING")
+        link = self.expected_active_run_task_link_record
+        if link is not None and (
+            link.run_id != expected.run_id
+            or link.result_task_state_version is not None
+        ):
+            raise ValueError("Cycle 2 Run start link is not active")
+        return self
+
+
+class CreateCycle2InitialTaskGraphCommand(_StrictRuntimePrivateRecord):
+    """Commit the reviewed initial reducer graph under a real RUNNING Run."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_user_message_record: MessageRecord
+    expected_running_run_record: AgentRunRecordV2
+    reducer_decision: Cycle2InitialRequestDecisionV2
+    conversation_task_link_record: ConversationTaskLinkRecord
+    active_run_task_link_record: RunTaskLinkRecordV2
+    ordinary_trace_records: Annotated[
+        tuple[TraceEventV2, ...], Field(min_length=1, max_length=8)
+    ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def initial_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "expected_conversation_record": ConversationRecord,
+                "expected_user_message_record": MessageRecord,
+                "expected_running_run_record": AgentRunRecordV2,
+                "reducer_decision": Cycle2InitialRequestDecisionV2,
+                "conversation_task_link_record": ConversationTaskLinkRecord,
+                "active_run_task_link_record": RunTaskLinkRecordV2,
+            },
+            tuple_model_fields={"ordinary_trace_records": TraceEventV2},
+        )
+
+    @model_validator(mode="after")
+    def initial_graph_closes_real_run(self) -> Self:
+        conversation = self.expected_conversation_record
+        message = self.expected_user_message_record
+        run = self.expected_running_run_record
+        decision = self.reducer_decision
+        graph = decision.task_graph
+        conversation_link = self.conversation_task_link_record
+        run_link = self.active_run_task_link_record
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or message.direction is not MessageDirection.USER
+            or message.conversation_id != conversation.conversation_id
+            or run.conversation_id != conversation.conversation_id
+            or run.status is not AgentRunStatusV2.RUNNING
+            or decision.run_id != run.run_id
+            or decision.message_ref != message.message_id
+            or graph.task.owner_customer_id != self.owner_scope.customer_id
+            or conversation_link.conversation_id != conversation.conversation_id
+            or conversation_link.task_id != graph.task.task_id
+            or conversation_link.ended_at is not None
+            or run_link.run_id != run.run_id
+            or run_link.task_id != graph.task.task_id
+            or run_link.base_task_state_version is not None
+            or run_link.result_task_state_version is not None
+        ):
+            raise ValueError("Cycle 2 initial graph does not close the real Run root")
+        trace_ids = tuple(trace.trace_event_id for trace in self.ordinary_trace_records)
+        if (
+            len(trace_ids) != len(set(trace_ids))
+            or any(
+                trace.run_id != run.run_id or trace.case_id is not None
+                for trace in self.ordinary_trace_records
+            )
+        ):
+            raise ValueError("Cycle 2 initial ordinary Trace closure is unsafe")
+        return self
+
+
+class FinalizeCycle2RunCommand(_StrictRuntimePrivateRecord):
+    """CAS one complete normal v2 terminal aggregate and visible result."""
+
+    owner_scope: TrustedOwnerScope
+    expected_running_run_record: AgentRunRecordV2
+    expected_active_run_task_link_record: RunTaskLinkRecordV2 | None = None
+    current_task_record: TaskRecord | None = None
+    current_request_unit_record: RequestUnitRecord | None = None
+    terminal_run_record: AgentRunRecordV2
+    terminal_run_task_link_record: RunTaskLinkRecordV2 | None = None
+    terminal_result: AgentRunResult
+    assistant_message_record: MessageRecord
+    ordinary_trace_records: Annotated[
+        tuple[TraceEventV2, ...], Field(min_length=1, max_length=8)
+    ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def terminal_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "expected_running_run_record": AgentRunRecordV2,
+                "terminal_run_record": AgentRunRecordV2,
+                "terminal_result": AgentRunResult,
+                "assistant_message_record": MessageRecord,
+            },
+            optional_model_fields={
+                "expected_active_run_task_link_record": RunTaskLinkRecordV2,
+                "current_task_record": TaskRecord,
+                "current_request_unit_record": RequestUnitRecord,
+                "terminal_run_task_link_record": RunTaskLinkRecordV2,
+            },
+            tuple_model_fields={"ordinary_trace_records": TraceEventV2},
+        )
+
+    @model_validator(mode="after")
+    def normal_terminal_graph_is_closed(self) -> Self:
+        active = self.expected_running_run_record
+        terminal = self.terminal_run_record
+        result = self.terminal_result
+        message = self.assistant_message_record
+        active_link = self.expected_active_run_task_link_record
+        terminal_link = self.terminal_run_task_link_record
+        task = self.current_task_record
+        unit = self.current_request_unit_record
+        if (
+            active.status is not AgentRunStatusV2.RUNNING
+            or terminal.status is not AgentRunStatusV2.COMPLETED
+            or terminal.stop_reason is None
+            or any(
+                getattr(active, field) != getattr(terminal, field)
+                for field in ("run_id", "conversation_id", "provider_lane", "started_at")
+            )
+            or result.run_id != terminal.run_id
+            or message.direction is not MessageDirection.ASSISTANT
+            or message.conversation_id != terminal.conversation_id
+            or message.content != result.message
+            or message.received_at != terminal.completed_at
+        ):
+            raise ValueError("Cycle 2 normal terminal Run/result/Message mismatch")
+        if active_link is None:
+            if any(value is not None for value in (terminal_link, task, unit)):
+                raise ValueError("no-Task terminal cannot carry Task closure")
+        else:
+            if terminal_link is None or task is None or unit is None:
+                raise ValueError("Task terminal requires complete Task/link closure")
+            _task_and_request_unit_form_current_pair(
+                owner_scope=self.owner_scope,
+                task_record=task,
+                request_unit_record=unit,
+            )
+            if (
+                active_link.run_id != active.run_id
+                or terminal_link.run_id != terminal.run_id
+                or active_link.task_id != task.task_id
+                or terminal_link.task_id != task.task_id
+                or terminal_link.base_task_state_version
+                != active_link.base_task_state_version
+                or terminal_link.result_task_state_version != task.state_version
+            ):
+                raise ValueError("Cycle 2 terminal RunTaskLink version mismatch")
+        stopped = tuple(
+            trace for trace in self.ordinary_trace_records
+            if trace.event_type is TraceEventType.RUN_STOPPED
+        )
+        if (
+            len(stopped) != 1
+            or stopped[0].run_id != terminal.run_id
+            or stopped[0].occurred_at != terminal.completed_at
+            or stopped[0].user_outcome is not result.outcome
+            or stopped[0].stop_reason is not terminal.stop_reason
+            or any(
+                trace.run_id != terminal.run_id or trace.case_id is not None
+                for trace in self.ordinary_trace_records
+            )
+        ):
+            raise ValueError("Cycle 2 terminal ordinary Trace closure mismatch")
+        return self
+
+
+class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
+    """Expectation-free exact logical evidence for one owner-scoped v2 Run."""
+
+    owner_scope: TrustedOwnerScope
+    conversation_record: ConversationRecord
+    run_record: AgentRunRecordV2
+    message_records: Annotated[tuple[MessageRecord, ...], Field(min_length=1)]
+    run_task_link_records: tuple[RunTaskLinkRecordV2, ...]
+    task_records: tuple[TaskRecord, ...]
+    request_unit_records: tuple[RequestUnitRecord, ...]
+    input_binding_records: tuple[InputBindingV2, ...]
+    trace_records: Annotated[tuple[TraceEventV2, ...], Field(min_length=1)]
+    terminal_result: AgentRunResult | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def evidence_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "conversation_record": ConversationRecord,
+                "run_record": AgentRunRecordV2,
+            },
+            optional_model_fields={"terminal_result": AgentRunResult},
+            tuple_model_fields={
+                "message_records": MessageRecord,
+                "run_task_link_records": RunTaskLinkRecordV2,
+                "task_records": TaskRecord,
+                "request_unit_records": RequestUnitRecord,
+                "input_binding_records": InputBindingV2,
+                "trace_records": TraceEventV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def evidence_graph_is_exact(self) -> Self:
+        conversation = self.conversation_record
+        run = self.run_record
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or run.conversation_id != conversation.conversation_id
+            or any(
+                message.conversation_id != conversation.conversation_id
+                for message in self.message_records
+            )
+            or any(link.run_id != run.run_id for link in self.run_task_link_records)
+            or any(trace.run_id != run.run_id for trace in self.trace_records)
+        ):
+            raise ValueError("Cycle 2 exact evidence root mismatch")
+        families = (
+            tuple(message.message_id for message in self.message_records),
+            tuple(link.task_id for link in self.run_task_link_records),
+            tuple(task.task_id for task in self.task_records),
+            tuple(unit.request_unit_id for unit in self.request_unit_records),
+            tuple(binding.binding_id for binding in self.input_binding_records),
+            tuple(trace.trace_event_id for trace in self.trace_records),
+        )
+        if any(len(values) != len(set(values)) for values in families):
+            raise ValueError("Cycle 2 exact evidence identities must be unique")
+        tasks = {task.task_id: task for task in self.task_records}
+        units = {unit.task_id: unit for unit in self.request_unit_records}
+        bindings = {binding.binding_id: binding for binding in self.input_binding_records}
+        if (
+            set(tasks) != set(units)
+            or any(link.task_id not in tasks for link in self.run_task_link_records)
+            or any(
+                task.owner_customer_id != self.owner_scope.customer_id
+                or unit.state_version != task.state_version
+                or any(ref not in bindings for ref in unit.input_binding_refs)
+                for task_id, task in tasks.items()
+                for unit in (units[task_id],)
+            )
+        ):
+            raise ValueError("Cycle 2 exact evidence Task graph mismatch")
+        if run.status is AgentRunStatusV2.SUPERSEDED:
+            if self.terminal_result is not None or any(
+                message.direction is MessageDirection.ASSISTANT
+                for message in self.message_records
+            ):
+                raise ValueError("OA-10 exact evidence cannot carry a result")
+        elif run.status is AgentRunStatusV2.COMPLETED:
+            if (
+                self.terminal_result is None
+                or self.terminal_result.run_id != run.run_id
+                or sum(
+                    message.direction is MessageDirection.ASSISTANT
+                    and message.content == self.terminal_result.message
+                    for message in self.message_records
+                ) != 1
+            ):
+                raise ValueError("completed exact evidence requires one result Message")
+        return self
+
+
 class Cycle2WriteResult(StrEnum):
     """Closed result for inactive aggregate writes; non-APPLIED means zero writes."""
 
@@ -2835,6 +3422,7 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
     current_candidate_source_tool_call_record: ToolCallRecordV2 | None = None
     current_search_observation_record: SearchOrdersObservation | None = None
     current_candidate_set_record: OrderCandidateSetRecord | None = None
+    current_auto_target_records: tuple[OrderCandidateAutoTargetRecord, ...] = ()
     trusted_read_at: datetime
 
     @model_validator(mode="before")
@@ -2856,6 +3444,9 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
                 "current_candidate_source_tool_call_record": ToolCallRecordV2,
                 "current_search_observation_record": SearchOrdersObservation,
                 "current_candidate_set_record": OrderCandidateSetRecord,
+            },
+            tuple_model_fields={
+                "current_auto_target_records": OrderCandidateAutoTargetRecord,
             },
         )
 
@@ -2904,6 +3495,8 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
             previous_candidate_set,
         )
         if all(record is None for record in previous_graph):
+            if self.current_auto_target_records:
+                raise ValueError("auto target cannot exist without Search aggregate")
             return self
         if (
             previous_source is None
@@ -2957,11 +3550,43 @@ class OrderSearchCurrentReadClosure(_StrictRuntimePrivateRecord):
             observation=previous_observation,
         )
         if previous_candidate_set.outcome is OrderCandidateSetOutcome.UNIQUE:
-            if task.status is not TaskStatus.ACTIVE or unit.open_questions:
+            if (
+                task.status is not TaskStatus.ACTIVE
+                or unit.open_questions
+                or len(self.current_auto_target_records) != 1
+            ):
                 raise ValueError("current UNIQUE CandidateSet Task effect mismatch")
+            auto_target = self.current_auto_target_records[0]
+            unique_entry = previous_candidate_set.ordered_candidates[0]
+            mapping = previous_observation.candidate_target_bindings[0]
+            if (
+                auto_target.private_owner_scope_ref != self.owner_scope.customer_id
+                or auto_target.conversation_id != conversation.conversation_id
+                or auto_target.task_id != task.task_id
+                or auto_target.request_unit_id != unit.request_unit_id
+                or auto_target.query_input_binding_ref != query.binding_ref
+                or auto_target.candidate_set_ref
+                != previous_candidate_set.candidate_set_id
+                or auto_target.candidate_set_version
+                != previous_candidate_set.candidate_set_version
+                or auto_target.source_tool_call_id != previous_source.tool_call_id
+                or auto_target.search_observation_ref
+                != previous_observation.observation_id
+                or auto_target.search_observation_source_version
+                != previous_observation.source_version
+                or auto_target.observation_candidate_ref
+                != unique_entry.observation_candidate_ref
+                or auto_target.candidate_source_version
+                != unique_entry.candidate_source_version
+                or auto_target.owner_scoped_order_target_ref
+                != mapping.owner_scoped_order_ref
+                or auto_target.result_task_state_version != task.state_version
+            ):
+                raise ValueError("current UNIQUE auto-target graph mismatch")
         elif (
             task.status is not TaskStatus.WAITING_USER
             or len(unit.open_questions) != 1
+            or self.current_auto_target_records
         ):
             raise ValueError("current MULTIPLE CandidateSet Task effect mismatch")
         return self
@@ -3011,7 +3636,7 @@ def _require_disjoint_search_candidate_refs(
 
 
 class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
-    """Atomic Search Observation, CandidateSet and Task/RequestUnit effect."""
+    """Atomic Search Observation/CandidateSet/auto-target and Task effect."""
 
     owner_scope: TrustedOwnerScope
     loaded_read_closure: OrderSearchCurrentReadClosure
@@ -3032,6 +3657,8 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
     ]
     pending_candidate_set_ref: UUID | None = None
     resolved_owner_scoped_order_target_ref: NonEmptyString | None = None
+    resolved_order_id: NonEmptyString | None = None
+    auto_target_record: OrderCandidateAutoTargetRecord | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -3056,6 +3683,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             },
             optional_model_fields={
                 "previous_candidate_set_record": OrderCandidateSetRecord,
+                "auto_target_record": OrderCandidateAutoTargetRecord,
             },
         )
 
@@ -3080,6 +3708,7 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
         run = self.source_run_record
         query_binding = self.current_query_binding
         loaded = self.loaded_read_closure
+        auto_target = self.auto_target_record
 
         if (
             loaded.owner_scope != owner
@@ -3229,6 +3858,8 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
             if (
                 self.pending_candidate_set_ref != candidate_set.candidate_set_id
                 or self.resolved_owner_scoped_order_target_ref is not None
+                or self.resolved_order_id is not None
+                or auto_target is not None
                 or next_task.status is not TaskStatus.WAITING_USER
                 or len(next_unit.open_questions) != 1
             ):
@@ -3244,6 +3875,8 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
                 raise ValueError("UNIQUE search cannot install pending clarification")
             if self.resolved_owner_scoped_order_target_ref is None:
                 raise ValueError("UNIQUE search requires exact owner-scoped target")
+            if self.resolved_order_id is None or auto_target is None:
+                raise ValueError("UNIQUE search requires exact durable auto target")
             bindings = observation.candidate_target_bindings
             if (
                 len(bindings) != 1
@@ -3251,6 +3884,52 @@ class ApplyOrderSearchOutcomeV2Command(_StrictRuntimePrivateRecord):
                 != self.resolved_owner_scoped_order_target_ref
             ):
                 raise ValueError("UNIQUE resolved target must match Observation mapping")
+            try:
+                normalized_order_id = _normalize_order_id(self.resolved_order_id)
+            except (TypeError, ValueError) as error:
+                raise ValueError("UNIQUE resolved order_id is invalid") from error
+            entry = candidate_set.ordered_candidates[0]
+            safe_candidate = observation.normalized_value.ordered_candidates[0]
+            previous_targets = loaded.current_auto_target_records
+            expected_supersedes = (
+                previous_targets[0].verified_target_ref
+                if previous_targets
+                else None
+            )
+            if (
+                normalized_order_id != self.resolved_order_id
+                or safe_candidate.public_summary.order_number
+                != self.resolved_order_id
+                or auto_target.private_owner_scope_ref != owner.customer_id
+                or auto_target.conversation_id != conversation.conversation_id
+                or auto_target.task_id != next_task.task_id
+                or auto_target.request_unit_id != next_unit.request_unit_id
+                or auto_target.query_input_binding_ref != query_binding.binding_ref
+                or auto_target.candidate_set_ref != candidate_set.candidate_set_id
+                or auto_target.candidate_set_version
+                != candidate_set.candidate_set_version
+                or auto_target.source_tool_call_id != source.tool_call_id
+                or auto_target.search_observation_ref != observation.observation_id
+                or auto_target.search_observation_record_schema_version
+                != observation.record_schema_version
+                or auto_target.search_observation_source_version
+                != observation.source_version
+                or auto_target.observation_candidate_ref
+                != entry.observation_candidate_ref
+                or auto_target.candidate_source_version
+                != entry.candidate_source_version
+                or auto_target.owner_scoped_order_target_ref
+                != self.resolved_owner_scoped_order_target_ref
+                or auto_target.order_id != self.resolved_order_id
+                or auto_target.base_task_state_version
+                != candidate_set.base_task_state_version
+                or auto_target.result_task_state_version
+                != candidate_set.result_task_state_version
+                or auto_target.verified_at != observation.recorded_at
+                or auto_target.supersedes_verified_target_ref
+                != expected_supersedes
+            ):
+                raise ValueError("UNIQUE durable auto-target closure mismatch")
         return self
 
 
@@ -3904,6 +4583,8 @@ class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):
         tuple[InputBindingV2, ...],
         Field(min_length=1),
     ]
+    current_verified_order_targets: tuple[Cycle2VerifiedOrderTargetFacts, ...] = ()
+    current_target_observations: tuple[Cycle2TargetObservationFacts, ...] = ()
     trusted_read_at: datetime
 
     @model_validator(mode="before")
@@ -3918,6 +4599,8 @@ class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):
             },
             tuple_model_fields={
                 "current_input_binding_records": InputBindingV2,
+                "current_verified_order_targets": Cycle2VerifiedOrderTargetFacts,
+                "current_target_observations": Cycle2TargetObservationFacts,
             },
         )
 
@@ -3943,6 +4626,54 @@ class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):
             bindings=self.current_input_binding_records,
             trusted_now=self.trusted_read_at,
         )
+        target_ids = tuple(
+            target.verified_target_ref
+            for target in self.current_verified_order_targets
+        )
+        observation_ids = tuple(
+            observation.observation_ref
+            for observation in self.current_target_observations
+        )
+        if (
+            len(target_ids) != len(set(target_ids))
+            or len(observation_ids) != len(set(observation_ids))
+            or len(self.current_verified_order_targets)
+            != len(self.current_target_observations)
+        ):
+            raise ValueError("initial ToolCall verified target graph is ambiguous")
+        targets = {
+            target.verified_target_ref: target
+            for target in self.current_verified_order_targets
+        }
+        binding_ids = {
+            binding.binding_id for binding in self.current_input_binding_records
+        }
+        for observation in self.current_target_observations:
+            target = targets.get(observation.verified_target_ref)
+            if (
+                target is None
+                or target.private_owner_scope_ref != self.owner_scope.customer_id
+                or target.owner_customer_id != self.owner_scope.customer_id
+                or target.task_id != self.current_task_record.task_id
+                or target.request_unit_id
+                != self.current_request_unit_record.request_unit_id
+                or target.task_state_version
+                != self.current_task_record.state_version
+                or target.superseded_by is not None
+                or not set(target.input_binding_refs).issubset(binding_ids)
+                or observation.private_owner_scope_ref
+                != self.owner_scope.customer_id
+                or observation.owner_customer_id != self.owner_scope.customer_id
+                or observation.task_id != target.task_id
+                or observation.request_unit_id != target.request_unit_id
+                or observation.task_state_version != target.task_state_version
+                or observation.observation_ref != target.source_observation_ref
+                or observation.observation_version
+                != target.source_observation_version
+                or observation.input_binding_refs != target.input_binding_refs
+                or observation.superseded_by is not None
+            ):
+                raise ValueError("initial ToolCall verified target closure mismatch")
         return self
 
 
@@ -4788,12 +5519,107 @@ class FinalizeStateInvalidatedToolRecoveryV2Command(_StrictRuntimePrivateRecord)
         return self
 
 
+class SaveOrderObservationV2Command(_StrictRuntimePrivateRecord):
+    """Insert one exact get_order Observation and advance its Task graph once."""
+
+    owner_scope: TrustedOwnerScope
+    expected_task_record: TaskRecord
+    next_task_record: TaskRecord
+    expected_request_unit_record: RequestUnitRecord
+    next_request_unit_record: RequestUnitRecord
+    source_tool_call_record: ToolCallRecordV2
+    source_result_ref: UUID
+    source_result: GetOrderResult
+    observation_record: OrderObservation
+    trusted_acceptance_now: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "expected_task_record": TaskRecord,
+                "next_task_record": TaskRecord,
+                "expected_request_unit_record": RequestUnitRecord,
+                "next_request_unit_record": RequestUnitRecord,
+                "source_tool_call_record": ToolCallRecordV2,
+                "source_result": GetOrderResult,
+                "observation_record": OrderObservation,
+            },
+        )
+
+    @field_validator("trusted_acceptance_now")
+    @classmethod
+    def acceptance_time_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="trusted_acceptance_now")
+
+    @model_validator(mode="after")
+    def source_and_task_graph_are_exact(self) -> Self:
+        owner = self.owner_scope
+        task = self.expected_task_record
+        unit = self.expected_request_unit_record
+        source = self.source_tool_call_record
+        result = self.source_result
+        observation = self.observation_record
+        _task_and_request_unit_form_current_pair(
+            owner_scope=owner,
+            task_record=task,
+            request_unit_record=unit,
+        )
+        summary = result.order_summary
+        if (
+            source.status is not ToolCallStatus.SUCCEEDED
+            or source.effect is not ToolEffect.READ
+            or source.canonical_tool_name.value != "get_order"
+            or source.private_owner_scope_ref != owner.customer_id
+            or source.task_id != task.task_id
+            or source.request_unit_id != unit.request_unit_id
+            or source.validated_task_state_version != task.state_version
+            or source.finished_at is None
+            or source.finished_at > observation.recorded_at
+            or source.result_ref != self.source_result_ref
+            or result.outcome is not GetOrderOutcome.FOUND
+            or summary is None
+            or observation.source_tool != "get_order"
+            or observation.source_resource_ref != summary.order_number
+            or observation.source_version != result.source_version
+            or observation.normalized_type != "ORDER_SUMMARY"
+            or observation.normalized_value != summary
+            or observation.observed_at != source.finished_at
+            or observation.recorded_at != self.trusted_acceptance_now
+        ):
+            raise ValueError("Order Observation source graph mismatch")
+        if observation.observation_id in unit.observation_refs:
+            raise ValueError("Order Observation identity must be new")
+        _task_pair_advances_once(
+            expected_task_record=task,
+            next_task_record=self.next_task_record,
+            expected_request_unit_record=unit,
+            next_request_unit_record=self.next_request_unit_record,
+            result_state_version=task.state_version + 1,
+            changed_at=self.trusted_acceptance_now,
+            allowed_request_unit_delta_fields=frozenset({"observation_refs"}),
+        )
+        if (
+            self.next_task_record.status is not task.status
+            or self.next_request_unit_record.status is not unit.status
+            or self.next_request_unit_record.observation_refs
+            != (*unit.observation_refs, observation.observation_id)
+        ):
+            raise ValueError("Order Observation Task effect mismatch")
+        return self
+
+
 class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
     """Insert one fresh Shipment Observation after exact successful ToolCall."""
 
     owner_scope: TrustedOwnerScope
-    current_task_record: TaskRecord
-    current_request_unit_record: RequestUnitRecord
+    expected_task_record: TaskRecord
+    next_task_record: TaskRecord
+    expected_request_unit_record: RequestUnitRecord
+    next_request_unit_record: RequestUnitRecord
     source_tool_call_record: ToolCallRecordV2
     source_result_ref: UUID
     source_result: GetShipmentResult
@@ -4808,8 +5634,10 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
             value,
             model_fields={
                 "owner_scope": TrustedOwnerScope,
-                "current_task_record": TaskRecord,
-                "current_request_unit_record": RequestUnitRecord,
+                "expected_task_record": TaskRecord,
+                "next_task_record": TaskRecord,
+                "expected_request_unit_record": RequestUnitRecord,
+                "next_request_unit_record": RequestUnitRecord,
                 "source_tool_call_record": ToolCallRecordV2,
                 "source_result": GetShipmentResult,
                 "observation_record": ShipmentObservation,
@@ -4827,8 +5655,8 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
     @model_validator(mode="after")
     def source_graph_is_exact(self) -> Self:
         owner = self.owner_scope
-        task = self.current_task_record
-        unit = self.current_request_unit_record
+        task = self.expected_task_record
+        unit = self.expected_request_unit_record
         source = self.source_tool_call_record
         result = self.source_result
         observation = self.observation_record
@@ -4897,6 +5725,24 @@ class SaveShipmentObservationV2Command(_StrictRuntimePrivateRecord):
                 current=observation,
                 previous=previous,
             )
+        if observation.observation_id in unit.observation_refs:
+            raise ValueError("Shipment Observation identity must be new")
+        _task_pair_advances_once(
+            expected_task_record=task,
+            next_task_record=self.next_task_record,
+            expected_request_unit_record=unit,
+            next_request_unit_record=self.next_request_unit_record,
+            result_state_version=task.state_version + 1,
+            changed_at=self.trusted_acceptance_now,
+            allowed_request_unit_delta_fields=frozenset({"observation_refs"}),
+        )
+        if (
+            self.next_task_record.status is not task.status
+            or self.next_request_unit_record.status is not unit.status
+            or self.next_request_unit_record.observation_refs
+            != (*unit.observation_refs, observation.observation_id)
+        ):
+            raise ValueError("Shipment Observation Task effect mismatch")
         return self
 
 

@@ -17,7 +17,12 @@ from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2RunRootCommand,
     Cycle2ReadDispatchGrant,
+    Cycle2ContinuationProviderProposal,
+    Cycle2CurrentSessionTaskClosure,
+    Cycle2ExactRunEvidenceClosure,
     Cycle2WriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
@@ -30,6 +35,7 @@ from mini_agent.application.records import (
     EvalExecutionFailureRecord,
     EvalResultRecord,
     ExactRunEvidenceClosure,
+    FinalizeCycle2RunCommand,
     FinalizeRunCommand,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
     FinalizeCreatedToolRecoveryV2Command,
@@ -49,10 +55,12 @@ from mini_agent.application.records import (
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
+    SaveOrderObservationV2Command,
     SaveShipmentAssessmentV2Command,
     SaveShipmentObservationV2Command,
     SaveRequestUnderstandingV2NoTaskCommand,
     SaveObservationCommand,
+    StartCycle2RunCommand,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
@@ -61,14 +69,24 @@ from mini_agent.application.records import (
     SupersededRunReadClosure,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.memory import ContextManifest, OrderObservation
-from mini_agent.core.order import GetOrderQuery, GetOrderResult
+from mini_agent.core.memory import (
+    ContextManifest,
+    OrderObservation,
+    SearchOrdersObservationSafeProjection,
+)
+from mini_agent.core.order import (
+    GetOrderQuery,
+    GetOrderResult,
+    OrderSummaryProjection,
+)
 from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import (
     PresentationInput,
     PresentationPlan,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2InitialRequestUnderstandingOutputV2,
+    NextMove,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
 )
@@ -414,6 +432,58 @@ class Cycle2RuntimeRecordPort(Protocol):
     business-fact authority, or user-visible result authority.
     """
 
+    async def load_current_session_task_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        session_ref_hash: str,
+        trusted_now: datetime,
+    ) -> Cycle2CurrentSessionTaskClosure | None:
+        """Load the one exact current Task graph for this trusted session.
+
+        ``None`` means no current Task, absent, or unauthorized. Once an owner
+        root is selected, duplicate, dangling, mixed-owner, mixed-version, or
+        incomplete current graphs fail closed rather than degrading to absence.
+        """
+        ...
+
+    async def insert_cycle2_run_root_if_current(
+        self,
+        command: CreateCycle2RunRootCommand,
+    ) -> Cycle2WriteResult:
+        """Insert Conversation/Message/Run roots and current link atomically."""
+        ...
+
+    async def start_cycle2_run_if_created(
+        self,
+        command: StartCycle2RunCommand,
+    ) -> Cycle2WriteResult:
+        """Advance the exact CREATED Run to RUNNING in one CAS write."""
+        ...
+
+    async def create_cycle2_initial_task_graph_if_current(
+        self,
+        command: CreateCycle2InitialTaskGraphCommand,
+    ) -> Cycle2WriteResult:
+        """Create the reviewed initial Task graph against exact current roots."""
+        ...
+
+    async def finalize_cycle2_run_if_current(
+        self,
+        command: FinalizeCycle2RunCommand,
+    ) -> Cycle2WriteResult:
+        """Commit normal assistant result and exact terminal Run atomically."""
+        ...
+
+    async def load_cycle2_exact_run_evidence_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure | None:
+        """Load one expectation-free exact normal-turn evidence closure."""
+        ...
+
     async def load_continuation_input_binding_closure_for_owner(
         self,
         *,
@@ -647,6 +717,13 @@ class Cycle2RuntimeRecordPort(Protocol):
         """Commit one fresh exact-source Observation and current supersession."""
         ...
 
+    async def save_order_observation_if_current(
+        self,
+        command: SaveOrderObservationV2Command,
+    ) -> Cycle2WriteResult:
+        """Commit get_order Observation plus Task/RequestUnit v-to-v+1 atomically."""
+        ...
+
     async def load_shipment_assessment_closure_for_owner(
         self,
         *,
@@ -793,6 +870,39 @@ class RestartRecoveryPort(Protocol):
         projection may commit; Action RESULT_UNKNOWN reconciliation remains the
         Tool/Action owner path. Integrity failure raises instead of returning.
         """
+        ...
+
+
+@runtime_checkable
+class Cycle2RequestUnderstandingProvider(Protocol):
+    """Provider boundary for bounded Cycle 2 initial/continuation proposals."""
+
+    async def propose_cycle2_initial(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2InitialRequestUnderstandingOutputV2: ...
+
+    async def propose_cycle2_continuation(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2ContinuationProviderProposal: ...
+
+    async def propose_cycle2_search_followup(
+        self,
+        request: RequestUnderstandingInput,
+        safe_search_projection: SearchOrdersObservationSafeProjection,
+        current_task_state_version: int,
+    ) -> NextMove:
+        """Propose only a model-visible post-search next move; grants no target."""
+        ...
+
+    async def propose_cycle2_order_followup(
+        self,
+        request: RequestUnderstandingInput,
+        order_summary: OrderSummaryProjection,
+        current_task_state_version: int,
+    ) -> NextMove:
+        """Choose FINISH or get_shipment from safe Order facts; grants no target."""
         ...
 
 

@@ -10,6 +10,7 @@ import mini_agent.application.records as application_records_module
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
+    Cycle2RequestUnderstandingProvider,
     Cycle2RuntimeRecordPort,
     ExactRunEvidencePort,
     EvalResultPort,
@@ -35,6 +36,8 @@ from mini_agent.application.records import (
     Cycle2ReadDispatchGrant,
     Cycle2WriteResult,
     ContinuationInputBindingReadClosure,
+    CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2RunRootCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
@@ -44,6 +47,7 @@ from mini_agent.application.records import (
     EvalResultRecord,
     ExactRunEvidenceClosure,
     FinalizeRunCommand,
+    FinalizeCycle2RunCommand,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
     FinalizeCreatedToolRecoveryV2Command,
     FinalizeStateInvalidatedToolRecoveryV2Command,
@@ -63,10 +67,12 @@ from mini_agent.application.records import (
     RecoveryWriteResult,
     RestartRecoveryClosure,
     SaveRequestUnderstandingV2NoTaskCommand,
+    SaveOrderObservationV2Command,
     SaveObservationCommand,
     SaveShipmentAssessmentV2Command,
     SaveShipmentObservationV2Command,
     ShipmentAssessmentReadClosure,
+    StartCycle2RunCommand,
     SupersededRunReadClosure,
     ToolDispatchFenceWriteResult,
     TransitionRunCommand,
@@ -2134,6 +2140,12 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
     assert Cycle2RuntimeRecordPort is not RuntimeRecordPort
     for method_name in (
         "load_continuation_input_binding_closure_for_owner",
+        "load_current_session_task_for_owner",
+        "insert_cycle2_run_root_if_current",
+        "start_cycle2_run_if_created",
+        "create_cycle2_initial_task_graph_if_current",
+        "finalize_cycle2_run_if_current",
+        "load_cycle2_exact_run_evidence_for_owner",
         "apply_continuation_input_binding_if_current",
         "load_order_search_current_closure_for_owner",
         "apply_order_search_outcome_if_current",
@@ -2150,6 +2162,7 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         "finalize_budget_exhausted_tool_recovery_if_current",
         "finalize_state_invalidated_tool_recovery_if_current",
         "save_shipment_observation_if_current",
+        "save_order_observation_if_current",
         "load_shipment_assessment_closure_for_owner",
         "save_shipment_assessment_if_current",
         "load_superseded_run_closure_for_owner",
@@ -2158,6 +2171,38 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
         assert hasattr(Cycle2RuntimeRecordPort, method_name)
         assert not hasattr(RuntimeRecordPort, method_name)
 
+    _assert_signature(
+        Cycle2RuntimeRecordPort.insert_cycle2_run_root_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": CreateCycle2RunRootCommand,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.start_cycle2_run_if_created,
+        parameters=("command",),
+        type_hints={
+            "command": StartCycle2RunCommand,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.create_cycle2_initial_task_graph_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": CreateCycle2InitialTaskGraphCommand,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.finalize_cycle2_run_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": FinalizeCycle2RunCommand,
+            "return": Cycle2WriteResult,
+        },
+    )
     _assert_signature(
         Cycle2RuntimeRecordPort.apply_continuation_input_binding_if_current,
         parameters=("command",),
@@ -2242,6 +2287,14 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
             type_hints={"command": command_type, "return": Cycle2WriteResult},
         )
     _assert_signature(
+        Cycle2RuntimeRecordPort.save_order_observation_if_current,
+        parameters=("command",),
+        type_hints={
+            "command": SaveOrderObservationV2Command,
+            "return": Cycle2WriteResult,
+        },
+    )
+    _assert_signature(
         Cycle2RuntimeRecordPort.save_shipment_observation_if_current,
         parameters=("command",),
         type_hints={
@@ -2249,6 +2302,25 @@ def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
             "return": Cycle2WriteResult,
         },
     )
+
+
+def test_cycle2_request_understanding_provider_exposes_only_bounded_proposals() -> None:
+    assert Cycle2RequestUnderstandingProvider._is_protocol
+    for method_name in (
+        "propose_cycle2_initial",
+        "propose_cycle2_continuation",
+        "propose_cycle2_search_followup",
+        "propose_cycle2_order_followup",
+    ):
+        assert hasattr(Cycle2RequestUnderstandingProvider, method_name)
+    provider_source = inspect.getsource(Cycle2RequestUnderstandingProvider)
+    for forbidden_authority in (
+        "customer_id",
+        "owner_scope",
+        "verified_target_ref",
+        "source_version",
+    ):
+        assert forbidden_authority not in provider_source
     _assert_signature(
         Cycle2RuntimeRecordPort.save_shipment_assessment_if_current,
         parameters=("command",),

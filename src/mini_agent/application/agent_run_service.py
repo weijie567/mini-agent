@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,11 +18,14 @@ from mini_agent.application.deterministic_renderer import (
 from mini_agent.application.ports import (
     ConversationRecordPort,
     Cycle2RuntimeRecordPort,
+    Cycle2RequestUnderstandingProvider,
     ModelProviderV2,
     ModelVisibleToolsetArtifactPort,
     RuntimeRecordPort,
 )
 from mini_agent.application.read_tool_executor import (
+    Cycle2ReadToolExecutor,
+    Cycle2ReadToolExecution,
     ReadToolExecution,
     ReadToolExecutor,
     _is_canonical_get_order_source_version,
@@ -29,6 +33,7 @@ from mini_agent.application.read_tool_executor import (
 from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
+    ApplyContinuationInputBindingV2Command,
     ApplyTaskTransitionCommand,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
@@ -36,50 +41,89 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateInitialTaskGraphV2Command,
+    CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2RunRootCommand,
+    CreateToolCallV2Command,
     CreateRequestUnitCommand,
     CreateRunCommand,
     CreateRunTaskLinkCommand,
     CreateTaskCommand,
     FinalizeRunCommand,
+    FinalizeCycle2RunCommand,
     FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
+    InitialToolCallV2ReadClosure,
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
+    OrderCandidateSelectionReadClosure,
+    OrderSearchCurrentReadClosure,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
     SaveInputBindingCommand,
+    SaveOrderObservationV2Command,
     SaveRequestUnderstandingV2AcceptedCommand,
     SaveShipmentAssessmentV2Command,
+    SaveShipmentObservationV2Command,
+    StartCycle2RunCommand,
     ShipmentAssessmentReadClosure,
     TransitionRunCommand,
     TrustedOwnerScope,
     Cycle2WriteResult,
+    Cycle2CurrentSessionTaskClosure,
+    Cycle2ContinuationProviderProposal,
+    IssuedSelectedTargetRef,
+    build_order_candidate_selection_v2_command,
 )
 from mini_agent.application.run_result_mapper import (
     Cycle2MapperSignal,
     Cycle2ResultMapping,
     ImportedMapperReference,
+    MapperDisposition,
     RunResultMapper,
 )
 from mini_agent.core.control_gateway import (
+    Cycle2AcceptedBindingFacts,
+    Cycle2GatewayBudgetFacts,
+    Cycle2GatewayCandidate,
+    Cycle2GatewayLoadedClosure,
+    Cycle2GatewayProgressSnapshot,
+    Cycle2TargetObservationFacts,
+    Cycle2ToolProgressFact,
+    Cycle2VerifiedOrderTargetFacts,
+    build_cycle2_authorized_tool_command,
+    evaluate_cycle2_control_gateway,
     evaluate_control_gateway,
     resolve_validated_get_order_registration,
 )
+from mini_agent.core.common import thaw_json_value
 from mini_agent.core.memory import (
     ContextManifest,
+    ObservationVisibility,
     OrderObservation,
+    SearchObservationCandidateTargetBinding,
+    SearchOrdersObservation,
+    SearchOrdersObservationCandidate,
+    SearchOrdersObservationValue,
+    ShipmentObservation,
     TaskStateRefAndVersion,
     TokenCounts,
     VersionedRecordRef,
     project_search_orders_observation_safe,
 )
-from mini_agent.core.order import GetOrderOutcome
+from mini_agent.core.order import GetOrderOutcome, GetOrderResult
+from mini_agent.core.order_search import SearchOrdersResult
+from mini_agent.core.order_search import SearchOrdersOutcome
 from mini_agent.core.presentation import (
     CandidatePresentationPlan,
+    ClosingVariant,
+    OpeningVariant,
     PresentationInput,
+    PresentationField,
     PresentationPlan,
+    PresentationTone,
     PresentationPurpose,
     ShipmentPresentationPlan,
 )
@@ -88,14 +132,36 @@ from mini_agent.core.presentation_policy import (
     validate_presentation_plan,
 )
 from mini_agent.core.request_processing import (
-    InitialRequestRoutableTaskGraphDecisionV2,
+    Cycle2ContinuationBindingDecision,
+    Cycle2InitialRequestDecisionV2,
     InitialTaskIdentityAllocationV2,
+    InitialRequestRoutableTaskGraphDecisionV2,
+    RequestProcessingError,
     RequestUnderstandingV2Error,
+    build_cycle2_unique_auto_target_record,
+    prepare_cycle2_ordinal_selection,
+    reduce_cycle2_continuation_candidate,
     revalidate_next_move_v2,
+    route_cycle2_continuation_next_move,
+    route_cycle2_selected_next_move,
+    route_cycle2_unique_next_move,
+    route_cycle2_verified_target_next_move,
+    validate_and_reduce_cycle2_initial_request_v2,
     validate_and_reduce_initial_request_v2,
 )
-from mini_agent.core.request_understanding import RequestUnderstandingInput
+from mini_agent.core.request_understanding import (
+    ModelVisibleTaskSummary,
+    NextMove,
+    NextMoveKind,
+    RequestUnderstandingInput,
+)
 from mini_agent.core.task_state import (
+    ORDER_CANDIDATE_SET_TTL,
+    InputBindingV2,
+    OrderCandidateAutoTargetRecord,
+    OrderCandidateSelectionRecord,
+    OrderCandidateSetRecord,
+    OrderCandidateSetEntry,
     OrderCandidateSetOutcome,
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
@@ -103,23 +169,40 @@ from mini_agent.core.task_state import (
     TaskRecord,
     TaskStateTransition,
     TaskStatus,
+    compute_order_candidate_set_version,
 )
-from mini_agent.core.shipment import assess_shipment
+from mini_agent.core.shipment import (
+    SHIPMENT_FRESHNESS_TTL,
+    GetShipmentOutcome,
+    GetShipmentResult,
+    assess_shipment,
+)
 from mini_agent.core.tool_system import (
     AuthorizedToolCommand,
+    AuthorizedToolCommandV2,
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     RegistrySnapshot,
     ToolCallStatus,
     ToolResultOutcome,
+    ToolResult,
     Cycle2ToolName,
     ToolCallRecordV2,
+    ToolEffect,
+    build_cycle2_registry_snapshot,
+    validate_cycle2_registry_snapshot,
 )
 from mini_agent.core.trace import (
+    AgentOutcome,
     AgentRunRecord,
+    AgentRunRecordV2,
+    AgentRunStatusV2,
     AgentRunStatus,
     StopReason,
+    StopReasonV2,
     TraceEvent,
+    TraceEventV2,
     TraceEventType,
 )
 
@@ -188,6 +271,44 @@ def _project_request_unit(
     }
     values.update(updates)
     return RequestUnitRecord(**values)
+
+
+def _project_cycle2_run(
+    record: AgentRunRecordV2,
+    **updates: object,
+) -> AgentRunRecordV2:
+    values = {
+        field_name: getattr(record, field_name)
+        for field_name in AgentRunRecordV2.model_fields
+    }
+    values.update(updates)
+    return AgentRunRecordV2(**values)
+
+
+def _cycle2_order_presentation_plan() -> PresentationPlan:
+    return PresentationPlan(
+        template_id="ORDER_STATUS_SUMMARY_V1",
+        tone=PresentationTone.NEUTRAL,
+        opening_variant=OpeningVariant.DIRECT,
+        field_order=tuple(PresentationField),
+        closing_variant=ClosingVariant.NONE,
+    )
+
+
+def _cycle2_candidate_presentation_plan() -> CandidatePresentationPlan:
+    return CandidatePresentationPlan(
+        tone=PresentationTone.NEUTRAL,
+        opening_variant=OpeningVariant.DIRECT,
+        closing_variant=ClosingVariant.NONE,
+    )
+
+
+def _cycle2_shipment_presentation_plan() -> ShipmentPresentationPlan:
+    return ShipmentPresentationPlan(
+        tone=PresentationTone.NEUTRAL,
+        opening_variant=OpeningVariant.DIRECT,
+        closing_variant=ClosingVariant.NONE,
+    )
 
 
 class _RunFailureState:
@@ -1295,7 +1416,95 @@ class Cycle2RuntimeStep:
 
     mapping: Cycle2ResultMapping | None = None
     outbound_result: AgentRunResult | None = None
-    verified_target_ref: str | None = None
+    verified_target_ref: UUID | None = None
+
+
+def _map_cycle2_typed_tool_result(
+    execution: Cycle2ReadToolExecution,
+    *,
+    canonical_tool_name: str,
+    result_type: (
+        type[SearchOrdersResult]
+        | type[GetOrderResult]
+        | type[GetShipmentResult]
+    ),
+) -> SearchOrdersResult | GetOrderResult | GetShipmentResult:
+    """Map the same-attempt JSON envelope to one exact typed business result."""
+
+    if (
+        type(execution) is not Cycle2ReadToolExecution
+        or type(execution.tool_result) is not ToolResult
+        or execution.tool_result.canonical_tool_name != canonical_tool_name
+        or execution.tool_result.payload is None
+        or execution.tool_result.outcome
+        in {
+            ToolResultOutcome.TIMEOUT,
+            ToolResultOutcome.INTERRUPTED,
+            ToolResultOutcome.RESULT_UNKNOWN,
+        }
+    ):
+        raise AgentRunExecutionError("exact terminal typed ToolResult required")
+    try:
+        payload = thaw_json_value(execution.tool_result.payload)
+        if type(payload) is not dict or set(payload) != set(result_type.model_fields):
+            raise ValueError("typed payload field set mismatch")
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        typed = result_type.model_validate_json(encoded, strict=True)
+        canonical = typed.model_dump(mode="json", round_trip=True)
+    except (TypeError, ValueError) as error:
+        raise AgentRunExecutionError(
+            "Cycle 2 ToolResult payload failed exact typed mapping"
+        ) from error
+    if canonical != payload:
+        raise AgentRunExecutionError(
+            "Cycle 2 ToolResult payload failed canonical round trip"
+        )
+    return typed
+
+
+def map_cycle2_search_orders_tool_result(
+    execution: Cycle2ReadToolExecution,
+) -> SearchOrdersResult:
+    result = _map_cycle2_typed_tool_result(
+        execution,
+        canonical_tool_name="search_orders",
+        result_type=SearchOrdersResult,
+    )
+    if type(result) is not SearchOrdersResult:
+        raise AgentRunExecutionError("search_orders typed result mismatch")
+    return result
+
+
+def map_cycle2_get_order_tool_result(
+    execution: Cycle2ReadToolExecution,
+) -> GetOrderResult:
+    result = _map_cycle2_typed_tool_result(
+        execution,
+        canonical_tool_name="get_order",
+        result_type=GetOrderResult,
+    )
+    if type(result) is not GetOrderResult:
+        raise AgentRunExecutionError("get_order typed result mismatch")
+    return result
+
+
+def map_cycle2_get_shipment_tool_result(
+    execution: Cycle2ReadToolExecution,
+) -> GetShipmentResult:
+    result = _map_cycle2_typed_tool_result(
+        execution,
+        canonical_tool_name="get_shipment",
+        result_type=GetShipmentResult,
+    )
+    if type(result) is not GetShipmentResult:
+        raise AgentRunExecutionError("get_shipment typed result mismatch")
+    return result
 
 
 class Cycle2AgentRunService:
@@ -1390,12 +1599,12 @@ class Cycle2AgentRunService:
             )
         if outcome is not OrderCandidateSetOutcome.UNIQUE:
             raise AgentRunExecutionError("unsupported search outcome aggregate")
-        target = command.resolved_owner_scoped_order_target_ref
-        if type(target) is not str or not target:
+        target = command.auto_target_record
+        if type(target) is not OrderCandidateAutoTargetRecord:
             raise AgentRunExecutionError(
-                "UNIQUE search lacks reviewed private target"
+                "UNIQUE search lacks reviewed durable auto target"
             )
-        return Cycle2RuntimeStep(verified_target_ref=target)
+        return Cycle2RuntimeStep(verified_target_ref=target.verified_target_ref)
 
     async def apply_ordinal_selection(
         self,
@@ -1418,7 +1627,7 @@ class Cycle2AgentRunService:
                 signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
             )
         return Cycle2RuntimeStep(
-            verified_target_ref=str(command.selected_target_ref)
+            verified_target_ref=command.selected_target_ref
         )
 
     def complete_order_only(
@@ -1594,3 +1803,1948 @@ class Cycle2AgentRunService:
             Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY,
         )
         return self._result_mapper.map_cycle2(signal)
+
+
+@dataclass(slots=True)
+class _Cycle2Turn:
+    owner_scope: TrustedOwnerScope
+    conversation: ConversationRecord
+    user_message: MessageRecord
+    running_run: AgentRunRecordV2
+    active_link: RunTaskLinkRecordV2 | None
+    request_input: RequestUnderstandingInput
+    tool_progress: list[Cycle2ToolProgressFact]
+
+
+class Cycle2AgentRunHandler:
+    """Run one real Cycle 2 turn from trusted input through exact v2 Ports."""
+
+    def __init__(
+        self,
+        *,
+        runtime_record_port: Cycle2RuntimeRecordPort,
+        context_record_port: RuntimeRecordPort,
+        request_understanding_provider: Cycle2RequestUnderstandingProvider,
+        read_tool_executor: Cycle2ReadToolExecutor,
+        deterministic_renderer: DeterministicRenderer,
+        clock: Callable[[], datetime],
+        uuid_factory: Callable[[], UUID],
+        provider_lane: str,
+        redaction_policy_version: str,
+        gateway_run_budget_ms: int = 30_000,
+    ) -> None:
+        if (
+            type(provider_lane) is not str
+            or not provider_lane
+            or type(redaction_policy_version) is not str
+            or not redaction_policy_version
+            or type(gateway_run_budget_ms) is not int
+            or gateway_run_budget_ms <= 0
+        ):
+            raise ValueError("invalid Cycle 2 handler configuration")
+        self._runtime_record_port = runtime_record_port
+        self._context_record_port = context_record_port
+        self._request_understanding_provider = request_understanding_provider
+        self._read_tool_executor = read_tool_executor
+        self._deterministic_renderer = deterministic_renderer
+        self._clock = clock
+        self._uuid_factory = uuid_factory
+        self._provider_lane = provider_lane
+        self._redaction_policy_version = redaction_policy_version
+        self._gateway_run_budget_ms = gateway_run_budget_ms
+        self._registry_snapshot = validate_cycle2_registry_snapshot(
+            build_cycle2_registry_snapshot()
+        )
+        self._steps = Cycle2AgentRunService(
+            runtime_record_port=runtime_record_port,
+            deterministic_renderer=deterministic_renderer,
+            uuid_factory=uuid_factory,
+        )
+
+    async def handle(self, command: AgentRunCommand) -> AgentRunResult:
+        if type(command) is not AgentRunCommand:
+            raise AgentRunExecutionError("canonical AgentRunCommand required")
+        owner_scope = TrustedOwnerScope.from_customer_context(
+            command.customer_context
+        )
+        trusted_now = self._clock()
+        current_session = await (
+            self._runtime_record_port.load_current_session_task_for_owner(
+                owner_scope=owner_scope,
+                session_ref_hash=command.customer_context.session_ref_hash,
+                trusted_now=trusted_now,
+            )
+        )
+        conversation = (
+            ConversationRecord(
+                schema_version=_CONVERSATION_SCHEMA_VERSION,
+                conversation_id=self._uuid_factory(),
+                owner_customer_id=owner_scope.customer_id,
+                created_at=trusted_now,
+            )
+            if current_session is None
+            else current_session.conversation_record
+        )
+        user_message = MessageRecord(
+            schema_version=_MESSAGE_SCHEMA_VERSION,
+            message_id=self._uuid_factory(),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.USER,
+            content=command.message,
+            received_at=trusted_now,
+        )
+        created_run = AgentRunRecordV2(
+            run_id=self._uuid_factory(),
+            conversation_id=conversation.conversation_id,
+            status=AgentRunStatusV2.CREATED,
+            provider_lane=self._provider_lane,
+            started_at=trusted_now,
+        )
+        active_link = (
+            None
+            if current_session is None
+            else RunTaskLinkRecordV2(
+                run_id=created_run.run_id,
+                task_id=current_session.current_task_record.task_id,
+                base_task_state_version=(
+                    current_session.current_task_record.state_version
+                ),
+            )
+        )
+        root = CreateCycle2RunRootCommand(
+            owner_scope=owner_scope,
+            session_ref_hash=command.customer_context.session_ref_hash,
+            current_session_closure=current_session,
+            conversation_record=conversation,
+            user_message_record=user_message,
+            created_run_record=created_run,
+            active_run_task_link_record=active_link,
+        )
+        if (
+            await self._runtime_record_port.insert_cycle2_run_root_if_current(
+                root
+            )
+            is not Cycle2WriteResult.APPLIED
+        ):
+            raise AgentRunExecutionError("Cycle 2 Run root conflict")
+        running_run = _project_cycle2_run(
+            created_run,
+            status=AgentRunStatusV2.RUNNING,
+        )
+        if (
+            await self._runtime_record_port.start_cycle2_run_if_created(
+                StartCycle2RunCommand(
+                    owner_scope=owner_scope,
+                    expected_created_run_record=created_run,
+                    next_running_run_record=running_run,
+                    expected_active_run_task_link_record=active_link,
+                )
+            )
+            is not Cycle2WriteResult.APPLIED
+        ):
+            raise AgentRunExecutionError("Cycle 2 Run start conflict")
+
+        request_input = self._request_input(
+            run=running_run,
+            message=user_message,
+            current_session=current_session,
+        )
+        turn = _Cycle2Turn(
+            owner_scope=owner_scope,
+            conversation=conversation,
+            user_message=user_message,
+            running_run=running_run,
+            active_link=active_link,
+            request_input=request_input,
+            tool_progress=[],
+        )
+        if current_session is None:
+            return await self._handle_initial_turn(
+                command=command,
+                turn=turn,
+            )
+        return await self._handle_continuation_turn(
+            command=command,
+            turn=turn,
+            current_session=current_session,
+        )
+
+    def _request_input(
+        self,
+        *,
+        run: AgentRunRecordV2,
+        message: MessageRecord,
+        current_session: object | None,
+    ) -> RequestUnderstandingInput:
+        if current_session is None:
+            focused = None
+            pending_question = None
+        else:
+            task = current_session.current_task_record
+            unit = current_session.current_request_unit_record
+            focused = ModelVisibleTaskSummary(
+                task_alias="current-task",
+                request_unit_alias="current-request",
+                goal_summary=unit.goal_text,
+                status=task.status.value,
+                open_questions=unit.open_questions,
+            )
+            pending_question = (
+                unit.open_questions[0] if unit.open_questions else None
+            )
+        return RequestUnderstandingInput(
+            schema_version="e2e01-thin-v1",
+            run_id=run.run_id,
+            message_ref=message.message_id,
+            original_query=message.content,
+            pending_question=pending_question,
+            active_task_summaries=(() if focused is None else (focused,)),
+            focused_task_summary=focused,
+            output_constraints=(
+                "Return one bounded Cycle 2 proposal for the current message.",
+                "Never supply trusted owner, target, record identity, or version.",
+            ),
+            provider_visible_tool_specs=(
+                self._registry_snapshot.provider_visible_toolset
+            ),
+            model_visible_toolset_hash=(
+                self._registry_snapshot.model_visible_toolset_hash
+            ),
+        )
+
+    async def _handle_initial_turn(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+    ) -> AgentRunResult:
+        try:
+            output = await (
+                self._request_understanding_provider.propose_cycle2_initial(
+                    turn.request_input
+                )
+            )
+            reduced_at = self._clock()
+            decision = validate_and_reduce_cycle2_initial_request_v2(
+                request_input=turn.request_input,
+                output=output,
+                authoritative_messages={
+                    turn.user_message.message_id: turn.user_message.content
+                },
+                customer_context=command.customer_context,
+                identity_allocation=InitialTaskIdentityAllocationV2(
+                    candidate_ref=output.task_delta_candidates[0].candidate_id,
+                    accepted_delta_id=self._uuid_factory(),
+                    task_id=self._uuid_factory(),
+                    request_unit_id=self._uuid_factory(),
+                    binding_id=self._uuid_factory(),
+                ),
+                next_move_candidate_ref=self._uuid_factory(),
+                now=reduced_at,
+            )
+        except RequestUnderstandingCandidateInvalidError:
+            return await self._finish_fixed_phase1(
+                turn=turn,
+                stop_reason_v1=StopReason.INPUT_INVALID,
+                stop_reason_v2=StopReasonV2.INPUT_INVALID,
+            )
+        except ProviderProtocolError:
+            return await self._finish_fixed_phase1(
+                turn=turn,
+                stop_reason_v1=StopReason.PROVIDER_PROTOCOL_ERROR,
+                stop_reason_v2=StopReasonV2.PROVIDER_PROTOCOL_ERROR,
+            )
+        except (RequestProcessingError, RequestUnderstandingV2Error):
+            return await self._finish_fixed_phase1(
+                turn=turn,
+                stop_reason_v1=StopReason.INPUT_INVALID,
+                stop_reason_v2=StopReasonV2.INPUT_INVALID,
+            )
+        return await self._commit_initial_and_search(
+            command=command,
+            turn=turn,
+            decision=decision,
+            committed_at=reduced_at,
+        )
+
+    async def _commit_initial_and_search(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        decision: Cycle2InitialRequestDecisionV2,
+        committed_at: datetime,
+    ) -> AgentRunResult:
+        graph = decision.task_graph
+        conversation_link = ConversationTaskLinkRecord(
+            schema_version=_CONVERSATION_TASK_LINK_SCHEMA_VERSION,
+            conversation_id=turn.conversation.conversation_id,
+            task_id=graph.task.task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=committed_at,
+        )
+        active_link = RunTaskLinkRecordV2(
+            run_id=turn.running_run.run_id,
+            task_id=graph.task.task_id,
+        )
+        trace_records = (
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.MESSAGE_ACCEPTED,
+                occurred_at=turn.running_run.started_at,
+                run_id=turn.running_run.run_id,
+                message_ref=turn.user_message.message_id,
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=turn.running_run.started_at,
+                run_id=turn.running_run.run_id,
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+                occurred_at=committed_at,
+                run_id=turn.running_run.run_id,
+                message_ref=turn.user_message.message_id,
+                model_call_purpose="REQUEST_UNDERSTANDING",
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.TASK_DELTA_ACCEPTED,
+                occurred_at=committed_at,
+                run_id=turn.running_run.run_id,
+                message_ref=turn.user_message.message_id,
+                accepted_delta_ref=graph.accepted_delta.accepted_delta_id,
+                task_id=graph.task.task_id,
+                request_unit_id=graph.request_unit.request_unit_id,
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.INPUT_BINDING_RECORDED,
+                occurred_at=committed_at,
+                run_id=turn.running_run.run_id,
+                task_id=graph.task.task_id,
+                request_unit_id=graph.request_unit.request_unit_id,
+                input_binding_ref=graph.input_binding.binding_id,
+            ),
+        )
+        command_record = CreateCycle2InitialTaskGraphCommand(
+            owner_scope=turn.owner_scope,
+            expected_conversation_record=turn.conversation,
+            expected_user_message_record=turn.user_message,
+            expected_running_run_record=turn.running_run,
+            reducer_decision=decision,
+            conversation_task_link_record=conversation_link,
+            active_run_task_link_record=active_link,
+            ordinary_trace_records=trace_records,
+        )
+        if (
+            await self._runtime_record_port.create_cycle2_initial_task_graph_if_current(
+                command_record
+            )
+            is not Cycle2WriteResult.APPLIED
+        ):
+            raise AgentRunExecutionError("initial Cycle 2 Task graph conflict")
+        turn.active_link = active_link
+        return await self._search_orders(
+            command=command,
+            turn=turn,
+            task=graph.task,
+            request_unit=graph.request_unit,
+            input_bindings=(graph.input_binding,),
+            candidate_factory=lambda _closure, model_call_id, manifest_id: Cycle2GatewayCandidate(
+                run_id=turn.running_run.run_id,
+                task_id=graph.task.task_id,
+                request_unit_id=graph.request_unit.request_unit_id,
+                model_call_id=model_call_id,
+                context_manifest_id=manifest_id,
+                requested_provider_tool_name=(
+                    decision.next_move_candidate.requested_tool_name
+                ),
+                candidate_arguments=decision.next_move_candidate.arguments,
+                proposed_base_task_state_version=(
+                    decision.proposed_base_task_state_version
+                ),
+                validated_task_state_version=(
+                    decision.validated_task_state_version
+                ),
+                argument_binding_refs=decision.argument_binding_refs,
+            ),
+        )
+
+    def _step_for_signal(
+        self,
+        *,
+        run_id: UUID,
+        signal: Cycle2MapperSignal,
+    ) -> Cycle2RuntimeStep:
+        mapping = self._steps.result_mapper.map_cycle2(signal)
+        return Cycle2RuntimeStep(
+            mapping=mapping,
+            outbound_result=self._deterministic_renderer.map_cycle2_result(
+                run_id=run_id,
+                mapping=mapping,
+            ),
+        )
+
+    async def _search_orders(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+        input_bindings: tuple[InputBindingV2, ...],
+        candidate_factory: Callable[
+            [InitialToolCallV2ReadClosure, UUID, UUID],
+            Cycle2GatewayCandidate,
+        ],
+    ) -> AgentRunResult:
+        dispatched = await self._execute_tool(
+            command=command,
+            turn=turn,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            candidate_factory=candidate_factory,
+        )
+        if type(dispatched) is AgentRunResult:
+            return await self._finalize(
+                turn=turn,
+                result=dispatched,
+                stop_reason=StopReasonV2.GATE_REJECTED,
+                task=task,
+                request_unit=request_unit,
+            )
+        if (
+            type(dispatched) is not Cycle2ReadToolExecution
+            or dispatched.tool_result is None
+        ):
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        result = map_cycle2_search_orders_tool_result(dispatched)
+        if result.outcome is SearchOrdersOutcome.NO_MATCH:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.SEARCH_NO_MATCH,
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        if result.outcome is SearchOrdersOutcome.SYSTEM_FAILURE:
+            signal = (
+                Cycle2MapperSignal.ORDER_SEARCH_UNAVAILABLE
+                if getattr(result.failure_code, "value", None)
+                == "ORDER_SEARCH_UNAVAILABLE"
+                else Cycle2MapperSignal.RETRY_EXHAUSTED
+            )
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=signal,
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        return await self._apply_successful_search(
+            command=command,
+            turn=turn,
+            task=task,
+            request_unit=request_unit,
+            input_bindings=input_bindings,
+            execution=dispatched,
+            result=result,
+        )
+
+    async def _apply_successful_search(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+        input_bindings: tuple[InputBindingV2, ...],
+        execution: Cycle2ReadToolExecution,
+        result: SearchOrdersResult,
+    ) -> AgentRunResult:
+        terminal = execution.terminal_tool_call
+        if (
+            terminal.status is not ToolCallStatus.SUCCEEDED
+            or terminal.finished_at is None
+            or terminal.result_ref is None
+            or result.observed_at is None
+            or result.snapshot_resource_ref is None
+            or result.snapshot_source_version is None
+        ):
+            raise AgentRunExecutionError("successful search source is incomplete")
+        recorded_at = max(
+            self._clock(),
+            terminal.finished_at,
+            result.observed_at,
+        )
+        candidate_refs = tuple(self._uuid_factory() for _ in result.candidates)
+        observation = SearchOrdersObservation(
+            observation_id=self._uuid_factory(),
+            private_owner_scope=turn.owner_scope.customer_id,
+            source_tool="search_orders",
+            source_tool_call_id=terminal.tool_call_id,
+            source_resource_ref=result.snapshot_resource_ref,
+            source_version=result.snapshot_source_version,
+            candidate_target_bindings=tuple(
+                SearchObservationCandidateTargetBinding(
+                    observation_candidate_ref=candidate_ref,
+                    owner_scoped_order_ref=candidate.owner_scoped_order_ref,
+                    candidate_source_version=(
+                        candidate.candidate_source_version
+                    ),
+                )
+                for candidate_ref, candidate in zip(
+                    candidate_refs,
+                    result.candidates,
+                    strict=True,
+                )
+            ),
+            normalized_type="ORDER_SEARCH_CANDIDATES",
+            normalized_value=SearchOrdersObservationValue(
+                ordered_candidates=tuple(
+                    SearchOrdersObservationCandidate(
+                        observation_candidate_ref=candidate_ref,
+                        candidate_source_version=(
+                            candidate.candidate_source_version
+                        ),
+                        public_summary=candidate.public_summary,
+                    )
+                    for candidate_ref, candidate in zip(
+                        candidate_refs,
+                        result.candidates,
+                        strict=True,
+                    )
+                ),
+                truncated=result.truncated,
+            ),
+            observed_at=result.observed_at,
+            recorded_at=recorded_at,
+            valid_until=recorded_at + ORDER_CANDIDATE_SET_TTL,
+        )
+        search_read = await (
+            self._runtime_record_port.load_order_search_current_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                conversation_id=turn.conversation.conversation_id,
+                run_id=turn.running_run.run_id,
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                trusted_read_at=recorded_at,
+            )
+        )
+        if type(search_read) is not OrderSearchCurrentReadClosure:
+            raise AgentRunExecutionError("search current closure unavailable")
+        outcome = OrderCandidateSetOutcome(result.outcome.value)
+        entries = tuple(
+            OrderCandidateSetEntry(
+                ordinal=ordinal,
+                observation_candidate_ref=candidate_ref,
+                candidate_source_version=candidate.candidate_source_version,
+            )
+            for ordinal, (candidate_ref, candidate) in enumerate(
+                zip(candidate_refs, result.candidates, strict=True),
+                start=1,
+            )
+        )
+        candidate_set_id = self._uuid_factory()
+        next_version = task.state_version + 1
+        previous_set = search_read.current_candidate_set_record
+        candidate_set_fields = {
+            "candidate_set_id": candidate_set_id,
+            "private_owner_scope_ref": turn.owner_scope.customer_id,
+            "conversation_id": turn.conversation.conversation_id,
+            "task_id": task.task_id,
+            "request_unit_id": request_unit.request_unit_id,
+            "outcome": outcome,
+            "base_task_state_version": task.state_version,
+            "result_task_state_version": next_version,
+            "selection_expected_task_state_version": (
+                next_version
+                if outcome is OrderCandidateSetOutcome.MULTIPLE
+                else None
+            ),
+            "query_binding_refs": terminal.argument_binding_refs,
+            "source_tool_call_id": terminal.tool_call_id,
+            "search_observation_ref": observation.observation_id,
+            "search_observation_record_schema_version": (
+                observation.record_schema_version
+            ),
+            "search_observation_source_version": observation.source_version,
+            "ordered_candidates": entries,
+            "created_at": recorded_at,
+            "valid_until": observation.valid_until,
+            "supersedes_candidate_set_ref": (
+                None if previous_set is None else previous_set.candidate_set_id
+            ),
+        }
+        candidate_set = OrderCandidateSetRecord(
+            **candidate_set_fields,
+            candidate_set_version=compute_order_candidate_set_version(
+                **candidate_set_fields
+            ),
+        )
+        waiting = outcome is OrderCandidateSetOutcome.MULTIPLE
+        next_status = TaskStatus.WAITING_USER if waiting else TaskStatus.ACTIVE
+        next_task = _project_task(
+            task,
+            status=next_status,
+            state_version=next_version,
+            updated_at=recorded_at,
+        )
+        next_unit = _project_request_unit(
+            request_unit,
+            status=next_status,
+            state_version=next_version,
+            updated_at=recorded_at,
+            open_questions=(
+                ("请选择候选订单序号。",) if waiting else ()
+            ),
+            observation_refs=(
+                *request_unit.observation_refs,
+                observation.observation_id,
+            ),
+        )
+        if outcome is OrderCandidateSetOutcome.UNIQUE:
+            resolved_candidate = result.candidates[0]
+            auto_target = build_cycle2_unique_auto_target_record(
+                customer_context=command.customer_context,
+                current_conversation_id=turn.conversation.conversation_id,
+                current_task=task,
+                current_request_unit=request_unit,
+                current_input_bindings=input_bindings,
+                candidate_set=candidate_set,
+                search_observation=observation,
+                source_tool_argument_binding_refs=(
+                    terminal.argument_binding_refs
+                ),
+                resolved_owner_scoped_order_target_ref=(
+                    resolved_candidate.owner_scoped_order_ref
+                ),
+                resolved_order_id=resolved_candidate.order_number,
+                verified_target_ref=self._uuid_factory(),
+                current_auto_targets=(
+                    search_read.current_auto_target_records
+                ),
+                trusted_now=recorded_at,
+            )
+        else:
+            resolved_candidate = None
+            auto_target = None
+        aggregate = ApplyOrderSearchOutcomeV2Command(
+            owner_scope=turn.owner_scope,
+            loaded_read_closure=search_read,
+            trusted_conversation_record=turn.conversation,
+            source_run_record=turn.running_run,
+            current_query_binding=search_read.current_query_binding,
+            expected_task_record=task,
+            next_task_record=next_task,
+            expected_request_unit_record=request_unit,
+            next_request_unit_record=next_unit,
+            source_tool_call_record=terminal,
+            search_observation_record=observation,
+            candidate_set_record=candidate_set,
+            previous_candidate_set_record=previous_set,
+            current_query_binding_refs=terminal.argument_binding_refs,
+            pending_candidate_set_ref=(candidate_set_id if waiting else None),
+            resolved_owner_scoped_order_target_ref=(
+                None
+                if resolved_candidate is None
+                else resolved_candidate.owner_scoped_order_ref
+            ),
+            resolved_order_id=(
+                None
+                if resolved_candidate is None
+                else resolved_candidate.order_number
+            ),
+            auto_target_record=auto_target,
+        )
+        applied = await self._steps.apply_search_outcome(
+            run_id=turn.running_run.run_id,
+            command=aggregate,
+            candidate_plan=(
+                _cycle2_candidate_presentation_plan() if waiting else None
+            ),
+        )
+        if applied.outbound_result is not None:
+            search_state_committed = (
+                applied.mapping is not None
+                and applied.mapping.stop_reason
+                is StopReasonV2.CANDIDATE_CLARIFICATION_REQUIRED
+            )
+            return await self._finalize_mapping(
+                turn=turn,
+                step=applied,
+                task=next_task if search_state_committed else task,
+                request_unit=(
+                    next_unit if search_state_committed else request_unit
+                ),
+            )
+        if (
+            type(auto_target) is not OrderCandidateAutoTargetRecord
+            or resolved_candidate is None
+            or applied.verified_target_ref != auto_target.verified_target_ref
+        ):
+            raise AgentRunExecutionError("UNIQUE target was not committed")
+        next_move = await (
+            self._request_understanding_provider.propose_cycle2_search_followup(
+                turn.request_input,
+                project_search_orders_observation_safe(observation),
+                next_task.state_version,
+            )
+        )
+        return await self._get_order(
+            command=command,
+            turn=turn,
+            task=next_task,
+            request_unit=next_unit,
+            candidate_factory=lambda closure, model_call_id, manifest_id: (
+                self._route_unique_candidate(
+                    command=command,
+                    turn=turn,
+                    closure=closure,
+                    next_move=next_move,
+                    candidate_set=candidate_set,
+                    observation=observation,
+                    auto_target=auto_target,
+                    resolved_owner_scoped_order_target_ref=(
+                        resolved_candidate.owner_scoped_order_ref
+                    ),
+                    previous_candidate_set=previous_set,
+                    model_call_id=model_call_id,
+                    manifest_id=manifest_id,
+                )
+            ),
+        )
+
+    def _route_unique_candidate(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        closure: InitialToolCallV2ReadClosure,
+        next_move: NextMove,
+        candidate_set: OrderCandidateSetRecord,
+        observation: SearchOrdersObservation,
+        auto_target: OrderCandidateAutoTargetRecord,
+        resolved_owner_scoped_order_target_ref: str,
+        previous_candidate_set: OrderCandidateSetRecord | None,
+        model_call_id: UUID,
+        manifest_id: UUID,
+    ) -> Cycle2GatewayCandidate:
+        targets = tuple(
+            target
+            for target in closure.current_verified_order_targets
+            if target.verified_target_ref == auto_target.verified_target_ref
+        )
+        if len(targets) != 1:
+            raise AgentRunExecutionError("UNIQUE target facts unavailable")
+        return route_cycle2_unique_next_move(
+            request_input=turn.request_input,
+            next_move=next_move,
+            customer_context=command.customer_context,
+            current_conversation_id=turn.conversation.conversation_id,
+            current_task=closure.current_task_record,
+            current_request_unit=closure.current_request_unit_record,
+            current_input_bindings=closure.current_input_binding_records,
+            candidate_set=candidate_set,
+            search_observation=observation,
+            auto_target_record=auto_target,
+            resolved_owner_scoped_order_target_ref=(
+                resolved_owner_scoped_order_target_ref
+            ),
+            current_auto_targets=(auto_target,),
+            superseded_candidate_set_refs=(
+                ()
+                if previous_candidate_set is None
+                else (previous_candidate_set.candidate_set_id,)
+            ),
+            superseded_verified_target_refs=(
+                ()
+                if auto_target.supersedes_verified_target_ref is None
+                else (auto_target.supersedes_verified_target_ref,)
+            ),
+            verified_target=targets[0],
+            model_call_id=model_call_id,
+            context_manifest_id=manifest_id,
+            trusted_now=closure.trusted_read_at,
+        )
+
+    async def _get_order(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+        candidate_factory: Callable[
+            [InitialToolCallV2ReadClosure, UUID, UUID],
+            Cycle2GatewayCandidate,
+        ],
+    ) -> AgentRunResult:
+        dispatched = await self._execute_tool(
+            command=command,
+            turn=turn,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            candidate_factory=candidate_factory,
+        )
+        if type(dispatched) is AgentRunResult:
+            return await self._finalize(
+                turn=turn,
+                result=dispatched,
+                stop_reason=StopReasonV2.GATE_REJECTED,
+                task=task,
+                request_unit=request_unit,
+            )
+        if (
+            type(dispatched) is not Cycle2ReadToolExecution
+            or dispatched.tool_result is None
+        ):
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        result = map_cycle2_get_order_tool_result(dispatched)
+        if result.outcome is GetOrderOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE:
+            return await self._finish_fixed_phase1(
+                turn=turn,
+                stop_reason_v1=StopReason.NOT_FOUND_OR_NOT_ACCESSIBLE,
+                stop_reason_v2=StopReasonV2.NOT_FOUND_OR_NOT_ACCESSIBLE,
+                task=task,
+                request_unit=request_unit,
+            )
+        if result.outcome is GetOrderOutcome.SYSTEM_FAILURE:
+            self._steps.map_imported_phase1(
+                ImportedMapperReference.ORDER_SERVICE_UNAVAILABLE
+            )
+            return await self._finish_fixed_phase1(
+                turn=turn,
+                stop_reason_v1=StopReason.ORDER_SERVICE_UNAVAILABLE,
+                stop_reason_v2=StopReasonV2.ORDER_SERVICE_UNAVAILABLE,
+                task=task,
+                request_unit=request_unit,
+            )
+        terminal = dispatched.terminal_tool_call
+        summary = result.order_summary
+        if (
+            terminal.status is not ToolCallStatus.SUCCEEDED
+            or terminal.finished_at is None
+            or terminal.result_ref is None
+            or summary is None
+            or result.source_version is None
+        ):
+            raise AgentRunExecutionError("successful get_order source is incomplete")
+        recorded_at = max(self._clock(), terminal.finished_at)
+        observation = OrderObservation(
+            observation_id=self._uuid_factory(),
+            source_tool="get_order",
+            source_resource_ref=summary.order_number,
+            source_version=result.source_version,
+            normalized_type="ORDER_SUMMARY",
+            normalized_value=summary,
+            observed_at=terminal.finished_at,
+            recorded_at=recorded_at,
+            visibility=ObservationVisibility.MODEL_VISIBLE,
+        )
+        next_task = _project_task(
+            task,
+            state_version=task.state_version + 1,
+            updated_at=recorded_at,
+        )
+        next_unit = _project_request_unit(
+            request_unit,
+            state_version=request_unit.state_version + 1,
+            updated_at=recorded_at,
+            observation_refs=(
+                *request_unit.observation_refs,
+                observation.observation_id,
+            ),
+        )
+        written = await self._runtime_record_port.save_order_observation_if_current(
+            SaveOrderObservationV2Command(
+                owner_scope=turn.owner_scope,
+                expected_task_record=task,
+                next_task_record=next_task,
+                expected_request_unit_record=request_unit,
+                next_request_unit_record=next_unit,
+                source_tool_call_record=terminal,
+                source_result_ref=terminal.result_ref,
+                source_result=result,
+                observation_record=observation,
+                trusted_acceptance_now=recorded_at,
+            )
+        )
+        if written is not Cycle2WriteResult.APPLIED:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        next_move = await (
+            self._request_understanding_provider.propose_cycle2_order_followup(
+                turn.request_input,
+                summary,
+                next_task.state_version,
+            )
+        )
+        if next_move.kind is NextMoveKind.FINISH:
+            result_outbound = self._steps.complete_order_only(
+                run_id=turn.running_run.run_id,
+                observation=observation,
+                plan=_cycle2_order_presentation_plan(),
+            )
+            return await self._finalize(
+                turn=turn,
+                result=result_outbound,
+                stop_reason=StopReasonV2.GOAL_COMPLETED,
+                task=next_task,
+                request_unit=next_unit,
+            )
+        if (
+            next_move.kind is not NextMoveKind.CALL_TOOL
+            or next_move.requested_tool_name != "get_shipment"
+        ):
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=next_task,
+                request_unit=next_unit,
+            )
+        return await self._get_shipment(
+            command=command,
+            turn=turn,
+            task=next_task,
+            request_unit=next_unit,
+            candidate_factory=lambda closure, model_call_id, manifest_id: (
+                self._route_verified_shipment_candidate(
+                    command=command,
+                    turn=turn,
+                    closure=closure,
+                    next_move=next_move,
+                    model_call_id=model_call_id,
+                    manifest_id=manifest_id,
+                )
+            ),
+        )
+
+    def _route_verified_shipment_candidate(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        closure: InitialToolCallV2ReadClosure,
+        next_move: NextMove,
+        model_call_id: UUID,
+        manifest_id: UUID,
+    ) -> Cycle2GatewayCandidate:
+        if (
+            len(closure.current_verified_order_targets) != 1
+            or len(closure.current_target_observations) != 1
+        ):
+            raise AgentRunExecutionError(
+                "current verified Order target closure unavailable"
+            )
+        return route_cycle2_verified_target_next_move(
+            request_input=turn.request_input,
+            next_move=next_move,
+            customer_context=command.customer_context,
+            current_task=closure.current_task_record,
+            current_request_unit=closure.current_request_unit_record,
+            current_input_bindings=closure.current_input_binding_records,
+            verified_target=closure.current_verified_order_targets[0],
+            verified_target_observation=closure.current_target_observations[0],
+            model_call_id=model_call_id,
+            context_manifest_id=manifest_id,
+            trusted_now=closure.trusted_read_at,
+        )
+
+    async def _get_shipment(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+        candidate_factory: Callable[
+            [InitialToolCallV2ReadClosure, UUID, UUID],
+            Cycle2GatewayCandidate,
+        ],
+    ) -> AgentRunResult:
+        dispatched = await self._execute_tool(
+            command=command,
+            turn=turn,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            candidate_factory=candidate_factory,
+        )
+        if type(dispatched) is AgentRunResult:
+            return await self._finalize(
+                turn=turn,
+                result=dispatched,
+                stop_reason=StopReasonV2.GATE_REJECTED,
+                task=task,
+                request_unit=request_unit,
+            )
+        if (
+            type(dispatched) is not Cycle2ReadToolExecution
+            or dispatched.tool_result is None
+        ):
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        result = map_cycle2_get_shipment_tool_result(dispatched)
+        signal_by_outcome = {
+            GetShipmentOutcome.NO_SHIPMENT: Cycle2MapperSignal.NO_SHIPMENT,
+            GetShipmentOutcome.NOT_FOUND_OR_NOT_ACCESSIBLE: (
+                Cycle2MapperSignal.PRIVATE_RESOURCE_NOT_FOUND
+            ),
+            GetShipmentOutcome.FACTS_INSUFFICIENT: (
+                Cycle2MapperSignal.SHIPMENT_FACTS_INSUFFICIENT
+            ),
+        }
+        if result.outcome in signal_by_outcome:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=signal_by_outcome[result.outcome],
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        if result.outcome is GetShipmentOutcome.SYSTEM_FAILURE:
+            code = getattr(result.failure_code, "value", None)
+            signal = {
+                "SHIPMENT_SERVICE_UNAVAILABLE": (
+                    Cycle2MapperSignal.SHIPMENT_SERVICE_UNAVAILABLE
+                ),
+                "SHIPMENT_RELATION_CARDINALITY_VIOLATION": (
+                    Cycle2MapperSignal.SHIPMENT_RELATION_CARDINALITY
+                ),
+                "SHIPMENT_SOURCE_INTEGRITY": (
+                    Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                ),
+                "SHIPMENT_SOURCE_VERSION_INVALID": (
+                    Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                ),
+            }.get(code, Cycle2MapperSignal.RETRY_EXHAUSTED)
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=signal,
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        terminal = dispatched.terminal_tool_call
+        summary = result.shipment_summary
+        if (
+            terminal.status is not ToolCallStatus.SUCCEEDED
+            or terminal.finished_at is None
+            or terminal.result_ref is None
+            or terminal.verified_target_ref is None
+            or summary is None
+            or result.source_resource_ref is None
+            or result.source_version is None
+            or result.observed_at is None
+        ):
+            raise AgentRunExecutionError(
+                "successful get_shipment source is incomplete"
+            )
+        recorded_at = max(self._clock(), terminal.finished_at, result.observed_at)
+        if recorded_at >= result.observed_at + SHIPMENT_FRESHNESS_TTL:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.SHIPMENT_BORN_STALE,
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        observation = ShipmentObservation(
+            observation_id=self._uuid_factory(),
+            private_owner_scope=turn.owner_scope.customer_id,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            verified_order_target_ref=str(terminal.verified_target_ref),
+            source_tool="get_shipment",
+            source_tool_call_id=terminal.tool_call_id,
+            source_resource_ref=result.source_resource_ref,
+            source_version=result.source_version,
+            normalized_type="SHIPMENT_SUMMARY",
+            normalized_value=summary,
+            observed_at=result.observed_at,
+            recorded_at=recorded_at,
+            valid_until=result.observed_at + SHIPMENT_FRESHNESS_TTL,
+            raw_result_ref=str(terminal.result_ref),
+        )
+        next_task = _project_task(
+            task,
+            state_version=task.state_version + 1,
+            updated_at=recorded_at,
+        )
+        next_unit = _project_request_unit(
+            request_unit,
+            state_version=request_unit.state_version + 1,
+            updated_at=recorded_at,
+            observation_refs=(
+                *request_unit.observation_refs,
+                observation.observation_id,
+            ),
+        )
+        written = await (
+            self._runtime_record_port.save_shipment_observation_if_current(
+                SaveShipmentObservationV2Command(
+                    owner_scope=turn.owner_scope,
+                    expected_task_record=task,
+                    next_task_record=next_task,
+                    expected_request_unit_record=request_unit,
+                    next_request_unit_record=next_unit,
+                    source_tool_call_record=terminal,
+                    source_result_ref=terminal.result_ref,
+                    source_result=result,
+                    observation_record=observation,
+                    trusted_acceptance_now=recorded_at,
+                )
+            )
+        )
+        if written is not Cycle2WriteResult.APPLIED:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=task,
+                request_unit=request_unit,
+            )
+        assessment_closure = await (
+            self._runtime_record_port.load_shipment_assessment_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                task_id=next_task.task_id,
+                request_unit_id=next_unit.request_unit_id,
+                verified_order_target_ref=str(terminal.verified_target_ref),
+                trusted_assessed_at=recorded_at,
+            )
+        )
+        if type(assessment_closure) is not ShipmentAssessmentReadClosure:
+            raise AgentRunExecutionError(
+                "Shipment Assessment closure unavailable"
+            )
+        step = await self._steps.assess_and_render_shipment(
+            run_id=turn.running_run.run_id,
+            closure=assessment_closure,
+            plan=_cycle2_shipment_presentation_plan(),
+        )
+        return await self._finalize_mapping(
+            turn=turn,
+            step=step,
+            task=next_task,
+            request_unit=next_unit,
+        )
+
+    async def _handle_continuation_turn(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        current_session: Cycle2CurrentSessionTaskClosure,
+    ) -> AgentRunResult:
+        try:
+            proposal = await (
+                self._request_understanding_provider.propose_cycle2_continuation(
+                    turn.request_input
+                )
+            )
+        except (
+            ProviderProtocolError,
+            RequestUnderstandingCandidateInvalidError,
+        ):
+            signal = (
+                Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED
+                if current_session.current_task_record.status
+                is TaskStatus.WAITING_USER
+                else Cycle2MapperSignal.SEARCH_BINDING_CLARIFICATION
+            )
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=signal,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        if proposal.input_candidate.name == "candidate_ordinal":
+            return await self._continue_with_ordinal(
+                command=command,
+                turn=turn,
+                current_session=current_session,
+                proposal=proposal,
+            )
+        return await self._continue_with_binding(
+            command=command,
+            turn=turn,
+            current_session=current_session,
+            proposal=proposal,
+        )
+
+    async def _continue_with_binding(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        current_session: Cycle2CurrentSessionTaskClosure,
+        proposal: Cycle2ContinuationProviderProposal,
+    ) -> AgentRunResult:
+        bound_at = self._clock()
+        try:
+            decision = reduce_cycle2_continuation_candidate(
+                request_input=turn.request_input,
+                candidate=proposal.input_candidate,
+                authoritative_messages={
+                    turn.user_message.message_id: turn.user_message.content
+                },
+                customer_context=command.customer_context,
+                current_task=current_session.current_task_record,
+                current_request_unit=(
+                    current_session.current_request_unit_record
+                ),
+                current_input_bindings=(
+                    current_session.current_input_binding_records
+                ),
+                binding_id=self._uuid_factory(),
+                now=bound_at,
+            )
+        except RequestProcessingError:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.SEARCH_BINDING_CLARIFICATION,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        closure = await (
+            self._runtime_record_port.load_continuation_input_binding_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                conversation_id=turn.conversation.conversation_id,
+                message_id=turn.user_message.message_id,
+                task_id=current_session.current_task_record.task_id,
+                request_unit_id=(
+                    current_session.current_request_unit_record.request_unit_id
+                ),
+                trusted_now=bound_at,
+            )
+        )
+        if closure is None:
+            raise AgentRunExecutionError("continuation binding closure unavailable")
+        current_task = closure.current_task_record
+        current_unit = closure.current_request_unit_record
+        next_task = _project_task(
+            current_task,
+            state_version=decision.result_task_state_version,
+            updated_at=bound_at,
+        )
+        replaced = decision.input_binding.supersedes
+        next_refs = (
+            tuple(
+                decision.input_binding.binding_id if ref == replaced else ref
+                for ref in current_unit.input_binding_refs
+            )
+            if replaced is not None
+            else (*current_unit.input_binding_refs, decision.input_binding.binding_id)
+        )
+        next_unit = _project_request_unit(
+            current_unit,
+            input_binding_refs=next_refs,
+            state_version=decision.result_task_state_version,
+            updated_at=bound_at,
+        )
+        write = await (
+            self._runtime_record_port.apply_continuation_input_binding_if_current(
+                ApplyContinuationInputBindingV2Command(
+                    loaded_closure=closure,
+                    new_input_binding_record=decision.input_binding,
+                    next_task_record=next_task,
+                    next_request_unit_record=next_unit,
+                )
+            )
+        )
+        if write is not Cycle2WriteResult.APPLIED:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=current_task,
+                request_unit=current_unit,
+            )
+        next_bindings = tuple(
+            binding
+            for binding in closure.current_input_binding_records
+            if binding.binding_id != replaced
+        ) + (decision.input_binding,)
+        candidate_factory = (
+            lambda tool_closure, model_call_id, manifest_id: (
+                self._route_continuation_candidate(
+                    command=command,
+                    turn=turn,
+                    closure=tool_closure,
+                    decision=decision,
+                    next_move=proposal.next_move_candidate,
+                    model_call_id=model_call_id,
+                    manifest_id=manifest_id,
+                )
+            )
+        )
+        if decision.input_binding.name == "product_description":
+            return await self._search_orders(
+                command=command,
+                turn=turn,
+                task=next_task,
+                request_unit=next_unit,
+                input_bindings=next_bindings,
+                candidate_factory=candidate_factory,
+            )
+        if decision.input_binding.name == "shipment_not_received":
+            return await self._get_shipment(
+                command=command,
+                turn=turn,
+                task=next_task,
+                request_unit=next_unit,
+                candidate_factory=candidate_factory,
+            )
+        raise AgentRunExecutionError("unsupported Cycle 2 continuation binding")
+
+    def _route_continuation_candidate(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        closure: InitialToolCallV2ReadClosure,
+        decision: Cycle2ContinuationBindingDecision,
+        next_move: NextMove,
+        model_call_id: UUID,
+        manifest_id: UUID,
+    ) -> Cycle2GatewayCandidate:
+        if decision.input_binding.name == "shipment_not_received":
+            if (
+                len(closure.current_verified_order_targets) != 1
+                or len(closure.current_target_observations) != 1
+            ):
+                raise AgentRunExecutionError(
+                    "continuation Shipment target closure unavailable"
+                )
+            target = closure.current_verified_order_targets[0]
+            target_observation = closure.current_target_observations[0]
+        else:
+            target = None
+            target_observation = None
+        return route_cycle2_continuation_next_move(
+            request_input=turn.request_input,
+            decision=decision,
+            next_move=next_move,
+            customer_context=command.customer_context,
+            current_task=closure.current_task_record,
+            current_request_unit=closure.current_request_unit_record,
+            current_input_bindings=closure.current_input_binding_records,
+            verified_target=target,
+            verified_target_observation=target_observation,
+            model_call_id=model_call_id,
+            context_manifest_id=manifest_id,
+            trusted_now=closure.trusted_read_at,
+        )
+
+    async def _continue_with_ordinal(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        current_session: Cycle2CurrentSessionTaskClosure,
+        proposal: Cycle2ContinuationProviderProposal,
+    ) -> AgentRunResult:
+        selected_at = self._clock()
+        try:
+            preparation = prepare_cycle2_ordinal_selection(
+                request_input=turn.request_input,
+                candidate=proposal.input_candidate,
+                authoritative_messages={
+                    turn.user_message.message_id: turn.user_message.content
+                },
+                customer_context=command.customer_context,
+                current_conversation_id=turn.conversation.conversation_id,
+                current_task=current_session.current_task_record,
+                current_request_unit=(
+                    current_session.current_request_unit_record
+                ),
+                current_input_bindings=(
+                    current_session.current_input_binding_records
+                ),
+                current_candidate_sets=(
+                    current_session.current_candidate_set_records
+                ),
+                pending_candidate_set_ref=(
+                    current_session.current_candidate_set_records[0].candidate_set_id
+                    if current_session.current_candidate_set_records
+                    else None
+                ),
+                superseded_candidate_set_refs=(
+                    current_session.superseded_candidate_set_refs
+                ),
+                existing_selection_records=(
+                    current_session.existing_selection_records
+                ),
+                binding_id=self._uuid_factory(),
+                now=selected_at,
+            )
+        except (RequestProcessingError, IndexError):
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        selection_closure = await (
+            self._runtime_record_port.load_order_candidate_selection_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                conversation_id=turn.conversation.conversation_id,
+                task_id=current_session.current_task_record.task_id,
+                request_unit_id=(
+                    current_session.current_request_unit_record.request_unit_id
+                ),
+                selection_request=preparation.selection_request,
+                trusted_now=selected_at,
+            )
+        )
+        if type(selection_closure) is not OrderCandidateSelectionReadClosure:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=Cycle2MapperSignal.CANDIDATE_REFRESH_REQUIRED,
+                ),
+                task=current_session.current_task_record,
+                request_unit=current_session.current_request_unit_record,
+            )
+        current_task = selection_closure.current_task_record
+        current_unit = selection_closure.current_request_unit_record
+        selected_entry = tuple(
+            entry
+            for entry in selection_closure.current_candidate_set_record.ordered_candidates
+            if entry.ordinal == preparation.selection_request.ordinal
+        )
+        if len(selected_entry) != 1:
+            raise AgentRunExecutionError("selected CandidateSet entry unavailable")
+        issued_target = IssuedSelectedTargetRef.fresh()
+        selection = OrderCandidateSelectionRecord(
+            selection_id=self._uuid_factory(),
+            private_owner_scope_ref=turn.owner_scope.customer_id,
+            conversation_id=turn.conversation.conversation_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            source_message_ref=turn.user_message.message_id,
+            ordinal_input_binding_ref=(
+                preparation.ordinal_input_binding.binding_id
+            ),
+            candidate_set_ref=(
+                selection_closure.current_candidate_set_record.candidate_set_id
+            ),
+            candidate_set_version=(
+                selection_closure.current_candidate_set_record.candidate_set_version
+            ),
+            search_observation_ref=(
+                selection_closure.search_observation_record.observation_id
+            ),
+            search_observation_record_schema_version=(
+                selection_closure.search_observation_record.record_schema_version
+            ),
+            observation_candidate_ref=(
+                selected_entry[0].observation_candidate_ref
+            ),
+            candidate_source_version=selected_entry[0].candidate_source_version,
+            owner_scoped_order_target_ref=(
+                selection_closure.resolved_owner_scoped_order_target_ref
+            ),
+            selected_target_ref=str(issued_target.selected_target_ref),
+            base_task_state_version=current_task.state_version,
+            result_task_state_version=current_task.state_version + 1,
+            selected_at=selected_at,
+        )
+        next_task = _project_task(
+            current_task,
+            status=TaskStatus.ACTIVE,
+            state_version=current_task.state_version + 1,
+            updated_at=selected_at,
+        )
+        next_unit = _project_request_unit(
+            current_unit,
+            input_binding_refs=(
+                *current_unit.input_binding_refs,
+                preparation.ordinal_input_binding.binding_id,
+            ),
+            open_questions=(),
+            status=TaskStatus.ACTIVE,
+            state_version=current_unit.state_version + 1,
+            updated_at=selected_at,
+        )
+        selection_command = build_order_candidate_selection_v2_command(
+            loaded_closure=selection_closure,
+            ordinal_input_binding_record=(
+                preparation.ordinal_input_binding
+            ),
+            issued_selected_target=issued_target,
+            next_task_record=next_task,
+            next_request_unit_record=next_unit,
+            selection_record=selection,
+            closed_pending_candidate_set_ref=(
+                selection_closure.pending_candidate_set_ref
+            ),
+        )
+        applied = await self._steps.apply_ordinal_selection(
+            run_id=turn.running_run.run_id,
+            command=selection_command,
+        )
+        if applied.outbound_result is not None:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=applied,
+                task=current_task,
+                request_unit=current_unit,
+            )
+        return await self._get_order(
+            command=command,
+            turn=turn,
+            task=next_task,
+            request_unit=next_unit,
+            candidate_factory=lambda closure, model_call_id, manifest_id: (
+                self._route_selected_candidate(
+                    command=command,
+                    turn=turn,
+                    closure=closure,
+                    next_move=proposal.next_move_candidate,
+                    candidate_set=(
+                        selection_closure.current_candidate_set_record
+                    ),
+                    selection=selection,
+                    model_call_id=model_call_id,
+                    manifest_id=manifest_id,
+                )
+            ),
+        )
+
+    def _route_selected_candidate(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        closure: InitialToolCallV2ReadClosure,
+        next_move: NextMove,
+        candidate_set: OrderCandidateSetRecord,
+        selection: OrderCandidateSelectionRecord,
+        model_call_id: UUID,
+        manifest_id: UUID,
+    ) -> Cycle2GatewayCandidate:
+        targets = tuple(
+            target
+            for target in closure.current_verified_order_targets
+            if str(target.verified_target_ref) == selection.selected_target_ref
+        )
+        if len(targets) != 1:
+            raise AgentRunExecutionError("selected target facts unavailable")
+        return route_cycle2_selected_next_move(
+            request_input=turn.request_input,
+            next_move=next_move,
+            customer_context=command.customer_context,
+            current_conversation_id=turn.conversation.conversation_id,
+            current_task=closure.current_task_record,
+            current_request_unit=closure.current_request_unit_record,
+            current_input_bindings=closure.current_input_binding_records,
+            candidate_set=candidate_set,
+            selection_record=selection,
+            verified_target=targets[0],
+            model_call_id=model_call_id,
+            context_manifest_id=manifest_id,
+            trusted_now=closure.trusted_read_at,
+        )
+
+    async def _execute_tool(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        task_id: UUID,
+        request_unit_id: UUID,
+        candidate_factory: Callable[
+            [InitialToolCallV2ReadClosure, UUID, UUID],
+            Cycle2GatewayCandidate,
+        ],
+    ) -> Cycle2ReadToolExecution | AgentRunResult:
+        closure = await (
+            self._runtime_record_port.load_initial_tool_call_v2_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                task_id=task_id,
+                request_unit_id=request_unit_id,
+                trusted_read_at=self._clock(),
+            )
+        )
+        if type(closure) is not InitialToolCallV2ReadClosure:
+            raise AgentRunExecutionError("current ToolCall closure unavailable")
+        model_call_id = self._uuid_factory()
+        manifest_id = self._uuid_factory()
+        manifest = ContextManifest(
+            context_manifest_id=manifest_id,
+            run_id=turn.running_run.run_id,
+            model_call_id=model_call_id,
+            tool_registry_version=self._registry_snapshot.tool_registry_version,
+            model_visible_toolset_hash=(
+                self._registry_snapshot.model_visible_toolset_hash
+            ),
+            selected_message_refs=(turn.user_message.message_id,),
+            task_state_ref_and_version=TaskStateRefAndVersion(
+                task_id=closure.current_task_record.task_id,
+                state_version=closure.current_task_record.state_version,
+            ),
+            observation_refs_and_versions=tuple(
+                VersionedRecordRef(
+                    record_ref=observation.observation_ref,
+                    version=observation.observation_version,
+                )
+                for observation in closure.current_target_observations
+            ),
+            redaction_policy_version=self._redaction_policy_version,
+            token_counts=TokenCounts(),
+            assembled_at=closure.trusted_read_at,
+        )
+        await self._context_record_port.save_context_manifest(manifest)
+        candidate = candidate_factory(
+            closure,
+            model_call_id,
+            manifest_id,
+        )
+        binding_facts = tuple(
+            Cycle2AcceptedBindingFacts(
+                binding_id=binding.binding_id,
+                private_owner_scope_ref=turn.owner_scope.customer_id,
+                owner_customer_id=turn.owner_scope.customer_id,
+                task_id=closure.current_task_record.task_id,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+                task_state_version=closure.current_task_record.state_version,
+                name=binding.name,
+                normalized_value=binding.normalized_value,
+                authority=binding.authority,
+                validation_status=binding.validation_status.value,
+                confirmed_by_user=binding.confirmed_by_user,
+                source_refs=binding.source_refs,
+                superseded_by=None,
+            )
+            for binding in closure.current_input_binding_records
+        )
+        loaded_gateway = Cycle2GatewayLoadedClosure(
+            customer_context=command.customer_context,
+            private_owner_scope_ref=turn.owner_scope.customer_id,
+            current_task=closure.current_task_record,
+            current_request_unit=closure.current_request_unit_record,
+            current_input_bindings=binding_facts,
+            current_verified_order_targets=(
+                closure.current_verified_order_targets
+            ),
+            current_target_observations=closure.current_target_observations,
+            registry_snapshot=self._registry_snapshot,
+            context_manifest=manifest,
+            budget=Cycle2GatewayBudgetFacts(
+                run_id=turn.running_run.run_id,
+                context_manifest_id=manifest_id,
+                tool_registry_version=(
+                    self._registry_snapshot.tool_registry_version
+                ),
+                model_visible_toolset_hash=(
+                    self._registry_snapshot.model_visible_toolset_hash
+                ),
+                closure_complete=True,
+                tool_calls_used=len(turn.tool_progress),
+                max_tool_calls=3,
+                active_tool_calls=0,
+                accepted_parallel_tool_calls=0,
+                remaining_run_time_budget_ms=self._gateway_run_budget_ms,
+            ),
+            progress_snapshot=Cycle2GatewayProgressSnapshot(
+                run_id=turn.running_run.run_id,
+                context_manifest_id=manifest_id,
+                tool_registry_version=(
+                    self._registry_snapshot.tool_registry_version
+                ),
+                model_visible_toolset_hash=(
+                    self._registry_snapshot.model_visible_toolset_hash
+                ),
+                task_state_version=closure.current_task_record.state_version,
+                history_complete=True,
+                prior_tool_steps=tuple(turn.tool_progress),
+            ),
+        )
+        gate = evaluate_cycle2_control_gateway(
+            candidate=candidate,
+            loaded_closure=loaded_gateway,
+            gate_decision_id=self._uuid_factory(),
+            provider_tool_call_id=None,
+            decided_at=closure.trusted_read_at,
+        )
+        if type(gate) is not GateDecisionV2:
+            raise AgentRunExecutionError("Cycle 2 Gateway result is not exact")
+        if gate.decision is GateDecisionValue.REJECT:
+            self._steps.map_imported_phase1(
+                ImportedMapperReference.GATE_REJECTED
+            )
+            return self._deterministic_renderer.map_result(
+                run_id=turn.running_run.run_id,
+                stop_reason=StopReason.GATE_REJECTED,
+            )
+        authorized = build_cycle2_authorized_tool_command(
+            gate_decision=gate,
+            candidate=candidate,
+            registry_snapshot_ref=self._registry_snapshot.tool_registry_version,
+            trusted_context_ref=str(manifest.context_manifest_id),
+        )
+        created = ToolCallRecordV2(
+            tool_call_id=self._uuid_factory(),
+            run_id=turn.running_run.run_id,
+            task_id=closure.current_task_record.task_id,
+            request_unit_id=(
+                closure.current_request_unit_record.request_unit_id
+            ),
+            model_call_id=model_call_id,
+            context_manifest_id=manifest_id,
+            gate_decision_id=gate.gate_decision_id,
+            provider_tool_call_id=gate.provider_tool_call_id,
+            canonical_tool_name=Cycle2ToolName(
+                authorized.canonical_tool_name
+            ),
+            tool_registry_version=self._registry_snapshot.tool_registry_version,
+            private_owner_scope_ref=turn.owner_scope.customer_id,
+            validated_task_state_version=(
+                closure.current_task_record.state_version
+            ),
+            argument_binding_refs=authorized.argument_binding_refs,
+            verified_target_ref=authorized.verified_target_ref,
+            effect=ToolEffect.READ,
+            attempt_count=0,
+            attempts=(),
+            status=ToolCallStatus.CREATED,
+            started_at=closure.trusted_read_at,
+        )
+        execution = await self._read_tool_executor.execute_with_result(
+            create_command=CreateToolCallV2Command(
+                loaded_closure=closure,
+                gateway_candidate=candidate,
+                gate_decision=gate,
+                authorized_tool_command=authorized,
+                created_record=created,
+            )
+        )
+        if execution.terminal_tool_call.status in {
+            ToolCallStatus.SUCCEEDED,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.TIMED_OUT,
+            ToolCallStatus.INTERRUPTED,
+        }:
+            turn.tool_progress.append(
+                Cycle2ToolProgressFact(
+                    tool_call_id=created.tool_call_id,
+                    run_id=turn.running_run.run_id,
+                    context_manifest_id=manifest_id,
+                    tool_registry_version=(
+                        self._registry_snapshot.tool_registry_version
+                    ),
+                    model_visible_toolset_hash=(
+                        self._registry_snapshot.model_visible_toolset_hash
+                    ),
+                    canonical_tool_name=created.canonical_tool_name,
+                    validated_arguments=authorized.validated_arguments,
+                    task_state_version=created.validated_task_state_version,
+                    argument_binding_refs=created.argument_binding_refs,
+                    verified_target_ref=created.verified_target_ref,
+                )
+            )
+        return execution
+
+    async def _finish_fixed_phase1(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        stop_reason_v1: StopReason,
+        stop_reason_v2: StopReasonV2,
+        task: TaskRecord | None = None,
+        request_unit: RequestUnitRecord | None = None,
+    ) -> AgentRunResult:
+        result = self._deterministic_renderer.map_result(
+            run_id=turn.running_run.run_id,
+            stop_reason=stop_reason_v1,
+        )
+        return await self._finalize(
+            turn=turn,
+            result=result,
+            stop_reason=stop_reason_v2,
+            task=task,
+            request_unit=request_unit,
+        )
+
+    async def _finalize_mapping(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        step: Cycle2RuntimeStep,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+    ) -> AgentRunResult:
+        mapping = step.mapping
+        result = step.outbound_result
+        if (
+            type(mapping) is not Cycle2ResultMapping
+            or mapping.disposition is not MapperDisposition.EMIT
+            or mapping.stop_reason is None
+            or type(result) is not AgentRunResult
+        ):
+            raise AgentRunExecutionError("Cycle 2 mapping is not outbound")
+        return await self._finalize(
+            turn=turn,
+            result=result,
+            stop_reason=mapping.stop_reason,
+            task=task,
+            request_unit=request_unit,
+        )
+
+    async def _finalize(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        result: AgentRunResult,
+        stop_reason: StopReasonV2,
+        task: TaskRecord | None,
+        request_unit: RequestUnitRecord | None,
+    ) -> AgentRunResult:
+        completed_at = self._clock()
+        terminal_run = _project_cycle2_run(
+            turn.running_run,
+            status=AgentRunStatusV2.COMPLETED,
+            completed_at=completed_at,
+            stop_reason=stop_reason,
+        )
+        terminal_link = (
+            None
+            if turn.active_link is None
+            else RunTaskLinkRecordV2(
+                run_id=turn.running_run.run_id,
+                task_id=turn.active_link.task_id,
+                base_task_state_version=(
+                    turn.active_link.base_task_state_version
+                ),
+                result_task_state_version=(
+                    None if task is None else task.state_version
+                ),
+            )
+        )
+        assistant_message = MessageRecord(
+            schema_version=_MESSAGE_SCHEMA_VERSION,
+            message_id=self._uuid_factory(),
+            conversation_id=turn.conversation.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content=result.message,
+            received_at=completed_at,
+        )
+        stopped = TraceEventV2(
+            trace_event_id=self._uuid_factory(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=completed_at,
+            run_id=turn.running_run.run_id,
+            user_outcome=result.outcome,
+            stop_reason=stop_reason,
+        )
+        finalized = await (
+            self._runtime_record_port.finalize_cycle2_run_if_current(
+                FinalizeCycle2RunCommand(
+                    owner_scope=turn.owner_scope,
+                    expected_running_run_record=turn.running_run,
+                    expected_active_run_task_link_record=turn.active_link,
+                    current_task_record=task,
+                    current_request_unit_record=request_unit,
+                    terminal_run_record=terminal_run,
+                    terminal_run_task_link_record=terminal_link,
+                    terminal_result=result,
+                    assistant_message_record=assistant_message,
+                    ordinary_trace_records=(stopped,),
+                )
+            )
+        )
+        if finalized is not Cycle2WriteResult.APPLIED:
+            raise AgentRunExecutionError("Cycle 2 Run finalization conflict")
+        evidence = await (
+            self._runtime_record_port.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=turn.owner_scope,
+                run_id=turn.running_run.run_id,
+            )
+        )
+        if (
+            evidence is None
+            or evidence.owner_scope != turn.owner_scope
+            or evidence.run_record != terminal_run
+            or evidence.terminal_result != result
+            or assistant_message not in evidence.message_records
+            or stopped not in evidence.trace_records
+        ):
+            raise AgentRunExecutionError("terminal Cycle 2 evidence unavailable")
+        return result
