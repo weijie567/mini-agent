@@ -546,6 +546,7 @@ def _cycle2_gateway_case(
     binding_authority: InputAuthority = InputAuthority.USER_CLAIM,
     selected_get_order: bool = False,
     unique_auto_target: bool = False,
+    shipment_origin_binding: str = "order_id",
 ) -> tuple[Cycle2GatewayCandidate, Cycle2GatewayLoadedClosure]:
     decision = _decision()
     task = decision.task_graph.task.model_copy(
@@ -572,6 +573,17 @@ def _cycle2_gateway_case(
         raise ValueError("target-bearing options are only valid for get_order")
     if selected_get_order and unique_auto_target:
         raise ValueError("get_order target origins must remain distinct")
+    if shipment_origin_binding not in {
+        "order_id",
+        "candidate_ordinal",
+        "product_description",
+    }:
+        raise ValueError("unknown Shipment target origin binding")
+    if (
+        tool_name is not Cycle2ToolName.GET_SHIPMENT
+        and shipment_origin_binding != "order_id"
+    ):
+        raise ValueError("Shipment origin option requires get_shipment")
     if tool_name is Cycle2ToolName.SEARCH_ORDERS:
         binding_name = "product_description"
         normalized_value = "跑鞋"
@@ -583,6 +595,14 @@ def _cycle2_gateway_case(
     elif unique_auto_target:
         binding_name = "product_description"
         normalized_value = "跑鞋"
+        arguments = {"order_id": "O-1001"}
+    elif tool_name is Cycle2ToolName.GET_SHIPMENT:
+        binding_name = shipment_origin_binding
+        normalized_value = {
+            "order_id": "O-1001",
+            "candidate_ordinal": 2,
+            "product_description": "跑鞋",
+        }[shipment_origin_binding]
         arguments = {"order_id": "O-1001"}
     else:
         binding_name = "order_id"
@@ -675,7 +695,10 @@ def _cycle2_gateway_case(
                 task_id=task.task_id,
                 state_version=task.state_version,
             )
-            if unique_auto_target
+            if (
+                unique_auto_target
+                or tool_name is Cycle2ToolName.GET_SHIPMENT
+            )
             else None
         ),
     )
@@ -688,7 +711,12 @@ def _cycle2_gateway_case(
         requested_provider_tool_name=tool_name.value,
         candidate_arguments=arguments,
         proposed_base_task_state_version=(
-            task.state_version if unique_auto_target else None
+            task.state_version
+            if (
+                unique_auto_target
+                or tool_name is Cycle2ToolName.GET_SHIPMENT
+            )
+            else None
         ),
         validated_task_state_version=task.state_version,
         argument_binding_refs=candidate_refs,
@@ -858,6 +886,55 @@ def test_cycle2_unique_auto_target_rejects_wrong_binding_family() -> None:
     )
 
     gate = _evaluate_cycle2(candidate, drifted)
+
+    assert gate.decision is GateDecisionValue.REJECT
+    assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("origin_name", "origin_value"),
+    [
+        ("order_id", "O-1001"),
+        ("product_description", "跑鞋"),
+        ("candidate_ordinal", 2),
+    ],
+)
+def test_cycle2_shipment_accepts_exact_verified_target_origin_binding(
+    origin_name: str,
+    origin_value: object,
+) -> None:
+    candidate, loaded = _cycle2_gateway_case(
+        Cycle2ToolName.GET_SHIPMENT,
+        shipment_origin_binding=origin_name,
+    )
+
+    gate = _evaluate_cycle2(candidate, loaded)
+    command = build_cycle2_authorized_tool_command(
+        gate_decision=gate,
+        candidate=candidate,
+        registry_snapshot_ref="cycle2-snapshot-ref",
+        trusted_context_ref="cycle2-trusted-context-ref",
+    )
+
+    assert gate.decision is GateDecisionValue.ACCEPT
+    assert loaded.current_input_bindings[0].name == origin_name
+    assert loaded.current_input_bindings[0].normalized_value == origin_value
+    assert command.argument_binding_refs == candidate.argument_binding_refs
+    assert command.verified_target_ref == candidate.verified_target_ref
+
+
+def test_cycle2_shipment_rejects_non_origin_claim_even_with_target_ref() -> None:
+    candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    wrong_binding = loaded.current_input_bindings[0].model_copy(
+        update={"name": "shipment_not_received", "normalized_value": True}
+    )
+
+    gate = _evaluate_cycle2(
+        candidate,
+        loaded.model_copy(
+            update={"current_input_bindings": (wrong_binding,)}
+        ),
+    )
 
     assert gate.decision is GateDecisionValue.REJECT
     assert gate.reason_code is GateReasonCode.ARGUMENT_BINDING_MISMATCH
