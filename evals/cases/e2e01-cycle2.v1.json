@@ -160,7 +160,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -284,7 +284,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -416,7 +416,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -548,7 +548,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -668,7 +668,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -787,7 +787,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -911,7 +911,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       },
@@ -1053,7 +1053,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       },
@@ -1191,7 +1191,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1322,7 +1322,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1452,7 +1452,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1580,7 +1580,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1705,7 +1705,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1829,7 +1829,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -1952,7 +1952,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2072,7 +2072,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2192,7 +2192,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2312,7 +2312,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2440,7 +2440,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2569,7 +2569,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2699,7 +2699,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2832,7 +2832,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -2965,7 +2965,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -3107,7 +3107,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -3238,7 +3238,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -3361,7 +3361,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }
@@ -3487,7 +3487,7 @@
         ],
         "model_config_version": "scripted-model-provider-config-v1",
         "prompt_version": "e2e01-cycle2-prompt-v1",
-        "tool_registry_version": "e2e01-cycle2-tools-v1",
+        "tool_registry_version": "e2e01-cycle2-tools.p0.v1",
         "corpus_version": null,
         "runtime_version": "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
       }

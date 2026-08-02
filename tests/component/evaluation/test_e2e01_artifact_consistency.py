@@ -19,6 +19,10 @@ from mini_agent.core.request_understanding import (
     NextMove,
     RequestUnderstandingOutputV2,
 )
+from mini_agent.core.tool_system import (
+    CYCLE2_TOOL_REGISTRY_VERSION,
+    build_cycle2_registry_snapshot,
+)
 import mini_agent.evaluation.graders as graders_module
 import mini_agent.evaluation.harness as harness_module
 import mini_agent.evaluation.artifacts as artifacts_module
@@ -1277,6 +1281,22 @@ def test_cycle2_bundle_has_exact_27_contract_defined_case_identities() -> None:
         and case["input"]["model_script_refs"]
         == [f"script:{case['case_id']}"]
         for case in cases
+    )
+
+
+def test_cycle2_bundle_uses_the_real_runtime_tool_registry_version() -> None:
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    manifest = _load_json(CYCLE2_MANIFEST_PATH)
+
+    assert {
+        case["version_manifest"]["tool_registry_version"]
+        for case in dataset["cases"]
+    } == {CYCLE2_TOOL_REGISTRY_VERSION}
+    assert manifest["versions"]["tool_registry_version"] == (
+        CYCLE2_TOOL_REGISTRY_VERSION
+    )
+    assert build_cycle2_registry_snapshot().tool_registry_version == (
+        CYCLE2_TOOL_REGISTRY_VERSION
     )
 
 
