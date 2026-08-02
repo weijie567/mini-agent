@@ -63,6 +63,7 @@ from mini_agent.evaluation.artifacts import (
 from mini_agent.evaluation.graders import (
     CYCLE2_GRADER_NAMES,
     PHASE1_GRADER_NAMES,
+    Cycle2EvalEvidence,
     Cycle2EvalExpectations,
     Cycle2Predicate,
     EvalCaseExpectations,
@@ -76,6 +77,7 @@ from mini_agent.evaluation.graders import (
     derive_grading_outcome,
     e2e01_04_safe_observables_match,
     _fixed_message,
+    grade_cycle2_evidence,
     grade_evidence,
     ordinary_trace_shape,
 )
@@ -323,20 +325,93 @@ def _build_unbound_evidence_model() -> type[AuditOnlyModel]:
 UnboundEvalEvidence = _build_unbound_evidence_model()
 
 
+_UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST = (
+    "http_status",
+    "observed_outcome",
+    "response_policy",
+    "run_record",
+    "mapper_evidence",
+    "conversation_records",
+    "agent_results",
+    "message_records",
+    "input_bindings",
+    "task_records",
+    "request_units",
+    "run_task_links",
+    "task_state_transitions",
+    "candidate_sets",
+    "candidate_selections",
+    "search_observations",
+    "shipment_observations",
+    "shipment_assessments",
+    "tool_calls",
+    "recovery_decisions",
+    "superseded_run_finalizations",
+    "context_manifests",
+    "model_visible_toolset_artifacts",
+    "trace_events",
+)
+
+
+def _build_unbound_cycle2_evidence_model() -> type[AuditOnlyModel]:
+    bound_fields = frozenset(Cycle2EvalEvidence.model_fields)
+    expected_bound_fields = frozenset(
+        {
+            *_UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST,
+            "case_id",
+        }
+    )
+    if bound_fields != expected_bound_fields:
+        raise RuntimeError(
+            "Cycle2EvalEvidence changed without explicit SUT-boundary review"
+        )
+    if any(
+        _is_semantic_identity_field(field_name)
+        for field_name in _UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST
+    ):
+        raise RuntimeError(
+            "semantic Case/Script identity entered unbound Cycle 2 evidence"
+        )
+    field_definitions: dict[str, tuple[object, object]] = {}
+    for field_name in _UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST:
+        field_info = Cycle2EvalEvidence.model_fields[field_name]
+        if field_info.is_required():
+            default: object = ...
+        elif field_info.default_factory is not None:
+            default = Field(default_factory=field_info.default_factory)
+        else:
+            default = field_info.default
+        field_definitions[field_name] = (field_info.annotation, default)
+    return create_model(
+        "UnboundCycle2EvalEvidence",
+        __base__=AuditOnlyModel,
+        __module__=__name__,
+        **field_definitions,
+    )
+
+
+UnboundCycle2EvalEvidence = _build_unbound_cycle2_evidence_model()
+
+
 class EvalCaseSutResult(AuditOnlyModel):
     execution_ref: UUID
     evidence: UnboundEvalEvidence
     safe_observable: UnboundSafeCaseObservable
 
 
+class Cycle2EvalCaseSutResult(AuditOnlyModel):
+    execution_ref: UUID
+    evidence: UnboundCycle2EvalEvidence
+
+
 class EvalCaseSut(Protocol):
     async def execute_case(
         self,
         *,
-        execution_input: EvalCaseExecutionInput,
+        execution_input: EvalCaseExecutionInput | Cycle2EvalCaseExecutionInput,
         scripted_provider: ScriptedModelProviderV2,
         runtime_fault: RuntimeFaultDirective | None,
-    ) -> EvalCaseSutResult | None: ...
+    ) -> EvalCaseSutResult | Cycle2EvalCaseSutResult | None: ...
 
 
 class QwenBaselineSut(Protocol):
@@ -411,9 +486,9 @@ class _QwenBaselineExecution:
 @dataclass(frozen=True, slots=True)
 class _StagedCase:
     case: EvalCaseArtifact
-    expectations: EvalCaseExpectations
+    expectations: EvalCaseExpectations | Cycle2EvalExpectations
     result: EvalResultRecord
-    safe_observable: SafeCaseObservable
+    safe_observable: SafeCaseObservable | None
 
 
 _ReplayCacheKey = tuple[UUID, str, str, int, str]
@@ -1233,6 +1308,8 @@ def _reachable_result_types(
     _CANONICAL_RESULT_ENUM_TYPES,
 ) = _reachable_result_types(
     (
+        Cycle2EvalCaseSutResult,
+        Cycle2EvalEvidence,
         EvalCaseSutResult,
         EvalEvidence,
         SafeCaseObservable,
@@ -1243,6 +1320,7 @@ def _reachable_result_types(
     _ADDITIONAL_BOUNDARY_ENUM_TYPES,
 ) = _reachable_result_types(
     (
+        Cycle2EvalExpectations,
         EvalCaseExpectations,
         EvalExecutionFailureRecord,
         EvalResultRecord,
@@ -1937,6 +2015,150 @@ def _unbound_result_state_is_closed(
     )
 
 
+def _canonical_unbound_cycle2_result(
+    result: Cycle2EvalCaseSutResult,
+    *,
+    authenticated_identity_values: frozenset[str],
+) -> Cycle2EvalCaseSutResult | None:
+    if (
+        not _canonical_singleton_state_is_closed()
+        or not _model_storage_is_closed(
+            result,
+            Cycle2EvalCaseSutResult,
+        )
+        or not _payload_tree_is_closed(
+            result,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+    ):
+        return None
+    try:
+        projection = result.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        )
+        if type(projection) is not str:
+            return None
+        rebuilt = Cycle2EvalCaseSutResult.model_validate_json(
+            projection,
+            strict=True,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not Cycle2EvalCaseSutResult
+        or not _canonical_singleton_state_is_closed()
+        or not _same_exact_value_tree(result, rebuilt)
+        or rebuilt != result
+        or not _model_storage_is_closed(
+            rebuilt,
+            Cycle2EvalCaseSutResult,
+        )
+        or not _payload_tree_is_closed(
+            rebuilt,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+        or not _model_storage_is_closed(
+            rebuilt.evidence,
+            UnboundCycle2EvalEvidence,
+        )
+        or not rebuilt.evidence.trace_events
+        or any(
+            event.case_id is not None
+            for event in rebuilt.evidence.trace_events
+        )
+    ):
+        return None
+    return rebuilt
+
+
+def _unbound_cycle2_result_state_is_closed(
+    raw_result: Cycle2EvalCaseSutResult,
+    canonical_result: Cycle2EvalCaseSutResult,
+    *,
+    authenticated_identity_values: frozenset[str],
+) -> bool:
+    return (
+        _canonical_singleton_state_is_closed()
+        and _payload_tree_is_closed(
+            raw_result,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+        and _payload_tree_is_closed(
+            canonical_result,
+            forbidden_identity_values=authenticated_identity_values,
+        )
+        and _same_exact_value_tree(raw_result, canonical_result)
+        and raw_result == canonical_result
+    )
+
+
+def _bind_authenticated_cycle2_case(
+    result: Cycle2EvalCaseSutResult,
+    *,
+    case_id: str,
+) -> Cycle2EvalEvidence:
+    unbound_evidence = result.evidence
+    return Cycle2EvalEvidence(
+        case_id=case_id,
+        **{
+            field_name: getattr(unbound_evidence, field_name)
+            for field_name in UnboundCycle2EvalEvidence.model_fields
+        },
+    )
+
+
+def _canonical_bound_cycle2_evidence(
+    evidence: Cycle2EvalEvidence,
+    *,
+    case_id: str,
+    authenticated_identity_values: frozenset[str],
+) -> Cycle2EvalEvidence | None:
+    allowed_identity_values = {
+        "case_id": frozenset({case_id}),
+    }
+    if (
+        not _canonical_singleton_state_is_closed()
+        or evidence.case_id != case_id
+        or not evidence.trace_events
+        or any(event.case_id is not None for event in evidence.trace_events)
+        or not _payload_tree_is_closed(
+            evidence,
+            forbidden_identity_values=authenticated_identity_values,
+            allowed_schema_identity_values=allowed_identity_values,
+        )
+    ):
+        return None
+    try:
+        projection = evidence.model_dump_json(
+            round_trip=True,
+            warnings="error",
+        )
+        if type(projection) is not str:
+            return None
+        rebuilt = Cycle2EvalEvidence.model_validate_json(
+            projection,
+            strict=True,
+        )
+    except Exception:
+        return None
+    if (
+        type(rebuilt) is not Cycle2EvalEvidence
+        or not _canonical_singleton_state_is_closed()
+        or not _same_exact_value_tree(evidence, rebuilt)
+        or rebuilt != evidence
+        or rebuilt.case_id != case_id
+        or any(event.case_id is not None for event in rebuilt.trace_events)
+        or not _payload_tree_is_closed(
+            rebuilt,
+            forbidden_identity_values=authenticated_identity_values,
+            allowed_schema_identity_values=allowed_identity_values,
+        )
+    ):
+        return None
+    return rebuilt
+
+
 def _canonical_bound_evidence(
     evidence: EvalEvidence,
     *,
@@ -2598,12 +2820,42 @@ class OfflineEvalHarness:
                         )
                     )
             else:
-                pair = {
-                    case_id: staged[case_id].safe_observable for case_id in pair_ids
-                }
-                if not e2e01_04_safe_observables_match(pair):
+                pair_contract_is_closed = all(
+                    type(staged[case_id].expectations)
+                    is EvalCaseExpectations
+                    and type(staged[case_id].safe_observable)
+                    is SafeCaseObservable
+                    for case_id in pair_ids
+                )
+                if not pair_contract_is_closed:
+                    for case_id in pair_ids:
+                        stage = staged.pop(case_id)
+                        failures.append(
+                            await self._append_failure(
+                                eval_run_id=eval_run_id,
+                                lane=lane,
+                                phase=(
+                                    EvalExecutionFailurePhase.RESULT_COMPLETENESS
+                                ),
+                                case=stage.case,
+                                attempt=attempt,
+                                trace_ref=stage.result.trace_ref,
+                                lane_artifact=lane_artifact,
+                            )
+                        )
+                    pair = None
+                else:
+                    pair = {
+                        case_id: staged[case_id].safe_observable
+                        for case_id in pair_ids
+                    }
+                if (
+                    pair is not None
+                    and not e2e01_04_safe_observables_match(pair)
+                ):
                     for case_id in pair_ids:
                         current = staged[case_id]
+                        assert type(current.expectations) is EvalCaseExpectations
                         staged[case_id] = _StagedCase(
                             case=current.case,
                             expectations=current.expectations,
@@ -2635,22 +2887,37 @@ class OfflineEvalHarness:
                     persisted_record,
                     EvalResultRecord,
                 )
+                expectations_type = type(stage.expectations)
                 cache_expectations = _detached_canonical_model(
                     stage.expectations,
-                    EvalCaseExpectations,
+                    expectations_type,
                 )
-                cache_observable = _detached_canonical_model(
-                    stage.safe_observable,
-                    SafeCaseObservable,
+                cache_observable = (
+                    None
+                    if stage.safe_observable is None
+                    else _detached_canonical_model(
+                        stage.safe_observable,
+                        SafeCaseObservable,
+                    )
                 )
                 replay_key = replay_key_by_case.get(case_id)
+                phase1_cache_is_closed = (
+                    expectations_type is EvalCaseExpectations
+                    and type(cache_expectations) is EvalCaseExpectations
+                    and type(cache_observable) is SafeCaseObservable
+                )
+                cycle2_cache_is_closed = (
+                    expectations_type is Cycle2EvalExpectations
+                    and type(cache_expectations) is Cycle2EvalExpectations
+                    and cache_observable is None
+                )
                 if (
                     type(public_record) is EvalResultRecord
                     and type(cache_record) is EvalResultRecord
-                    and type(cache_expectations)
-                    is EvalCaseExpectations
-                    and type(cache_observable)
-                    is SafeCaseObservable
+                    and (
+                        phase1_cache_is_closed
+                        or cycle2_cache_is_closed
+                    )
                 ):
                     persisted.append(public_record)
                 else:
@@ -2754,6 +3021,343 @@ class OfflineEvalHarness:
         self._retired_execution_refs.add(execution_ref)
 
     async def _stage_case(
+        self,
+        *,
+        eval_run_id: UUID,
+        lane_artifact: EvalLaneArtifact,
+        attempt: int,
+        case: EvalCaseArtifact,
+        selected_script_ref: str | None,
+        qwen_execution: _QwenBaselineExecution | None,
+    ) -> tuple[_StagedCase | None, EvalExecutionFailureRecord | None]:
+        profile: AuthenticatedGraderProfile | None = None
+        try:
+            profile = resolve_authenticated_grader_profile(case)
+        except Exception:
+            pass
+        if profile is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.CASE_SETUP,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+        if profile is AuthenticatedGraderProfile.CYCLE2:
+            if qwen_execution is not None:
+                return None, await self._append_failure(
+                    eval_run_id=eval_run_id,
+                    lane=lane_artifact.lane,
+                    phase=EvalExecutionFailurePhase.CASE_SETUP,
+                    case=case,
+                    attempt=attempt,
+                    trace_ref=None,
+                    lane_artifact=lane_artifact,
+                )
+            return await self._stage_cycle2_case(
+                eval_run_id=eval_run_id,
+                lane_artifact=lane_artifact,
+                attempt=attempt,
+                case=case,
+                selected_script_ref=selected_script_ref,
+            )
+        return await self._stage_phase1_case(
+            eval_run_id=eval_run_id,
+            lane_artifact=lane_artifact,
+            attempt=attempt,
+            case=case,
+            selected_script_ref=selected_script_ref,
+            qwen_execution=qwen_execution,
+        )
+
+    async def _stage_cycle2_case(
+        self,
+        *,
+        eval_run_id: UUID,
+        lane_artifact: EvalLaneArtifact,
+        attempt: int,
+        case: EvalCaseArtifact,
+        selected_script_ref: str | None,
+    ) -> tuple[_StagedCase | None, EvalExecutionFailureRecord | None]:
+        expectations: Cycle2EvalExpectations | None = None
+        script: ModelScriptArtifact | None = None
+        try:
+            selected_script_ref = _normalized_selected_script_ref(
+                case,
+                selected_script_ref,
+            )
+            script = self._artifacts.script_by_ref(selected_script_ref)
+            expectations = build_authenticated_cycle2_expectations(
+                artifacts=self._artifacts,
+                case=case,
+            )
+        except Exception:
+            pass
+        if script is None or expectations is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.CASE_SETUP,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        nonce_pair = self._issue_nonce_pair()
+        if nonce_pair is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+        execution_ref, script_execution_ref = nonce_pair
+        provider: ScriptedModelProviderV2 | None = None
+        runtime_fault: RuntimeFaultDirective | None = None
+        execution_input: Cycle2EvalCaseExecutionInput | None = None
+        try:
+            sut_execution_ref = _detached_closed_uuid(execution_ref)
+            provider_execution_ref = _detached_closed_uuid(
+                script_execution_ref
+            )
+            if (
+                sut_execution_ref is None
+                or provider_execution_ref is None
+            ):
+                raise ValueError("closed nonce clone failed")
+            execution_input = build_cycle2_execution_input(
+                case,
+                execution_ref=sut_execution_ref,
+            )
+            provider = ScriptedModelProviderV2(
+                script,
+                script_execution_ref=provider_execution_ref,
+            )
+            runtime_fault = provider.take_runtime_fault_directive()
+        except Exception:
+            pass
+        if execution_input is None or provider is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.CASE_SETUP,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        self._pending_case_by_execution_ref[execution_ref] = case.case_id
+        authenticated_pending_case: str | None = None
+        sut_failed = False
+        sut_result: EvalCaseSutResult | Cycle2EvalCaseSutResult | None = None
+        try:
+            try:
+                sut_result = await self._sut.execute_case(
+                    execution_input=execution_input,
+                    scripted_provider=provider,
+                    runtime_fault=runtime_fault,
+                )
+            except Exception:
+                sut_failed = True
+            authenticated_pending_case = (
+                self._pending_case_by_execution_ref.get(execution_ref)
+            )
+        finally:
+            self._retire_execution_ref(execution_ref)
+        if sut_failed:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.SYSTEM_UNDER_TEST,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        canonical_result: Cycle2EvalCaseSutResult | None = None
+        if type(sut_result) is Cycle2EvalCaseSutResult:
+            try:
+                candidate = _canonical_unbound_cycle2_result(
+                    sut_result,
+                    authenticated_identity_values=(
+                        self._authenticated_identity_values
+                    ),
+                )
+                if (
+                    candidate is not None
+                    and candidate.execution_ref == execution_ref
+                    and authenticated_pending_case == case.case_id
+                ):
+                    canonical_result = candidate
+            except Exception:
+                pass
+        if canonical_result is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        evidence: Cycle2EvalEvidence | None = None
+        try:
+            evidence = _bind_authenticated_cycle2_case(
+                canonical_result,
+                case_id=case.case_id,
+            )
+            evidence = _canonical_bound_cycle2_evidence(
+                evidence,
+                case_id=case.case_id,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
+            )
+        except Exception:
+            evidence = None
+        if evidence is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.RESULT_COMPLETENESS,
+                case=case,
+                attempt=attempt,
+                trace_ref=None,
+                lane_artifact=lane_artifact,
+            )
+
+        try:
+            provider.assert_exhausted()
+        except Exception:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.SYSTEM_UNDER_TEST,
+                case=case,
+                attempt=attempt,
+                trace_ref=evidence.run_record.run_id,
+                lane_artifact=lane_artifact,
+            )
+
+        configured_names = tuple(case.grading.get("graders", ()))
+        grading: GradingOutcome | None = None
+        try:
+            if configured_names != CYCLE2_GRADER_NAMES:
+                raise GradingConfigurationError(
+                    "Cycle 2 grader profile changed after authentication"
+                )
+            if not _unbound_cycle2_result_state_is_closed(
+                sut_result,
+                canonical_result,
+                authenticated_identity_values=(
+                    self._authenticated_identity_values
+                ),
+            ):
+                raise GradingConfigurationError(
+                    "Cycle 2 result changed before grading"
+                )
+            runner_evidence = _detached_canonical_model(
+                evidence,
+                Cycle2EvalEvidence,
+            )
+            runner_expectations = _detached_canonical_model(
+                expectations,
+                Cycle2EvalExpectations,
+            )
+            if (
+                type(runner_evidence) is not Cycle2EvalEvidence
+                or type(runner_expectations) is not Cycle2EvalExpectations
+            ):
+                raise GradingConfigurationError(
+                    "Cycle 2 grader inputs are not detached canonical values"
+                )
+            candidate_grading = grade_cycle2_evidence(
+                configured_names,
+                runner_evidence,
+                runner_expectations,
+            )
+            detached_grading = _detached_canonical_model(
+                candidate_grading,
+                GradingOutcome,
+            )
+            if (
+                type(detached_grading) is not GradingOutcome
+                or not _unbound_cycle2_result_state_is_closed(
+                    sut_result,
+                    canonical_result,
+                    authenticated_identity_values=(
+                        self._authenticated_identity_values
+                    ),
+                )
+                or _detached_external_model_matching(
+                    runner_evidence,
+                    evidence,
+                    Cycle2EvalEvidence,
+                )
+                is None
+                or _detached_external_model_matching(
+                    runner_expectations,
+                    expectations,
+                    Cycle2EvalExpectations,
+                )
+                is None
+            ):
+                raise GradingConfigurationError(
+                    "Cycle 2 result changed during grading"
+                )
+            grading = detached_grading
+        except Exception:
+            grading = None
+        if grading is None:
+            return None, await self._append_failure(
+                eval_run_id=eval_run_id,
+                lane=lane_artifact.lane,
+                phase=EvalExecutionFailurePhase.GRADING,
+                case=case,
+                attempt=attempt,
+                trace_ref=evidence.run_record.run_id,
+                lane_artifact=lane_artifact,
+            )
+
+        result = EvalResultRecord(
+            schema_version="eval_result_record.p0.v1",
+            eval_run_id=eval_run_id,
+            case_id=case.case_id,
+            lane=lane_artifact.lane,
+            attempt=attempt,
+            status=grading.status,
+            grader_results=grading.grader_results,
+            critical_failures=grading.critical_failures,
+            observed_outcome=evidence.observed_outcome,
+            trace_ref=evidence.run_record.run_id,
+            version_manifest=self._version_manifest(case, lane_artifact),
+            latency_summary=None,
+            usage_summary=None,
+            completed_at=max(
+                event.occurred_at for event in evidence.trace_events
+            ),
+        )
+        return (
+            _StagedCase(
+                case=case,
+                expectations=expectations,
+                result=result,
+                safe_observable=None,
+            ),
+            None,
+        )
+
+    async def _stage_phase1_case(
         self,
         *,
         eval_run_id: UUID,

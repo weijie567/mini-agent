@@ -112,9 +112,13 @@ from mini_agent.core.tool_system import (
 from mini_agent.core.trace import (
     AgentOutcome,
     AgentRunRecord,
+    AgentRunRecordV2,
     AgentRunStatus,
+    AgentRunStatusV2,
     StopReason,
+    StopReasonV2,
     TraceEvent,
+    TraceEventV2,
     TraceEventType,
 )
 from mini_agent.evaluation.artifacts import (
@@ -124,6 +128,7 @@ from mini_agent.evaluation.artifacts import (
     load_e2e01_cycle2_artifacts,
 )
 from mini_agent.evaluation.graders import (
+    CYCLE2_GRADER_NAMES,
     EvalCaseExpectations,
     EvalEvidence,
     GradingOutcome,
@@ -134,10 +139,13 @@ from mini_agent.evaluation.graders import (
 )
 import mini_agent.evaluation.harness as harness_module
 from mini_agent.evaluation.harness import (
+    Cycle2EvalCaseExecutionInput,
+    Cycle2EvalCaseSutResult,
     EvalCaseExecutionInput,
     EvalCaseSutResult,
     EvalHarnessCommandError,
     OfflineEvalHarness,
+    UnboundCycle2EvalEvidence,
     UnboundEvalEvidence,
     UnboundSafeCaseObservable,
     append_qwen_not_run_record,
@@ -2793,53 +2801,57 @@ def test_derived_contract_defined_cases_fail_before_any_execution_stage(
     assert traces.events == []
 
 
-def test_all_cycle2_contract_defined_cases_fail_as_one_predispatch_batch(
+def test_all_cycle2_executable_cases_reach_typed_sut_boundary_as_one_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifacts = load_e2e01_cycle2_artifacts(
         REPO_ROOT,
-        candidate_version="git:synthetic-cycle2-predispatch",
-        runtime_version="git:synthetic-cycle2-predispatch",
+        candidate_version="git:synthetic-cycle2-router",
+        runtime_version="git:synthetic-cycle2-router",
     )
     selected_ids = tuple(case.case_id for case in artifacts.cases)
     assert len(selected_ids) == 27
-    assert all(case.lifecycle_status == "CONTRACT_DEFINED" for case in artifacts.cases)
+    assert all(case.lifecycle_status == "EXECUTABLE" for case in artifacts.cases)
 
     sut = BoundaryProbeSut()
     traces = InMemoryTraceCallbacks()
     port = InMemoryResultPort()
     provider_calls = 0
-    nonce_calls = 0
     grader_calls = 0
 
-    class ForbiddenCycle2Provider:
+    class ExhaustedCycle2Provider:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             nonlocal provider_calls
             provider_calls += 1
-            raise AssertionError("Cycle 2 lifecycle hold forbids Provider construction")
 
-    def forbidden_nonce() -> UUID:
-        nonlocal nonce_calls
-        nonce_calls += 1
-        raise AssertionError("Cycle 2 lifecycle hold forbids nonce issuance")
+        def take_runtime_fault_directive(self) -> None:
+            return None
+
+        def assert_exhausted(self) -> None:
+            return None
 
     def forbidden_grader(*_args: object, **_kwargs: object) -> GradingOutcome:
         nonlocal grader_calls
         grader_calls += 1
-        raise AssertionError("Cycle 2 lifecycle hold forbids Grader execution")
+        raise AssertionError("incomplete Cycle 2 result reached Phase 1 grader")
 
     monkeypatch.setattr(
         harness_module,
         "ScriptedModelProviderV2",
-        ForbiddenCycle2Provider,
+        ExhaustedCycle2Provider,
     )
+    nonce_values = tuple(
+        UUID(f"{index:08x}-0000-4000-8000-{index:012x}")
+        for index in range(1, 55)
+    )
+    nonce_factory = NonceFactorySpy(nonce_values)
     harness, _sut, _traces, _port = _harness(
         artifacts=artifacts,
         sut=sut,
         traces=traces,
         port=port,
         grader_runner=forbidden_grader,
-        nonce_factory=forbidden_nonce,
+        nonce_factory=nonce_factory,
     )
 
     outcome = _run(harness, case_ids=selected_ids)
@@ -2850,20 +2862,161 @@ def test_all_cycle2_contract_defined_cases_fail_as_one_predispatch_batch(
         selected_ids
     )
     assert all(
-        failure.failure_phase is EvalExecutionFailurePhase.CASE_SETUP
+        failure.failure_phase is EvalExecutionFailurePhase.RESULT_COMPLETENESS
         and failure.safe_error_code
-        is EvalExecutionSafeErrorCode.CASE_SETUP_FAILED
+        is EvalExecutionSafeErrorCode.RESULT_COMPLETENESS_FAILED
         and failure.trace_ref is None
         for failure in outcome.execution_failures
     )
     assert tuple(port.failures) == outcome.execution_failures
     assert port.results == {}
     assert port.events == ["failure_append"] * len(selected_ids)
-    assert sut.received_calls == []
+    assert len(sut.received_calls) == 27
+    assert all(
+        type(call["execution_input"]) is Cycle2EvalCaseExecutionInput
+        and set(call) == {
+            "execution_input",
+            "scripted_provider",
+            "runtime_fault",
+        }
+        and call["runtime_fault"] is None
+        for call in sut.received_calls
+    )
+    assert all(
+        {
+            "expectations",
+            "required_predicates",
+            "forbidden_predicates",
+            "graders",
+            "case_id",
+        }.isdisjoint(
+            type(call["execution_input"]).model_fields
+        )
+        for call in sut.received_calls
+    )
     assert traces.events == []
-    assert provider_calls == 0
-    assert nonce_calls == 0
+    assert provider_calls == 27
+    assert nonce_factory.calls == [((), {})] * 54
     assert grader_calls == 0
+
+
+def test_cycle2_unbound_actual_evidence_is_bound_graded_persisted_and_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = load_e2e01_cycle2_artifacts(
+        REPO_ROOT,
+        candidate_version="git:synthetic-cycle2-result-route",
+        runtime_version="git:synthetic-cycle2-result-route",
+    )
+    case = artifacts.cases[0]
+    run_id = UUID("91000000-0000-4000-8000-000000000001")
+
+    class ExhaustedCycle2Provider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def take_runtime_fault_directive(self) -> None:
+            return None
+
+        def assert_exhausted(self) -> None:
+            return None
+
+    class TypedCycle2Sut:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.inputs: list[Cycle2EvalCaseExecutionInput] = []
+
+        async def execute_case(
+            self,
+            **kwargs: object,
+        ) -> Cycle2EvalCaseSutResult:
+            self.calls += 1
+            execution_input = kwargs["execution_input"]
+            assert type(execution_input) is Cycle2EvalCaseExecutionInput
+            self.inputs.append(execution_input)
+            return Cycle2EvalCaseSutResult(
+                execution_ref=execution_input.execution_ref,
+                evidence=UnboundCycle2EvalEvidence(
+                    http_status=503,
+                    observed_outcome=AgentOutcome.COMPLETED,
+                    response_policy="DETERMINISTIC_ORDER_SUMMARY_V1",
+                    run_record=AgentRunRecordV2(
+                        run_id=run_id,
+                        conversation_id=None,
+                        status=AgentRunStatusV2.COMPLETED,
+                        provider_lane="offline_gate",
+                        started_at=NOW,
+                        completed_at=NOW + timedelta(seconds=1),
+                        stop_reason=StopReasonV2.GOAL_COMPLETED,
+                    ),
+                    agent_results=(
+                        AgentRunResult(
+                            run_id=run_id,
+                            outcome=AgentOutcome.COMPLETED,
+                            message="确定性安全结果。",
+                        ),
+                    ),
+                    trace_events=(
+                        TraceEventV2(
+                            trace_event_id=UUID(
+                                "92000000-0000-4000-8000-000000000001"
+                            ),
+                            event_type=TraceEventType.RUN_STARTED,
+                            occurred_at=NOW,
+                            run_id=run_id,
+                        ),
+                        TraceEventV2(
+                            trace_event_id=UUID(
+                                "92000000-0000-4000-8000-000000000002"
+                            ),
+                            event_type=TraceEventType.RUN_STOPPED,
+                            occurred_at=NOW + timedelta(seconds=1),
+                            run_id=run_id,
+                            user_outcome=AgentOutcome.COMPLETED,
+                            stop_reason=StopReasonV2.GOAL_COMPLETED,
+                        ),
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        harness_module,
+        "ScriptedModelProviderV2",
+        ExhaustedCycle2Provider,
+    )
+    sut = TypedCycle2Sut()
+    traces = InMemoryTraceCallbacks()
+    port = InMemoryResultPort()
+    nonce_factory = NonceFactorySpy(
+        (EXECUTION_REF_1, SCRIPT_EXECUTION_REF_1)
+    )
+    harness, *_ = _harness(
+        artifacts=artifacts,
+        sut=sut,
+        traces=traces,
+        port=port,
+        nonce_factory=nonce_factory,
+    )
+
+    first = _run(harness, case_ids=(case.case_id,))
+    second = _run(harness, case_ids=(case.case_id,))
+
+    assert first.execution_failures == second.execution_failures == ()
+    assert len(first.results) == len(second.results) == 1
+    assert first.results == second.results
+    result = first.results[0]
+    assert result.status is EvalResultStatus.FAIL
+    assert result.case_id == case.case_id
+    assert result.trace_ref == run_id
+    assert tuple(item.grader_name for item in result.grader_results) == (
+        CYCLE2_GRADER_NAMES
+    )
+    assert len(result.grader_results) == 15
+    assert sut.calls == 1
+    assert len(sut.inputs) == 1
+    assert nonce_factory.calls == [((), {}), ((), {})]
+    assert traces.events == []
+    assert len(port.results) == 1
 
 
 @pytest.mark.parametrize(
@@ -4992,23 +5145,38 @@ def test_canonical_result_enum_types_are_import_time_closed() -> None:
     } == {
         "AgentOutcome",
         "AgentRunStatus",
+        "AgentRunStatusV2",
         "CandidateRejectionReasonCode",
         "CandidateValidationDecision",
+        "Cycle2MapperSignal",
+        "Cycle2ToolName",
         "GateDecisionValue",
         "GateReasonCode",
         "InputAuthority",
         "InputSourceKind",
         "InputValidationStatus",
+        "MapperDisposition",
         "MessageDirection",
         "ObservationVisibility",
+        "OrderCandidateSetOutcome",
         "OrderStatus",
         "ReferenceSourceKindV2",
+        "ResponsePolicy",
+        "ShipmentAssessmentReason",
+        "ShipmentAssessmentResult",
+        "ShipmentEventCode",
+        "ShipmentStatus",
         "StopReason",
+        "StopReasonV2",
+        "SupersededRunInvalidationKind",
         "TaskDeltaOperation",
         "TaskStatus",
         "ToolCallStatus",
         "ToolEffect",
+        "ToolRecoveryDecision",
+        "ToolRecoveryDisposition",
         "ToolResultOutcome",
+        "ToolRetryDecision",
         "ToolTimeoutPhase",
         "TraceEventType",
         "UncertaintyReasonCodeV2",
