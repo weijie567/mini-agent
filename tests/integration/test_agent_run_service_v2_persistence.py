@@ -18,6 +18,7 @@ from mini_agent.application.read_tool_executor import (
 )
 from mini_agent.application.records import (
     AgentRunCommand,
+    Cycle2ControlPurpose,
     Cycle2RunBudgetPolicyEvidence,
     TrustedOwnerScope,
 )
@@ -28,6 +29,8 @@ from mini_agent.core.order import (
     OrderSummaryProjection,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -351,28 +354,18 @@ class _Cycle2UniqueProvider:
     async def propose_cycle2_continuation(self, _request):
         raise AssertionError("unique first turn must not use continuation")
 
-    async def propose_cycle2_search_followup(
+    async def propose_cycle2_control(
         self,
         _request,
-        _projection,
-        current_task_state_version: int,
-    ) -> NextMove:
-        return NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name="get_order",
-            arguments={"order_id": "O-1001"},
-            base_task_state_version=current_task_state_version,
-        )
-
-    async def propose_cycle2_order_followup(
-        self,
-        _request,
-        _summary,
-        current_task_state_version: int,
-    ) -> NextMove:
-        return NextMove(
-            kind=NextMoveKind.FINISH,
-            base_task_state_version=current_task_state_version,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        if purpose is Cycle2ControlPurpose.PROPOSE_GET_ORDER:
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
+                requested_tool_name="get_order",
+            )
+        return Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.FINISH,
         )
 
 
