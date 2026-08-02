@@ -16,6 +16,10 @@ from .common import (
     thaw_json_value,
 )
 from .identity import CustomerContext
+from .memory import (
+    SearchOrdersObservation,
+    validate_search_candidate_set_observation_closure,
+)
 from .order_search import normalize_product_description
 from .request_understanding import (
     Cycle2InitialRequestUnderstandingOutputV2,
@@ -31,8 +35,10 @@ from .task_state import (
     InputBinding,
     InputBindingV2,
     InputValidationStatus,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
+    OrderCandidateSetOutcome,
     OrderCandidateSetRecord,
     RequestUnitRecord,
     TaskRecord,
@@ -3237,6 +3243,183 @@ def _canonical_cycle2_verified_target(
     return value
 
 
+def build_cycle2_unique_auto_target_record(
+    *,
+    customer_context: CustomerContext,
+    current_conversation_id: UUID,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+    current_input_bindings: tuple[InputBindingV2, ...],
+    candidate_set: OrderCandidateSetRecord,
+    search_observation: SearchOrdersObservation,
+    source_tool_argument_binding_refs: tuple[UUID, ...],
+    resolved_owner_scoped_order_target_ref: str,
+    resolved_order_id: str,
+    verified_target_ref: UUID,
+    current_auto_targets: tuple[OrderCandidateAutoTargetRecord, ...],
+    trusted_now: datetime,
+) -> OrderCandidateAutoTargetRecord:
+    """Build one UNIQUE target from an already owner-resolved loaded closure."""
+
+    context, task, unit, bindings = _require_cycle2_current_task_graph(
+        customer_context=customer_context,
+        current_task=current_task,
+        current_request_unit=current_request_unit,
+        current_input_bindings=current_input_bindings,
+        trusted_now=trusted_now,
+    )
+    if (
+        type(current_conversation_id) is not UUID
+        or type(candidate_set) is not OrderCandidateSetRecord
+        or not _is_exact_canonical_model_v2(
+            candidate_set,
+            OrderCandidateSetRecord,
+        )
+        or type(search_observation) is not SearchOrdersObservation
+        or not _is_exact_canonical_model_v2(
+            search_observation,
+            SearchOrdersObservation,
+        )
+        or type(source_tool_argument_binding_refs) is not tuple
+        or any(type(reference) is not UUID for reference in source_tool_argument_binding_refs)
+        or type(verified_target_ref) is not UUID
+        or verified_target_ref.version != 4
+        or type(current_auto_targets) is not tuple
+        or any(
+            type(record) is not OrderCandidateAutoTargetRecord
+            or not _is_exact_canonical_model_v2(
+                record,
+                OrderCandidateAutoTargetRecord,
+            )
+            for record in current_auto_targets
+        )
+        or len(current_auto_targets) > 1
+    ):
+        raise _cycle2_routing_error()
+    try:
+        validate_search_candidate_set_observation_closure(
+            candidate_set=candidate_set,
+            observation=search_observation,
+        )
+        normalized_order_id = _normalize_order_id(resolved_order_id)
+    except (TypeError, ValueError, ValidationError, RequestProcessingError) as error:
+        raise _cycle2_routing_error() from error
+
+    query_bindings = tuple(
+        binding for binding in bindings if binding.name == "product_description"
+    )
+    unique_entry = candidate_set.ordered_candidates[0]
+    target_mappings = tuple(
+        mapping
+        for mapping in search_observation.candidate_target_bindings
+        if mapping.observation_candidate_ref
+        == unique_entry.observation_candidate_ref
+        and mapping.candidate_source_version
+        == unique_entry.candidate_source_version
+    )
+    safe_candidates = tuple(
+        candidate
+        for candidate in search_observation.normalized_value.ordered_candidates
+        if candidate.observation_candidate_ref
+        == unique_entry.observation_candidate_ref
+        and candidate.candidate_source_version
+        == unique_entry.candidate_source_version
+    )
+    previous_target = current_auto_targets[0] if current_auto_targets else None
+    graph_identities = {
+        current_conversation_id,
+        task.task_id,
+        unit.request_unit_id,
+        candidate_set.candidate_set_id,
+        candidate_set.source_tool_call_id,
+        candidate_set.search_observation_ref,
+        unique_entry.observation_candidate_ref,
+        *(binding.binding_id for binding in bindings),
+    }
+    if previous_target is not None:
+        graph_identities.add(previous_target.verified_target_ref)
+
+    if (
+        task.status is not TaskStatus.ACTIVE
+        or unit.status is not TaskStatus.ACTIVE
+        or unit.open_questions
+        or len(query_bindings) != 1
+        or candidate_set.outcome is not OrderCandidateSetOutcome.UNIQUE
+        or len(candidate_set.ordered_candidates) != 1
+        or candidate_set.selection_expected_task_state_version is not None
+        or candidate_set.private_owner_scope_ref != context.customer_id
+        or candidate_set.conversation_id != current_conversation_id
+        or candidate_set.task_id != task.task_id
+        or candidate_set.request_unit_id != unit.request_unit_id
+        or candidate_set.query_binding_refs != (query_bindings[0].binding_id,)
+        or source_tool_argument_binding_refs != (query_bindings[0].binding_id,)
+        or candidate_set.result_task_state_version
+        != candidate_set.base_task_state_version + 1
+        or task.state_version != candidate_set.result_task_state_version
+        or unit.state_version != candidate_set.result_task_state_version
+        or candidate_set.search_observation_ref not in unit.observation_refs
+        or trusted_now != candidate_set.created_at
+        or trusted_now != search_observation.recorded_at
+        or trusted_now >= candidate_set.valid_until
+        or len(target_mappings) != 1
+        or len(safe_candidates) != 1
+        or target_mappings[0].owner_scoped_order_ref
+        != resolved_owner_scoped_order_target_ref
+        or normalized_order_id != resolved_order_id
+        # This is an integrity comparison only; resolved_order_id authority is the
+        # caller's owner-scoped business reader, never the safe public projection.
+        or safe_candidates[0].public_summary.order_number != resolved_order_id
+        or verified_target_ref in graph_identities
+    ):
+        raise _cycle2_routing_error()
+
+    supersedes_verified_target_ref: UUID | None = None
+    if previous_target is not None:
+        if (
+            candidate_set.supersedes_candidate_set_ref
+            != previous_target.candidate_set_ref
+            or previous_target.private_owner_scope_ref != context.customer_id
+            or previous_target.conversation_id != current_conversation_id
+            or previous_target.task_id != task.task_id
+            or previous_target.request_unit_id != unit.request_unit_id
+            or previous_target.result_task_state_version
+            > candidate_set.base_task_state_version
+            or previous_target.verified_at > trusted_now
+        ):
+            raise _cycle2_routing_error()
+        supersedes_verified_target_ref = previous_target.verified_target_ref
+
+    try:
+        return OrderCandidateAutoTargetRecord(
+            verified_target_ref=verified_target_ref,
+            private_owner_scope_ref=context.customer_id,
+            conversation_id=current_conversation_id,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            query_input_binding_ref=query_bindings[0].binding_id,
+            candidate_set_ref=candidate_set.candidate_set_id,
+            candidate_set_version=candidate_set.candidate_set_version,
+            source_tool_call_id=candidate_set.source_tool_call_id,
+            search_observation_ref=candidate_set.search_observation_ref,
+            search_observation_record_schema_version=(
+                candidate_set.search_observation_record_schema_version
+            ),
+            search_observation_source_version=(
+                candidate_set.search_observation_source_version
+            ),
+            observation_candidate_ref=unique_entry.observation_candidate_ref,
+            candidate_source_version=unique_entry.candidate_source_version,
+            owner_scoped_order_target_ref=resolved_owner_scoped_order_target_ref,
+            order_id=normalized_order_id,
+            base_task_state_version=candidate_set.base_task_state_version,
+            result_task_state_version=candidate_set.result_task_state_version,
+            verified_at=trusted_now,
+            supersedes_verified_target_ref=supersedes_verified_target_ref,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
+
+
 def route_cycle2_continuation_next_move(
     *,
     request_input: RequestUnderstandingInput,
@@ -3350,6 +3533,184 @@ def route_cycle2_continuation_next_move(
         context_manifest_id=context_manifest_id,
         argument_binding_refs=argument_binding_refs,
         verified_target_ref=verified_target_ref,
+    )
+
+
+def route_cycle2_unique_next_move(
+    *,
+    request_input: RequestUnderstandingInput,
+    next_move: NextMove,
+    customer_context: CustomerContext,
+    current_conversation_id: UUID,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+    current_input_bindings: tuple[InputBindingV2, ...],
+    candidate_set: OrderCandidateSetRecord,
+    search_observation: SearchOrdersObservation,
+    auto_target_record: OrderCandidateAutoTargetRecord,
+    resolved_owner_scoped_order_target_ref: str,
+    current_auto_targets: tuple[OrderCandidateAutoTargetRecord, ...],
+    superseded_candidate_set_refs: tuple[UUID, ...],
+    superseded_verified_target_refs: tuple[UUID, ...],
+    verified_target: Cycle2VerifiedOrderTargetFacts,
+    model_call_id: UUID,
+    context_manifest_id: UUID,
+    trusted_now: datetime,
+) -> Cycle2GatewayCandidate:
+    """Route a current UNIQUE auto-target without inventing an order-id Claim."""
+
+    try:
+        canonical_input = _canonical_request_input_v2(request_input)
+    except (RequestUnderstandingV2Error, TypeError, ValueError) as error:
+        raise _cycle2_routing_error() from error
+    move = _canonical_cycle2_next_move(next_move)
+    context, task, unit, bindings = _require_cycle2_current_task_graph(
+        customer_context=customer_context,
+        current_task=current_task,
+        current_request_unit=current_request_unit,
+        current_input_bindings=current_input_bindings,
+        trusted_now=trusted_now,
+    )
+    if (
+        type(current_conversation_id) is not UUID
+        or type(candidate_set) is not OrderCandidateSetRecord
+        or not _is_exact_canonical_model_v2(
+            candidate_set,
+            OrderCandidateSetRecord,
+        )
+        or type(auto_target_record) is not OrderCandidateAutoTargetRecord
+        or not _is_exact_canonical_model_v2(
+            auto_target_record,
+            OrderCandidateAutoTargetRecord,
+        )
+        or type(search_observation) is not SearchOrdersObservation
+        or not _is_exact_canonical_model_v2(
+            search_observation,
+            SearchOrdersObservation,
+        )
+        or type(resolved_owner_scoped_order_target_ref) is not str
+        or not resolved_owner_scoped_order_target_ref
+        or any(character.isspace() for character in resolved_owner_scoped_order_target_ref)
+        or type(current_auto_targets) is not tuple
+        or current_auto_targets != (auto_target_record,)
+        or type(superseded_candidate_set_refs) is not tuple
+        or any(type(reference) is not UUID for reference in superseded_candidate_set_refs)
+        or len(superseded_candidate_set_refs)
+        != len(set(superseded_candidate_set_refs))
+        or type(superseded_verified_target_refs) is not tuple
+        or any(
+            type(reference) is not UUID
+            for reference in superseded_verified_target_refs
+        )
+        or len(superseded_verified_target_refs)
+        != len(set(superseded_verified_target_refs))
+    ):
+        raise _cycle2_routing_error()
+    try:
+        validate_search_candidate_set_observation_closure(
+            candidate_set=candidate_set,
+            observation=search_observation,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
+    target = _canonical_cycle2_verified_target(verified_target)
+    query_bindings = tuple(
+        binding
+        for binding in bindings
+        if binding.name == "product_description"
+        and binding.binding_id == auto_target_record.query_input_binding_ref
+    )
+    try:
+        normalized_order_id = _normalize_order_id(move.arguments.get("order_id"))
+    except (TypeError, ValueError, RequestProcessingError) as error:
+        raise _cycle2_routing_error() from error
+    unique_entry = candidate_set.ordered_candidates[0]
+    target_mappings = tuple(
+        mapping
+        for mapping in search_observation.candidate_target_bindings
+        if mapping.observation_candidate_ref
+        == unique_entry.observation_candidate_ref
+        and mapping.candidate_source_version
+        == unique_entry.candidate_source_version
+    )
+    record = auto_target_record
+    if (
+        task.status is not TaskStatus.ACTIVE
+        or unit.status is not TaskStatus.ACTIVE
+        or unit.open_questions
+        or len(query_bindings) != 1
+        or query_bindings[0].source_refs != (canonical_input.message_ref,)
+        or candidate_set.outcome is not OrderCandidateSetOutcome.UNIQUE
+        or len(candidate_set.ordered_candidates) != 1
+        or candidate_set.selection_expected_task_state_version is not None
+        or candidate_set.candidate_set_id in superseded_candidate_set_refs
+        or record.verified_target_ref in superseded_verified_target_refs
+        or trusted_now < record.verified_at
+        or trusted_now >= candidate_set.valid_until
+        or candidate_set.private_owner_scope_ref != context.customer_id
+        or candidate_set.conversation_id != current_conversation_id
+        or candidate_set.task_id != task.task_id
+        or candidate_set.request_unit_id != unit.request_unit_id
+        or candidate_set.query_binding_refs != (query_bindings[0].binding_id,)
+        or candidate_set.result_task_state_version
+        != candidate_set.base_task_state_version + 1
+        or task.state_version != candidate_set.result_task_state_version
+        or unit.state_version != candidate_set.result_task_state_version
+        or candidate_set.search_observation_ref not in unit.observation_refs
+        or len(target_mappings) != 1
+        or target_mappings[0].owner_scoped_order_ref
+        != resolved_owner_scoped_order_target_ref
+        or record.private_owner_scope_ref != context.customer_id
+        or record.conversation_id != current_conversation_id
+        or record.task_id != task.task_id
+        or record.request_unit_id != unit.request_unit_id
+        or record.candidate_set_ref != candidate_set.candidate_set_id
+        or record.candidate_set_version != candidate_set.candidate_set_version
+        or record.source_tool_call_id != candidate_set.source_tool_call_id
+        or record.search_observation_ref
+        != candidate_set.search_observation_ref
+        or record.search_observation_record_schema_version
+        != candidate_set.search_observation_record_schema_version
+        or record.search_observation_source_version
+        != candidate_set.search_observation_source_version
+        or record.observation_candidate_ref
+        != unique_entry.observation_candidate_ref
+        or record.candidate_source_version != unique_entry.candidate_source_version
+        or record.owner_scoped_order_target_ref
+        != resolved_owner_scoped_order_target_ref
+        or record.base_task_state_version
+        != candidate_set.base_task_state_version
+        or record.result_task_state_version
+        != candidate_set.result_task_state_version
+        or record.verified_at != candidate_set.created_at
+        or move.base_task_state_version != record.result_task_state_version
+        or move.requested_tool_name != "get_order"
+        or set(move.arguments) != {"order_id"}
+        or normalized_order_id != move.arguments["order_id"]
+        or normalized_order_id != record.order_id
+        or target.verified_target_ref != record.verified_target_ref
+        or target.superseded_by is not None
+        or target.private_owner_scope_ref != context.customer_id
+        or target.owner_customer_id != context.customer_id
+        or target.task_id != task.task_id
+        or target.request_unit_id != unit.request_unit_id
+        or target.task_state_version != task.state_version
+        or target.order_id != record.order_id
+        or target.source_observation_ref != record.search_observation_ref
+        or target.source_observation_version
+        != record.search_observation_source_version
+        or target.input_binding_refs != (query_bindings[0].binding_id,)
+    ):
+        raise _cycle2_routing_error()
+    return _build_cycle2_gateway_candidate(
+        request_input=canonical_input,
+        next_move=move,
+        current_task=task,
+        current_request_unit=unit,
+        model_call_id=model_call_id,
+        context_manifest_id=context_manifest_id,
+        argument_binding_refs=(query_bindings[0].binding_id,),
+        verified_target_ref=record.verified_target_ref,
     )
 
 

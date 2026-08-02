@@ -18,6 +18,17 @@ from mini_agent.core.control_gateway import (
     Cycle2VerifiedOrderTargetFacts,
 )
 from mini_agent.core.identity import CustomerContext
+from mini_agent.core.memory import (
+    SearchObservationCandidateTargetBinding,
+    SearchOrdersObservation,
+    SearchOrdersObservationCandidate,
+    SearchOrdersObservationValue,
+)
+from mini_agent.core.order import OrderStatus
+from mini_agent.core.order_search import (
+    OrderCandidateMatchingItem,
+    OrderCandidatePublicSummary,
+)
 from mini_agent.core.request_processing import (
     Cycle2InitialAcceptedTaskGraphV2,
     Cycle2InitialRequestDecisionV2,
@@ -32,12 +43,14 @@ from mini_agent.core.request_processing import (
     RequestUnderstandingClosureV2,
     RequestUnderstandingV2Error,
     RevalidatedNextMove,
+    build_cycle2_unique_auto_target_record,
     build_request_understanding_closure_v2,
     prepare_cycle2_ordinal_selection,
     revalidate_next_move_v2,
     reduce_cycle2_continuation_candidate,
     route_cycle2_continuation_next_move,
     route_cycle2_selected_next_move,
+    route_cycle2_unique_next_move,
     validate_and_reduce_cycle2_initial_request_v2,
     validate_and_reduce_initial_request_v2,
 )
@@ -67,6 +80,7 @@ from mini_agent.core.task_state import (
     CandidateValidationRecordV2,
     InputValidationStatus,
     InputBindingV2,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSetEntry,
     OrderCandidateSetOutcome,
@@ -5615,6 +5629,307 @@ def _cycle2_candidate_set(
         }
     )
     return OrderCandidateSetRecord.model_validate(values)
+
+
+def _cycle2_unique_auto_target_case() -> dict[str, object]:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="帮我找轻量跑鞋订单",
+        run_id=uuid4(),
+    )
+    query_binding = _cycle2_binding(
+        name="product_description",
+        value="轻量跑鞋",
+        source_ref=message_ref,
+    )
+    task, unit = _cycle2_current_task_graph(binding=query_binding)
+    conversation_id = uuid4()
+    candidate_set = _cycle2_candidate_set(
+        task=task,
+        unit=unit,
+        query_binding=query_binding,
+        conversation_id=conversation_id,
+        outcome=OrderCandidateSetOutcome.UNIQUE,
+        ordered_candidates=(
+            OrderCandidateSetEntry(
+                ordinal=1,
+                observation_candidate_ref=uuid4(),
+                candidate_source_version=C2_CANDIDATE_SOURCE_VERSIONS[0],
+            ),
+        ),
+        selection_expected_task_state_version=None,
+        created_at=NOW,
+        valid_until=NOW + timedelta(minutes=15),
+    )
+    entry = candidate_set.ordered_candidates[0]
+    observation = SearchOrdersObservation(
+        observation_id=candidate_set.search_observation_ref,
+        private_owner_scope=task.owner_customer_id,
+        source_tool="search_orders",
+        source_tool_call_id=candidate_set.source_tool_call_id,
+        source_resource_ref="order-search:customer-A:1",
+        source_version=candidate_set.search_observation_source_version,
+        candidate_target_bindings=(
+            SearchObservationCandidateTargetBinding(
+                observation_candidate_ref=entry.observation_candidate_ref,
+                owner_scoped_order_ref="owner-order:1",
+                candidate_source_version=entry.candidate_source_version,
+            ),
+        ),
+        normalized_type="ORDER_SEARCH_CANDIDATES",
+        normalized_value=SearchOrdersObservationValue(
+            ordered_candidates=(
+                SearchOrdersObservationCandidate(
+                    observation_candidate_ref=entry.observation_candidate_ref,
+                    candidate_source_version=entry.candidate_source_version,
+                    public_summary=OrderCandidatePublicSummary(
+                        order_number="O-1001",
+                        ordered_on_utc=NOW.date(),
+                        status=OrderStatus.SHIPPED,
+                        matching_items=(
+                            OrderCandidateMatchingItem(
+                                product_name="轻量跑鞋",
+                                quantity=1,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            truncated=False,
+        ),
+        observed_at=NOW - timedelta(seconds=1),
+        recorded_at=NOW,
+        valid_until=NOW + timedelta(minutes=15),
+    )
+    unit = unit.model_copy(
+        update={"observation_refs": (observation.observation_id,)}
+    )
+    return {
+        "request_input": request_input,
+        "customer_context": _customer_context(),
+        "current_conversation_id": conversation_id,
+        "current_task": task,
+        "current_request_unit": unit,
+        "current_input_bindings": (query_binding,),
+        "candidate_set": candidate_set,
+        "search_observation": observation,
+        "source_tool_argument_binding_refs": (query_binding.binding_id,),
+        "resolved_owner_scoped_order_target_ref": "owner-order:1",
+        "resolved_order_id": "O-1001",
+        "verified_target_ref": uuid4(),
+        "current_auto_targets": (),
+        "trusted_now": NOW,
+    }
+
+
+def test_cycle2_unique_builder_closes_private_mapping_and_fresh_target() -> None:
+    arguments = _cycle2_unique_auto_target_case()
+
+    record = build_cycle2_unique_auto_target_record(
+        **{
+            key: value
+            for key, value in arguments.items()
+            if key != "request_input"
+        }
+    )
+
+    candidate_set = arguments["candidate_set"]
+    query_binding = arguments["current_input_bindings"][0]
+    assert isinstance(record, OrderCandidateAutoTargetRecord)
+    assert record.verified_target_ref == arguments["verified_target_ref"]
+    assert record.query_input_binding_ref == query_binding.binding_id
+    assert record.candidate_set_ref == candidate_set.candidate_set_id
+    assert record.owner_scoped_order_target_ref == "owner-order:1"
+    assert record.order_id == "O-1001"
+    assert record.supersedes_verified_target_ref is None
+
+
+@pytest.mark.parametrize(
+    "variant",
+    (
+        "wrong-owner",
+        "multiple",
+        "wrong-source-binding",
+        "wrong-private-target",
+        "wrong-order-id",
+        "reused-uuid",
+        "wrong-time",
+        "duplicate-current-target",
+    ),
+)
+def test_cycle2_unique_builder_rejects_partial_or_substituted_closure(
+    variant: str,
+) -> None:
+    arguments = _cycle2_unique_auto_target_case()
+    arguments.pop("request_input")
+    if variant == "wrong-owner":
+        arguments["customer_context"] = _customer_context("customer-B")
+    elif variant == "multiple":
+        candidate_set = arguments["candidate_set"]
+        observation = arguments["search_observation"]
+        extra_ref = uuid4()
+        extra_version = C2_CANDIDATE_SOURCE_VERSIONS[1]
+        arguments["candidate_set"] = _cycle2_candidate_set(
+            task=arguments["current_task"],
+            unit=arguments["current_request_unit"],
+            query_binding=arguments["current_input_bindings"][0],
+            conversation_id=arguments["current_conversation_id"],
+            source_tool_call_id=candidate_set.source_tool_call_id,
+            search_observation_ref=candidate_set.search_observation_ref,
+            outcome=OrderCandidateSetOutcome.MULTIPLE,
+            ordered_candidates=(
+                candidate_set.ordered_candidates[0],
+                OrderCandidateSetEntry(
+                    ordinal=2,
+                    observation_candidate_ref=extra_ref,
+                    candidate_source_version=extra_version,
+                ),
+            ),
+            selection_expected_task_state_version=(
+                candidate_set.result_task_state_version
+            ),
+            created_at=NOW,
+            valid_until=NOW + timedelta(minutes=15),
+        )
+        arguments["search_observation"] = observation.model_copy(
+            update={
+                "candidate_target_bindings": (
+                    *observation.candidate_target_bindings,
+                    SearchObservationCandidateTargetBinding(
+                        observation_candidate_ref=extra_ref,
+                        owner_scoped_order_ref="owner-order:2",
+                        candidate_source_version=extra_version,
+                    ),
+                ),
+                "normalized_value": observation.normalized_value.model_copy(
+                    update={
+                        "ordered_candidates": (
+                            *observation.normalized_value.ordered_candidates,
+                            SearchOrdersObservationCandidate(
+                                observation_candidate_ref=extra_ref,
+                                candidate_source_version=extra_version,
+                                public_summary=observation.normalized_value.ordered_candidates[0].public_summary.model_copy(
+                                    update={"order_number": "O-1002"}
+                                ),
+                            ),
+                        )
+                    }
+                ),
+            }
+        )
+    elif variant == "wrong-source-binding":
+        arguments["source_tool_argument_binding_refs"] = (uuid4(),)
+    elif variant == "wrong-private-target":
+        arguments["resolved_owner_scoped_order_target_ref"] = "owner-order:2"
+    elif variant == "wrong-order-id":
+        arguments["resolved_order_id"] = "O-1002"
+    elif variant == "reused-uuid":
+        arguments["verified_target_ref"] = arguments["candidate_set"].candidate_set_id
+    elif variant == "wrong-time":
+        arguments["trusted_now"] = NOW + timedelta(seconds=1)
+    else:
+        record = build_cycle2_unique_auto_target_record(**arguments)
+        arguments["candidate_set"] = arguments["candidate_set"].model_copy(
+            update={
+                "supersedes_candidate_set_ref": record.candidate_set_ref,
+            }
+        )
+        arguments["current_auto_targets"] = (record, record)
+
+    with pytest.raises(RequestProcessingError):
+        build_cycle2_unique_auto_target_record(**arguments)
+
+
+def test_cycle2_unique_route_uses_query_binding_and_independent_target() -> None:
+    arguments = _cycle2_unique_auto_target_case()
+    build_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if key != "request_input"
+    }
+    record = build_cycle2_unique_auto_target_record(**build_arguments)
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=record.verified_target_ref,
+        private_owner_scope_ref=record.private_owner_scope_ref,
+        owner_customer_id=record.private_owner_scope_ref,
+        task_id=record.task_id,
+        request_unit_id=record.request_unit_id,
+        task_state_version=record.result_task_state_version,
+        order_id=record.order_id,
+        source_observation_ref=record.search_observation_ref,
+        source_observation_version=record.search_observation_source_version,
+        input_binding_refs=(record.query_input_binding_ref,),
+    )
+    route_arguments = {
+        "request_input": arguments["request_input"],
+        "next_move": NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-1001"},
+            base_task_state_version=record.result_task_state_version,
+        ),
+        "customer_context": arguments["customer_context"],
+        "current_conversation_id": arguments["current_conversation_id"],
+        "current_task": arguments["current_task"],
+        "current_request_unit": arguments["current_request_unit"],
+        "current_input_bindings": arguments["current_input_bindings"],
+        "candidate_set": arguments["candidate_set"],
+        "search_observation": arguments["search_observation"],
+        "auto_target_record": record,
+        "resolved_owner_scoped_order_target_ref": (
+            record.owner_scoped_order_target_ref
+        ),
+        "current_auto_targets": (record,),
+        "superseded_candidate_set_refs": (),
+        "superseded_verified_target_refs": (),
+        "verified_target": target,
+        "model_call_id": uuid4(),
+        "context_manifest_id": uuid4(),
+        "trusted_now": NOW,
+    }
+
+    candidate = route_cycle2_unique_next_move(**route_arguments)
+
+    assert candidate.argument_binding_refs == (record.query_input_binding_ref,)
+    assert candidate.verified_target_ref == record.verified_target_ref
+    assert candidate.candidate_arguments == {"order_id": "O-1001"}
+
+    for update in (
+        {"superseded_candidate_set_refs": (record.candidate_set_ref,)},
+        {"superseded_verified_target_refs": (record.verified_target_ref,)},
+        {"current_auto_targets": ()},
+        {
+            "auto_target_record": record.model_copy(
+                update={"owner_scoped_order_target_ref": "owner-order:2"}
+            ),
+            "current_auto_targets": (
+                record.model_copy(
+                    update={"owner_scoped_order_target_ref": "owner-order:2"}
+                ),
+            ),
+        },
+        {"resolved_owner_scoped_order_target_ref": "owner-order:2"},
+        {
+            "next_move": route_arguments["next_move"].model_copy(
+                update={"arguments": {"order_id": "O-1002"}}
+            )
+        },
+        {
+            "next_move": route_arguments["next_move"].model_copy(
+                update={"requested_tool_name": "get_shipment"}
+            )
+        },
+        {"verified_target": target.model_copy(update={"order_id": "O-1002"})},
+        {
+            "verified_target": target.model_copy(
+                update={"input_binding_refs": (uuid4(),)}
+            )
+        },
+        {"trusted_now": NOW + timedelta(minutes=15)},
+    ):
+        with pytest.raises(RequestProcessingError):
+            route_cycle2_unique_next_move(**(route_arguments | update))
 
 
 def _advance_cycle2_graph_with_binding(

@@ -496,6 +496,9 @@ ORDER_SEARCH_OBSERVATION_RECORD_SCHEMA_VERSION = (
 ORDER_CANDIDATE_SELECTION_RECORD_SCHEMA_VERSION = (
     "order_candidate_selection_record.p0.v1"
 )
+ORDER_CANDIDATE_AUTO_TARGET_RECORD_SCHEMA_VERSION = (
+    "order_candidate_auto_target_record.p0.v1"
+)
 
 StrictOpaqueRef = Annotated[
     StrictStr,
@@ -756,6 +759,74 @@ class OrderCandidateSetRecord(AuditOnlyModel):
         )
         if self.candidate_set_version != expected_version:
             raise ValueError("candidate_set_version does not match canonical payload")
+        return self
+
+
+class OrderCandidateAutoTargetRecord(AuditOnlyModel):
+    """Append-only UNIQUE-search target capability; never model-visible."""
+
+    record_schema_version: ClassVar[
+        Literal["order_candidate_auto_target_record.p0.v1"]
+    ] = ORDER_CANDIDATE_AUTO_TARGET_RECORD_SCHEMA_VERSION
+
+    verified_target_ref: UUID
+    private_owner_scope_ref: StrictOpaqueRef
+    conversation_id: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    query_input_binding_ref: UUID
+    candidate_set_ref: UUID
+    candidate_set_version: OrderCandidateSetVersion
+    source_tool_call_id: UUID
+    search_observation_ref: UUID
+    search_observation_record_schema_version: Literal[
+        "order_search_observation_record.p0.v1"
+    ]
+    search_observation_source_version: OrderSearchSnapshotSourceVersion
+    observation_candidate_ref: UUID
+    candidate_source_version: OrderCandidateSourceVersion
+    owner_scoped_order_target_ref: StrictOpaqueRef
+    order_id: StrictOrderIdV2
+    base_task_state_version: StrictPositiveStateVersionC2
+    result_task_state_version: StrictPositiveStateVersionC2
+    verified_at: datetime
+    supersedes_verified_target_ref: UUID | None = None
+
+    @field_validator("verified_at")
+    @classmethod
+    def verified_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(
+            value,
+            field_name="OrderCandidateAutoTargetRecord.verified_at",
+        )
+
+    @model_validator(mode="after")
+    def auto_target_identity_and_version_are_closed(self) -> Self:
+        if self.verified_target_ref.version != 4:
+            raise ValueError("verified_target_ref must be a UUIDv4")
+        graph_identities = {
+            self.conversation_id,
+            self.task_id,
+            self.request_unit_id,
+            self.query_input_binding_ref,
+            self.candidate_set_ref,
+            self.source_tool_call_id,
+            self.search_observation_ref,
+            self.observation_candidate_ref,
+        }
+        if self.verified_target_ref in graph_identities:
+            raise ValueError(
+                "verified_target_ref must be independent from graph identities"
+            )
+        if self.supersedes_verified_target_ref == self.verified_target_ref:
+            raise ValueError("auto target cannot supersede itself")
+        if (
+            self.supersedes_verified_target_ref is not None
+            and self.supersedes_verified_target_ref.version != 4
+        ):
+            raise ValueError("superseded auto target ref must be a UUIDv4")
+        if self.result_task_state_version != self.base_task_state_version + 1:
+            raise ValueError("auto target must advance Task version exactly once")
         return self
 
 
