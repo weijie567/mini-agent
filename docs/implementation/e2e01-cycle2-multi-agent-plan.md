@@ -142,12 +142,18 @@ squash merge；`B_C2_PLAN_APPROVED =
 > `B_C2_W12_EXECUTION_CONTRACT_RULING =
 > a1543d41da9f182d99f3be700911ae1703257581` / tree
 > `c0278504a9f9e34bf1e8435a04802182f1bc50bd`。其cross-file scan同时确认：artifact
-> bytes为`EXECUTABLE`，但Coverage Matrix、`AGENTS.md`与Intent current-state prose
+> bytes为`EXECUTABLE`，但Coverage Matrix、Eval Strategy、Cycle 2 Spec、`AGENTS.md`
+> 与Intent current-state prose
 > 仍保留旧`CONTRACT_DEFINED`表述；13个trajectory-only artifact仍错误携带HTTP
 > `200`。依据用户“按照建议执行直到W12完成”的授权，本Plan增加一个严格串行的
 > `W12R13` correction wave：先修master Plan，再按canonical owner逐文件关闭状态
 > 差异，随后按Core/Application/Infrastructure/Eval/Composition边界实现，最后才从
-> 真实successor重冻结原`02-18`。总slot数由41调整为51，wave label由16调整为17；
+> 真实successor重冻结原`02-18`。初次总slot数由41调整为51，wave label由16调整为17。
+> `02-18R14`随后经PR #349 reviewed合并；R14A Coverage审查又发现Eval Strategy仍
+> 声称`LIFECYCLE_HOLD / CONTRACT_DEFINED`且owner alignment/Activation缺失，同时
+> scoped Spec current-state摘要也会在Coverage对齐后失真。Gate P2-A13因此新增
+> `02-18R14R1/R14D/R14E`三个slot，把总数纠正为54，并要求在R14R1 merge后原位
+> 重冻结R14A exact Task Packet。PR #351保持draft，不能用旧34f016 barrier执行。
 > 不扩大并发上限，不推进lifecycle，也不把artifact值写成已有Result。
 >
 > `integration/e2e01-cycle2` 已在 historical Gate P2-C 从 exact `B_C2_START`
@@ -205,18 +211,18 @@ contract change。
 |---|---|
 | Scoped contract | `CONTRACT_ACTIVE / W12_EXECUTION_CORRECTION_REVIEWED` |
 | Case lifecycle | `27 ARTIFACTS_SERIALIZED_EXECUTABLE / OWNER_CURRENT_STATE_ALIGNMENT_PENDING / 0 PHASE_2_RESULTS` |
-| Master Plan | `PLAN_APPROVED / PR #203 MERGED / 02-18R14 CORRECTION PACKET ACTIVE` |
-| Future GSD Plans | `W1-W11 + 02-18R13 COMPLETE / 02-18R14 ACTIVE / R14A-R19 + REFROZEN 02-18 PENDING` |
-| Task Packets | `41/51 COMPLETE / 02-18R14 ACTIVE / 02-18 REFROZEN PENDING` |
-| Proposed Plan / Packet slots / Waves | `51 / 17`（历史41 + `02-18R13/R14/R14A/R14B/R14C/R15/R16/R17/R18/R19` / 历史16 + `W12R13`） |
+| Master Plan | `PLAN_APPROVED / R14 PR #349 MERGED / 02-18R14R1 ROUTE CORRECTION ACTIVE` |
+| Future GSD Plans | `W1-W11 + 02-18R13/R14 COMPLETE / 02-18R14R1 ACTIVE / R14A/D/E/B/C + R15-R19 + REFROZEN 02-18 PENDING` |
+| Task Packets | `42/54 COMPLETE / 02-18R14R1 ACTIVE / 02-18 REFROZEN PENDING` |
+| Proposed Plan / Packet slots / Waves | `54 / 17`（历史41 + `02-18R13/R14/R14R1/R14A/R14D/R14E/R14B/R14C/R15/R16/R17/R18/R19` / 历史16 + `W12R13`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 7a73eb1042c18e38401f34d05338964f25ae4364` / tree `a97ce91ce3e6e7e42077e60b188000b8c1542766`（R14 planning-control barrier） |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 9ae000a36ea54c013de9ebb84c204c290ed52645` / tree `c6df897bed07f257f5177d31bc7321d840bba566`（R14R1 planning-control barrier） |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W11 + 02-18R13 COMPLETE；02-18R14 master-Plan single writer ACTIVE` |
-| Writer assignments | `Integrator 02-18R14 master-Plan single writer ACTIVE；implementation writer 0` |
+| Integration / code feature branches / Worktrees | `W1..W11 + 02-18R13/R14 COMPLETE；R14A PR #351 DRAFT/PAUSED；02-18R14R1 master-Plan single writer ACTIVE` |
+| Writer assignments | `Integrator 02-18R14R1 master-Plan single writer ACTIVE；implementation writer 0` |
 | Execution concurrency | approved ceiling `2` writers；W12R13 effective ceiling `1`；当前 implementation writer `0` |
 
 ### 2.1 Gate P2-A planning PR exact scope
@@ -314,8 +320,8 @@ Tech Lead / Integrator
 
 ## 5. Future Plan / Task Packet slots
 
-以下 51 个slot是当前冻结集合：历史41个slot保持编号与ownership；新增
-`02-18R13/R14/R14A/R14B/R14C/R15/R16/R17/R18/R19`十个W12 correction slots，
+以下 54 个slot是当前冻结集合：历史41个slot保持编号与ownership；新增
+`02-18R13/R14/R14R1/R14A/R14D/R14E/R14B/R14C/R15/R16/R17/R18/R19`十三个W12 correction slots，
 原`02-18`保持final aggregate identity但必须从`02-18R19`真实reviewed successor
 重新冻结。新增slots严格串行，不与历史slot并行回放。
 
@@ -334,9 +340,11 @@ Application normal entry与Infrastructure normal evidence/dispatch corrections�
 durability correction与Core unique-target routing correction；`02-15R1E/R1F/R1G/R1H`
 依次闭合UNIQUE Gateway origin及Shipment target binding/Gateway/route；`02-15R1I`
 只修Gateway current-target Observation与合法RequestUnit Observation历史的集合关系。
-`02-18R13`是W12 authenticated execution scoped Spec correction；`02-18R14`只更新
-本master Plan；`02-18R14A/R14B/R14C`依次由Coverage、项目指令与Intent consumer
-单文件关闭current-state prose差异；`02-18R15..R19`依次拥有Core、Application、
+`02-18R13`是W12 authenticated execution scoped Spec correction；`02-18R14`首次更新
+本master Plan；`02-18R14R1`修复R14A审查发现的active-owner漏路由；R14A先原位
+重冻结exact Task Packet，再由`02-18R14A/R14D/R14E/R14B/R14C`依次以Coverage、
+Eval Strategy、Cycle 2 Spec、项目指令与Intent consumer单文件关闭current-state
+prose差异；`02-18R15..R19`依次拥有Core、Application、
 Infrastructure、Eval与Composition实现边界。Eval slot同时原子同步13个T2的nullable
 transport applicability；final `02-18`只拥有aggregate tests、Results与full gate。
 `02-00` 是零功能代码的
@@ -1049,13 +1057,27 @@ post-activation verification。
 ### `02-18R14` — W12 master execution Plan correction
 
 - **Owner:** Tech Lead / master Plan single writer。
-- **Goal:** 把W1–W11、R13 barrier、51 slots / 17 wave labels、三份current-state
+- **Goal:** 把W1–W11、R13 barrier、当时51 slots / 17 wave labels、三份current-state
   alignment与五个implementation owners写入本Plan；不修改canonical语义。
 - **Files:**
   - `docs/implementation/e2e01-cycle2-multi-agent-plan.md`
 - **Depends on:** reviewed / merged `02-18R13`与reviewed `02-18R14-PLAN.md`。
 - **Acceptance:** exact one-file review `PASS`；R14A只能从本slot真实merge successor
   冻结，不能使用R13或planning-control SHA代替。
+
+### `02-18R14R1` — W12 lifecycle consumer route correction
+
+- **Owner:** Tech Lead / master Plan single writer。
+- **Goal:** 关闭R14A independent review发现的Eval Strategy HIGH drift与scoped Spec
+  stale consumer漏路由，新增Strategy/Spec owner slots并纠正总数与依赖；不修改
+  canonical owner正文。
+- **Files:**
+  - `docs/implementation/e2e01-cycle2-multi-agent-plan.md`
+- **Depends on:** reviewed / merged `02-18R14`与reviewed R14A planning-control
+  barrier `b87218af408c4684b24f44fbaa5ee09238df0f8e`。
+- **Acceptance:** 冻结`42/54 COMPLETE / R14R1 ACTIVE`、54 slots / 17 wave labels；
+  R14A implementation继续保持draft，并在本slot真实merge后先原位重冻结同一
+  `02-18R14A-PLAN.md`的base/tree/dependency/required blobs。
 
 ### `02-18R14A` — Coverage lifecycle current-state owner alignment
 
@@ -1065,9 +1087,37 @@ post-activation verification。
   Result且不推进`REGRESSION_GATE`。
 - **Files:**
   - `docs/evaluation/p0-eval-coverage-matrix.md`
-- **Depends on:** reviewed / merged `02-18R14`；W10/W11证据与current artifact bytes。
+- **Depends on:** reviewed / merged `02-18R14R1`；W10/W11证据与current artifact bytes；
+  merged `02-18R14A-PLAN.md`必须先从R14R1真实successor原位重冻结，旧34f016
+  base/dependency不可执行。
 - **Acceptance:** 删除“sync仍未发生”的current-state误述，历史ruling保留；不修改
   Case bytes、grader、源码、测试、Result或其他owner语义。
+
+### `02-18R14D` — Eval Strategy lifecycle current-state alignment
+
+- **Owner:** Agent Evaluation Strategy canonical owner / documentation single writer。
+- **Goal:** 把Cycle 2的`LIFECYCLE_HOLD / CONTRACT_DEFINED`与“owner alignment /
+  Activation缺失”限定为历史状态，消费Coverage current effective lifecycle；不改
+  通用lifecycle、Result、Gate或Dataset语义。
+- **Files:**
+  - `docs/evaluation/agent-evaluation-strategy.md`
+- **Depends on:** reviewed / merged `02-18R14A`。
+- **Acceptance:** exact one-file review `PASS`；当前四个logical/27 physical为
+  `EXECUTABLE`，Phase 2 Result为0且无`REGRESSION_GATE`；不修改Coverage、Case、
+  manifest、loader、grader、源码或测试。
+
+### `02-18R14E` — Cycle 2 Spec lifecycle-status consumer alignment
+
+- **Owner:** Cycle 2 scoped Spec owner / documentation single writer。
+- **Goal:** 只把top banner、requirements/current state与9.1 status consumer prose从
+  “Coverage/AGENTS冲突全部pending”对齐到reviewed Coverage/Strategy successor；
+  不重开R13 authenticated execution contract。
+- **Files:**
+  - `docs/implementation/e2e01-cycle2-implementation-spec.md`
+- **Depends on:** reviewed / merged `02-18R14D`。
+- **Acceptance:** exact one-file review `PASS`；历史W11/R13冲突发现保留为历史，
+  current state准确区分Coverage/Strategy已对齐与AGENTS/Intent仍待对齐；不修改
+  exact fixture、fault、ordinal、transport、mapper、evidence或execution语义。
 
 ### `02-18R14B` — Project instruction current-state consumer alignment
 
@@ -1076,7 +1126,7 @@ post-activation verification。
   artifact值和0 Result事实对齐；保留所有安全、命令与多Agent治理规则。
 - **Files:**
   - `AGENTS.md`
-- **Depends on:** reviewed / merged `02-18R14A`。
+- **Depends on:** reviewed / merged `02-18R14E`。
 - **Acceptance:** 不复制Coverage规则正文，不声称W12、full E2E、Qwen、UAT或
   production readiness完成；canonical suite数字只在实际新证据出现时更新。
 
@@ -1185,7 +1235,7 @@ post-activation verification。
   - `tests/integration/evaluation/test_e2e01_offline_harness.py`
   - `tests/e2e/test_e2e01_http_eval.py`
   - `tests/baseline/test_qwen_baseline.py`
-- **Depends on:** reviewed / merged `02-18R13/R14/R14A/R14B/R14C/R15/R16/R17/R18/R19`
+- **Depends on:** reviewed / merged `02-18R13/R14/R14R1/R14A/R14D/R14E/R14B/R14C/R15/R16/R17/R18/R19`
   barriers；final exact Plan / Task Packet须从R19 successor重冻结。
 - **Acceptance:** Phase 1 16 variants和 Phase 2 14 longitudinal + 13 trajectory 全部
   lifecycle-valid，T2 transport为`NOT_APPLICABLE`且longitudinal捕获真实HTTP status；
@@ -1214,7 +1264,7 @@ post-activation verification。
 | `W9` | `02-15R0 → 02-15R1A → 02-15R1B → 02-15R1C → 02-15R1D → 02-15R1E → 02-15R1F → 02-15R1G → 02-15R1H → 02-15R1I → 02-15R1 → 02-15R2 → 02-15` | 1 | seed、initial RU、typed execution、UNIQUE/Shipment target与Gateway corrections、Application normal entry及Infrastructure normal evidence/dispatch依次reviewed后重冻结Composition；形成`B_C2_EXECUTION_SEAM`；Case仍为`CONTRACT_DEFINED` |
 | `W10` | `02-16` | 1 | independent owner ruling `G_C2_APPROVED_FOR_EXECUTABLE` |
 | `W11` | `02-17` | 1 | atomic consumer sync；形成 `B_C2_EXECUTABLE` |
-| `W12R13` | `02-18R13 → 02-18R14 → 02-18R14A → 02-18R14B → 02-18R14C → 02-18R15 → 02-18R16 → 02-18R17 → 02-18R18 → 02-18R19` | 1 | contract → Plan → Coverage → project status → Intent consumer → Core → Application → Infrastructure → Eval → Composition严格串行；形成`B_C2_W12_REAL_SUT` |
+| `W12R13` | `02-18R13 → 02-18R14 → 02-18R14R1 → R14A Task Packet refreeze → 02-18R14A → 02-18R14D → 02-18R14E → 02-18R14B → 02-18R14C → 02-18R15 → 02-18R16 → 02-18R17 → 02-18R18 → 02-18R19` | 1 | contract → Plan → route correction/refreeze → Coverage → Strategy → Spec → project status → Intent consumer → Core → Application → Infrastructure → Eval → Composition严格串行；形成`B_C2_W12_REAL_SUT` |
 | `W12` | refrozen `02-18` | 1 | only from reviewed `B_C2_W12_REAL_SUT`；形成 `B_C2_VERTICAL` |
 
 ```text
@@ -1281,7 +1331,9 @@ W12R13 scoped authenticated-execution contract correction
   ↓
 W12R13 master Plan correction
   ↓
-W12R13 Coverage → AGENTS → Intent current-state alignment
+W12R13 master Plan route correction → R14A exact Task Packet refreeze
+  ↓
+W12R13 Coverage → Eval Strategy → Cycle 2 Spec → AGENTS → Intent current-state alignment
   ↓
 W12R13 Core → Application → Infrastructure → Eval → Composition
   ↓
@@ -1293,7 +1345,7 @@ Post-execution quality gates
 同一 Wave 只表示依赖允许，不表示同时启动全部 slot。Integrator 每次最多 dispatch
 两个 writer，合并始终逐个进行。任一 proposed allowlist 出现交集时，该 slot 在
 Task Packet freeze 前自动变为 `BLOCKED`。`W12R13`因每个Packet消费前一真实
-successor且包含三个status consumers与Composition hotspot，effective concurrency
+successor且包含五个status owner/consumers与Composition hotspot，effective concurrency
 固定为1，不能使用全局ceiling 2并行。
 
 ## 7. Requirement and decision coverage
@@ -1331,11 +1383,11 @@ successor且包含三个status consumers与Composition hotspot，effective concu
 
 | W12 correction scope | Added slots |
 |---|---|
-| `R01/R17/R18` status、Eval与release discipline | `18R13,18R14,18R14A,18R14B,18R14C,18R18,18R19,18` |
+| `R01/R17/R18` status、Eval与release discipline | `18R13,18R14,18R14R1,18R14A,18R14D,18R14E,18R14B,18R14C,18R18,18R19,18` |
 | `R02..R08/R14/R16` Claim、candidate、state与disclosure | `18R13,18R15,18R16,18R17,18R18,18R19,18` |
 | `R09..R13` Shipment、freshness、retry/recovery与actual evidence | `18R13,18R15,18R16,18R17,18R18,18R19,18` |
 | `R15` dynamic three-READ-tool pair | `18R13,18R15,18R16,18R17,18R18,18R19,18` |
-| all four logical Case / 27 physical Case | `18R13,18R14,18R14A,18R14B,18R14C,18R15,18R16,18R17,18R18,18R19,18` |
+| all four logical Case / 27 physical Case | `18R13,18R14,18R14R1,18R14A,18R14D,18R14E,18R14B,18R14C,18R15,18R16,18R17,18R18,18R19,18` |
 
 | Frozen decision | Slots |
 |---|---|
@@ -1466,9 +1518,10 @@ Security audit 与 Controlled UAT。Phase 末 finding 修复期间只跑 focused
 - 历史上，`02-13/14/15`完成前Case保持`CONTRACT_DEFINED`，`02-15`只建立direct
   non-Harness seam；`02-16`随后完成Coverage owner
   `APPROVED_FOR_EXECUTABLE`裁决，`02-17`已经原子同步27个artifact、manifest与loader。
-- 当前27个artifact均序列化为`EXECUTABLE`，但Coverage Matrix、`AGENTS.md`与Intent
-  current-state prose尚未对齐，13个T2 transport encoding仍为HTTP `200`，Phase 2
-  lifecycle-valid Result仍为0。`02-18R14A/B/C`与`02-18R18`必须分别关闭这些差异；
+- 当前27个artifact均序列化为`EXECUTABLE`，但Coverage Matrix、Eval Strategy、Cycle 2
+  Spec、`AGENTS.md`与Intent current-state prose尚未全部对齐，13个T2 transport
+  encoding仍为HTTP `200`，Phase 2 lifecycle-valid Result仍为0。
+  `02-18R14A/D/E/B/C`与`02-18R18`必须分别关闭这些差异；
   final dispatch在此之前禁止。
 - refrozen `02-18`只有在`02-18R19`真实reviewed successor上才能运行Phase 2
   Harness / SUT并产生Result；R13-R19的Component/direct tests都不能抵扣该门禁。
@@ -1538,7 +1591,7 @@ closure 需要后续独立 exact Plan / Task Packet 和用户批准；其 eviden
 | mixed active v1/v2 | CRITICAL | full prevalidation、atomic cutover、strict readers/writers/recovery | `03,05,06,10,11` |
 | obsolete Run overwrites new state / sends result | CRITICAL | conditional CAS、`SUPERSEDED`、null link result、no outbound/task write | `03,05,09,11,12,14` |
 | model / Eval fabricates business evidence | CRITICAL | deterministic projection/mapper、authenticated artifacts、typed seed、real HTTP/non-HTTP SUT、actual mapper/root-supporting evidence | `12,13,14,15R0,15R2,15,18R13,18R16,18R17,18R18,18R19,18` |
-| lifecycle prose / artifact值漂移或artifact自激活 | CRITICAL | Coverage owner先裁决current state；AGENTS/Intent只消费；artifact/manifest/loader/grader原子；final Result gate独立 | `16,17,18R13,18R14A,18R14B,18R14C,18R18,18` |
+| lifecycle prose / artifact值漂移或artifact自激活 | CRITICAL | Coverage owner先裁决current state；Eval Strategy、Cycle 2 Spec、AGENTS与Intent按各自owner/consumer边界串行消费；artifact/manifest/loader/grader原子；final Result gate独立 | `16,17,18R13,18R14R1,18R14A,18R14D,18R14E,18R14B,18R14C,18R18,18` |
 | non-HTTP trajectory合成HTTP `200` | HIGH | T2 expected/actual transport同时为nullable `NOT_APPLICABLE`；只允许14 longitudinal捕获真实HTTP status | `18R13,18R18,18R19,18` |
 | read-only phase enables Action / side effect | CRITICAL | exact Registry 仅三个 `READ` tools；无 confirmation、ActionPolicy、idempotency claim/key、Action Ledger write 或 `RESULT_UNKNOWN` side-effect recovery | `04,09R1,09R2,09R3,09R4,11,13,15R1,15R2,15,18R13,18R15,18R16,18R17,18R18,18R19,18` |
 | fixture ref / static digest被误当成可信seed | CRITICAL | active Spec closed payload；typed all-or-nothing setup；post-fold canonical projection与actual Registry重算digest；禁止script/expectation/grader反推 | `15R0,15R2,15,18R13,18R17,18R18,18R19,18` |
@@ -1568,7 +1621,9 @@ barrier 与 release。
    `02-15R1C/R1D`；随后R1E-R1H及Gate P2-A11增加`02-15R1I`，均不新增
    wave label。W12 preflight与reviewed Spec correction再由Gate P2-A12增加
    `02-18R13/R14/R14A/R14B/R14C/R15/R16/R17/R18/R19`十个slots与`W12R13`
-   一个wave label。当前冻结集合为51 slots / 17 wave labels / global max 2 writers，
+   一个wave label。R14A review发现的Strategy HIGH与Spec stale consumer再由Gate
+   P2-A13增加`02-18R14R1/R14D/R14E`三个slots，不新增wave label。当前冻结集合为
+   54 slots / 17 wave labels / global max 2 writers，
    但W12R13 effective max固定为1。
    后续再增减任一 slot 仍需重新裁决 master Plan。
 2. **不在执行中偷渡 contract。** 发现 owner gap，停止对应 Wave，先做最小
@@ -1664,7 +1719,7 @@ Action或`RESULT_UNKNOWN` side-effect path。
 
 ### Gate P2-A12 — W12 authenticated execution remediation
 
-状态：`USER_AUTHORIZED / R13 SPEC MERGED / R14 MASTER PLAN ACTIVE`。W12 mechanical
+状态：`HISTORICAL APPROVAL / SUPERSEDED BY P2-A13 ROUTE CORRECTION`。W12 mechanical
 preflight证明原`02-18`三测试文件不能解析25/27 setup组合，Scripted Provider缺少
 Cycle 2 Port，六类fault/crash未实现，synthetic SUT与root-only evidence无法形成
 真实Result。用户已授权按建议持续修正至W12完成；`02-18R13`经四轮local exact review
@@ -1684,16 +1739,44 @@ Cycle 2 Port，六类fault/crash未实现，synthetic SUT与root-only evidence�
 Result、`REGRESSION_GATE`或release；任一新cross-owner gap继续新增exact Packet，
 不得扩大现有allowlist。
 
+### Gate P2-A13 — W12 lifecycle owner/consumer route correction
+
+状态：`USER_AUTHORIZED / R14 MERGED / R14R1 ACTIVE / R14A PR #351 DRAFT_PAUSED`。
+`02-18R14`已由PR #349 reviewed合并为
+`34f01611a2edb554d05cdf8400c34f16b1bb8f4c`；R14A planning control又由PR #350
+合并为`b87218af408c4684b24f44fbaa5ee09238df0f8e`。Coverage implementation的
+independent review确认内容本身准确，但以HIGH阻断：active Eval Strategy仍把Cycle 2
+写为`LIFECYCLE_HOLD / CONTRACT_DEFINED`并声称owner alignment/Activation缺失；
+cross-file scan同时确认Cycle 2 Spec current-state consumer在Coverage合并后也会失真。
+PR #351因此保持draft。
+
+本Gate增加`02-18R14R1/R14D/R14E`三个slots而不增加wave label；R14R1 planning
+control已经independent exact-head `PASS`并由PR #352合并为
+`9ae000a36ea54c013de9ebb84c204c290ed52645` / tree
+`c6df897bed07f257f5177d31bc7321d840bba566`。纠正后冻结集合为54 slots / 17 wave
+labels，R14R1开始时精确为42/54 complete，串行顺序固定为：
+
+```text
+18R13 → 18R14 → 18R14R1 → in-place R14A Task Packet refreeze
+→ 18R14A → 18R14D → 18R14E → 18R14B → 18R14C
+→ 18R15 → 18R16 → 18R17 → 18R18 → 18R19 → refrozen 18
+```
+
+原位R14A refreeze只更新同一`.planning/.../02-18R14A-PLAN.md`，使其exact base/tree/
+dependency/required blobs消费R14R1真实merge successor；它不新增product slot或wave。
+各active owner继续单文件串行，不能把Strategy、Spec、AGENTS或Intent并入Coverage PR。
+
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / W1-W11 + 02-18R13 COMPLETE / 41 OF 51 COMPLETE / 02-18R14 ACTIVE`。
+状态：`IN_PROGRESS / W1-W11 + 02-18R13/R14 COMPLETE / 42 OF 54 COMPLETE / 02-18R14R1 ACTIVE`。
 P2-A 通过后始终按真实 dependency barrier 分批准备；不得给尚未产生的 barrier
 填造 SHA。当前真实 integration planning-control successor为
-`7a73eb1042c18e38401f34d05338964f25ae4364` / tree
-`a97ce91ce3e6e7e42077e60b188000b8c1542766`；`02-18R14` implementation Packet
+`9ae000a36ea54c013de9ebb84c204c290ed52645` / tree
+`c6df897bed07f257f5177d31bc7321d840bba566`；`02-18R14R1` implementation Packet
 仍使用其exact Plan冻结的product base
-`a1543d41da9f182d99f3be700911ae1703257581`，PR只允许修改master Plan。R14A必须
-等待R14真实merge successor，不能提前填造或使用planning-control SHA代替。
+`b87218af408c4684b24f44fbaa5ee09238df0f8e`，PR只允许修改master Plan。R14A必须
+在R14R1真实merge后原位重冻结exact Task Packet，不能继续使用旧34f016 base或仅凭
+master prose执行。
 
 用户需逐项或整组批准：
 
@@ -1749,7 +1832,8 @@ Gate P2-C 前不得创建 Phase 2 integration / feature branch；第 2 步失败
       增加`02-15R1A`，Gate P2-A9增加`02-15R1B`，Gate P2-A10增加
       `02-15R1C/R1D`，后续R1E-R1H与Gate P2-A11增加`02-15R1I`，均不新增wave
       label；Gate P2-A12再增加十个`02-18R13..R19` correction slots与一个
-      `W12R13` label。当前冻结为51 slots / 17 wave labels，global并发上限仍为2，
+      `W12R13` label；Gate P2-A13再增加`02-18R14R1/R14D/R14E`三个slots且不新增
+      label。当前冻结为54 slots / 17 wave labels，global并发上限仍为2，
       W12R13 effective并发固定为1。
 - [x] 每个 R01–R18、D1–D8、四个 Case至少有一个实现和一个验证 owner。
 - [x] same-wave proposed file intersection为零。
