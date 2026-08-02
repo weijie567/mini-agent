@@ -3528,13 +3528,42 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             record.recovery_decision_id: record
             for record in self.recovery_decision_records
         }
+        recovery_decisions_by_tool_call: dict[
+            UUID, list[ToolRetryRecoveryDecisionRecordV2]
+        ] = {}
+        for record in self.recovery_decision_records:
+            recovery_decisions_by_tool_call.setdefault(
+                record.tool_call_id, []
+            ).append(record)
+            tool_call = tool_calls.get(record.tool_call_id)
+            if (
+                tool_call is None
+                or tool_call.run_id != run.run_id
+                or len(recovery_decisions_by_tool_call[record.tool_call_id]) != 1
+            ):
+                raise ValueError("Cycle 2 exact evidence recovery root mismatch")
+            if record.decision is ToolRecoveryDecision.APPEND_SECOND_ATTEMPT:
+                attempts = tool_call.attempts
+                if (
+                    len(attempts) != 2
+                    or attempts[0].attempt_no != 1
+                    or attempts[0].finished_at is None
+                    or attempts[0].retry_decision
+                    is not ToolRetryDecision.RETRY_SCHEDULED
+                    or record.last_attempt_no != 1
+                    or record.candidate_next_attempt_no != 2
+                    or record.decided_at < attempts[0].finished_at
+                    or attempts[1].attempt_no != 2
+                    or attempts[1].started_at < record.decided_at
+                    or tool_call.recovery_disposition is not None
+                    or tool_call.recovery_decision_ref is not None
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence recovery root mismatch"
+                    )
+            elif tool_call.recovery_decision_ref != record.recovery_decision_id:
+                raise ValueError("Cycle 2 exact evidence recovery root mismatch")
         if any(
-            record.tool_call_id not in tool_calls
-            or tool_calls[record.tool_call_id].run_id != run.run_id
-            or tool_calls[record.tool_call_id].recovery_decision_ref
-            != record.recovery_decision_id
-            for record in self.recovery_decision_records
-        ) or any(
             record.recovery_decision_ref is not None
             and record.recovery_decision_ref not in recovery_decisions
             for record in self.tool_call_records
