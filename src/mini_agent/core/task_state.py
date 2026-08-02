@@ -28,7 +28,11 @@ from .order_search import (
     OrderSearchSnapshotSourceVersion,
     normalize_product_description,
 )
-from .request_understanding import InputAuthority, TaskDeltaOperation
+from .request_understanding import (
+    CYCLE2_ORDINAL_CLAIM_MAX,
+    InputAuthority,
+    TaskDeltaOperation,
+)
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 PositiveStateVersion = Annotated[int, Field(ge=1)]
@@ -108,9 +112,12 @@ class InputBindingV2(AuditOnlyModel):
                     "product_description must be the exact normalized value"
                 )
         elif self.name == "candidate_ordinal":
-            if type(value) is not int or not 1 <= value <= 5:
+            if (
+                type(value) is not int
+                or not 1 <= value <= CYCLE2_ORDINAL_CLAIM_MAX
+            ):
                 raise ValueError(
-                    "candidate_ordinal must be a strict integer from 1 to 5"
+                    "candidate_ordinal must be a strict integer from 1 to 99"
                 )
         elif type(value) is not bool:
             raise ValueError("shipment_not_received must be a strict boolean")
@@ -837,7 +844,7 @@ class OrderCandidateSelectionRequest(RuntimePrivateModel):
     ordinal_input_binding_ref: UUID
     ordinal: Annotated[
         StrictInt,
-        Field(ge=1, le=ORDER_SEARCH_MAX_CANDIDATES),
+        Field(ge=1, le=CYCLE2_ORDINAL_CLAIM_MAX),
     ]
 
 

@@ -1840,7 +1840,7 @@ def test_cycle2_gateway_typed_surface_has_no_public_or_model_target_authority() 
         ("candidate_ordinal", True),
         ("candidate_ordinal", "2"),
         ("candidate_ordinal", 0),
-        ("candidate_ordinal", 6),
+        ("candidate_ordinal", 100),
     ],
 )
 def test_cycle2_gateway_binding_vocabulary_is_strict_and_canonical(
@@ -1856,6 +1856,30 @@ def test_cycle2_gateway_binding_vocabulary_is_strict_and_canonical(
                 **base.model_dump(),
                 "name": name,
                 "normalized_value": value,
+            },
+            strict=True,
+        )
+
+
+def test_cycle2_gateway_loaded_binding_accepts_ordinal_claim_99_only() -> None:
+    _candidate, loaded = _cycle2_gateway_case(Cycle2ToolName.GET_SHIPMENT)
+    base = loaded.current_input_bindings[0]
+    ordinal = Cycle2AcceptedBindingFacts.model_validate(
+        {
+            **base.model_dump(),
+            "name": "candidate_ordinal",
+            "normalized_value": 99,
+        },
+        strict=True,
+    )
+
+    assert ordinal.normalized_value == 99
+    with pytest.raises(ValidationError):
+        Cycle2AcceptedBindingFacts.model_validate(
+            {
+                **base.model_dump(),
+                "name": "candidate_ordinal",
+                "normalized_value": 100,
             },
             strict=True,
         )

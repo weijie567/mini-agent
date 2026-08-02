@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 from uuid import UUID
 
@@ -22,6 +23,8 @@ from .memory import (
 )
 from .order_search import normalize_product_description
 from .request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     InputAuthority,
@@ -2790,6 +2793,64 @@ class Cycle2ContinuationBindingDecision(RuntimePrivateModel):
         return self
 
 
+class Cycle2OrdinalSelectionRejectionReason(StrEnum):
+    OUT_OF_RANGE = "OUT_OF_RANGE"
+    EXPIRED = "EXPIRED"
+    CROSS_TASK = "CROSS_TASK"
+    OWNER_MISMATCH = "OWNER_MISMATCH"
+    SUPERSEDED = "SUPERSEDED"
+    CURRENT_SET_CARDINALITY_NOT_ONE = "CURRENT_SET_CARDINALITY_NOT_ONE"
+
+
+class Cycle2OrdinalClaimPreparation(RuntimePrivateModel):
+    """Accepted ordinal Claim before any CandidateSet authority is granted."""
+
+    ordinal_input_binding: InputBindingV2
+    selection_request: OrderCandidateSelectionRequest
+    base_task_state_version: Annotated[int, Field(strict=True, ge=1)]
+    result_task_state_version: Annotated[int, Field(strict=True, ge=1)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_values_are_exact_owner_models(cls, value: object) -> object:
+        if (
+            not isinstance(value, Mapping)
+            or type(value.get("ordinal_input_binding")) is not InputBindingV2
+            or type(value.get("selection_request"))
+            is not OrderCandidateSelectionRequest
+        ):
+            raise ValueError("ordinal Claim requires exact Core owner models")
+        return value
+
+    @model_validator(mode="after")
+    def claim_is_canonical_and_advances_once(self) -> Self:
+        binding = self.ordinal_input_binding
+        request = self.selection_request
+        if (
+            not _is_exact_canonical_model_v2(binding, InputBindingV2)
+            or not _is_exact_canonical_model_v2(
+                request,
+                OrderCandidateSelectionRequest,
+            )
+            or binding.name != "candidate_ordinal"
+            or type(binding.normalized_value) is not int
+            or binding.binding_id != request.ordinal_input_binding_ref
+            or binding.normalized_value != request.ordinal
+            or binding.source_refs != (request.source_message_ref,)
+            or binding.supersedes is not None
+        ):
+            raise ValueError("ordinal Claim graph mismatch")
+        if self.result_task_state_version != self.base_task_state_version + 1:
+            raise ValueError("ordinal Claim must advance version once")
+        return self
+
+
+class Cycle2AcceptedClaimRejectedSelection(Cycle2OrdinalClaimPreparation):
+    """Accepted Claim plus typed refusal of selection authority."""
+
+    rejection_reason: Cycle2OrdinalSelectionRejectionReason
+
+
 class Cycle2OrdinalSelectionPreparation(RuntimePrivateModel):
     """Pre-CAS ordinal Claim without CandidateSet or selected-target authority."""
 
@@ -2896,6 +2957,19 @@ def _canonical_cycle2_request_and_candidate(
         except (TypeError, ValueError) as error:
             raise _cycle2_routing_error() from error
         if candidate_value not in normalized_quote:
+            raise _cycle2_routing_error()
+    elif candidate.name == "order_id":
+        try:
+            normalized_order_id = _normalize_order_id(candidate.candidate_value)
+        except RequestProcessingError as error:
+            raise _cycle2_routing_error() from error
+        if (
+            normalized_order_id != candidate.candidate_value
+            or not _source_quote_contains_exact_order_id(
+                candidate.source_quote,
+                normalized_order_id,
+            )
+        ):
             raise _cycle2_routing_error()
     return canonical_input, candidate, current_message
 
@@ -3054,6 +3128,108 @@ def reduce_cycle2_continuation_candidate(
         raise _cycle2_routing_error() from error
 
 
+def prepare_cycle2_ordinal_claim(
+    *,
+    request_input: RequestUnderstandingInput,
+    candidate: Cycle2InputCandidate,
+    authoritative_messages: Mapping[UUID, str],
+    customer_context: CustomerContext,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+    current_input_bindings: tuple[InputBindingV2, ...],
+    binding_id: UUID,
+    now: datetime,
+) -> Cycle2OrdinalClaimPreparation:
+    """Accept one strict ordinal Claim without granting CandidateSet authority."""
+
+    _canonical_input, canonical_candidate, _message = (
+        _canonical_cycle2_request_and_candidate(
+            request_input=request_input,
+            candidate=candidate,
+            authoritative_messages=authoritative_messages,
+        )
+    )
+    _context, task, unit, bindings = _require_cycle2_current_task_graph(
+        customer_context=customer_context,
+        current_task=current_task,
+        current_request_unit=current_request_unit,
+        current_input_bindings=current_input_bindings,
+        trusted_now=now,
+    )
+    query_bindings = tuple(
+        binding for binding in bindings if binding.name == "product_description"
+    )
+    if (
+        canonical_candidate.name != "candidate_ordinal"
+        or task.status is not TaskStatus.WAITING_USER
+        or unit.status is not TaskStatus.WAITING_USER
+        or len(unit.open_questions) != 1
+        or len(query_bindings) != 1
+        or type(binding_id) is not UUID
+        or binding_id
+        in {
+            canonical_candidate.source_ref,
+            task.task_id,
+            unit.request_unit_id,
+        }
+    ):
+        raise _cycle2_routing_error()
+    binding = _new_cycle2_claim_binding(
+        candidate=canonical_candidate,
+        current_bindings=bindings,
+        binding_id=binding_id,
+        now=now,
+    )
+    if binding.supersedes is not None:
+        raise _cycle2_routing_error()
+    try:
+        request = OrderCandidateSelectionRequest(
+            source_message_ref=canonical_candidate.source_ref,
+            ordinal_input_binding_ref=binding.binding_id,
+            ordinal=canonical_candidate.candidate_value,
+        )
+        return Cycle2OrdinalClaimPreparation(
+            ordinal_input_binding=binding,
+            selection_request=request,
+            base_task_state_version=task.state_version,
+            result_task_state_version=task.state_version + 1,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
+
+
+def reject_cycle2_ordinal_selection(
+    *,
+    claim: Cycle2OrdinalClaimPreparation,
+    reason: Cycle2OrdinalSelectionRejectionReason,
+) -> Cycle2AcceptedClaimRejectedSelection:
+    """Type one authority rejection while exact-copying the accepted Claim."""
+
+    if (
+        type(claim) is not Cycle2OrdinalClaimPreparation
+        or type(reason) is not Cycle2OrdinalSelectionRejectionReason
+    ):
+        raise _cycle2_routing_error()
+    try:
+        canonical = Cycle2OrdinalClaimPreparation(
+            ordinal_input_binding=claim.ordinal_input_binding,
+            selection_request=claim.selection_request,
+            base_task_state_version=claim.base_task_state_version,
+            result_task_state_version=claim.result_task_state_version,
+        )
+        if not _runtime_values_match_exactly_v2(canonical, claim):
+            raise ValueError("ordinal Claim preparation is not canonical")
+        return Cycle2AcceptedClaimRejectedSelection(
+            ordinal_input_binding=claim.ordinal_input_binding,
+            selection_request=claim.selection_request,
+            base_task_state_version=claim.base_task_state_version,
+            result_task_state_version=claim.result_task_state_version,
+            rejection_reason=reason,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
+
+
 def prepare_cycle2_ordinal_selection(
     *,
     request_input: RequestUnderstandingInput,
@@ -3191,6 +3367,44 @@ def _canonical_cycle2_next_move(value: object) -> NextMove:
     ):
         raise _cycle2_routing_error()
     return value
+
+
+def materialize_cycle2_control_next_move(
+    *,
+    candidate: Cycle2ControlCandidate,
+    current_task_state_version: int,
+    verified_order_id: str | None,
+) -> NextMove:
+    """Inject deterministic target arguments into an argument-free model choice."""
+
+    if (
+        type(candidate) is not Cycle2ControlCandidate
+        or not _is_exact_canonical_model_v2(candidate, Cycle2ControlCandidate)
+        or type(current_task_state_version) is not int
+        or current_task_state_version < 1
+    ):
+        raise _cycle2_routing_error()
+    try:
+        if candidate.kind is Cycle2ControlCandidateKind.FINISH:
+            if verified_order_id is not None:
+                raise ValueError("FINISH cannot consume a verified order target")
+            return NextMove(
+                kind=NextMoveKind.FINISH,
+                requested_tool_name=None,
+                arguments=None,
+                base_task_state_version=current_task_state_version,
+            )
+        normalized_order_id = _normalize_order_id(verified_order_id)
+        if normalized_order_id != verified_order_id:
+            raise ValueError("verified order id is not canonical")
+        return NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name=candidate.requested_tool_name,
+            arguments={"order_id": normalized_order_id},
+            base_task_state_version=current_task_state_version,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
 
 
 def _build_cycle2_gateway_candidate(
@@ -3629,6 +3843,32 @@ def route_cycle2_continuation_next_move(
             raise _cycle2_routing_error()
         argument_binding_refs = (trigger.binding_id,)
         verified_target_ref = None
+    elif trigger.name == "order_id":
+        target = _canonical_cycle2_verified_target(verified_target)
+        origin = _resolve_cycle2_shipment_target_origin_binding(
+            customer_context=context,
+            current_task=task,
+            current_request_unit=unit,
+            current_input_bindings=bindings,
+            verified_target=target,
+            verified_target_observation=verified_target_observation,
+        )
+        arguments = move.arguments
+        if (
+            origin.binding_id != trigger.binding_id
+            or trigger.normalized_value != target.order_id
+            or move.requested_tool_name not in {"get_order", "get_shipment"}
+            or set(arguments) != {"order_id"}
+            or type(arguments.get("order_id")) is not str
+            or arguments["order_id"] != target.order_id
+        ):
+            raise _cycle2_routing_error()
+        argument_binding_refs = (trigger.binding_id,)
+        verified_target_ref = (
+            None
+            if move.requested_tool_name == "get_order"
+            else target.verified_target_ref
+        )
     elif trigger.name == "shipment_not_received":
         if trigger.normalized_value is not True:
             raise _cycle2_routing_error()
