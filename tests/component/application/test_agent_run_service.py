@@ -2614,8 +2614,14 @@ class _Cycle2UnusedExecutor:
 
 
 class _Cycle2ProviderHarness:
-    def __init__(self, *, ordinal: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        ordinal: int = 2,
+        post_order_shipment: bool = False,
+    ) -> None:
         self.ordinal = ordinal
+        self.post_order_shipment = post_order_shipment
         self.control_purposes: list[Cycle2ControlPurpose] = []
 
     async def propose_cycle2_initial(
@@ -2677,8 +2683,12 @@ class _Cycle2ProviderHarness:
         self.control_purposes.append(purpose)
         tool_name = {
             Cycle2ControlPurpose.PROPOSE_GET_ORDER: "get_order",
-            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT: "get_shipment",
         }.get(purpose)
+        if (
+            purpose is Cycle2ControlPurpose.PROPOSE_POST_ORDER
+            and self.post_order_shipment
+        ):
+            tool_name = "get_shipment"
         if tool_name is not None:
             return Cycle2ControlCandidate(
                 kind=Cycle2ControlCandidateKind.CALL_TOOL,
@@ -2709,8 +2719,9 @@ class _StrictCycle2ControlProvider(_Cycle2ProviderHarness):
         expected_purposes: tuple[Cycle2ControlPurpose, ...],
         *,
         wrong_candidate: bool = False,
+        post_order_shipment: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(post_order_shipment=post_order_shipment)
         self.expected_purposes = list(expected_purposes)
         self.wrong_candidate = wrong_candidate
 
@@ -3814,6 +3825,7 @@ def test_cycle2_direct_order_id_routes_from_actual_current_observation_state(
 
     assert outbound is sentinel
     assert routed == ["get_shipment" if has_current_shipment else "get_order"]
+    assert provider.control_purposes == []
     assert len(runtime.binding_commands) == 1
     assert runtime.binding_commands[0].new_input_binding_record.name == "order_id"
 
@@ -3853,9 +3865,10 @@ def test_cycle2_two_control_path_consumes_get_shipment_then_assessment() -> None
     runtime = _Cycle2RuntimeHarness()
     provider = _StrictCycle2ControlProvider(
         (
-            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+            Cycle2ControlPurpose.PROPOSE_POST_ORDER,
             Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
-        )
+        ),
+        post_order_shipment=True,
     )
     handler = _cycle2_handler(runtime, provider)
     sentinel, captured = _capture_cycle2_initial_turn(handler)
@@ -3901,15 +3914,25 @@ def test_cycle2_two_control_path_consumes_get_shipment_then_assessment() -> None
         trusted_read_at=NOW,
     )
 
-    move = asyncio.run(
-        handler._materialize_tool_control(
+    candidate = asyncio.run(
+        handler._propose_cycle2_control(
             turn=captured["turn"],
-            purpose=Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
-            closure=closure,
+            purpose=Cycle2ControlPurpose.PROPOSE_POST_ORDER,
         )
+    )
+    move = handler._materialize_post_order_shipment_control(
+        candidate=candidate,
+        closure=closure,
     )
     assert move.requested_tool_name == "get_shipment"
     assert move.arguments == {"order_id": "O-1001"}
+    with pytest.raises(agent_run_service_module._Cycle2ControlProtocolError):
+        handler._materialize_post_order_shipment_control(
+            candidate=candidate,
+            closure=closure.model_copy(
+                update={"current_verified_order_targets": ()}
+            ),
+        )
 
     async def stop_after_control(**kwargs: object) -> AgentRunResult:
         return kwargs["result"]  # type: ignore[return-value]
@@ -3929,9 +3952,161 @@ def test_cycle2_two_control_path_consumes_get_shipment_then_assessment() -> None
     )
     provider.assert_exhausted()
     assert provider.control_purposes == [
-        Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+        Cycle2ControlPurpose.PROPOSE_POST_ORDER,
         Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
     ]
+
+
+def test_cycle2_post_order_control_accepts_finish_and_rejects_wrong_tool() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    finish_provider = _StrictCycle2ControlProvider(
+        (Cycle2ControlPurpose.PROPOSE_POST_ORDER,)
+    )
+    finish_handler = _cycle2_handler(runtime, finish_provider)
+    _, captured = _capture_cycle2_initial_turn(finish_handler)
+
+    candidate = asyncio.run(
+        finish_handler._propose_cycle2_control(
+            turn=captured["turn"],
+            purpose=Cycle2ControlPurpose.PROPOSE_POST_ORDER,
+        )
+    )
+
+    assert candidate.kind is Cycle2ControlCandidateKind.FINISH
+    assert candidate.requested_tool_name is None
+    finish_provider.assert_exhausted()
+
+    wrong_provider = _StrictCycle2ControlProvider(
+        (Cycle2ControlPurpose.PROPOSE_POST_ORDER,),
+        wrong_candidate=True,
+    )
+    wrong_handler = _cycle2_handler(_Cycle2RuntimeHarness(), wrong_provider)
+    _, wrong_captured = _capture_cycle2_initial_turn(wrong_handler)
+    with pytest.raises(agent_run_service_module._Cycle2ControlProtocolError):
+        asyncio.run(
+            wrong_handler._propose_cycle2_control(
+                turn=wrong_captured["turn"],
+                purpose=Cycle2ControlPurpose.PROPOSE_POST_ORDER,
+            )
+        )
+
+
+def test_cycle2_post_order_closure_revalidation_fails_closed() -> None:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
+    sentinel, captured = _capture_cycle2_initial_turn(handler)
+    task = captured["task"]
+    unit = captured["request_unit"]
+    binding = captured["input_bindings"][0]
+    target_ref = uuid4()
+    observation_ref = uuid4()
+    valid = InitialToolCallV2ReadClosure(
+        owner_scope=captured["turn"].owner_scope,
+        current_task_record=task,
+        current_request_unit_record=unit.model_copy(
+            update={"observation_refs": (observation_ref,)}
+        ),
+        current_input_binding_records=(binding,),
+        current_verified_order_targets=(
+            Cycle2VerifiedOrderTargetFacts(
+                verified_target_ref=target_ref,
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                order_id="O-1001",
+                source_observation_ref=observation_ref,
+                source_observation_version="order-observation-v1",
+                input_binding_refs=(binding.binding_id,),
+            ),
+        ),
+        current_target_observations=(
+            Cycle2TargetObservationFacts(
+                observation_ref=observation_ref,
+                observation_version="order-observation-v1",
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_target_ref=target_ref,
+                input_binding_refs=(binding.binding_id,),
+            ),
+        ),
+        trusted_read_at=NOW,
+    )
+
+    class _ClosureRuntime:
+        def __init__(self, closure: object) -> None:
+            self.closure = closure
+
+        async def load_initial_tool_call_v2_closure_for_owner(
+            self,
+            **_kwargs: object,
+        ) -> object:
+            return self.closure
+
+    closure_runtime = _ClosureRuntime(valid)
+    handler._runtime_record_port = closure_runtime  # type: ignore[assignment]
+    loaded = asyncio.run(
+        handler._load_post_order_control_closure(
+            turn=captured["turn"],
+            task=task,
+            request_unit=unit,
+        )
+    )
+    assert loaded is valid
+
+    closure_runtime.closure = None
+    with pytest.raises(agent_run_service_module._Cycle2ControlProtocolError):
+        asyncio.run(
+            handler._load_post_order_control_closure(
+                turn=captured["turn"],
+                task=task,
+                request_unit=unit,
+            )
+        )
+    finalized: list[object] = []
+
+    async def capture_finalize(**kwargs: object) -> AgentRunResult:
+        finalized.append(kwargs)
+        return sentinel
+
+    handler._finalize_mapping = capture_finalize  # type: ignore[method-assign]
+    result = asyncio.run(
+        handler._get_shipment(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message="订单 O-1001 到哪了？",
+            ),
+            turn=captured["turn"],
+            task=task,
+            request_unit=unit,
+            candidate_factory=lambda *_args: pytest.fail(
+                "candidate factory must not run without current closure"
+            ),
+            closure_unavailable_is_control_error=True,
+        )
+    )
+    assert result is sentinel
+    assert len(finalized) == 1
+    step = finalized[0]["step"]  # type: ignore[index]
+    assert step.cycle2_signal is Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+    assert finalized[0]["consume_control"] is False  # type: ignore[index]
+
+
+def test_cycle2_get_order_has_one_bounded_post_order_boundary() -> None:
+    source = inspect.getsource(Cycle2AgentRunHandler._get_order)
+
+    assert source.count("Cycle2ControlPurpose.PROPOSE_POST_ORDER") == 1
+    assert source.index("_load_post_order_control_closure") < source.index(
+        "_propose_cycle2_control"
+    )
+    assert "_route_post_order_shipment_candidate" in source
+    assert "requires_shipment" not in source
+    assert "PROPOSE_ORDER_SUMMARY" not in source
+    assert "PROPOSE_GET_SHIPMENT" not in source
 
 
 @pytest.mark.parametrize("origin", ["UNIQUE", "ORDINAL"])
@@ -4199,7 +4374,6 @@ def test_cycle2_control_candidate_remains_argument_free_at_application_boundary(
         Cycle2ControlPurpose.PROPOSE_GET_ORDER,
         Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE,
         Cycle2ControlPurpose.PROPOSE_CANDIDATE_QUESTION,
-        Cycle2ControlPurpose.PROPOSE_ORDER_SUMMARY,
-        Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+        Cycle2ControlPurpose.PROPOSE_POST_ORDER,
         Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
     }

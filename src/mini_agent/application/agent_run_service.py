@@ -1919,9 +1919,20 @@ class Cycle2AgentRunHandler:
             raise _Cycle2ControlProtocolError
         expected_tool = {
             Cycle2ControlPurpose.PROPOSE_GET_ORDER: "get_order",
-            Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT: "get_shipment",
         }.get(purpose)
-        if expected_tool is None:
+        if purpose is Cycle2ControlPurpose.PROPOSE_POST_ORDER:
+            if not (
+                (
+                    candidate.kind is Cycle2ControlCandidateKind.FINISH
+                    and candidate.requested_tool_name is None
+                )
+                or (
+                    candidate.kind is Cycle2ControlCandidateKind.CALL_TOOL
+                    and candidate.requested_tool_name == "get_shipment"
+                )
+            ):
+                raise _Cycle2ControlProtocolError
+        elif expected_tool is None:
             if (
                 candidate.kind is not Cycle2ControlCandidateKind.FINISH
                 or candidate.requested_tool_name is not None
@@ -1958,6 +1969,81 @@ class Cycle2AgentRunHandler:
                 ),
             )
         except RequestProcessingError as error:
+            raise _Cycle2ControlProtocolError from error
+
+    @staticmethod
+    def _materialize_post_order_shipment_control(
+        *,
+        candidate: Cycle2ControlCandidate,
+        closure: InitialToolCallV2ReadClosure,
+    ) -> NextMove:
+        if (
+            candidate.kind is not Cycle2ControlCandidateKind.CALL_TOOL
+            or candidate.requested_tool_name != "get_shipment"
+            or len(closure.current_verified_order_targets) != 1
+            or len(closure.current_target_observations) != 1
+        ):
+            raise _Cycle2ControlProtocolError
+        try:
+            return materialize_cycle2_control_next_move(
+                candidate=candidate,
+                current_task_state_version=(
+                    closure.current_task_record.state_version
+                ),
+                verified_order_id=(
+                    closure.current_verified_order_targets[0].order_id
+                ),
+            )
+        except RequestProcessingError as error:
+            raise _Cycle2ControlProtocolError from error
+
+    async def _load_post_order_control_closure(
+        self,
+        *,
+        turn: _Cycle2Turn,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+    ) -> InitialToolCallV2ReadClosure:
+        closure = await (
+            self._runtime_record_port.load_initial_tool_call_v2_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                trusted_read_at=self._clock(),
+            )
+        )
+        if (
+            type(closure) is not InitialToolCallV2ReadClosure
+            or len(closure.current_verified_order_targets) != 1
+            or len(closure.current_target_observations) != 1
+        ):
+            raise _Cycle2ControlProtocolError
+        return closure
+
+    def _route_post_order_shipment_candidate(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        closure: InitialToolCallV2ReadClosure,
+        candidate: Cycle2ControlCandidate,
+        model_call_id: UUID,
+        manifest_id: UUID,
+    ) -> Cycle2GatewayCandidate:
+        try:
+            next_move = self._materialize_post_order_shipment_control(
+                candidate=candidate,
+                closure=closure,
+            )
+            return self._route_verified_shipment_candidate(
+                command=command,
+                turn=turn,
+                closure=closure,
+                next_move=next_move,
+                model_call_id=model_call_id,
+                manifest_id=manifest_id,
+            )
+        except (AgentRunExecutionError, RequestProcessingError) as error:
             raise _Cycle2ControlProtocolError from error
 
     @staticmethod
@@ -2710,7 +2796,6 @@ class Cycle2AgentRunHandler:
             Cycle2GatewayCandidate,
         ],
         control_purpose: Cycle2ControlPurpose | None = None,
-        requires_shipment: bool = False,
     ) -> AgentRunResult:
         try:
             dispatched = await self._execute_tool(
@@ -2844,26 +2929,30 @@ class Cycle2AgentRunHandler:
                 task=task,
                 request_unit=request_unit,
         )
-        if not requires_shipment:
-            if control_purpose is None:
-                try:
-                    await self._propose_cycle2_control(
-                        turn=turn,
-                        purpose=Cycle2ControlPurpose.PROPOSE_ORDER_SUMMARY,
-                    )
-                except _Cycle2ControlProtocolError:
-                    return await self._finalize_mapping(
-                        turn=turn,
-                        step=self._step_for_signal(
-                            run_id=turn.running_run.run_id,
-                            signal=(
-                                Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
-                            ),
-                        ),
-                        task=next_task,
-                        request_unit=next_unit,
-                        consume_control=False,
-                    )
+        try:
+            await self._load_post_order_control_closure(
+                turn=turn,
+                task=next_task,
+                request_unit=next_unit,
+            )
+            post_order_candidate = await self._propose_cycle2_control(
+                turn=turn,
+                purpose=Cycle2ControlPurpose.PROPOSE_POST_ORDER,
+            )
+        except _Cycle2ControlProtocolError:
+            return await self._finalize_mapping(
+                turn=turn,
+                step=self._step_for_signal(
+                    run_id=turn.running_run.run_id,
+                    signal=(
+                        Cycle2MapperSignal.CYCLE2_PROTOCOL_OR_SOURCE_INTEGRITY
+                    ),
+                ),
+                task=next_task,
+                request_unit=next_unit,
+                consume_control=False,
+            )
+        if post_order_candidate.kind is Cycle2ControlCandidateKind.FINISH:
             result_outbound = self._steps.complete_order_only(
                 run_id=turn.running_run.run_id,
                 observation=observation,
@@ -2884,17 +2973,17 @@ class Cycle2AgentRunHandler:
             turn=turn,
             task=next_task,
             request_unit=next_unit,
-            candidate_factory=lambda closure, model_call_id, manifest_id, control_move: (
-                self._route_verified_shipment_candidate(
+            candidate_factory=lambda closure, model_call_id, manifest_id, _control_move: (
+                self._route_post_order_shipment_candidate(
                     command=command,
                     turn=turn,
                     closure=closure,
-                    next_move=self._require_control_move(control_move),
+                    candidate=post_order_candidate,
                     model_call_id=model_call_id,
                     manifest_id=manifest_id,
                 )
             ),
-            control_purpose=Cycle2ControlPurpose.PROPOSE_GET_SHIPMENT,
+            closure_unavailable_is_control_error=True,
         )
 
     def _route_verified_shipment_candidate(
@@ -2940,6 +3029,7 @@ class Cycle2AgentRunHandler:
             Cycle2GatewayCandidate,
         ],
         control_purpose: Cycle2ControlPurpose | None = None,
+        closure_unavailable_is_control_error: bool = False,
     ) -> AgentRunResult:
         try:
             dispatched = await self._execute_tool(
@@ -2949,6 +3039,9 @@ class Cycle2AgentRunHandler:
                 request_unit_id=request_unit.request_unit_id,
                 candidate_factory=candidate_factory,
                 control_purpose=control_purpose,
+                closure_unavailable_is_control_error=(
+                    closure_unavailable_is_control_error
+                ),
             )
         except _Cycle2ControlProtocolError:
             return await self._finalize_mapping(
@@ -3349,18 +3442,12 @@ class Cycle2AgentRunHandler:
                     request_unit=next_unit,
                     candidate_factory=candidate_factory,
                 )
-            requires_shipment = any(
-                binding.name == "shipment_not_received"
-                and binding.normalized_value is True
-                for binding in next_bindings
-            )
             return await self._get_order(
                 command=command,
                 turn=turn,
                 task=next_task,
                 request_unit=next_unit,
                 candidate_factory=candidate_factory,
-                requires_shipment=requires_shipment,
             )
         raise AgentRunExecutionError("unsupported Cycle 2 continuation binding")
 
@@ -3779,6 +3866,7 @@ class Cycle2AgentRunHandler:
             Cycle2GatewayCandidate,
         ],
         control_purpose: Cycle2ControlPurpose | None = None,
+        closure_unavailable_is_control_error: bool = False,
     ) -> Cycle2ReadToolExecution | AgentRunResult:
         closure = await (
             self._runtime_record_port.load_initial_tool_call_v2_closure_for_owner(
@@ -3789,6 +3877,8 @@ class Cycle2AgentRunHandler:
             )
         )
         if type(closure) is not InitialToolCallV2ReadClosure:
+            if closure_unavailable_is_control_error:
+                raise _Cycle2ControlProtocolError
             raise AgentRunExecutionError("current ToolCall closure unavailable")
         model_call_id = self._uuid_factory()
         manifest_id = self._uuid_factory()
