@@ -51,6 +51,7 @@ from mini_agent.core.request_processing import (
     route_cycle2_continuation_next_move,
     route_cycle2_selected_next_move,
     route_cycle2_unique_next_move,
+    route_cycle2_verified_target_next_move,
     validate_and_reduce_cycle2_initial_request_v2,
     validate_and_reduce_initial_request_v2,
 )
@@ -6614,6 +6615,131 @@ def test_cycle2_ordinary_routes_are_post_cas_and_keep_ordinal_separate() -> None
             context_manifest_id=uuid4(),
             trusted_now=NOW,
         )
+
+
+@pytest.mark.parametrize(
+    ("origin_name", "origin_value"),
+    [
+        ("order_id", "O-1001"),
+        ("product_description", "轻量跑鞋"),
+        ("candidate_ordinal", 2),
+    ],
+)
+def test_cycle2_verified_target_routes_shipment_from_exact_origin_binding(
+    origin_name: str,
+    origin_value: object,
+) -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="查询配送",
+        run_id=uuid4(),
+    )
+    origin = _cycle2_binding(name=origin_name, value=origin_value)
+    task, unit = _cycle2_current_task_graph(binding=origin)
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=task.owner_customer_id,
+        owner_customer_id=task.owner_customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        order_id="O-1001",
+        source_observation_ref=uuid4(),
+        source_observation_version="order-observation-v1",
+        input_binding_refs=(origin.binding_id,),
+    )
+    unit = unit.model_copy(
+        update={"observation_refs": (target.source_observation_ref,)}
+    )
+    move = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_shipment",
+        arguments={"order_id": target.order_id},
+        base_task_state_version=task.state_version,
+    )
+
+    routed = route_cycle2_verified_target_next_move(
+        request_input=request_input,
+        next_move=move,
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=(origin,),
+        verified_target=target,
+        model_call_id=uuid4(),
+        context_manifest_id=uuid4(),
+        trusted_now=NOW,
+    )
+
+    assert routed.requested_provider_tool_name == "get_shipment"
+    assert routed.candidate_arguments == {"order_id": "O-1001"}
+    assert routed.argument_binding_refs == (origin.binding_id,)
+    assert routed.verified_target_ref == target.verified_target_ref
+
+
+def test_cycle2_verified_target_shipment_route_rejects_authority_substitution() -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="查询配送",
+        run_id=uuid4(),
+    )
+    origin = _cycle2_binding(name="product_description", value="轻量跑鞋")
+    task, unit = _cycle2_current_task_graph(binding=origin)
+    target = Cycle2VerifiedOrderTargetFacts(
+        verified_target_ref=uuid4(),
+        private_owner_scope_ref=task.owner_customer_id,
+        owner_customer_id=task.owner_customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        task_state_version=task.state_version,
+        order_id="O-1001",
+        source_observation_ref=uuid4(),
+        source_observation_version="order-observation-v1",
+        input_binding_refs=(origin.binding_id,),
+    )
+    unit = unit.model_copy(
+        update={"observation_refs": (target.source_observation_ref,)}
+    )
+    move = NextMove(
+        kind=NextMoveKind.CALL_TOOL,
+        requested_tool_name="get_shipment",
+        arguments={"order_id": target.order_id},
+        base_task_state_version=task.state_version,
+    )
+    base = {
+        "request_input": request_input,
+        "next_move": move,
+        "customer_context": _customer_context(),
+        "current_task": task,
+        "current_request_unit": unit,
+        "current_input_bindings": (origin,),
+        "verified_target": target,
+        "model_call_id": uuid4(),
+        "context_manifest_id": uuid4(),
+        "trusted_now": NOW,
+    }
+
+    for update in (
+        {"next_move": move.model_copy(update={"arguments": {"order_id": "O-9999"}})},
+        {"next_move": move.model_copy(update={"base_task_state_version": task.state_version - 1})},
+        {"verified_target": target.model_copy(update={"input_binding_refs": (uuid4(),)})},
+        {"verified_target": target.model_copy(update={"owner_customer_id": "customer-B"})},
+        {"verified_target": target.model_copy(update={"source_observation_ref": uuid4()})},
+        {
+            "current_input_bindings": (
+                origin.model_copy(
+                    update={
+                        "name": "shipment_not_received",
+                        "normalized_value": True,
+                    }
+                ),
+            )
+        },
+    ):
+        with pytest.raises(RequestProcessingError):
+            route_cycle2_verified_target_next_move(**(base | update))
 
 
 def _cycle2_initial_request_output_v2(
