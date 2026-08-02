@@ -7,22 +7,22 @@
 > migration、artifact与reviewed barrier是否存在必须分别引用可复现证据。
 >
 > 当前 Phase 2 已完成 scoped contract activation、master planning与 W1–W11 实现；
-> 27 个 physical artifact 已原子序列化为 `lifecycle_status = EXECUTABLE`，但 Coverage
-> Matrix 与 `AGENTS.md` 的 current-state prose 仍写为 `CONTRACT_DEFINED`。这个
-> cross-owner 状态冲突为 `CONFIRMED`，必须由后续独立 owner-alignment Packet 关闭；
-> 在此之前本文不裁决 effective Case lifecycle。27 个 physical Case 仍没有 Phase 2
-> lifecycle-valid Result。本文同时包含已实现合同与 W12 待实现 correction，具体状态
+> Coverage Matrix 与Agent Evaluation Strategy已reviewed记录四个logical Case
+> families / 27个physical artifacts的current effective lifecycle为`EXECUTABLE`。
+> 本Spec只消费该owner状态，不自行裁决lifecycle；Phase 2 lifecycle-valid Result仍为0，
+> 且没有`REGRESSION_GATE`。`AGENTS.md`与Intent的current-state prose仍待R14B/R14C
+> 独立consumer Packet对齐。本文同时包含已实现合同与 W12 待实现 correction，具体状态
 > 必须以源码、测试、reviewed barrier和第 9.2.3 节边界逐项判断，不能整体描述为
 > complete。
 
 - **Created:** 2026-07-31
-- **Review status:** `CONTRACT_ACTIVE / W11_ARTIFACT_SYNCED / OWNER_STATE_ALIGNMENT_PENDING / W12_CORRECTION_IN_PROGRESS`
+- **Review status:** `CONTRACT_ACTIVE / COVERAGE_STRATEGY_ALIGNED / PROJECT_INTENT_STATUS_PENDING / W12_CORRECTION_IN_PROGRESS`
 - **Target phase:** Phase 2｜Cycle 2｜完成 E2E-01
 - **Target cases:** `E2E01-02/03/05/06`
 - **Preliminary ambiguity score:** `0.12`（仅评价草案内部清晰度；不是 activation gate）
 - **Draft requirements:** 18
 - **Activation:** `SCOPED_CONTRACT_ACTIVE`
-- **Case lifecycle:** `27 ARTIFACTS_SERIALIZED_EXECUTABLE / OWNER_CURRENT_STATE_ALIGNMENT_PENDING / 0 PHASE_2_RESULTS`
+- **Case lifecycle:** `4 LOGICAL / 27 PHYSICAL EXECUTABLE / 0 PHASE_2_RESULTS / NO REGRESSION_GATE`
 - **Implementation:** `PARTIAL / W12_RESULTS_NOT_YET_AVAILABLE`
 
 ## 1. 权威边界
@@ -123,8 +123,8 @@ Plan 或实现以 scoped Spec 较新为由静默覆盖 canonical owner。
   READ tools。
 - reviewed Eval bundle、15-grader profile、Harness route与 atomic lifecycle /
   manifest / loader sync 已存在，27 个 physical artifact 均序列化为
-  `lifecycle_status = EXECUTABLE`；Coverage Matrix 与 `AGENTS.md` 的 current-state
-  prose 尚未同步，effective Case lifecycle 仍待对应 owner 独立裁决 / 对齐。
+  `lifecycle_status = EXECUTABLE`；Coverage Matrix 与Agent Evaluation Strategy已
+  对齐current effective lifecycle，`AGENTS.md`与Intent consumer仍待R14B/R14C同步。
 - W9 direct non-Harness seam与后续 OA-10 exact reader focused/integration evidence
   可复现，但不等于 14 个 longitudinal或13个mandatory trajectory Result。
 - W12 preflight确认现有 typed seed loader只能解析2/27 Case组合，Scripted Provider、
@@ -180,7 +180,7 @@ writer与执行顺序由独立 reviewed master execution Plan拥有；本文只�
 ## 5. Scoped Requirements
 
 1. **状态与证据真实性**：Phase 2 合同、activation、Case lifecycle、实现和验证状态必须分开记录。
-   - Current：scoped contract与master Plan已激活，27个physical artifact已序列化为`EXECUTABLE`，但Coverage Matrix与`AGENTS.md`的current-state prose仍为`CONTRACT_DEFINED`；W12尚无Phase 2 lifecycle-valid Result。
+   - Current：scoped contract与master Plan已激活，Coverage Matrix与Agent Evaluation Strategy已确认四个logical families / 27个physical artifacts为`EXECUTABLE`；`AGENTS.md`与Intent current-state consumer仍待对齐，W12尚无Phase 2 lifecycle-valid Result且无`REGRESSION_GATE`。
    - Target：本文在审阅、activation、实现和 Eval 各阶段使用不重叠状态，不因文档或 Fixture 出现就声明 `EXECUTABLE`。
    - Acceptance：任何“已实现/已验证/`EXECUTABLE`”表述都引用对应源码、测试或owner ruling；`EXECUTABLE`不得写成已有Result或`REGRESSION_GATE`。
 
@@ -260,12 +260,12 @@ writer与执行顺序由独立 reviewed master execution Plan拥有；本文只�
    - Acceptance：重启后可以在 owner scope 内从 CandidateSet → Search Observation → candidate target mapping 恢复唯一 verified order target；半写、dangling ref、mapping 缺失 / 重复 / wrong-owner、CandidateSet 复制业务事实、错误 ordinal / version、attempt 漂移或未写 Observation 的判断均被 exact reader 拒绝。
 
 17. **四个 Case 的三层 Eval**：`E2E01-02/03/05/06` 必须同时具有 Component、Trajectory 和 HTTP E2E 证据。
-    - Current：Phase 1 16 variants具有真实Result；Phase 2 27个artifact已序列化为`EXECUTABLE`，owner current-state alignment尚未关闭，13个T2仍错误携带HTTP `200`，且仍为0 lifecycle-valid Result。
+    - Current：Phase 1 16 variants具有真实Result；Phase 2四个logical families / 27个artifacts的Coverage/Strategy current state已对齐为`EXECUTABLE`，`AGENTS.md`与Intent consumer仍待对齐，13个T2仍错误携带HTTP `200`，且仍为0 lifecycle-valid Result。
    - Target：四个逻辑 Case与本文定义的 14 个 Phase 2 required offline variants，以及 13 个具备完整 input / predicate / state / disclosure / `CF-*` mapping 的强制 Trajectory Case，形成版本化、authenticated artifact bundle；第 13 个 Case 专门证明 OA-10 no-result closure。
    - Acceptance：每个 physical Case 可从本文唯一编码通用 EvalCase 必填字段、grading 和 version manifest；predicate arity / symbol 解析可机械验证；默认离线 Harness 对全部 Phase 1 + 2 variants 产生完整 Result；任何 Critical failure、execution failure、缺失 Case 或 digest mismatch 使 Gate 失败。
 
 18. **Phase 2 总门禁与三轴 lifecycle 纪律**：实现完成不自动推进 Contract、Planning、Case 或 Phase。
-    - Current：Contract、Planning、W1–W11实现与artifact atomic sync已完成；Coverage / project-instruction current-state alignment、W12 correction与final Results尚未完成。
+    - Current：Contract、Planning、W1–W11实现、artifact atomic sync与Coverage/Strategy current-state alignment已完成；`AGENTS.md`/Intent consumer alignment、W12 correction与final Results尚未完成。
    - Target：Document / Contract、Planning 和 EvalCase lifecycle 分轴推进；依次完成 contract activation、Plan / Task Packet、实现、review / fix、Validation、Eval / Security、Controlled UAT、Coverage Matrix owner lifecycle 裁决和显式 release。
    - Acceptance：任一文档、Plan、artifact、Fixture、测试或实现的出现都不自动推进另一轴；只有 canonical owner 基于 exact artifact 与可复现结果更新 Case lifecycle 后，Integrator 才手工同步 `.planning/`；无真实凭据时 Qwen 保持诚实 `NOT_RUN`。
 
@@ -2149,12 +2149,13 @@ evals/lanes/e2e01-cycle2.v1.json
 ```
 
 本文不修改这些文件。W10 Coverage owner ruling 曾批准 bundle 进入 `EXECUTABLE`，
-W11 atomic consumer sync 已把 27 个 physical artifact 序列化为该值；但 Coverage
-Matrix 与 `AGENTS.md` 的 current-state prose 仍保留 `CONTRACT_DEFINED`。因此本
-Spec 只记录 `CONFIRMED` 的 artifact 状态与冲突，不自行裁决 effective lifecycle；
-W12 final lifecycle-valid dispatch 必须先由独立 owner-alignment Packet 关闭冲突。
-bundle 继续服从 Eval owner 的 Dataset lifecycle、loader、manifest、SUT、Grader、
-Result 和 critical failure 规则。
+W11 atomic consumer sync 已把 27 个 physical artifact 序列化为该值；Coverage
+Matrix与Agent Evaluation Strategy随后已reviewed对齐current effective lifecycle。
+因此本Spec只消费四个logical families / 27个physical artifacts为`EXECUTABLE`的
+owner状态，不自行裁决lifecycle；Phase 2 lifecycle-valid Result仍为0且无
+`REGRESSION_GATE`。`AGENTS.md`与Intent consumer仍待R14B/R14C对齐，bundle继续
+服从Eval owner的Dataset lifecycle、loader、manifest、SUT、Grader、Result和
+critical failure规则。
 
 ### 9.2 EvalCase reference vocabulary
 
@@ -3277,7 +3278,8 @@ Phase 2 release 前至少要求：
   实现第 9.2.3 节，并在每个 exact head 独立 review 后串行合并。
 - 对当前 27 个已序列化 artifact 运行不声称 lifecycle-valid Result 的 pre-dispatch、
   RED、focused 与 neighbor 验证；final lifecycle-valid dispatch 必须先完成独立
-  owner current-state alignment，且只有 final `02-18` 才生成并汇总 W12 Results。
+  `AGENTS.md`与Intent current-state consumer alignment，且只有 final `02-18` 才生成
+  并汇总 W12 Results。
 
 当前禁止：
 
@@ -3287,7 +3289,7 @@ Phase 2 release 前至少要求：
   Eval 与 Composition Root。
 - 从 Case expectation、script、grader 或 reply 反推 setup、fault、mapper或业务
   evidence。
-- 在 owner current-state alignment、27 个真实 Result 与 final gate 出现前声称
+- 在剩余`AGENTS.md`/Intent consumer alignment、27 个真实 Result 与 final gate出现前声称
   `B_C2_VERTICAL`、Phase 2 complete、
   `REGRESSION_GATE`、production readiness 或 end-user UAT 已完成。
 
@@ -3337,10 +3339,10 @@ CONTRACT_DEFINED
 ```
 
 后续 W10 Coverage owner ruling 批准本 bundle 进入 `EXECUTABLE`，W11 atomic
-consumer sync 已把 27 个 physical artifact 序列化为该值；但 Coverage Matrix 与
-`AGENTS.md` 的 current-state prose 仍为 `CONTRACT_DEFINED`。该冲突必须由后续独立
-owner-alignment Packet 关闭；截至第 9.2.3 节 correction 起点仍没有 Phase 2
-lifecycle-valid Result。
+consumer sync 已把 27 个 physical artifact 序列化为该值。此后R13 correction起点
+仍存在Coverage Matrix与`AGENTS.md` current-state prose保留`CONTRACT_DEFINED`的
+冲突，且没有Phase 2 lifecycle-valid Result；该历史冲突现已由Coverage/Strategy
+owner alignment部分关闭，`AGENTS.md`与Intent consumer仍待R14B/R14C对齐。
 
 ### 10.3 Planning activation gate
 
@@ -3392,7 +3394,7 @@ Plan、Task Packet、exact base SHA、Worktree / branch activation 只属于本�
 ```text
 CONTRACT_DEFINED
 → Coverage Matrix owner ruling
-→ EXECUTABLE                           # W10 ruling + W11 artifact value；current-state prose alignment pending
+→ EXECUTABLE                           # 当前；W10/W11 + Coverage/Strategy reviewed alignment；0 Result / no gate
 → lifecycle-valid Results + regression synchronization
 → Coverage Matrix owner ruling
 → REGRESSION_GATE
@@ -3557,8 +3559,8 @@ Reviewer 应重点判断：
 *Activated through an independent exact-head reviewed PR from base
 `9ee260f12a82b706269f8a62c460c781c64f1f47`.*
 
-*Next allowed step: 本W12 execution-contract correction通过independent exact-head
-review并合并后，只能从其真实successor冻结master execution Plan correction；随后先
-串行关闭Coverage / `AGENTS.md` / Intent current-state alignment，再按Core、
-Application、Infrastructure、Eval、Composition推进。final lifecycle-valid dispatch
-在上述owner barriers全部reviewed前保持禁止。*
+*Next allowed step: master route、Coverage与Agent Evaluation Strategy alignment已
+reviewed合并；本R14E Spec current-state alignment通过independent exact-head review并
+合并后，只能从其真实successor冻结R14B `AGENTS.md` Packet，随后串行完成R14C Intent，
+再按Core、Application、Infrastructure、Eval、Composition推进。final lifecycle-valid
+dispatch在上述remaining barriers全部reviewed前保持禁止。*
