@@ -7,11 +7,11 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from pydantic_core import TzInfo
 
 from mini_agent.application.ports import (
@@ -691,6 +691,43 @@ Cycle2ReadHandler = Callable[
 ]
 
 
+class Cycle2ReadToolExecution(RuntimePrivateModel):
+    """Ephemeral terminal ToolCall plus its same-attempt validated result."""
+
+    terminal_tool_call: ToolCallRecordV2
+    tool_result: ToolResult | None = None
+
+    @model_validator(mode="after")
+    def result_matches_terminal_attempt(self) -> Self:
+        result = self.tool_result
+        if result is None:
+            return self
+        terminal = self.terminal_tool_call
+        if (
+            terminal.status not in {
+                ToolCallStatus.SUCCEEDED,
+                ToolCallStatus.FAILED,
+                ToolCallStatus.INTERRUPTED,
+            }
+            or not terminal.attempts
+            or result.outcome in {
+                ToolResultOutcome.TIMEOUT,
+                ToolResultOutcome.RESULT_UNKNOWN,
+            }
+            or result.tool_call_id != terminal.tool_call_id
+            or result.canonical_tool_name != terminal.canonical_tool_name.value
+        ):
+            raise ValueError("ToolResult does not identify the terminal ToolCall")
+        attempt = terminal.attempts[-1]
+        if (
+            attempt.finished_at != result.completed_at
+            or attempt.outcome is not result.outcome
+            or attempt.failure_code != result.error_code
+        ):
+            raise ValueError("ToolResult does not match the terminal attempt")
+        return self
+
+
 def _project_cycle2_tool_call(
     record: ToolCallRecordV2,
     **updates: object,
@@ -736,6 +773,14 @@ class Cycle2ReadToolExecutor:
         *,
         create_command: CreateToolCallV2Command,
     ) -> ToolCallRecordV2:
+        execution = await self.execute_with_result(create_command=create_command)
+        return execution.terminal_tool_call
+
+    async def execute_with_result(
+        self,
+        *,
+        create_command: CreateToolCallV2Command,
+    ) -> Cycle2ReadToolExecution:
         if type(create_command) is not CreateToolCallV2Command:
             raise ReadToolExecutionError("exact live ToolCallV2 command required")
         inserted = await (
@@ -744,8 +789,10 @@ class Cycle2ReadToolExecutor:
             )
         )
         if inserted is not Cycle2WriteResult.APPLIED:
-            return create_command.created_record
-        return await self._execute_created(
+            return Cycle2ReadToolExecution(
+                terminal_tool_call=create_command.created_record,
+            )
+        return await self._execute_created_with_result(
             owner_scope=create_command.loaded_closure.owner_scope,
             created_record=create_command.created_record,
         )
@@ -817,6 +864,18 @@ class Cycle2ReadToolExecutor:
         owner_scope: TrustedOwnerScope,
         created_record: ToolCallRecordV2,
     ) -> ToolCallRecordV2:
+        execution = await self._execute_created_with_result(
+            owner_scope=owner_scope,
+            created_record=created_record,
+        )
+        return execution.terminal_tool_call
+
+    async def _execute_created_with_result(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        created_record: ToolCallRecordV2,
+    ) -> Cycle2ReadToolExecution:
         if (
             type(owner_scope) is not TrustedOwnerScope
             or type(created_record) is not ToolCallRecordV2
@@ -830,7 +889,7 @@ class Cycle2ReadToolExecutor:
             expected_record=created_record,
         )
         if closure is None:
-            return created_record
+            return Cycle2ReadToolExecution(terminal_tool_call=created_record)
         attempt = ToolAttemptRecordV2(
             tool_call_id=created_record.tool_call_id,
             attempt_no=1,
@@ -860,8 +919,8 @@ class Cycle2ReadToolExecutor:
             tool_call_id=created_record.tool_call_id,
             attempt=attempt,
         ):
-            return created_record
-        return await self._dispatch_started_attempt(
+            return Cycle2ReadToolExecution(terminal_tool_call=created_record)
+        return await self._dispatch_started_attempt_with_result(
             owner_scope=owner_scope,
             running_record=running,
             started_attempt=attempt,
@@ -876,7 +935,24 @@ class Cycle2ReadToolExecutor:
         started_attempt: ToolAttemptRecordV2,
         effective_timeout_ms: int,
     ) -> ToolCallRecordV2:
+        execution = await self._dispatch_started_attempt_with_result(
+            owner_scope=owner_scope,
+            running_record=running_record,
+            started_attempt=started_attempt,
+            effective_timeout_ms=effective_timeout_ms,
+        )
+        return execution.terminal_tool_call
+
+    async def _dispatch_started_attempt_with_result(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        running_record: ToolCallRecordV2,
+        started_attempt: ToolAttemptRecordV2,
+        effective_timeout_ms: int,
+    ) -> Cycle2ReadToolExecution:
         timeout_phase: ToolTimeoutPhase | None = None
+        tool_result: ToolResult | None = None
         try:
             async with asyncio.timeout(effective_timeout_ms / 1000):
                 result = await self._handler(
@@ -899,6 +975,7 @@ class Cycle2ReadToolExecutor:
                 or result.completed_at < started_attempt.started_at
             ):
                 raise ReadToolExecutionError("invalid Cycle 2 handler result")
+            tool_result = result
             outcome = result.outcome
             failure_code = result.error_code
             finished_at = result.completed_at
@@ -910,7 +987,7 @@ class Cycle2ReadToolExecutor:
             expected_record=running_record,
         )
         if closure is None:
-            return running_record
+            return Cycle2ReadToolExecution(terminal_tool_call=running_record)
         revalidation = self._retry_revalidation(
             closure=closure,
             expected_record=running_record,
@@ -969,9 +1046,16 @@ class Cycle2ReadToolExecutor:
             )
         )
         if finalized_result is not Cycle2WriteResult.APPLIED:
-            return running_record
+            return Cycle2ReadToolExecution(terminal_tool_call=running_record)
         if retry is not ToolRetryDecision.RETRY_SCHEDULED:
-            return next_record
+            return Cycle2ReadToolExecution(
+                terminal_tool_call=next_record,
+                tool_result=(
+                    tool_result
+                    if outcome is not ToolResultOutcome.TIMEOUT
+                    else None
+                ),
+            )
 
         from mini_agent.application.restart_recovery_service import (
             Cycle2ToolRestartRecoveryService,
@@ -993,8 +1077,8 @@ class Cycle2ReadToolExecutor:
                 attempt=second,
             )
         ):
-            return recovered
-        return await self._dispatch_started_attempt(
+            return Cycle2ReadToolExecution(terminal_tool_call=recovered)
+        return await self._dispatch_started_attempt_with_result(
             owner_scope=owner_scope,
             running_record=recovered,
             started_attempt=second,
