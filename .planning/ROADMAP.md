@@ -59,9 +59,9 @@ R1A并冻结`B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准R1B。PR #2
 已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` / tree
 `ec3c8c50...`；PR #280完成R1 second-refreeze planning后，PR #281批准R1C/R1D。
 PR #282/#283已reviewed完成R1C并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e9727...` /
-tree `394d022a...`。PR #284-#296又reviewed完成R1D-R1H与R1第六次重冻结；当前
-integration `24f1e181...` / tree `99f48fcd...`，41 slots / 16 wave labels并审核R1I
-exact Plan；R1 WIP未发布。
+tree `394d022a...`。PR #284-#296又reviewed完成R1D-R1H与R1第六次重冻结；PR
+#297-#300完成R1I、R1第七次重冻结与R1 Application normal entry。当前integration
+`e8e53a4f...` / tree `1d825e07...`，41 slots / 16 wave labels并审核R2 exact Plan。
 Phase 3–6
 在对应 scoped canonical contract 出现并通过冲突审查前，只保留 Case ID 与 gate
 mapping。
@@ -197,7 +197,7 @@ Plans:
 ### Phase 2: Cycle 2｜完成 E2E-01
 
 **Status**:
-`CONTRACT_ACTIVE / W9_R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED / CASES_CONTRACT_DEFINED`
+`CONTRACT_ACTIVE / W9_R2_PLAN_REVIEW / B_C2_W9_APP_ENTRY / CASES_CONTRACT_DEFINED`
 
 **Goal**: 按 Coverage Matrix Cycle 2 覆盖 `E2E01-02/03/05/06`。
 
@@ -252,8 +252,8 @@ PR #268/#269批准W9 correction链；PR #270/#271完成R0并冻结
 `B_C2_W9_INITIAL_RU`；PR #276重冻结R1，PR #277批准其前置R1B；PR #278/#279
 已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`。PR #280完成R1
 second-refreeze planning，PR #281又批准R1C/R1D；PR #282/#283已reviewed完成R1C并
-冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`；PR #284-#296又完成R1D-R1H及R1第六次
-重冻结；当前审核`02-15R1I` exact Plan，R1 WIP未发布，R2/02-15未冻结。
+冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`；PR #284-#300又完成R1D-R1I、R1第七次
+重冻结与R1 normal entry；当前审核`02-15R2` exact Plan，02-15未冻结。
 
 **Branch mapping**:
 
@@ -529,7 +529,7 @@ third-refrozen R1；旧 `B_C2_APP_CONTRACT`、
 | Phase | Plans Complete | Status | Completed |
 |---|---:|---|---|
 | 1. 第一最薄 E2E-01 | 8/8 | `Implementation 42/42；六Case REGRESSION_GATE；16 PASS；quality gates complete；RTA-D01 accepted；PR #199 merged to main` | 2026-07-31 |
-| 2. 完成 E2E-01 | 34/41 | `W1-W8 + 02-15R0/R1A-R1H complete；02-15R1I plan review；R1 WIP unpublished；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
+| 2. 完成 E2E-01 | 36/41 | `W1-W8 + 02-15R0/R1A-R1I/R1 complete；02-15R2 plan review；Cases CONTRACT_DEFINED；Phase 2 Harness/Result zero` | - |
 | 3. RAG / Evidence / judgment | 0/TBD | `Not started` | - |
 | 4. Simulated refund action | 0/TBD | `Not started` | - |
 | 5. Result unknown / recovery | 0/TBD | `Not started` | - |

@@ -1,6 +1,6 @@
 # Gate W9｜Owner correction execution card
 
-状态：`B_C2_W9_R1_SIXTH_REFREEZE / 02-15R1I_PLAN_REVIEW`
+状态：`B_C2_W9_APP_ENTRY / 02-15R2_PLAN_REVIEW`
 
 ## Exact input
 
@@ -37,6 +37,11 @@
   tree `99f48fcde988b71adb5d0e19df99f69fd1b8854b`。当前40 slots / 16 wave labels。
 - R1第六次writer确认Gateway Observation-history集合缺陷；用户授权按建议修复，
   `02-15R1I`把总slot数调整为41、不新增wave label；R1 WIP继续未发布。
+- PR #297/#298已reviewed完成R1I，PR #299完成R1第七次重冻结，PR #300 reviewed
+  merge形成真实`B_C2_W9_APP_ENTRY = e8e53a4fde3890390273ef9e44e73c248170b843` /
+  tree `1d825e07d14b9588ee5f03a11757265b0bca0261`；focused `491 passed`、
+  neighbor `818 passed`。当前36/41 slots complete，R1 checkpoint已由reviewed
+  exact-six-file successor取代。
 
 ## Ordered dispatch
 
@@ -64,4 +69,5 @@ allowlist/owner/base/tree/blob不匹配，立即停止并裁决。
 
 ## Current gate
 
-当前只允许`02-15R1I` exact-two-file planning/review；R1 WIP未发布，R2/02-15尚未冻结。
+当前只允许从真实`B_C2_W9_APP_ENTRY`冻结并review `02-15R2` exact-seven-file
+Infrastructure Packet；02-15 Composition尚未冻结。

@@ -52,8 +52,9 @@
   PR #278/#279又完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` /
   tree `ec3c8c50...`。PR #281随后批准`02-15R1C/R1D`；PR #282/#283已reviewed完成
   R1C并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e9727...` / tree `394d022a...`。
-  PR #284-#296又完成R1D-R1H与R1第六次重冻结；当前41 slots / 16 wave labels并审核
-  R1I exact Plan，R1 WIP未发布，writer
+  PR #284-#296又完成R1D-R1H与R1第六次重冻结；PR #297-#300随后完成R1I、
+  R1第七次重冻结与R1 Application normal entry，真实`B_C2_W9_APP_ENTRY =
+  e8e53a4f...` / tree `1d825e07...`。当前41 slots / 16 wave labels并审核R2 exact Plan，writer
   上限仍为2。
   `integration/e2e01-cycle2` 已启用 PR-required、enforce-admins、linear-history、
   conversation-resolution 保护，并禁用 force-push / deletion；dispatch 与 merge 前
@@ -106,7 +107,8 @@
   PR #278/#279完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`；PR #280完成R1
   second-refreeze planning后，PR #281确认UNIQUE target durability/Core route缺口并
   批准`02-15R1C/R1D`；PR #282/#283完成R1C并冻结
-  `B_C2_W9_UNIQUE_TARGET_CONTRACT`；当前审核`02-15R1D` exact Plan，R1/R2/02-15尚未冻结。
+  `B_C2_W9_UNIQUE_TARGET_CONTRACT`；PR #284-#300完成R1D-R1I与R1，当前从真实
+  `B_C2_W9_APP_ENTRY`审核`02-15R2` exact Plan，02-15尚未冻结。
 - Phase 3–6 仍只保留 Case ID / Cycle mapping；对应 scoped implementation owner 出现前不生成实现细节。
 
 ### Out of Scope
@@ -142,7 +144,7 @@
 - 01-04E/F/G/H owner Packet已依序通过PR #23/#24/#25/#32合并；01-05R通过PR #33/#34 merge `fb607019...`，01-06R通过PR #35/#36 merge `8e21652...`，01-07 PR #29在latest-integration overlay复验后merge `eee1c0e...`。01-07A planning/Runtime PR #37/#38又merge为`4cfac0a...`；Business、Eval、项目规则状态PR #39–#41随后形成01-07B execution base。01-07B planning/status PR #42–#43与feature PR #44已reviewed merge为`ccdafe87...`；这些历史证据已由后续42/42实现与post-execution gates supersede。
 - 当前 immediate gate：全部42个implementation targets已完成；01-07S/U/X/T/W/V形成`B_RU_V2_CONTRACT = 5c84e0e...`，01-08 / Composition handoff / 01-08A依序形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`与`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。真实credentialed Qwen Baseline、canonical产品启动和production readiness仍未完成，但它们不是当前scoped deterministic offline release的未完成Task Packet。
 - 当前 Case lifecycle仍由Coverage Matrix拥有；其已将六个authenticated physical Case推进为`REGRESSION_GATE`。本derived文件只同步该状态，不自行裁决；默认离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。
-- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W8；W6唯一canonical full为`2840 passed, 1 deselected, 12 warnings`；W9 R0/R1A-R1H已reviewed完成。当前34/41 complete并审核R1I exact Plan；R1 WIP未发布，必须从R1I真实successor第七次重冻结。Case仍为`CONTRACT_DEFINED`；corrections不运行full或Phase 2 Harness dispatch/Result，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify在当前integration tree为NOT_FOUND且不作为barrier或实现证据。
+- Phase 1 release closure已完成：用户继续接受`RTA-D01`有界availability residual risk，reviewed integration → `main` PR #199已squash merge为`f15320e3c98a408727b1488db5a5c7f0a7a57931`。Phase 2 已完成 W1–W8；W6唯一canonical full为`2840 passed, 1 deselected, 12 warnings`；W9 R0/R1A-R1I/R1已reviewed完成。当前36/41 complete并审核R2 exact Plan；Case仍为`CONTRACT_DEFINED`；corrections不运行full或Phase 2 Harness dispatch/Result，Phase末全面深审延至W12。Phase 3–6仍需各自scoped owner与activation。Graphify在当前integration tree为NOT_FOUND且不作为barrier或实现证据。
 
 ## 不属于 GSD 派生层的事项
 

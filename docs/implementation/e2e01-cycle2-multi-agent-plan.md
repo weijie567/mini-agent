@@ -189,16 +189,16 @@ contract change。
 | Scoped contract | `CONTRACT_ACTIVE / READY_FOR_PLANNING` |
 | Case lifecycle | `E2E01-02/03/05/06 = CONTRACT_DEFINED` |
 | Master Plan | `PLAN_APPROVED / PR #203 MERGED` |
-| Future GSD Plans | `W1-W8 + 02-15R0/R1A/R1B COMPLETE / 02-15R1C/R1D OWNER CORRECTIONS APPROVED / 02-15R1 IMPLEMENTATION BLOCKED UNTIL THIRD REFREEZE` |
-| Task Packets | `28 COMPLETE / 02-15R1C/R1D PLAN PENDING / 02-15R1 SECOND-REFROZEN DIRTY CHECKPOINT UNPUBLISHED / 02-15R2/15 NOT REFROZEN` |
+| Future GSD Plans | `W1-W8 + 02-15R0/R1A-R1I/R1 COMPLETE / 02-15R2 EXACT PLAN REVIEW / 02-15 NOT REFROZEN` |
+| Task Packets | `36/41 COMPLETE / 02-15R2 EXACT PLAN REVIEW / 02-15 NOT REFROZEN` |
 | Proposed Plan / Packet slots / Waves | `41 / 16`（原 `02-00..18` + `02-02R/04R/05R` + `02-09R1/R2/R3/R4` + `02-07R/10R/11R` + `02-15R0/R1A/R1B/R1C/R1D/R1E/R1F/R1G/R1H/R1I/R1/R2` / 原 `W0..W12` + `W3R/W4R/W4R2`） |
 | Planning input SHA | `b96fe8adf8ce4bcadbdf2cf008e28be4ff9aa5a3` |
 | `B_C2_PLAN_APPROVED` | `2879f5226a073051d1550fe079b4a427c1ec8cb1` / tree `d5ded99bb0439fb57bbb4d6057fbda7a12b21fdf` |
 | Initial implementation base | `B_C2_START = 4dc6dc95de81080fb3b651bc2f0026fb046fd9f8` / tree `521ac2c7611b20683089ab41a74d07c9a2bb8fc7` |
-| Integration branch | `integration/e2e01-cycle2 / ACTIVE / 7d0d52f0762d9ba369008a52fd429adb2be98208` / tree `e07d9741ed31b37becdf6ee0d7286b110b5eaef2` |
+| Integration branch | `integration/e2e01-cycle2 / ACTIVE / e8e53a4fde3890390273ef9e44e73c248170b843` / tree `1d825e07d14b9588ee5f03a11757265b0bca0261` |
 | GSD config branch mapping | `integration/e2e01-cycle2 / ACTIVE` |
 | `02-00` execution branch / Worktree | `COMPLETE / REVIEWED MERGE` |
-| Integration / code feature branches / Worktrees | `W1..W8 + 02-15R0/R1A/R1B COMPLETE；02-15R1 second-refrozen dirty-blocked unpublished；02-15R1C/R1D/R2与02-15尚未dispatch` |
+| Integration / code feature branches / Worktrees | `W1..W8 + 02-15R0/R1A-R1I/R1 COMPLETE；02-15R2 planning review；02-15尚未dispatch` |
 | Writer assignments | `Integrator W9 owner-ruling single writer ACTIVE；implementation writer 0` |
 | Execution concurrency | approved ceiling `2` writers；当前 implementation writer `0` |
 
@@ -1413,15 +1413,13 @@ Action或`RESULT_UNKNOWN` side-effect path。
 
 ### Gate P2-B — Exact Plan / Task Packet set
 
-状态：`IN_PROGRESS / W1-W8 + W9 R0/R1A/R1B COMPLETE / R1C/R1D OWNER RULING`。
+状态：`IN_PROGRESS / W1-W8 + W9 R0/R1A-R1I/R1 COMPLETE / R2 PLAN REVIEW`。
 P2-A 通过后始终按真实 dependency barrier 分批准备；不得给尚未产生的 barrier
-填造 SHA。当前真实 integration successor 为
-`7d0d52f0762d9ba369008a52fd429adb2be98208` / tree
-`e07d9741ed31b37becdf6ee0d7286b110b5eaef2`；其中
-`B_C2_W9_TYPED_READ_EXECUTION = 1fba65168fb487d3c4a8664213831a9c1c5dc815`
-已由 reviewed R1B implementation 形成，随后只合并 R1 second-refreeze planning。
-R1 implementation checkpoint 未发布，必须等待 R1C/R1D exact Plans、reviewed
-successors与第三次 refreeze；旧 R1 base/head 均不得发布或作为 R2 输入。
+填造 SHA。当前真实 integration successor / `B_C2_W9_APP_ENTRY` 为
+`e8e53a4fde3890390273ef9e44e73c248170b843` / tree
+`1d825e07d14b9588ee5f03a11757265b0bca0261`；PR #297-#300已reviewed完成R1I、
+R1第七次重冻结与R1 Application exact-six-file实现。R2只能从该真实successor冻结，
+旧R1 checkpoint/base/head均不得发布或作为输入。
 
 用户需逐项或整组批准：
 
