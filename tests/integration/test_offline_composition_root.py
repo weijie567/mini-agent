@@ -66,6 +66,7 @@ from mini_agent.infrastructure.persistence.models import (
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
 from mini_agent.bootstrap import (
+    Cycle2OfflineComposition,
     OfflineCompositionError,
     OfflineE2E01Composition,
 )
@@ -129,6 +130,24 @@ def _record_row_count(session_factory) -> int:
             session.scalar(select(func.count()).select_from(P0RecordModel))
             or 0
         )
+
+
+async def test_cycle2_composition_rejects_unknown_seed_before_any_write(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    session_factory = build_session_factory(engine)
+
+    with pytest.raises(OfflineCompositionError, match="OFFLINE_COMPOSITION_FAILED"):
+        await Cycle2OfflineComposition.start(
+            fixture_refs=("fx-not-dispatchable-v1",),
+            session_factory=session_factory,
+            clock=_MonotonicClock(),
+        )
+
+    assert _order_row_count(session_factory) == 0
+    assert _record_row_count(session_factory) == 0
+    engine.dispose()
 
 
 def _execution_input(artifacts) -> EvalCaseExecutionInput:
