@@ -4,16 +4,16 @@ milestone: "v0.1"
 milestone_name: "GSD-only P0 execution"
 current_phase: "2"
 current_phase_name: "Cycle 2｜完成 E2E-01"
-current_plan: "02-15R1D"
-status: "phase_2_w9_r1d_plan_review"
+current_plan: "02-15R1I"
+status: "phase_2_w9_r1i_plan_review"
 last_updated: "2026-08-02"
-last_activity: "2026-08-02 — PR #282/#283完成R1C并冻结B_C2_W9_UNIQUE_TARGET_CONTRACT；从真实successor冻结R1D exact Plan"
+last_activity: "2026-08-02 — PR #284-#296完成R1D-R1H与R1第六次重冻结；R1 writer确认Gateway Observation历史缺陷并冻结R1I exact Plan"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 36
-  completed_plans: 29
-  percent: 81
+  total_plans: 41
+  completed_plans: 34
+  percent: 83
 ---
 
 # Mini Agent｜GSD 派生执行状态
@@ -63,37 +63,38 @@ full、未dispatch Harness或生成Eval Result。PR #266/#267又reviewed完成W8
 `B_C2_W9_TYPED_READ_EXECUTION = 1fba6516...` / tree `ec3c8c50...`。PR #280完成R1
 second-refreeze planning后，PR #281又批准R1C/R1D与36 slots；PR #282/#283已
 reviewed完成R1C并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e9727...` / tree
-`394d022a...`；当前从该真实successor冻结R1D exact Plan；旧R1 dirty checkpoint
-保持未发布并只作R1D后third-refreeze参考；
+`394d022a...`。PR #284-#296随后reviewed完成R1D-R1H及R1第六次重冻结；真实current
+integration为`24f1e181...` / tree `99f48fcd...`。R1 writer确认Gateway无法接受合法
+Search/Order Observation历史；当前冻结R1I exact Plan，R1 WIP保持未发布；
 Case仍为`CONTRACT_DEFINED`。
 
 ## GSD 1.38.3 Compatibility Fields
 
 Current Phase: 2
 Current Phase Name: Cycle 2｜完成 E2E-01
-Current Plan: 02-15R1D
+Current Plan: 02-15R1I
 Total Phases: 6
-Total Plans in Phase: 36
-Status: Phase 2 W9 / 02-15R1D plan review
+Total Plans in Phase: 41
+Status: Phase 2 W9 / 02-15R1I plan review
 Last Activity: 2026-08-02
-Last Activity Description: PR #282/#283完成R1C并冻结B_C2_W9_UNIQUE_TARGET_CONTRACT；从真实successor冻结R1D exact Plan
-Progress: Phase 1 complete；Phase 2 W1–W8 + R0/R1A/R1B/R1C complete；tracked Plan files 29、authorized slots 36、completed slots 29/36；1/6 phases
+Last Activity Description: PR #284-#296完成R1D-R1H与R1第六次重冻结；R1 writer确认Gateway Observation历史缺陷并冻结R1I exact Plan
+Progress: Phase 1 complete；Phase 2 W1–W8 + R0/R1A-R1H complete；authorized slots 41、completed slots 34/41；1/6 phases
 
 ## Current Position
 
 Phase: 2 of 6（完成 E2E-01）
-Plan: `MASTER_PLAN_APPROVED / 36 USER-AUTHORIZED SLOTS / W8 + 02-15R0/R1A/R1B/R1C COMPLETE / 02-15R1D PLAN REVIEW`
-Status: `CONTRACT_ACTIVE / W9_R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED`
-Last activity: 2026-08-02 — PR #283 PASS；current integration dd1e9727 / 394d022a
-Progress: Phase 1 100% complete；Phase 2 completed slots 29/36；W9 R1D plan review；milestone 1/6 phases
+Plan: `MASTER_PLAN_APPROVED / 41 USER-AUTHORIZED SLOTS / W8 + 02-15R0/R1A-R1H COMPLETE / 02-15R1I PLAN REVIEW`
+Status: `CONTRACT_ACTIVE / W9_R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED`
+Last activity: 2026-08-02 — current integration 24f1e181 / 99f48fcd；R1I exact Plan frozen
+Progress: Phase 1 100% complete；Phase 2 completed slots 34/41；W9 R1I plan review；milestone 1/6 phases
 
 Canonical `E2E01-01/04`六个authenticated physical Case当前为`REGRESSION_GATE`，真实离线链为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`。用户已继续接受有界`RTA-D01`，reviewed PR #199已合并到`main`；Requirements与Phase checkbox已由Integrator手工同步为完成。Phase 2 通过独立 owner alignment 与 Activation 进入 `READY_FOR_PLANNING`；`E2E01-02/03/05/06` 仍为 `CONTRACT_DEFINED`。
 
 ## Next Safe Action
 
-1. 完成 `02-15R1D` exact-seven-file planning review/merge；未合并前不dispatch。
-2. 从真实`B_C2_W9_UNIQUE_TARGET_CONTRACT = dd1e9727... / 394d022a...`创建exact-four-file R1D Core Worktree并完成focused/neighbor/bounded review/merge。
-3. 只从真实`B_C2_W9_UNIQUE_TARGET_CORE`第三次重冻结R1；reviewed R1D successor前不重放R1 checkpoint。
+1. 完成 `02-15R1I` exact planning review/merge；未合并前不dispatch。
+2. 从真实`B_C2_W9_R1_SIXTH_REFREEZE = 24f1e181... / 99f48fcd...`创建exact-two-file R1I Core Worktree并完成focused/neighbor/bounded review/merge。
+3. 只从真实`B_C2_W9_OBSERVATION_HISTORY_GATE`第七次重冻结R1；reviewed R1I successor前不发布R1 checkpoint。
 4. R1不运行full、不写Infrastructure/API/bootstrap/Eval lifecycle；R2只从真实`B_C2_W9_APP_ENTRY`冻结。
 5. 真实credentialed Qwen、canonical app startup、end-user UAT与production readiness仍未完成。
 

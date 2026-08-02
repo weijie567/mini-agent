@@ -43,8 +43,9 @@
   `B_C2_W9_INITIAL_RU`。PR #276重冻结R1，PR #277又批准`02-15R1B`与34 slots；
   PR #278/#279已reviewed完成R1B并冻结`B_C2_W9_TYPED_READ_EXECUTION`。PR #280完成
   R1 second-refreeze planning后，PR #281又批准`02-15R1C/R1D`与36 slots；当前从
-  真实successor完成R1C planning/implementation并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`；
-  当前审核R1D exact Plan，旧R1 dirty checkpoint未发布，这不推进任一Case lifecycle。
+  真实successor完成R1C planning/implementation并冻结`B_C2_W9_UNIQUE_TARGET_CONTRACT`。
+  PR #284-#296又完成R1D-R1H与R1第六次重冻结；R1 writer确认Gateway Observation历史
+  缺陷，当前41 slots并审核R1I exact Plan；R1 WIP未发布，这不推进任一Case lifecycle。
   Phase 3–6 只保留 Coverage
   Matrix Cycle 的顺序映射，在各自 owner 出现前不生成或推断实现细节。
 - 任何冲突都按 [GOVERNANCE.md](GOVERNANCE.md) 阻断并交由对应 specialized owner 裁决，绝不按文件更新时间覆盖。
@@ -56,7 +57,7 @@
 
 当前八个numbered Plan与全部42个implementation targets均有reviewed merge和自动化反馈证据。01-07S/U/X/T/W/V已形成`B_RU_V2_CONTRACT = 5c84e0e...`；01-08、Composition handoff与01-08A已形成`B_01_08 = b8a2cf3...`、`B_01_08A_COMPOSITION = c59eaea...`和`B_01_08A = 11d6d08...`。PR #172–#186完成review / fix、Validation、controlled UAT、Eval activation / Results / regression gate与mandatory Eval / Security re-review。六个authenticated physical Case的全部16 variants为`16 PASS / 0 FAIL / 0 Critical failure / 0 execution failure`，canonical full为`2007 passed, 1 deselected, 12 warnings`。本文件不把真实Qwen `NOT_RUN`、无canonical产品启动或无production readiness伪装成已完成；它们也不是本次scoped deterministic offline Phase 1 requirement的隐藏Task Packet。用户已明确暂时停用Graphify；后续不运行、不引用，也不把freshness作为门禁。
 
-## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / W9 R1D PLAN REVIEW）
+## Phase 2｜Cycle 2：完成 E2E-01（CONTRACT ACTIVE / W9 R1I PLAN REVIEW）
 
 - [ ] **E2E01-02**
 - [ ] **E2E01-03**
@@ -111,10 +112,10 @@ Case activation、Trajectory/E2E Result或完整E2E-01证据。四个Case继续�
 |---|---:|---|---|
 | `E2E01-01` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
 | `E2E01-04` | Phase 1 | Coverage Matrix Cycle 1 + Thin Slice Spec | `REGRESSION_GATE / PHASE_1_RELEASE_COMPLETE` |
-| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
-| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
-| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
-| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1D_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
+| `E2E01-02` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
+| `E2E01-03` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
+| `E2E01-05` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
+| `E2E01-06` | Phase 2 | Coverage Matrix Cycle 2 + Cycle 2 Spec | `CONTRACT_DEFINED / 02-15R1I_PLAN_REVIEW / R1_CHECKPOINT_UNPUBLISHED` |
 | `E2E02-01` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-02` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
 | `E2E02-03` | Phase 3 | Coverage Matrix Cycle 3（先 Evidence / judgment） | Pending |
