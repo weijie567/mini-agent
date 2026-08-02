@@ -10,6 +10,7 @@ import mini_agent.application.records as application_records_module
 from mini_agent.application.ports import (
     AgentRunHandler,
     ConversationRecordPort,
+    Cycle2ExecutionOutcomeObserver,
     Cycle2RequestUnderstandingProvider,
     Cycle2RuntimeRecordPort,
     ExactRunEvidencePort,
@@ -17,6 +18,7 @@ from mini_agent.application.ports import (
     GetOrderPort,
     GetShipmentPort,
     ModelProviderV2,
+    NoOpCycle2ExecutionOutcomeObserver,
     RestartRecoveryPort,
     RuntimeRecordPort,
     SearchOrdersPort,
@@ -33,6 +35,7 @@ from mini_agent.application.records import (
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
+    Cycle2ControlPurpose,
     Cycle2ReadDispatchGrant,
     Cycle2WriteResult,
     ContinuationInputBindingReadClosure,
@@ -82,8 +85,13 @@ from mini_agent.application.records import (
 from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
+)
+from mini_agent.application.run_result_mapper import (
+    Cycle2ExecutionOutcomeObservationV1,
 )
 from mini_agent.core.shipment import GetShipmentQuery, GetShipmentResult
 from mini_agent.core.task_state import OrderCandidateSelectionRequest
@@ -2309,8 +2317,7 @@ def test_cycle2_request_understanding_provider_exposes_only_bounded_proposals() 
     for method_name in (
         "propose_cycle2_initial",
         "propose_cycle2_continuation",
-        "propose_cycle2_search_followup",
-        "propose_cycle2_order_followup",
+        "propose_cycle2_control",
     ):
         assert hasattr(Cycle2RequestUnderstandingProvider, method_name)
     provider_source = inspect.getsource(Cycle2RequestUnderstandingProvider)
@@ -2664,3 +2671,36 @@ def test_cycle2_port_docs_freeze_atomicity_and_no_authority_semantics() -> None:
         "zero-dispatch",
     ):
         assert required_term in created_doc
+
+
+def test_cycle2_provider_separates_claim_and_closed_purpose_control() -> None:
+    continuation_hints = get_type_hints(
+        Cycle2RequestUnderstandingProvider.propose_cycle2_continuation
+    )
+    control_hints = get_type_hints(
+        Cycle2RequestUnderstandingProvider.propose_cycle2_control
+    )
+
+    assert continuation_hints["return"] is Cycle2InputCandidate
+    assert control_hints["purpose"] is Cycle2ControlPurpose
+    assert control_hints["return"] is Cycle2ControlCandidate
+    assert not hasattr(
+        Cycle2RequestUnderstandingProvider,
+        "propose_cycle2_search_followup",
+    )
+    assert not hasattr(
+        Cycle2RequestUnderstandingProvider,
+        "propose_cycle2_order_followup",
+    )
+
+
+def test_cycle2_outcome_observer_has_production_noop_surface() -> None:
+    hints = get_type_hints(
+        Cycle2ExecutionOutcomeObserver.observe_cycle2_execution_outcome
+    )
+    assert hints["observation"] is Cycle2ExecutionOutcomeObservationV1
+    assert hints["return"] is type(None)
+    assert isinstance(
+        NoOpCycle2ExecutionOutcomeObserver(),
+        Cycle2ExecutionOutcomeObserver,
+    )

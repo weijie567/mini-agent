@@ -44,7 +44,9 @@ from mini_agent.core.memory import (
 )
 from mini_agent.core.order import GetOrderOutcome, GetOrderResult
 from mini_agent.core.request_processing import (
+    Cycle2AcceptedClaimRejectedSelection,
     Cycle2InitialRequestDecisionV2,
+    Cycle2OrdinalSelectionRejectionReason,
     _normalize_order_id,
 )
 from mini_agent.core.request_understanding import (
@@ -2547,45 +2549,15 @@ class RunTaskLinkRecordV2(_StrictAuditOnlyRecord):
         return self
 
 
-class Cycle2ContinuationProviderProposal(_StrictRuntimePrivateRecord):
-    """One Claim/NextMove proposal with no identity or business authority."""
+class Cycle2ControlPurpose(StrEnum):
+    """Application-selected actual boundary; never model output or Eval input."""
 
-    input_candidate: Cycle2InputCandidate
-    next_move_candidate: NextMove
-
-    @model_validator(mode="before")
-    @classmethod
-    def proposal_children_are_exact(cls, value: object) -> object:
-        return _require_exact_cycle2_inputs(
-            value,
-            model_fields={
-                "input_candidate": Cycle2InputCandidate,
-                "next_move_candidate": NextMove,
-            },
-        )
-
-    @model_validator(mode="after")
-    def proposal_is_narrowly_routable(self) -> Self:
-        candidate = self.input_candidate
-        move = self.next_move_candidate
-        arguments = move.arguments
-        if candidate.name == "candidate_ordinal":
-            expected_tool = "get_order"
-            expected_argument = "order_id"
-        elif candidate.name == "product_description":
-            expected_tool = "search_orders"
-            expected_argument = "product_description"
-        else:
-            expected_tool = "get_shipment"
-            expected_argument = "order_id"
-        if (
-            move.kind.value != "CALL_TOOL"
-            or move.requested_tool_name != expected_tool
-            or arguments is None
-            or set(arguments) != {expected_argument}
-        ):
-            raise ValueError("Cycle 2 continuation proposal is not narrowly routable")
-        return self
+    PROPOSE_GET_ORDER = "PROPOSE_GET_ORDER"
+    PROPOSE_FIXED_RESPONSE = "PROPOSE_FIXED_RESPONSE"
+    PROPOSE_CANDIDATE_QUESTION = "PROPOSE_CANDIDATE_QUESTION"
+    PROPOSE_ORDER_SUMMARY = "PROPOSE_ORDER_SUMMARY"
+    PROPOSE_GET_SHIPMENT = "PROPOSE_GET_SHIPMENT"
+    PROPOSE_SHIPMENT_ASSESSMENT = "PROPOSE_SHIPMENT_ASSESSMENT"
 
 
 class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
@@ -2603,8 +2575,13 @@ class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
     current_candidate_set_records: tuple[OrderCandidateSetRecord, ...] = ()
     current_search_observation_records: tuple[SearchOrdersObservation, ...] = ()
     current_auto_target_records: tuple[OrderCandidateAutoTargetRecord, ...] = ()
+    current_order_observation_records: tuple[OrderObservation, ...] = ()
+    current_shipment_observation_records: tuple[ShipmentObservation, ...] = ()
     superseded_candidate_set_refs: tuple[UUID, ...] = ()
     existing_selection_records: tuple[OrderCandidateSelectionRecord, ...] = ()
+    ordinal_selection_rejection_hint: (
+        Cycle2OrdinalSelectionRejectionReason | None
+    ) = None
     trusted_now: datetime
 
     @model_validator(mode="before")
@@ -2624,6 +2601,8 @@ class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
                 "current_candidate_set_records": OrderCandidateSetRecord,
                 "current_search_observation_records": SearchOrdersObservation,
                 "current_auto_target_records": OrderCandidateAutoTargetRecord,
+                "current_order_observation_records": OrderObservation,
+                "current_shipment_observation_records": ShipmentObservation,
                 "existing_selection_records": OrderCandidateSelectionRecord,
             },
         )
@@ -2672,11 +2651,36 @@ class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
             record.verified_target_ref
             for record in self.current_auto_target_records
         )
+        order_observation_ids = tuple(
+            record.observation_id
+            for record in self.current_order_observation_records
+        )
+        shipment_observation_ids = tuple(
+            record.observation_id
+            for record in self.current_shipment_observation_records
+        )
+        allowed_rejection_hints = {
+            Cycle2OrdinalSelectionRejectionReason.CROSS_TASK,
+            Cycle2OrdinalSelectionRejectionReason.OWNER_MISMATCH,
+            Cycle2OrdinalSelectionRejectionReason.SUPERSEDED,
+            Cycle2OrdinalSelectionRejectionReason.CURRENT_SET_CARDINALITY_NOT_ONE,
+        }
         if (
             len(binding_names) != len(set(binding_names))
             or len(candidate_ids) != len(set(candidate_ids))
             or len(observation_ids) != len(set(observation_ids))
             or len(auto_target_ids) != len(set(auto_target_ids))
+            or len(order_observation_ids) != len(set(order_observation_ids))
+            or len(shipment_observation_ids)
+            != len(set(shipment_observation_ids))
+            or set(order_observation_ids).intersection(shipment_observation_ids)
+            or not set(order_observation_ids).issubset(unit.observation_refs)
+            or not set(shipment_observation_ids).issubset(unit.observation_refs)
+            or (
+                self.ordinal_selection_rejection_hint is not None
+                and self.ordinal_selection_rejection_hint
+                not in allowed_rejection_hints
+            )
             or len(self.superseded_candidate_set_refs)
             != len(set(self.superseded_candidate_set_refs))
             or any(
@@ -2703,6 +2707,16 @@ class Cycle2CurrentSessionTaskClosure(_StrictRuntimePrivateRecord):
                 or record.task_id != task.task_id
                 or record.request_unit_id != unit.request_unit_id
                 for record in self.existing_selection_records
+            )
+            or any(
+                record.source_tool != "get_order"
+                for record in self.current_order_observation_records
+            )
+            or any(
+                record.private_owner_scope != self.owner_scope.customer_id
+                or record.task_id != task.task_id
+                or record.request_unit_id != unit.request_unit_id
+                for record in self.current_shipment_observation_records
             )
         ):
             raise ValueError("current Session capability graph mismatch")
@@ -3955,12 +3969,13 @@ class ContinuationInputBindingReadClosure(_StrictRuntimePrivateRecord):
 
 
 class ApplyContinuationInputBindingV2Command(_StrictRuntimePrivateRecord):
-    """CAS one non-ordinal binding and Task/RequestUnit version advance."""
+    """CAS one ordinary binding or rejected ordinal Claim and version advance."""
 
     loaded_closure: ContinuationInputBindingReadClosure
     new_input_binding_record: InputBindingV2
     next_task_record: TaskRecord
     next_request_unit_record: RequestUnitRecord
+    rejected_ordinal_selection: Cycle2AcceptedClaimRejectedSelection | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -3973,6 +3988,9 @@ class ApplyContinuationInputBindingV2Command(_StrictRuntimePrivateRecord):
                 "next_task_record": TaskRecord,
                 "next_request_unit_record": RequestUnitRecord,
             },
+            optional_model_fields={
+                "rejected_ordinal_selection": Cycle2AcceptedClaimRejectedSelection,
+            },
         )
 
     @model_validator(mode="after")
@@ -3981,8 +3999,20 @@ class ApplyContinuationInputBindingV2Command(_StrictRuntimePrivateRecord):
         current_task = closure.current_task_record
         current_unit = closure.current_request_unit_record
         binding = self.new_input_binding_record
+        rejection = self.rejected_ordinal_selection
         if binding.name == "candidate_ordinal":
-            raise ValueError("candidate_ordinal requires the selection CAS")
+            if (
+                type(rejection) is not Cycle2AcceptedClaimRejectedSelection
+                or rejection.ordinal_input_binding != binding
+                or rejection.base_task_state_version != current_task.state_version
+                or rejection.result_task_state_version
+                != current_task.state_version + 1
+            ):
+                raise ValueError(
+                    "candidate_ordinal requires exact rejected selection decision"
+                )
+        elif rejection is not None:
+            raise ValueError("ordinary continuation cannot carry selection rejection")
         if binding.binding_id in current_unit.input_binding_refs:
             raise ValueError("continuation binding identity must be new")
         if binding.source_refs != (closure.saved_user_message_record.message_id,):

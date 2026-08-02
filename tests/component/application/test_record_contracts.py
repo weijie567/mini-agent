@@ -24,6 +24,8 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
+    Cycle2ControlPurpose,
+    Cycle2CurrentSessionTaskClosure,
     Cycle2DispatchFenceWriteResult,
     Cycle2ExactRunEvidenceClosure,
     Cycle2ObservationSourceEdge,
@@ -136,6 +138,11 @@ from mini_agent.core.request_understanding import (
     InputAuthority,
     InputSourceKind,
     TaskDeltaOperation,
+)
+from mini_agent.core.request_processing import (
+    Cycle2OrdinalClaimPreparation,
+    Cycle2OrdinalSelectionRejectionReason,
+    reject_cycle2_ordinal_selection,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
@@ -9893,7 +9900,7 @@ def test_cycle2_continuation_binding_is_one_exact_nonordinal_cas() -> None:
         created_at=closure.trusted_now,
         updated_at=closure.trusted_now,
     )
-    with pytest.raises(ValidationError, match="selection CAS"):
+    with pytest.raises(ValidationError, match="rejected selection decision"):
         ApplyContinuationInputBindingV2Command(
             **{**values, "new_input_binding_record": ordinal}
         )
@@ -9917,6 +9924,62 @@ def test_cycle2_continuation_binding_is_one_exact_nonordinal_cas() -> None:
                 ),
             }
         )
+
+
+def test_cycle2_rejected_ordinal_claim_is_one_binding_only_cas() -> None:
+    ordinary = _c2_continuation_command()
+    closure = ordinary.loaded_closure
+    ordinal = _input_binding_v2(
+        name="candidate_ordinal",
+        normalized_value=6,
+        source_refs=(closure.saved_user_message_record.message_id,),
+        created_at=closure.trusted_now,
+        updated_at=closure.trusted_now,
+    )
+    claim = Cycle2OrdinalClaimPreparation(
+        ordinal_input_binding=ordinal,
+        selection_request=OrderCandidateSelectionRequest(
+            source_message_ref=closure.saved_user_message_record.message_id,
+            ordinal_input_binding_ref=ordinal.binding_id,
+            ordinal=6,
+        ),
+        base_task_state_version=closure.current_task_record.state_version,
+        result_task_state_version=closure.current_task_record.state_version + 1,
+    )
+    rejected = reject_cycle2_ordinal_selection(
+        claim=claim,
+        reason=Cycle2OrdinalSelectionRejectionReason.OUT_OF_RANGE,
+    )
+    command = ApplyContinuationInputBindingV2Command(
+        loaded_closure=closure,
+        new_input_binding_record=ordinal,
+        next_task_record=_c2_project(
+            closure.current_task_record,
+            state_version=4,
+            updated_at=closure.trusted_now,
+        ),
+        next_request_unit_record=_c2_project(
+            closure.current_request_unit_record,
+            state_version=4,
+            updated_at=closure.trusted_now,
+            input_binding_refs=(
+                *closure.current_request_unit_record.input_binding_refs,
+                ordinal.binding_id,
+            ),
+        ),
+        rejected_ordinal_selection=rejected,
+    )
+
+    assert command.rejected_ordinal_selection == rejected
+    assert command.next_task_record.status is closure.current_task_record.status
+    assert command.next_request_unit_record.open_questions == (
+        closure.current_request_unit_record.open_questions
+    )
+    assert not {
+        "selection_record",
+        "selected_target_ref",
+        "tool_call_record",
+    }.intersection(type(command).model_fields)
 
 
 def test_cycle2_continuation_supersedes_only_one_current_same_name_binding() -> None:
@@ -12540,3 +12603,26 @@ def test_cycle2_oa10_accepts_completed_replacement_and_rejects_trace_sidecar() -
                 occurred_at=UTC_NOW + timedelta(seconds=1),
             ),
         )
+
+
+def test_cycle2_application_control_and_rejection_fields_are_closed() -> None:
+    assert {purpose.value for purpose in Cycle2ControlPurpose} == {
+        "PROPOSE_GET_ORDER",
+        "PROPOSE_FIXED_RESPONSE",
+        "PROPOSE_CANDIDATE_QUESTION",
+        "PROPOSE_ORDER_SUMMARY",
+        "PROPOSE_GET_SHIPMENT",
+        "PROPOSE_SHIPMENT_ASSESSMENT",
+    }
+    assert set(ApplyContinuationInputBindingV2Command.model_fields) == {
+        "loaded_closure",
+        "new_input_binding_record",
+        "next_task_record",
+        "next_request_unit_record",
+        "rejected_ordinal_selection",
+    }
+    assert {
+        "current_order_observation_records",
+        "current_shipment_observation_records",
+        "ordinal_selection_rejection_hint",
+    }.issubset(Cycle2CurrentSessionTaskClosure.model_fields)
