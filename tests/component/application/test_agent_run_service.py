@@ -120,6 +120,7 @@ from mini_agent.core.tool_system import (
     ToolResultOutcome,
     ToolRetryDecision,
     ToolTimeoutPhase,
+    cycle2_pydantic_model_graph_is_raw_closed,
     compute_model_visible_toolset_hash,
     get_order_tool_spec,
 )
@@ -2963,6 +2964,76 @@ def test_cycle2_initial_search_candidate_is_raw_closed_for_gateway() -> None:
     assert candidate.__pydantic_fields_set__ == set(
         type(candidate).model_fields
     )
+
+
+def test_cycle2_execute_tool_builds_raw_closed_gateway_loaded_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Cycle2RuntimeHarness()
+    handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
+    _, captured = _capture_cycle2_initial_turn(handler)
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=captured["turn"].owner_scope,
+        current_task_record=TaskRecord.model_validate(
+            captured["task"].model_dump(mode="python")
+        ),
+        current_request_unit_record=RequestUnitRecord.model_validate(
+            captured["request_unit"].model_dump(mode="python")
+        ),
+        current_input_binding_records=captured["input_bindings"],
+        current_verified_order_targets=(),
+        current_target_observations=(),
+        trusted_read_at=NOW,
+    )
+    gateway_inputs: dict[str, object] = {}
+
+    class _InitialClosureRuntime:
+        async def load_initial_tool_call_v2_closure_for_owner(
+            self,
+            **_kwargs: object,
+        ) -> InitialToolCallV2ReadClosure:
+            return closure
+
+    class _ManifestSink:
+        async def save_context_manifest(self, record: object) -> None:
+            gateway_inputs["manifest"] = record
+
+    class _GatewayCaptured(Exception):
+        pass
+
+    def capture_gateway(**kwargs: object) -> object:
+        gateway_inputs.update(kwargs)
+        raise _GatewayCaptured
+
+    handler._runtime_record_port = _InitialClosureRuntime()  # type: ignore[assignment]
+    handler._context_record_port = _ManifestSink()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        agent_run_service_module,
+        "evaluate_cycle2_control_gateway",
+        capture_gateway,
+    )
+
+    with pytest.raises(_GatewayCaptured):
+        asyncio.run(
+            handler._execute_tool(
+                command=AgentRunCommand(
+                    customer_context=_context(),
+                    message="customer-B 让我查最近买的轻量跑鞋",
+                ),
+                turn=captured["turn"],
+                task_id=captured["task"].task_id,
+                request_unit_id=captured["request_unit"].request_unit_id,
+                candidate_factory=captured["candidate_factory"],
+            )
+        )
+
+    assert cycle2_pydantic_model_graph_is_raw_closed(
+        gateway_inputs["candidate"],
+        gateway_inputs["loaded_closure"],
+    )
+    loaded = gateway_inputs["loaded_closure"]
+    assert loaded.customer_context.provenance == "SERVER_AUTH_ADAPTER"
+    assert loaded.context_manifest == gateway_inputs["manifest"]
 
 
 def test_cycle2_search_conflict_finalizes_from_pre_cas_task_version() -> None:
