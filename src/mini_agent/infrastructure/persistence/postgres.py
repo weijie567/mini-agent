@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from enum import Enum
 from functools import wraps
@@ -39,15 +39,20 @@ from mini_agent.application.records import (
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyTaskTransitionCommand,
+    AgentRunResult,
     ConditionalWriteResult,
     ContinuationInputBindingReadClosure,
     ConversationRecord,
     ConversationTaskLinkRecord,
+    CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2RunRootCommand,
     CreateInitialTaskGraphV2Command,
     CreateRunCommand,
     CreateToolCallCommand,
     CreateToolCallV2Command,
     Cycle2DispatchFenceWriteResult,
+    Cycle2CurrentSessionTaskClosure,
+    Cycle2ExactRunEvidenceClosure,
     Cycle2ReadDispatchGrant,
     Cycle2RunBudgetPolicyEvidence,
     Cycle2WriteResult,
@@ -58,6 +63,7 @@ from mini_agent.application.records import (
     FinalizeBudgetExhaustedToolRecoveryV2Command,
     FinalizeCreatedToolRecoveryV2Command,
     FinalizeRunCommand,
+    FinalizeCycle2RunCommand,
     FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
     FinalizeToolCallCommand,
@@ -65,11 +71,13 @@ from mini_agent.application.records import (
     FinalizeUnfinishedToolRecoveryV2Command,
     InsertOnlyWriteResult,
     MessageRecord,
+    MessageDirection,
     ObservationWriteResult,
     OrderCandidateSelectionReadClosure,
     OrderSearchCurrentReadClosure,
     RunTaskLinkRecord,
     RunTaskLinkRecordV2,
+    SaveOrderObservationV2Command,
     SaveShipmentAssessmentV2Command,
     SaveShipmentObservationV2Command,
     SaveObservationCommand,
@@ -82,6 +90,7 @@ from mini_agent.application.records import (
     InitialToolCallV2ReadClosure,
     ShipmentAssessmentReadClosure,
     ShipmentNotReceivedClaimReadClosure,
+    StartCycle2RunCommand,
     SupersededRunInvalidationKind,
     SupersededRunReadClosure,
 )
@@ -96,6 +105,7 @@ from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
     InputBinding,
     InputBindingV2,
+    OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
     OrderCandidateSelectionRequest,
     OrderCandidateSetRecord,
@@ -114,6 +124,10 @@ from mini_agent.core.tool_system import (
     ToolCallRecordV2,
     ToolCallStatus,
     ToolEffect,
+)
+from mini_agent.core.control_gateway import (
+    Cycle2TargetObservationFacts,
+    Cycle2VerifiedOrderTargetFacts,
 )
 from mini_agent.core.trace import (
     AgentRunRecord,
@@ -167,6 +181,7 @@ _CYCLE2_VERSION_BY_CODE = MappingProxyType(
             "conversation_task_link_record.p0.v1"
         ),
         P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
+        P0RecordCode.OBSERVATION_RECORD: "observation_record.p0.v1",
         P0RecordCode.INPUT_BINDING_RECORD: "input_binding_record.p0.v2",
         P0RecordCode.GATE_DECISION_RECORD: "gate_decision_record.p0.v2",
         P0RecordCode.TOOL_CALL_RECORD: "tool_call_record.p0.v2",
@@ -192,6 +207,11 @@ _CYCLE2_VERSION_BY_CODE = MappingProxyType(
 )
 _CYCLE2_INPUT_BINDING_VERSIONS = frozenset(
     {"input_binding_record.p0.v1", "input_binding_record.p0.v2"}
+)
+_PHYSICAL_OBSERVATION_RECORD_CODES = (
+    P0RecordCode.OBSERVATION_RECORD,
+    P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+    P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
 )
 _CYCLE2_MODEL_BY_PAIR = MappingProxyType(
     {
@@ -786,12 +806,28 @@ def _exact_run_normalized_references(
     normalized: tuple[P0RecordReference, ...] | None = None
     validation_failed = False
     try:
+        envelope_references = _exact_run_parse_envelope(
+            row.envelope
+        ).record_references
         normalized = tuple(
             P0RecordReference.model_validate_json(
                 json.dumps(
                     {
                         "relation": reference.relation,
-                        "target_record_code": reference.target_record_code,
+                        "target_record_code": (
+                            P0RecordCode.OBSERVATION_RECORD.value
+                            if ordinal < len(envelope_references)
+                            and envelope_references[
+                                ordinal
+                            ].target_record_code
+                            is P0RecordCode.OBSERVATION_RECORD
+                            and reference.target_record_code
+                            in {
+                                code.value
+                                for code in _PHYSICAL_OBSERVATION_RECORD_CODES
+                            }
+                            else reference.target_record_code
+                        ),
                         "target_logical_identity": (
                             reference.target_logical_identity
                         ),
@@ -801,7 +837,7 @@ def _exact_run_normalized_references(
                 ),
                 strict=True,
             )
-            for reference in references
+            for ordinal, reference in enumerate(references)
         )
     except (TypeError, ValueError, ValidationError, RecursionError):
         validation_failed = True
@@ -1063,10 +1099,14 @@ class PostgresRecordAdapter:
         *,
         cycle2_clock: Callable[[], datetime] | None = None,
         cycle2_run_budget_policy: Cycle2RunBudgetPolicyEvidence | None = None,
+        cycle2_session_owners: Mapping[str, str] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self._cycle2_clock = cycle2_clock
         self._cycle2_run_budget_policy = cycle2_run_budget_policy
+        self._cycle2_session_owners = MappingProxyType(
+            dict(cycle2_session_owners or {})
+        )
 
     @staticmethod
     def _cycle2_version(
@@ -1092,6 +1132,14 @@ class PostgresRecordAdapter:
         logical_children: tuple[BaseModel, ...] = (),
         external_references: tuple[P0RecordReference, ...] = (),
     ) -> P0PersistenceEnvelope:
+        if (
+            record_code is P0RecordCode.GATE_DECISION_RECORD
+            and type(record) is GateDecisionV2
+        ):
+            record = GateDecisionV2.model_validate_json(
+                record.model_dump_json(warnings="error"),
+                strict=True,
+            )
         version = cls._cycle2_version(record_code, record)
         if record_code in {
             P0RecordCode.CONVERSATION_RECORD,
@@ -1370,7 +1418,13 @@ class PostgresRecordAdapter:
         owner_customer_id: str,
         pending_keys: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
-        for reference in envelope.record_references:
+        for logical_reference in envelope.record_references:
+            reference = cls._cycle2_physical_reference(
+                session,
+                logical_reference,
+                owner_customer_id=owner_customer_id,
+                pending_keys=pending_keys,
+            )
             key = (
                 reference.target_record_code.value,
                 _canonical_identity_text(
@@ -1413,6 +1467,60 @@ class PostgresRecordAdapter:
                     expected_code=reference.target_record_code,
                     expected_versions=allowed_versions,
                 )
+
+    @classmethod
+    def _cycle2_physical_reference(
+        cls,
+        session: Session,
+        reference: P0RecordReference,
+        *,
+        owner_customer_id: str,
+        pending_keys: frozenset[tuple[str, str]] = frozenset(),
+    ) -> P0RecordReference:
+        if reference.target_record_code is not P0RecordCode.OBSERVATION_RECORD:
+            return reference
+        identity = _json_identity(reference.target_logical_identity)
+        identity_text = _canonical_identity_text(identity)
+        pending_codes = {
+            code
+            for code in _PHYSICAL_OBSERVATION_RECORD_CODES
+            if (code.value, identity_text) in pending_keys
+        }
+        persisted_codes = {
+            record_code
+            for value in session.scalars(
+                select(P0RecordModel.record_code)
+                .where(
+                    P0RecordModel.record_code.in_(
+                        tuple(
+                            code.value
+                            for code in _PHYSICAL_OBSERVATION_RECORD_CODES
+                        )
+                    ),
+                    P0RecordModel.logical_identity == identity,
+                    P0RecordModel.scope_owner_customer_id
+                    == owner_customer_id,
+                )
+                .limit(2)
+            )
+            if (record_code := _RECORD_CODE_BY_VALUE.get(value)) is not None
+        }
+        physical_codes = pending_codes | persisted_codes
+        if len(physical_codes) != 1:
+            category = (
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                if physical_codes
+                else P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+            raise _integrity(category)
+        physical_code = next(iter(physical_codes))
+        if physical_code is P0RecordCode.OBSERVATION_RECORD:
+            return reference
+        return P0RecordReference(
+            relation=reference.relation,
+            target_record_code=physical_code,
+            target_logical_identity=reference.target_logical_identity,
+        )
 
     @classmethod
     def _cycle2_row(
@@ -1540,7 +1648,11 @@ class PostgresRecordAdapter:
                 cls._reference_model(
                     envelope,
                     ordinal=ordinal,
-                    reference=reference,
+                    reference=cls._cycle2_physical_reference(
+                        session,
+                        reference,
+                        owner_customer_id=owner_customer_id,
+                    ),
                 )
                 for ordinal, reference in enumerate(envelope.record_references)
             )
@@ -1792,7 +1904,11 @@ class PostgresRecordAdapter:
             cls._reference_model(
                 next_envelope,
                 ordinal=ordinal,
-                reference=reference,
+                reference=cls._cycle2_physical_reference(
+                    session,
+                    reference,
+                    owner_customer_id=owner_customer_id,
+                ),
             )
             for ordinal, reference in enumerate(next_envelope.record_references)
         )
@@ -4215,6 +4331,35 @@ class PostgresRecordAdapter:
             record,
         )
         with self.session_factory.begin() as session:
+            run_rows = tuple(
+                session.scalars(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.AGENT_RUN_RECORD.value,
+                        P0RecordModel.run_id == record.run_id,
+                    )
+                    .limit(2)
+                )
+            )
+            if (
+                len(run_rows) == 1
+                and run_rows[0].record_schema_version
+                == "agent_run_record.p0.v2"
+                and run_rows[0].scope_owner_customer_id is not None
+            ):
+                self._cycle2_decode_row(
+                    session,
+                    run_rows[0],
+                    owner_customer_id=run_rows[0].scope_owner_customer_id,
+                    expected_code=P0RecordCode.AGENT_RUN_RECORD,
+                )
+                self._cycle2_insert(
+                    session,
+                    (envelope,),
+                    owner_customer_id=run_rows[0].scope_owner_customer_id,
+                )
+                return
             self._persist_envelopes(session, (envelope,))
 
     async def save_gate_decision(self, record: GateDecision) -> None:
@@ -4714,6 +4859,1006 @@ class PostgresRecordAdapter:
             raise _integrity(P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH)
         return task, unit, tuple(bindings)
 
+    @staticmethod
+    def _cycle2_auto_target_marker(
+        record: OrderCandidateAutoTargetRecord,
+    ) -> str:
+        supersedes = (
+            "none"
+            if record.supersedes_verified_target_ref is None
+            else str(record.supersedes_verified_target_ref)
+        )
+        return f"cycle2-auto:{record.order_id}:{supersedes}"
+
+    @classmethod
+    def _cycle2_auto_target_selection(
+        cls,
+        *,
+        auto_target: OrderCandidateAutoTargetRecord,
+        source_message_ref: UUID,
+    ) -> OrderCandidateSelectionRecord:
+        """Persist the reviewed auto-target through the existing selection family.
+
+        The marker is infrastructure-private and unambiguously disjoint from the
+        UUID-valued ``selected_target_ref`` issued for an ordinal selection.
+        """
+
+        return OrderCandidateSelectionRecord(
+            selection_id=auto_target.verified_target_ref,
+            private_owner_scope_ref=auto_target.private_owner_scope_ref,
+            conversation_id=auto_target.conversation_id,
+            task_id=auto_target.task_id,
+            request_unit_id=auto_target.request_unit_id,
+            source_message_ref=source_message_ref,
+            ordinal_input_binding_ref=auto_target.query_input_binding_ref,
+            candidate_set_ref=auto_target.candidate_set_ref,
+            candidate_set_version=auto_target.candidate_set_version,
+            search_observation_ref=auto_target.search_observation_ref,
+            search_observation_record_schema_version=(
+                auto_target.search_observation_record_schema_version
+            ),
+            observation_candidate_ref=auto_target.observation_candidate_ref,
+            candidate_source_version=auto_target.candidate_source_version,
+            owner_scoped_order_target_ref=(
+                auto_target.owner_scoped_order_target_ref
+            ),
+            selected_target_ref=cls._cycle2_auto_target_marker(auto_target),
+            base_task_state_version=auto_target.base_task_state_version,
+            result_task_state_version=auto_target.result_task_state_version,
+            selected_at=auto_target.verified_at,
+        )
+
+    @staticmethod
+    def _cycle2_parse_auto_target_marker(
+        marker: str,
+    ) -> tuple[str, UUID | None] | None:
+        prefix = "cycle2-auto:"
+        if not marker.startswith(prefix):
+            return None
+        remainder = marker[len(prefix) :]
+        order_id, separator, supersedes_text = remainder.partition(":")
+        if not separator or not order_id:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        if supersedes_text == "none":
+            return order_id, None
+        try:
+            supersedes = UUID(supersedes_text)
+        except ValueError:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            ) from None
+        if supersedes.version != 4 or str(supersedes) != supersedes_text:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+            )
+        return order_id, supersedes
+
+    @classmethod
+    def _cycle2_auto_target_from_selection(
+        cls,
+        *,
+        record: OrderCandidateSelectionRecord,
+        candidate_set: OrderCandidateSetRecord,
+    ) -> OrderCandidateAutoTargetRecord | None:
+        parsed = cls._cycle2_parse_auto_target_marker(
+            record.selected_target_ref
+        )
+        if parsed is None:
+            return None
+        order_id, supersedes = parsed
+        entries = tuple(
+            entry
+            for entry in candidate_set.ordered_candidates
+            if entry.observation_candidate_ref
+            == record.observation_candidate_ref
+            and entry.candidate_source_version
+            == record.candidate_source_version
+        )
+        if len(entries) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        return OrderCandidateAutoTargetRecord(
+            verified_target_ref=record.selection_id,
+            private_owner_scope_ref=record.private_owner_scope_ref,
+            conversation_id=record.conversation_id,
+            task_id=record.task_id,
+            request_unit_id=record.request_unit_id,
+            query_input_binding_ref=record.ordinal_input_binding_ref,
+            candidate_set_ref=record.candidate_set_ref,
+            candidate_set_version=record.candidate_set_version,
+            source_tool_call_id=candidate_set.source_tool_call_id,
+            search_observation_ref=record.search_observation_ref,
+            search_observation_record_schema_version=(
+                record.search_observation_record_schema_version
+            ),
+            search_observation_source_version=(
+                candidate_set.search_observation_source_version
+            ),
+            observation_candidate_ref=record.observation_candidate_ref,
+            candidate_source_version=record.candidate_source_version,
+            owner_scoped_order_target_ref=(
+                record.owner_scoped_order_target_ref
+            ),
+            order_id=order_id,
+            base_task_state_version=record.base_task_state_version,
+            result_task_state_version=record.result_task_state_version,
+            verified_at=record.selected_at,
+            supersedes_verified_target_ref=supersedes,
+        )
+
+    @classmethod
+    def _cycle2_target_facts(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        task: TaskRecord,
+        unit: RequestUnitRecord,
+        bindings: tuple[InputBindingV2, ...],
+        for_update: bool = False,
+    ) -> tuple[
+        tuple[Cycle2VerifiedOrderTargetFacts, ...],
+        tuple[Cycle2TargetObservationFacts, ...],
+    ]:
+        owner = owner_scope.customer_id
+        candidate_sets = {
+            record.candidate_set_id: record
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task.task_id,
+                    P0RecordModel.request_unit_id == unit.request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            for record in (decoded.source_record,)
+            if type(record) is OrderCandidateSetRecord
+        }
+        capabilities: list[
+            tuple[
+                int,
+                datetime,
+                UUID,
+                str,
+                UUID,
+                UUID,
+                str,
+            ]
+        ] = []
+        for _, decoded in cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+            predicates=(
+                P0RecordModel.task_id == task.task_id,
+                P0RecordModel.request_unit_id == unit.request_unit_id,
+            ),
+            for_update=for_update,
+        ):
+            selection = decoded.source_record
+            if type(selection) is not OrderCandidateSelectionRecord:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            candidate_set = candidate_sets.get(selection.candidate_set_ref)
+            if candidate_set is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            auto_target = cls._cycle2_auto_target_from_selection(
+                record=selection,
+                candidate_set=candidate_set,
+            )
+            if auto_target is not None:
+                verified_ref = auto_target.verified_target_ref
+                order_id = auto_target.order_id
+                input_ref = auto_target.query_input_binding_ref
+            else:
+                try:
+                    verified_ref = UUID(selection.selected_target_ref)
+                except ValueError:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                    ) from None
+                if verified_ref.version != 4:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH
+                    )
+                entries = tuple(
+                    entry
+                    for entry in candidate_set.ordered_candidates
+                    if entry.observation_candidate_ref
+                    == selection.observation_candidate_ref
+                    and entry.candidate_source_version
+                    == selection.candidate_source_version
+                )
+                if len(entries) != 1:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                order_id = entries[0].public_summary.order_number
+                input_ref = selection.ordinal_input_binding_ref
+            capabilities.append(
+                (
+                    selection.result_task_state_version,
+                    selection.selected_at,
+                    verified_ref,
+                    order_id,
+                    input_ref,
+                    candidate_set.search_observation_ref,
+                    candidate_set.search_observation_source_version,
+                )
+            )
+        eligible = tuple(
+            capability
+            for capability in capabilities
+            if capability[0] <= task.state_version
+        )
+        if not eligible:
+            return (), ()
+        highest_version = max(item[0] for item in eligible)
+        current = tuple(item for item in eligible if item[0] == highest_version)
+        if len(current) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        _, _, verified_ref, order_id, input_ref, search_ref, search_version = (
+            current[0]
+        )
+        if input_ref not in {binding.binding_id for binding in bindings}:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        source_ref = search_ref
+        source_version = search_version
+        order_observations: list[OrderObservation] = []
+        for observation_ref in unit.observation_refs:
+            loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.OBSERVATION_RECORD,
+                logical_identity=(("observation_id", observation_ref),),
+                for_update=for_update,
+            )
+            if loaded is None:
+                continue
+            observation = loaded[1].source_record
+            if type(observation) is not OrderObservation:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            if observation.source_resource_ref == order_id:
+                order_observations.append(observation)
+        if len(order_observations) > 1:
+            order_observations.sort(
+                key=lambda record: (record.recorded_at, str(record.observation_id))
+            )
+        if order_observations:
+            latest = order_observations[-1]
+            source_ref = latest.observation_id
+            source_version = latest.source_version
+        target = Cycle2VerifiedOrderTargetFacts(
+            verified_target_ref=verified_ref,
+            private_owner_scope_ref=owner,
+            owner_customer_id=owner,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            task_state_version=task.state_version,
+            order_id=order_id,
+            source_observation_ref=source_ref,
+            source_observation_version=source_version,
+            input_binding_refs=(input_ref,),
+            superseded_by=None,
+        )
+        observation_facts = Cycle2TargetObservationFacts(
+            observation_ref=source_ref,
+            observation_version=source_version,
+            private_owner_scope_ref=owner,
+            owner_customer_id=owner,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            task_state_version=task.state_version,
+            verified_target_ref=verified_ref,
+            input_binding_refs=(input_ref,),
+            superseded_by=None,
+        )
+        return (target,), (observation_facts,)
+
+    def _cycle2_session_is_authorized(
+        self,
+        *,
+        session_ref_hash: str,
+        owner_customer_id: str,
+    ) -> bool:
+        return (
+            type(session_ref_hash) is str
+            and bool(session_ref_hash)
+            and self._cycle2_session_owners.get(session_ref_hash)
+            == owner_customer_id
+        )
+
+    @classmethod
+    def _cycle2_current_session_closure(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        session_ref_hash: str,
+        trusted_now: datetime,
+        for_update: bool = False,
+    ) -> Cycle2CurrentSessionTaskClosure | None:
+        owner = owner_scope.customer_id
+        link_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            for_update=for_update,
+        )
+        active_links = tuple(
+            cast(ConversationTaskLinkRecord, decoded.source_record)
+            for _, decoded in link_rows
+            if type(decoded.source_record) is ConversationTaskLinkRecord
+            and decoded.source_record.ended_at is None
+        )
+        if not active_links:
+            return None
+        if len(active_links) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        link = active_links[0]
+        conversation = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", link.conversation_id),),
+            for_update=for_update,
+        )
+        unit_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+            predicates=(P0RecordModel.task_id == link.task_id,),
+            for_update=for_update,
+        )
+        if conversation is None or len(unit_rows) != 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        unit_record = unit_rows[0][1].source_record
+        if type(unit_record) is not RequestUnitRecord:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+            )
+        current = cls._cycle2_current_task_unit_bindings(
+            session,
+            owner_scope=owner_scope,
+            task_id=link.task_id,
+            request_unit_id=unit_record.request_unit_id,
+            for_update=for_update,
+        )
+        if current is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        task, unit, bindings = current
+        candidate_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+            predicates=(
+                P0RecordModel.task_id == task.task_id,
+                P0RecordModel.request_unit_id == unit.request_unit_id,
+            ),
+            for_update=for_update,
+        )
+        all_sets = tuple(
+            cast(OrderCandidateSetRecord, decoded.source_record)
+            for _, decoded in candidate_rows
+            if type(decoded.source_record) is OrderCandidateSetRecord
+        )
+        superseded_refs = tuple(
+            cast(UUID, record.supersedes_candidate_set_ref)
+            for record in all_sets
+            if record.supersedes_candidate_set_ref is not None
+        )
+        current_sets = tuple(
+            record
+            for record in all_sets
+            if record.candidate_set_id not in set(superseded_refs)
+            and (
+                record.result_task_state_version == task.state_version
+                or record.selection_expected_task_state_version
+                == task.state_version
+            )
+        )
+        if len(current_sets) > 1:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+            )
+        observations: list[SearchOrdersObservation] = []
+        auto_targets: list[OrderCandidateAutoTargetRecord] = []
+        if current_sets:
+            candidate_set = current_sets[0]
+            loaded_observation = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+                logical_identity=(
+                    ("observation_id", candidate_set.search_observation_ref),
+                ),
+                for_update=for_update,
+            )
+            if (
+                loaded_observation is None
+                or type(loaded_observation[1].source_record)
+                is not SearchOrdersObservation
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            observations.append(
+                cast(
+                    SearchOrdersObservation,
+                    loaded_observation[1].source_record,
+                )
+            )
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task.task_id,
+                    P0RecordModel.request_unit_id == unit.request_unit_id,
+                ),
+                for_update=for_update,
+            ):
+                selection = decoded.source_record
+                if (
+                    type(selection) is OrderCandidateSelectionRecord
+                    and selection.candidate_set_ref
+                    == candidate_set.candidate_set_id
+                ):
+                    auto = cls._cycle2_auto_target_from_selection(
+                        record=selection,
+                        candidate_set=candidate_set,
+                    )
+                    if auto is not None:
+                        auto_targets.append(auto)
+        selections = tuple(
+            cast(OrderCandidateSelectionRecord, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task.task_id,
+                    P0RecordModel.request_unit_id == unit.request_unit_id,
+                ),
+                for_update=for_update,
+            )
+            if type(decoded.source_record) is OrderCandidateSelectionRecord
+            and cls._cycle2_parse_auto_target_marker(
+                decoded.source_record.selected_target_ref
+            ) is None
+        )
+        return Cycle2CurrentSessionTaskClosure(
+            owner_scope=owner_scope,
+            session_ref_hash=session_ref_hash,
+            conversation_record=cast(
+                ConversationRecord, conversation[1].source_record
+            ),
+            current_conversation_task_link_record=link,
+            current_task_record=task,
+            current_request_unit_record=unit,
+            current_input_binding_records=bindings,
+            current_candidate_set_records=current_sets,
+            current_search_observation_records=tuple(observations),
+            current_auto_target_records=tuple(auto_targets),
+            superseded_candidate_set_refs=superseded_refs,
+            existing_selection_records=selections,
+            trusted_now=trusted_now,
+        )
+
+    @_bounded_database_failures
+    async def load_current_session_task_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        session_ref_hash: str,
+        trusted_now: datetime,
+    ) -> Cycle2CurrentSessionTaskClosure | None:
+        if not self._cycle2_session_is_authorized(
+            session_ref_hash=session_ref_hash,
+            owner_customer_id=owner_scope.customer_id,
+        ):
+            return None
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                    )
+                )
+                return self._cycle2_current_session_closure(
+                    session,
+                    owner_scope=owner_scope,
+                    session_ref_hash=session_ref_hash,
+                    trusted_now=trusted_now,
+                )
+
+    @_bounded_database_failures
+    async def insert_cycle2_run_root_if_current(
+        self,
+        command: CreateCycle2RunRootCommand,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        if not self._cycle2_session_is_authorized(
+            session_ref_hash=command.session_ref_hash,
+            owner_customer_id=owner,
+        ):
+            return Cycle2WriteResult.NOT_APPLICABLE
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_current_session_closure(
+                    session,
+                    owner_scope=command.owner_scope,
+                    session_ref_hash=command.session_ref_hash,
+                    trusted_now=command.user_message_record.received_at,
+                    for_update=True,
+                )
+                if current != command.current_session_closure:
+                    raise _Cycle2NotApplicable() from None
+                envelopes = []
+                if current is None:
+                    envelopes.append(
+                        self._cycle2_encode(
+                            P0RecordCode.CONVERSATION_RECORD,
+                            command.conversation_record,
+                        )
+                    )
+                else:
+                    loaded_conversation = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.CONVERSATION_RECORD,
+                        logical_identity=((
+                            "conversation_id",
+                            command.conversation_record.conversation_id,
+                        ),),
+                        for_update=True,
+                    )
+                    if (
+                        loaded_conversation is None
+                        or loaded_conversation[1].source_record
+                        != command.conversation_record
+                    ):
+                        raise _Cycle2NotApplicable() from None
+                envelopes.extend(
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.MESSAGE_RECORD,
+                            command.user_message_record,
+                        ),
+                        self._cycle2_encode(
+                            P0RecordCode.AGENT_RUN_RECORD,
+                            command.created_run_record,
+                        ),
+                    )
+                )
+                if command.active_run_task_link_record is not None:
+                    envelopes.append(
+                        self._cycle2_encode(
+                            P0RecordCode.RUN_TASK_LINK_RECORD,
+                            command.active_run_task_link_record,
+                        )
+                    )
+                self._cycle2_insert(
+                    session,
+                    tuple(envelopes),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def start_cycle2_run_if_created(
+        self,
+        command: StartCycle2RunCommand,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.AGENT_RUN_RECORD,
+                    logical_identity=((
+                        "run_id",
+                        command.expected_created_run_record.run_id,
+                    ),),
+                    for_update=True,
+                )
+                if loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                if command.expected_active_run_task_link_record is not None:
+                    link = command.expected_active_run_task_link_record
+                    loaded_link = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                        logical_identity=(
+                            ("run_id", link.run_id),
+                            ("task_id", link.task_id),
+                        ),
+                        for_update=True,
+                    )
+                    if loaded_link is None or loaded_link[1].source_record != link:
+                        raise _Cycle2NotApplicable() from None
+                self._cycle2_replace(
+                    session,
+                    loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_created_run_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        command.next_running_run_record,
+                    ),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def create_cycle2_initial_task_graph_if_current(
+        self,
+        command: CreateCycle2InitialTaskGraphCommand,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        graph = command.reducer_decision.task_graph
+        try:
+            with self.session_factory.begin() as session:
+                roots = []
+                for code, identity, expected in (
+                    (
+                        P0RecordCode.CONVERSATION_RECORD,
+                        (("conversation_id", command.expected_conversation_record.conversation_id),),
+                        command.expected_conversation_record,
+                    ),
+                    (
+                        P0RecordCode.MESSAGE_RECORD,
+                        (("message_id", command.expected_user_message_record.message_id),),
+                        command.expected_user_message_record,
+                    ),
+                    (
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        (("run_id", command.expected_running_run_record.run_id),),
+                        command.expected_running_run_record,
+                    ),
+                ):
+                    loaded = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=code,
+                        logical_identity=identity,
+                        for_update=True,
+                    )
+                    if loaded is None or loaded[1].source_record != expected:
+                        raise _Cycle2NotApplicable() from None
+                    roots.append(loaded)
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.TASK_RECORD,
+                            graph.task,
+                        ),
+                        self._cycle2_encode(
+                            P0RecordCode.REQUEST_UNIT_RECORD,
+                            graph.request_unit,
+                        ),
+                        self._cycle2_encode_input_binding(
+                            graph.input_binding,
+                            request_unit_id=graph.request_unit.request_unit_id,
+                        ),
+                        self._cycle2_encode(
+                            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                            command.conversation_task_link_record,
+                        ),
+                        self._cycle2_encode(
+                            P0RecordCode.RUN_TASK_LINK_RECORD,
+                            command.active_run_task_link_record,
+                        ),
+                        *(
+                            self._cycle2_encode(
+                                P0RecordCode.TRACE_EVENT_RECORD,
+                                trace,
+                            )
+                            for trace in command.ordinary_trace_records
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def finalize_cycle2_run_if_current(
+        self,
+        command: FinalizeCycle2RunCommand,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                run = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.AGENT_RUN_RECORD,
+                    logical_identity=((
+                        "run_id",
+                        command.expected_running_run_record.run_id,
+                    ),),
+                    for_update=True,
+                )
+                if run is None:
+                    raise _Cycle2NotApplicable() from None
+                link_row = None
+                if command.expected_active_run_task_link_record is not None:
+                    link = command.expected_active_run_task_link_record
+                    link_row = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                        logical_identity=(
+                            ("run_id", link.run_id),
+                            ("task_id", link.task_id),
+                        ),
+                        for_update=True,
+                    )
+                    if link_row is None or link_row[1].source_record != link:
+                        raise _Cycle2NotApplicable() from None
+                    current = self._cycle2_current_task_unit_bindings(
+                        session,
+                        owner_scope=command.owner_scope,
+                        task_id=link.task_id,
+                        request_unit_id=cast(
+                            RequestUnitRecord,
+                            command.current_request_unit_record,
+                        ).request_unit_id,
+                        for_update=True,
+                    )
+                    if current is None or current[:2] != (
+                        command.current_task_record,
+                        command.current_request_unit_record,
+                    ):
+                        raise _Cycle2NotApplicable() from None
+                self._cycle2_replace(
+                    session,
+                    run[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_running_run_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        command.terminal_run_record,
+                    ),
+                )
+                if link_row is not None:
+                    self._cycle2_replace(
+                        session,
+                        link_row[0],
+                        owner_customer_id=owner,
+                        expected_record=cast(
+                            RunTaskLinkRecordV2,
+                            command.expected_active_run_task_link_record,
+                        ),
+                        next_envelope=self._cycle2_encode(
+                            P0RecordCode.RUN_TASK_LINK_RECORD,
+                            cast(
+                                RunTaskLinkRecordV2,
+                                command.terminal_run_task_link_record,
+                            ),
+                        ),
+                    )
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.MESSAGE_RECORD,
+                            command.assistant_message_record,
+                        ),
+                        *(
+                            self._cycle2_encode(
+                                P0RecordCode.TRACE_EVENT_RECORD,
+                                trace,
+                            )
+                            for trace in command.ordinary_trace_records
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @classmethod
+    def _cycle2_exact_run_evidence(
+        cls,
+        session: Session,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure | None:
+        owner = owner_scope.customer_id
+        run_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", run_id),),
+        )
+        if run_loaded is None:
+            return None
+        run = run_loaded[1].source_record
+        if type(run) is not AgentRunRecordV2:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+            )
+        conversation_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.CONVERSATION_RECORD,
+            logical_identity=(("conversation_id", run.conversation_id),),
+        )
+        if conversation_loaded is None:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        message_rows = cls._cycle2_rows(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.MESSAGE_RECORD,
+            predicates=(P0RecordModel.conversation_id == run.conversation_id,),
+        )
+        messages = tuple(
+            cast(MessageRecord, decoded.source_record)
+            for _, decoded in message_rows
+            if type(decoded.source_record) is MessageRecord
+            and (
+                decoded.source_record.received_at == run.started_at
+                or (
+                    run.completed_at is not None
+                    and decoded.source_record.received_at == run.completed_at
+                )
+            )
+        )
+        links = tuple(
+            cast(RunTaskLinkRecordV2, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                predicates=(P0RecordModel.run_id == run_id,),
+            )
+            if type(decoded.source_record) is RunTaskLinkRecordV2
+        )
+        tasks: list[TaskRecord] = []
+        units: list[RequestUnitRecord] = []
+        bindings: list[InputBindingV2] = []
+        for link in links:
+            unit_rows = cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                predicates=(P0RecordModel.task_id == link.task_id,),
+            )
+            if len(unit_rows) != 1:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            unit = unit_rows[0][1].source_record
+            if type(unit) is not RequestUnitRecord:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            current = cls._cycle2_current_task_unit_bindings(
+                session,
+                owner_scope=owner_scope,
+                task_id=link.task_id,
+                request_unit_id=unit.request_unit_id,
+            )
+            if current is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            task, current_unit, current_bindings = current
+            tasks.append(task)
+            units.append(current_unit)
+            bindings.extend(current_bindings)
+        traces = tuple(
+            cast(TraceEventV2, decoded.source_record)
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TRACE_EVENT_RECORD,
+                predicates=(P0RecordModel.run_id == run_id,),
+            )
+            if type(decoded.source_record) is TraceEventV2
+        )
+        terminal_result = None
+        if run.status is AgentRunStatusV2.COMPLETED:
+            assistants = tuple(
+                message
+                for message in messages
+                if message.direction is MessageDirection.ASSISTANT
+            )
+            stopped = tuple(
+                trace
+                for trace in traces
+                if trace.event_type is TraceEventType.RUN_STOPPED
+                and trace.user_outcome is not None
+            )
+            if len(assistants) != 1 or len(stopped) != 1:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
+            terminal_result = AgentRunResult(
+                run_id=run.run_id,
+                outcome=cast(Any, stopped[0].user_outcome),
+                message=assistants[0].content,
+            )
+        return Cycle2ExactRunEvidenceClosure(
+            owner_scope=owner_scope,
+            conversation_record=cast(
+                ConversationRecord, conversation_loaded[1].source_record
+            ),
+            run_record=run,
+            message_records=tuple(
+                sorted(messages, key=lambda record: (record.received_at, str(record.message_id)))
+            ),
+            run_task_link_records=links,
+            task_records=tuple(tasks),
+            request_unit_records=tuple(units),
+            input_binding_records=tuple(bindings),
+            trace_records=tuple(
+                sorted(traces, key=lambda record: (record.occurred_at, str(record.trace_event_id)))
+            ),
+            terminal_result=terminal_result,
+        )
+
+    @_bounded_database_failures
+    async def load_cycle2_exact_run_evidence_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure | None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                    )
+                )
+                return self._cycle2_exact_run_evidence(
+                    session,
+                    owner_scope=owner_scope,
+                    run_id=run_id,
+                )
+
     @classmethod
     def _cycle2_continuation_closure(
         cls,
@@ -4907,11 +6052,20 @@ class PostgresRecordAdapter:
                 if current is None:
                     return None
                 task, unit, bindings = current
+                targets, target_observations = self._cycle2_target_facts(
+                    session,
+                    owner_scope=owner_scope,
+                    task=task,
+                    unit=unit,
+                    bindings=bindings,
+                )
                 return InitialToolCallV2ReadClosure(
                     owner_scope=owner_scope,
                     current_task_record=task,
                     current_request_unit_record=unit,
                     current_input_binding_records=bindings,
+                    current_verified_order_targets=targets,
+                    current_target_observations=target_observations,
                     trusted_read_at=trusted_read_at,
                 )
 
@@ -5137,7 +6291,26 @@ class PostgresRecordAdapter:
                     run_budget_policy=policy,
                     for_update=True,
                 )
-                if current != loaded_closure:
+                if (
+                    current.owner_scope != loaded_closure.owner_scope
+                    or current.active_run_record
+                    != loaded_closure.active_run_record
+                    or current.active_run_task_link_record
+                    != loaded_closure.active_run_task_link_record
+                    or current.current_task_record
+                    != loaded_closure.current_task_record
+                    or current.current_request_unit_record
+                    != loaded_closure.current_request_unit_record
+                    or current.current_input_binding_records
+                    != loaded_closure.current_input_binding_records
+                    or current.tool_call_record
+                    != loaded_closure.tool_call_record
+                    or current.recovery_decision_records
+                    != loaded_closure.recovery_decision_records
+                    or current.run_budget_policy
+                    != loaded_closure.run_budget_policy
+                    or current.trusted_read_at < loaded_closure.trusted_read_at
+                ):
                     raise _Cycle2NotApplicable() from None
                 if append_command.expected_record != current.tool_call_record:
                     raise _Cycle2NotApplicable() from None
@@ -5344,6 +6517,128 @@ class PostgresRecordAdapter:
         )
 
     @_bounded_database_failures
+    async def save_order_observation_if_current(
+        self,
+        command: SaveOrderObservationV2Command,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                current = self._cycle2_current_task_unit_bindings(
+                    session,
+                    owner_scope=command.owner_scope,
+                    task_id=command.expected_task_record.task_id,
+                    request_unit_id=(
+                        command.expected_request_unit_record.request_unit_id
+                    ),
+                    for_update=True,
+                )
+                if current is None or current[:2] != (
+                    command.expected_task_record,
+                    command.expected_request_unit_record,
+                ):
+                    raise _Cycle2NotApplicable() from None
+                tool_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TOOL_CALL_RECORD,
+                    logical_identity=((
+                        "tool_call_id",
+                        command.source_tool_call_record.tool_call_id,
+                    ),),
+                    for_update=True,
+                )
+                task_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=((
+                        "task_id",
+                        command.expected_task_record.task_id,
+                    ),),
+                    for_update=True,
+                )
+                unit_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=((
+                        "request_unit_id",
+                        command.expected_request_unit_record.request_unit_id,
+                    ),),
+                    for_update=True,
+                )
+                if (
+                    tool_loaded is None
+                    or task_loaded is None
+                    or unit_loaded is None
+                    or tool_loaded[1].source_record
+                    != command.source_tool_call_record
+                ):
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_insert(
+                    session,
+                    (
+                        self._cycle2_encode(
+                            P0RecordCode.OBSERVATION_RECORD,
+                            command.observation_record,
+                            external_references=(
+                                _external_reference(
+                                    "source_tool_call_id",
+                                    P0RecordCode.TOOL_CALL_RECORD,
+                                    "tool_call_id",
+                                    command.source_tool_call_record.tool_call_id,
+                                ),
+                                _external_reference(
+                                    "source_run_id",
+                                    P0RecordCode.AGENT_RUN_RECORD,
+                                    "run_id",
+                                    command.source_tool_call_record.run_id,
+                                ),
+                                _external_reference(
+                                    "source_task_id",
+                                    P0RecordCode.TASK_RECORD,
+                                    "task_id",
+                                    command.source_tool_call_record.task_id,
+                                ),
+                                _external_reference(
+                                    "source_request_unit_id",
+                                    P0RecordCode.REQUEST_UNIT_RECORD,
+                                    "request_unit_id",
+                                    command.source_tool_call_record.request_unit_id,
+                                ),
+                            ),
+                        ),
+                    ),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(
+                    session,
+                    task_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_task_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.next_task_record,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_request_unit_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        command.next_request_unit_record,
+                    ),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
     async def save_shipment_observation_if_current(
         self,
         command: SaveShipmentObservationV2Command,
@@ -5354,13 +6649,13 @@ class PostgresRecordAdapter:
                 current = self._cycle2_current_task_unit_bindings(
                     session,
                     owner_scope=command.owner_scope,
-                    task_id=command.current_task_record.task_id,
-                    request_unit_id=command.current_request_unit_record.request_unit_id,
+                    task_id=command.expected_task_record.task_id,
+                    request_unit_id=command.expected_request_unit_record.request_unit_id,
                     for_update=True,
                 )
                 if current is None or current[:2] != (
-                    command.current_task_record,
-                    command.current_request_unit_record,
+                    command.expected_task_record,
+                    command.expected_request_unit_record,
                 ):
                     raise _Cycle2NotApplicable() from None
                 tool_loaded = self._cycle2_row(
@@ -5380,9 +6675,9 @@ class PostgresRecordAdapter:
                     owner_customer_id=owner,
                     record_code=P0RecordCode.SHIPMENT_OBSERVATION_RECORD,
                     predicates=(
-                        P0RecordModel.task_id == command.current_task_record.task_id,
+                        P0RecordModel.task_id == command.expected_task_record.task_id,
                         P0RecordModel.request_unit_id
-                        == command.current_request_unit_record.request_unit_id,
+                        == command.expected_request_unit_record.request_unit_id,
                     ),
                     for_update=True,
                 )
@@ -5419,6 +6714,48 @@ class PostgresRecordAdapter:
                         ),
                     ),
                     owner_customer_id=owner,
+                )
+                task_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=((
+                        "task_id",
+                        command.expected_task_record.task_id,
+                    ),),
+                    for_update=True,
+                )
+                unit_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=((
+                        "request_unit_id",
+                        command.expected_request_unit_record.request_unit_id,
+                    ),),
+                    for_update=True,
+                )
+                if task_loaded is None or unit_loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                self._cycle2_replace(
+                    session,
+                    task_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_task_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.next_task_record,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=command.expected_request_unit_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        command.next_request_unit_record,
+                    ),
                 )
         except _Cycle2NotApplicable:
             return Cycle2WriteResult.NOT_APPLICABLE
@@ -5824,6 +7161,7 @@ class PostgresRecordAdapter:
         )
         source = None
         observation = None
+        auto_targets: tuple[OrderCandidateAutoTargetRecord, ...] = ()
         if candidate_set is not None:
             loaded_source = cls._cycle2_row(
                 session,
@@ -5845,6 +7183,33 @@ class PostgresRecordAdapter:
             observation = loaded_observation[1].source_record
             if type(source) is not ToolCallRecordV2 or type(observation) is not SearchOrdersObservation:
                 raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+            reconstructed = []
+            for _, decoded in cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+                predicates=(
+                    P0RecordModel.task_id == task_id,
+                    P0RecordModel.request_unit_id == request_unit_id,
+                ),
+                for_update=for_update,
+            ):
+                record = decoded.source_record
+                if (
+                    type(record) is OrderCandidateSelectionRecord
+                    and record.candidate_set_ref == candidate_set.candidate_set_id
+                ):
+                    auto_target = cls._cycle2_auto_target_from_selection(
+                        record=record,
+                        candidate_set=candidate_set,
+                    )
+                    if auto_target is not None:
+                        reconstructed.append(auto_target)
+            auto_targets = tuple(reconstructed)
+            if len(auto_targets) > 1:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                )
         return OrderSearchCurrentReadClosure(
             owner_scope=owner_scope,
             trusted_conversation_record=cast(ConversationRecord, conversation_record),
@@ -5855,6 +7220,7 @@ class PostgresRecordAdapter:
             current_candidate_source_tool_call_record=cast(ToolCallRecordV2 | None, source),
             current_search_observation_record=cast(SearchOrdersObservation | None, observation),
             current_candidate_set_record=candidate_set,
+            current_auto_target_records=auto_targets,
             trusted_read_at=trusted_read_at,
         )
 
@@ -5928,12 +7294,25 @@ class PostgresRecordAdapter:
                 )
                 if tool is None or task is None or unit is None or tool[1].source_record != command.source_tool_call_record:
                     raise _Cycle2NotApplicable() from None
+                candidate_records = [
+                    self._cycle2_encode(P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD, command.search_observation_record),
+                    self._cycle2_encode(P0RecordCode.ORDER_CANDIDATE_SET_RECORD, command.candidate_set_record),
+                ]
+                if command.auto_target_record is not None:
+                    candidate_records.append(
+                        self._cycle2_encode(
+                            P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+                            self._cycle2_auto_target_selection(
+                                auto_target=command.auto_target_record,
+                                source_message_ref=(
+                                    command.current_query_binding.source_message_record.message_id
+                                ),
+                            ),
+                        )
+                    )
                 self._cycle2_insert(
                     session,
-                    (
-                        self._cycle2_encode(P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD, command.search_observation_record),
-                        self._cycle2_encode(P0RecordCode.ORDER_CANDIDATE_SET_RECORD, command.candidate_set_record),
-                    ),
+                    tuple(candidate_records),
                     owner_customer_id=owner,
                 )
                 self._cycle2_replace(session, task[0], owner_customer_id=owner, expected_record=command.expected_task_record, next_envelope=self._cycle2_encode(P0RecordCode.TASK_RECORD, command.next_task_record))
@@ -6094,6 +7473,9 @@ class PostgresRecordAdapter:
             )
             if type(decoded.source_record) is OrderCandidateSelectionRecord
             and decoded.source_record.candidate_set_ref == candidate_set.candidate_set_id
+            and cls._cycle2_parse_auto_target_marker(
+                decoded.source_record.selected_target_ref
+            ) is None
         )
         return OrderCandidateSelectionReadClosure(
             owner_scope=owner_scope,

@@ -1,33 +1,61 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
-from mini_agent.application.agent_run_service import AgentRunService
+from mini_agent.application.agent_run_service import (
+    AgentRunService,
+    Cycle2AgentRunHandler,
+)
 from mini_agent.application.deterministic_renderer import DeterministicRenderer
-from mini_agent.application.read_tool_executor import ReadToolExecutor
-from mini_agent.application.records import AgentRunCommand, TrustedOwnerScope
+from mini_agent.application.read_tool_executor import (
+    Cycle2ReadToolExecutor,
+    ReadToolExecutor,
+)
+from mini_agent.application.records import (
+    AgentRunCommand,
+    Cycle2RunBudgetPolicyEvidence,
+    TrustedOwnerScope,
+)
 from mini_agent.core.identity import CustomerContext
 from mini_agent.core.order import (
     OrderLineSummary,
     OrderStatus,
     OrderSummaryProjection,
 )
+from mini_agent.core.request_understanding import (
+    Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2InitialTaskDeltaCandidateV2,
+    Cycle2InputCandidate,
+    NextMove,
+    NextMoveKind,
+    QueryContextualizationCandidateV2,
+)
+from mini_agent.core.task_state import TaskDeltaOperation
 from mini_agent.core.task_state import TaskStatus
 from mini_agent.core.tool_system import (
     ExecutionPolicy,
     RegistrySnapshot,
     ToolEffect,
     ToolRegistration,
+    build_cycle2_registry_snapshot,
     get_order_tool_spec,
 )
 from mini_agent.core.trace import AgentOutcome, StopReason, TraceEventType
 from mini_agent.evaluation.artifacts import load_e2e01_artifacts
 from mini_agent.evaluation.scripted_provider import ScriptedModelProviderV2
 from mini_agent.infrastructure.order.postgres import PostgresGetOrderAdapter
+from mini_agent.infrastructure.order.postgres import PostgresSearchOrdersAdapter
+from mini_agent.infrastructure.cycle2_fixture_seed import (
+    TRUSTED_CLOCK,
+    apply_cycle2_seed_plan,
+    resolve_cycle2_seed_plan,
+)
+from mini_agent.infrastructure.cycle2_runtime import Cycle2BusinessReadHandler
 from mini_agent.infrastructure.persistence.database import build_session_factory
 from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
 
@@ -270,3 +298,178 @@ async def test_actual_v2_protocol_fault_remains_protocol_error(
     assert evidence.task_records == ()
     assert evidence.gate_decisions == ()
     assert evidence.tool_calls == ()
+
+
+class _Cycle2Clock:
+    def __init__(self) -> None:
+        self._next = TRUSTED_CLOCK
+
+    def __call__(self) -> datetime:
+        current = self._next
+        self._next += timedelta(microseconds=1)
+        return current
+
+
+class _Cycle2UniqueProvider:
+    async def propose_cycle2_initial(
+        self,
+        request,
+    ) -> Cycle2InitialRequestUnderstandingOutputV2:
+        return Cycle2InitialRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-initial.p0.v1",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text="查找最近购买的轻量跑鞋订单",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2InitialTaskDeltaCandidateV2(
+                    candidate_id=uuid4(),
+                    operation=TaskDeltaOperation.ADD_GOAL,
+                    goal_patch="查找最近购买的轻量跑鞋订单",
+                    input_candidates=(
+                        Cycle2InputCandidate(
+                            name="product_description",
+                            candidate_value="轻量跑鞋",
+                            source_ref=request.message_ref,
+                            source_quote="轻量跑鞋",
+                            confidence=0.99,
+                        ),
+                    ),
+                    confidence=0.99,
+                ),
+            ),
+            next_move_candidate=NextMove(
+                kind=NextMoveKind.CALL_TOOL,
+                requested_tool_name="search_orders",
+                arguments={"product_description": "轻量跑鞋"},
+            ),
+        )
+
+    async def propose_cycle2_continuation(self, _request):
+        raise AssertionError("unique first turn must not use continuation")
+
+    async def propose_cycle2_search_followup(
+        self,
+        _request,
+        _projection,
+        current_task_state_version: int,
+    ) -> NextMove:
+        return NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-1001"},
+            base_task_state_version=current_task_state_version,
+        )
+
+    async def propose_cycle2_order_followup(
+        self,
+        _request,
+        _summary,
+        current_task_state_version: int,
+    ) -> NextMove:
+        return NextMove(
+            kind=NextMoveKind.FINISH,
+            base_task_state_version=current_task_state_version,
+        )
+
+
+async def test_cycle2_unique_first_turn_persists_real_normal_graph_and_exact_evidence(
+    eval_postgres_namespace,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    plan = resolve_cycle2_seed_plan(
+        ["fx-search-unique-owner-a-with-foreign-decoy-v1"]
+    )
+    apply_cycle2_seed_plan(factory, plan)
+    clock = _Cycle2Clock()
+    context = CustomerContext(
+        subject_ref="fixture-subject:session:alice",
+        customer_id="customer-A",
+        auth_scopes=frozenset({"orders:read"}),
+        authenticated_at=TRUSTED_CLOCK,
+        session_ref_hash=sha256(b"session:alice").hexdigest(),
+    )
+    owner_scope = TrustedOwnerScope.from_customer_context(context)
+    records = PostgresRecordAdapter(
+        factory,
+        cycle2_clock=clock,
+        cycle2_run_budget_policy=Cycle2RunBudgetPolicyEvidence(
+            policy_version="cycle2-w9-test-budget.v1",
+            run_time_budget_ms=30_000,
+        ),
+        cycle2_session_owners=plan.session_owners_by_hash(),
+    )
+    search = PostgresSearchOrdersAdapter(factory)
+    order = PostgresGetOrderAdapter(factory)
+    handler = Cycle2BusinessReadHandler(
+        runtime_record_port=records,
+        search_orders_port=search,
+        get_order_port=order,
+        get_shipment_port=object(),
+        owner_scopes={owner_scope.customer_id: owner_scope},
+        clock=clock,
+    )
+    service = Cycle2AgentRunHandler(
+        runtime_record_port=records,
+        context_record_port=records,
+        request_understanding_provider=_Cycle2UniqueProvider(),
+        read_tool_executor=Cycle2ReadToolExecutor(
+            runtime_record_port=records,
+            handler=handler,
+            uuid_factory=uuid4,
+        ),
+        deterministic_renderer=DeterministicRenderer(),
+        clock=clock,
+        uuid_factory=uuid4,
+        provider_lane="scripted-cycle2",
+        redaction_policy_version="redaction-v1",
+    )
+    try:
+        await records.put_toolset_artifact(
+            build_cycle2_registry_snapshot().artifact()
+        )
+        result = await service.handle(
+            AgentRunCommand(
+                customer_context=context,
+                message="帮我查找最近购买的轻量跑鞋订单",
+            )
+        )
+        evidence = await records.load_cycle2_exact_run_evidence_for_owner(
+            owner_scope=owner_scope,
+            run_id=result.run_id,
+        )
+        current = await records.load_current_session_task_for_owner(
+            owner_scope=owner_scope,
+            session_ref_hash=context.session_ref_hash,
+            trusted_now=clock(),
+        )
+        foreign = CustomerContext(
+            subject_ref="subject-B",
+            customer_id="customer-B",
+            auth_scopes=frozenset({"orders:read"}),
+            authenticated_at=TRUSTED_CLOCK,
+            session_ref_hash=sha256(b"session:bob").hexdigest(),
+        )
+        assert result.outcome is AgentOutcome.COMPLETED
+        assert evidence is not None
+        assert evidence.terminal_result == result
+        assert len(evidence.task_records) == 1
+        assert evidence.task_records[0].state_version == 3
+        assert len(evidence.input_binding_records) == 1
+        assert current is not None
+        assert current.current_task_record == evidence.task_records[0]
+        assert await records.load_cycle2_exact_run_evidence_for_owner(
+            owner_scope=TrustedOwnerScope.from_customer_context(foreign),
+            run_id=result.run_id,
+        ) is None
+        assert await records.load_current_session_task_for_owner(
+            owner_scope=owner_scope,
+            session_ref_hash="wrong-session-hash",
+            trusted_now=clock(),
+        ) is None
+    finally:
+        engine.dispose()

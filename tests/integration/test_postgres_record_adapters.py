@@ -18,6 +18,7 @@ from pydantic_core import to_jsonable_python
 from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from mini_agent.application.ports import Cycle2RuntimeRecordPort
 from mini_agent.application.persistence import (
     P0PersistenceEnvelope,
     P0PersistenceIntegrityCategory,
@@ -199,6 +200,28 @@ def test_postgres_request_understanding_surface_is_v2_only() -> None:
     assert all(
         envelope.record_code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD
         for envelope in _encoded_non_ru_record_set()
+    )
+
+
+def test_postgres_adapter_explicitly_implements_cycle2_runtime_port() -> None:
+    required_methods = {
+        name
+        for name, member in Cycle2RuntimeRecordPort.__dict__.items()
+        if name.startswith("load_")
+        or name.startswith("insert_")
+        or name.startswith("start_")
+        or name.startswith("create_")
+        or name.startswith("apply_")
+        or name.startswith("append_")
+        or name.startswith("save_")
+        or name.startswith("finalize_")
+    }
+
+    assert required_methods
+    assert required_methods <= PostgresRecordAdapter.__dict__.keys()
+    assert isinstance(
+        object.__new__(PostgresRecordAdapter),
+        Cycle2RuntimeRecordPort,
     )
 
 
