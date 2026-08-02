@@ -3037,6 +3037,74 @@ class Cycle2ObservationSourceEdge(_StrictAuditOnlyRecord):
     request_unit_id: UUID
 
 
+class SupersededRunFinalizationEvidenceV2(_StrictAuditOnlyRecord):
+    """Durable OA-10 audit projection over the persisted terminal triplet."""
+
+    superseded_run_record: AgentRunRecordV2
+    no_result_link_record: RunTaskLinkRecordV2
+    run_stopped_trace_record: TraceEventV2
+
+    @model_validator(mode="before")
+    @classmethod
+    def persisted_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "superseded_run_record": AgentRunRecordV2,
+                "no_result_link_record": RunTaskLinkRecordV2,
+                "run_stopped_trace_record": TraceEventV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def terminal_triplet_is_exact(self) -> Self:
+        run = self.superseded_run_record
+        link = self.no_result_link_record
+        trace = self.run_stopped_trace_record
+        if (
+            run.status is not AgentRunStatusV2.SUPERSEDED
+            or run.stop_reason
+            is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
+            or run.incomplete_reason is not None
+        ):
+            raise ValueError("OA-10 evidence requires exact SUPERSEDED Run")
+        if (
+            link.run_id != run.run_id
+            or link.result_task_state_version is not None
+        ):
+            raise ValueError("OA-10 evidence requires exact no-result Link")
+        if (
+            trace.event_type is not TraceEventType.RUN_STOPPED
+            or trace.run_id != run.run_id
+            or trace.task_id != link.task_id
+            or trace.request_unit_id is None
+            or trace.occurred_at != run.completed_at
+            or trace.user_outcome is not AgentOutcome.BLOCKED
+            or trace.stop_reason
+            is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
+        ):
+            raise ValueError("OA-10 evidence requires exact RunStopped Trace")
+        allowed_trace_fields = {
+            "trace_event_id",
+            "event_type",
+            "occurred_at",
+            "run_id",
+            "task_id",
+            "request_unit_id",
+            "user_outcome",
+            "stop_reason",
+        }
+        if any(
+            getattr(trace, field_name) != field.default
+            for field_name, field in TraceEventV2.model_fields.items()
+            if field_name not in allowed_trace_fields
+        ):
+            raise ValueError(
+                "OA-10 evidence Trace cannot carry outbound or mutation refs"
+            )
+        return self
+
+
 class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     """Expectation-free exact logical evidence for one owner-scoped v2 Run."""
 
@@ -3059,7 +3127,10 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     shipment_assessment_records: tuple[ShipmentAssessment, ...] = ()
     tool_call_records: tuple[ToolCallRecordV2, ...] = ()
     recovery_decision_records: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
-    superseded_run_finalizations: tuple[FinalizeSupersededRunV2Command, ...] = ()
+    superseded_run_finalizations: tuple[
+        SupersededRunFinalizationEvidenceV2,
+        ...,
+    ] = ()
     context_manifest_records: tuple[ContextManifest, ...] = ()
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
     trace_records: Annotated[tuple[TraceEventV2, ...], Field(min_length=1)]
@@ -3092,17 +3163,16 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 "observation_source_edges": Cycle2ObservationSourceEdge,
                 "shipment_assessment_records": ShipmentAssessment,
                 "tool_call_records": ToolCallRecordV2,
+                "superseded_run_finalizations": (
+                    SupersededRunFinalizationEvidenceV2
+                ),
                 "context_manifest_records": ContextManifest,
                 "model_visible_toolset_artifacts": ModelVisibleToolsetArtifact,
                 "trace_records": TraceEventV2,
             },
         )
 
-    @field_validator(
-        "recovery_decision_records",
-        "superseded_run_finalizations",
-        mode="before",
-    )
+    @field_validator("recovery_decision_records", mode="before")
     @classmethod
     def later_defined_children_are_exact(
         cls,
@@ -3111,15 +3181,10 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     ) -> tuple[BaseModel, ...]:
         if type(value) is not tuple:
             raise ValueError(f"{info.field_name} must be an exact tuple")
-        expected_type = (
-            ToolRetryRecoveryDecisionRecordV2
-            if info.field_name == "recovery_decision_records"
-            else FinalizeSupersededRunV2Command
-        )
         return tuple(
             _require_exact_cycle2_model(
                 item,
-                expected_type,
+                ToolRetryRecoveryDecisionRecordV2,
                 field_name=info.field_name,
             )
             for item in value
@@ -3187,6 +3252,10 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             tuple(
                 record.recovery_decision_id
                 for record in self.recovery_decision_records
+            ),
+            tuple(
+                record.superseded_run_record.run_id
+                for record in self.superseded_run_finalizations
             ),
             tuple(
                 record.context_manifest_id for record in self.context_manifest_records
@@ -3670,19 +3739,43 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             for manifest in self.context_manifest_records
         }:
             raise ValueError("Cycle 2 exact evidence toolset root mismatch")
-        if any(
-            record.superseded_run_record != run
-            or record.no_result_link_record not in self.run_task_link_records
-            or record.run_stopped_trace_record not in self.trace_records
-            for record in self.superseded_run_finalizations
-        ):
-            raise ValueError("Cycle 2 exact evidence finalization root mismatch")
-        if run.status is AgentRunStatusV2.SUPERSEDED:
-            if self.terminal_result is not None or any(
-                message.direction is MessageDirection.ASSISTANT
-                for message in self.message_records
+        finalizations = self.superseded_run_finalizations
+        if run.status is not AgentRunStatusV2.SUPERSEDED and finalizations:
+            raise ValueError("ordinary exact evidence cannot carry a finalization")
+        for record in finalizations:
+            rooted_unit = unit_by_id.get(
+                record.run_stopped_trace_record.request_unit_id
+            )
+            if (
+                record.superseded_run_record != run
+                or record.no_result_link_record not in current_links
+                or record.run_stopped_trace_record not in self.trace_records
+                or rooted_unit is None
+                or rooted_unit.task_id != record.no_result_link_record.task_id
             ):
-                raise ValueError("OA-10 exact evidence cannot carry a result")
+                raise ValueError(
+                    "Cycle 2 exact evidence finalization root mismatch"
+                )
+        if run.status is AgentRunStatusV2.SUPERSEDED:
+            if len(finalizations) != 1:
+                raise ValueError(
+                    "OA-10 exact evidence requires exactly one finalization"
+                )
+            if (
+                self.terminal_result is not None
+                or any(
+                    message.direction is MessageDirection.ASSISTANT
+                    for message in self.message_records
+                )
+                or any(
+                    trace.event_type is TraceEventType.RESPONSE_RENDERED
+                    for trace in self.trace_records
+                )
+                or self.task_state_transition_records
+            ):
+                raise ValueError(
+                    "OA-10 exact evidence cannot carry output or state mutation"
+                )
         elif run.status is AgentRunStatusV2.COMPLETED:
             if (
                 self.terminal_result is None
@@ -6871,13 +6964,11 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
         terminal = self.superseded_run_record
         terminal_link = self.no_result_link_record
         trace = self.run_stopped_trace_record
-        if (
-            terminal.status is not AgentRunStatusV2.SUPERSEDED
-            or terminal.stop_reason
-            is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
-            or terminal.incomplete_reason is not None
-        ):
-            raise ValueError("OA-10 requires exact SUPERSEDED terminal Run")
+        SupersededRunFinalizationEvidenceV2(
+            superseded_run_record=terminal,
+            no_result_link_record=terminal_link,
+            run_stopped_trace_record=trace,
+        )
         if terminal.completed_at < closure.trusted_current_evidence_at:
             raise ValueError("OA-10 terminal time precedes current invalidation evidence")
         if any(
@@ -6890,35 +6981,10 @@ class FinalizeSupersededRunV2Command(_StrictRuntimePrivateRecord):
             )
         ):
             raise ValueError("SUPERSEDED Run cannot change stable fields")
-        if terminal_link != active_link or terminal_link.result_task_state_version is not None:
+        if terminal_link != active_link:
             raise ValueError("OA-10 link must remain exact no-result closure")
-        if (
-            trace.event_type is not TraceEventType.RUN_STOPPED
-            or trace.run_id != terminal.run_id
-            or trace.task_id != terminal_link.task_id
-            or trace.request_unit_id
-            != closure.current_request_unit_record.request_unit_id
-            or trace.occurred_at != terminal.completed_at
-            or trace.user_outcome is not AgentOutcome.BLOCKED
-            or trace.stop_reason is not StopReasonV2.STATE_OR_BINDING_INVALIDATED
-        ):
+        if trace.request_unit_id != closure.current_request_unit_record.request_unit_id:
             raise ValueError("OA-10 requires exact audit-only RunStopped trace")
-        allowed_trace_fields = {
-            "trace_event_id",
-            "event_type",
-            "occurred_at",
-            "run_id",
-            "task_id",
-            "request_unit_id",
-            "user_outcome",
-            "stop_reason",
-        }
-        if any(
-            getattr(trace, field_name) != field.default
-            for field_name, field in TraceEventV2.model_fields.items()
-            if field_name not in allowed_trace_fields
-        ):
-            raise ValueError("OA-10 audit Trace cannot carry outbound or mutation refs")
         return self
 
 

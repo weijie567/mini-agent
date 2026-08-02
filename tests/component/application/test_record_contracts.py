@@ -86,6 +86,7 @@ from mini_agent.application.records import (
     ShipmentAssessmentReadClosure,
     ShipmentNotReceivedClaimReadClosure,
     SupersededRunReadClosure,
+    SupersededRunFinalizationEvidenceV2,
     SupersededRunInvalidationKind,
     ToolCallRecoveryAggregate,
     ToolRetryRecoveryDecisionRecordV2,
@@ -377,12 +378,9 @@ def _minimal_cycle2_exact_run_evidence() -> Cycle2ExactRunEvidenceClosure:
     run = AgentRunRecordV2(
         run_id=run_id,
         conversation_id=conversation.conversation_id,
-        status=AgentRunStatusV2.SUPERSEDED,
+        status=AgentRunStatusV2.RUNNING,
         provider_lane="offline_cycle2",
         started_at=UTC_NOW,
-        completed_at=UTC_NOW,
-        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
-        incomplete_reason=None,
     )
     return Cycle2ExactRunEvidenceClosure(
         owner_scope=_owner_scope(),
@@ -508,6 +506,329 @@ def _cycle2_exact_run_evidence_with_task() -> Cycle2ExactRunEvidenceClosure:
     )
 
 
+def _cycle2_oa10_exact_run_evidence() -> Cycle2ExactRunEvidenceClosure:
+    baseline = _cycle2_exact_run_evidence_with_task()
+    task = baseline.task_records[0]
+    unit = baseline.request_unit_records[0]
+    link = baseline.run_task_link_records[0]
+    completed_at = UTC_NOW + timedelta(seconds=1)
+    run = _c2_project(
+        baseline.run_record,
+        status=AgentRunStatusV2.SUPERSEDED,
+        completed_at=completed_at,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    stopped = TraceEventV2(
+        trace_event_id=uuid4(),
+        event_type=TraceEventType.RUN_STOPPED,
+        occurred_at=completed_at,
+        run_id=run.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        user_outcome=AgentOutcome.BLOCKED,
+        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
+    )
+    finalization = SupersededRunFinalizationEvidenceV2(
+        superseded_run_record=run,
+        no_result_link_record=link,
+        run_stopped_trace_record=stopped,
+    )
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **{
+                field_name: getattr(baseline, field_name)
+                for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+            },
+            "run_record": run,
+            "superseded_run_finalizations": (finalization,),
+            "trace_records": (*baseline.trace_records, stopped),
+        }
+    )
+
+
+def test_oa10_durable_projection_has_only_exact_persisted_triplet() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    projection = closure.superseded_run_finalizations[0]
+
+    assert set(SupersededRunFinalizationEvidenceV2.model_fields) == {
+        "superseded_run_record",
+        "no_result_link_record",
+        "run_stopped_trace_record",
+    }
+    assert projection.superseded_run_record == closure.run_record
+    assert projection.no_result_link_record in closure.run_task_link_records
+    assert projection.run_stopped_trace_record in closure.trace_records
+    assert not {
+        "loaded_closure",
+        "replacement_run_record",
+        "trusted_current_evidence_at",
+        "fixture_ref",
+        "expectations",
+    }.intersection(SupersededRunFinalizationEvidenceV2.model_fields)
+
+
+def test_oa10_durable_projection_rejects_contradictory_triplet() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    projection = closure.superseded_run_finalizations[0]
+    run = projection.superseded_run_record
+    link = projection.no_result_link_record
+    trace = projection.run_stopped_trace_record
+    completed_run = AgentRunRecordV2(
+        **{
+            **run.model_dump(mode="python"),
+            "status": AgentRunStatusV2.COMPLETED,
+            "stop_reason": StopReasonV2.GOAL_COMPLETED,
+        }
+    )
+    invalid_children = (
+        {"superseded_run_record": completed_run},
+        {"no_result_link_record": _c2_project(link, run_id=uuid4())},
+        {
+            "no_result_link_record": _c2_project(
+                link,
+                result_task_state_version=1,
+            )
+        },
+        {"run_stopped_trace_record": _c2_project(trace, run_id=uuid4())},
+        {"run_stopped_trace_record": _c2_project(trace, task_id=uuid4())},
+        {
+            "run_stopped_trace_record": _c2_project(
+                trace,
+                occurred_at=trace.occurred_at + timedelta(microseconds=1),
+            )
+        },
+        {
+            "run_stopped_trace_record": _c2_project(
+                trace,
+                message_ref=uuid4(),
+            )
+        },
+    )
+    values = {
+        field_name: getattr(projection, field_name)
+        for field_name in SupersededRunFinalizationEvidenceV2.model_fields
+    }
+
+    for updates in invalid_children:
+        with pytest.raises(ValidationError, match="OA-10"):
+            SupersededRunFinalizationEvidenceV2(**{**values, **updates})
+
+
+def test_oa10_durable_projection_rejects_raw_nested_records() -> None:
+    projection = (
+        _cycle2_oa10_exact_run_evidence().superseded_run_finalizations[0]
+    )
+
+    with pytest.raises(ValidationError, match="exact AgentRunRecordV2"):
+        SupersededRunFinalizationEvidenceV2(
+            superseded_run_record=projection.superseded_run_record.model_dump(
+                mode="python"
+            ),
+            no_result_link_record=projection.no_result_link_record,
+            run_stopped_trace_record=projection.run_stopped_trace_record,
+        )
+
+
+def test_oa10_exact_run_evidence_requires_one_rooted_projection() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    projection = closure.superseded_run_finalizations[0]
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="exactly one finalization"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "superseded_run_finalizations": ()}
+        )
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "superseded_run_finalizations": (projection, projection),
+            }
+        )
+    foreign_run = _c2_project(projection.superseded_run_record, run_id=uuid4())
+    foreign = SupersededRunFinalizationEvidenceV2(
+        superseded_run_record=foreign_run,
+        no_result_link_record=_c2_project(
+            projection.no_result_link_record,
+            run_id=foreign_run.run_id,
+        ),
+        run_stopped_trace_record=_c2_project(
+            projection.run_stopped_trace_record,
+            run_id=foreign_run.run_id,
+        ),
+    )
+    with pytest.raises(ValidationError, match="finalization root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "superseded_run_finalizations": (foreign,)}
+        )
+
+
+def test_completed_exact_run_evidence_has_no_oa10_projection() -> None:
+    conversation = _conversation()
+    run_id = uuid4()
+    completed_at = UTC_NOW + timedelta(seconds=1)
+    run = AgentRunRecordV2(
+        run_id=run_id,
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="offline_cycle2",
+        started_at=UTC_NOW,
+        completed_at=completed_at,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    result = AgentRunResult(
+        run_id=run_id,
+        outcome=AgentOutcome.COMPLETED,
+        message="已完成。",
+    )
+    user_message = _message(
+        conversation_id=conversation.conversation_id,
+    )
+    assistant_message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        direction=MessageDirection.ASSISTANT,
+        content=result.message,
+        received_at=completed_at,
+    )
+    closure = Cycle2ExactRunEvidenceClosure(
+        owner_scope=_owner_scope(),
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(user_message, assistant_message),
+        run_task_link_records=(),
+        task_records=(),
+        request_unit_records=(),
+        input_binding_records=(),
+        trace_records=(
+            TraceEventV2(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.RUN_STOPPED,
+                occurred_at=completed_at,
+                run_id=run_id,
+                user_outcome=AgentOutcome.COMPLETED,
+                stop_reason=StopReasonV2.GOAL_COMPLETED,
+            ),
+        ),
+        terminal_result=result,
+    )
+
+    assert closure.superseded_run_finalizations == ()
+    oa10 = _cycle2_oa10_exact_run_evidence().superseded_run_finalizations[0]
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    with pytest.raises(ValidationError, match="cannot carry a finalization"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "superseded_run_finalizations": (oa10,)}
+        )
+
+
+def test_oa10_exact_run_evidence_rejects_terminal_result() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="output or state mutation"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "terminal_result": AgentRunResult(
+                    run_id=closure.run_record.run_id,
+                    outcome=AgentOutcome.BLOCKED,
+                    message="不应存在的 OA-10 结果。",
+                ),
+            }
+        )
+
+
+def test_oa10_exact_run_evidence_rejects_assistant_message() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="output or state mutation"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "message_records": (
+                    *closure.message_records,
+                    MessageRecord(
+                        schema_version="message_record.p0.v1",
+                        message_id=uuid4(),
+                        conversation_id=closure.conversation_record.conversation_id,
+                        direction=MessageDirection.ASSISTANT,
+                        content="不应存在的 OA-10 assistant Message。",
+                        received_at=closure.run_record.completed_at,
+                    ),
+                ),
+            }
+        )
+
+
+def test_oa10_exact_run_evidence_rejects_response_rendered_trace() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="output or state mutation"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "trace_records": (
+                    *closure.trace_records,
+                    TraceEventV2(
+                        trace_event_id=uuid4(),
+                        event_type=TraceEventType.RESPONSE_RENDERED,
+                        occurred_at=closure.run_record.completed_at,
+                        run_id=closure.run_record.run_id,
+                        presentation_plan_ref=uuid4(),
+                    ),
+                ),
+            }
+        )
+
+
+def test_oa10_exact_run_evidence_rejects_task_state_transition() -> None:
+    closure = _cycle2_oa10_exact_run_evidence()
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="output or state mutation"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "task_state_transition_records": (
+                    TaskStateTransition(
+                        task_id=task.task_id,
+                        request_unit_id=unit.request_unit_id,
+                        from_status=task.status,
+                        to_status=TaskStatus.WAITING_USER,
+                        base_state_version=task.state_version,
+                        result_state_version=task.state_version + 1,
+                        reason_ref=closure.message_records[0].message_id,
+                        changed_at=closure.run_record.completed_at,
+                    ),
+                ),
+            }
+        )
+
+
 def test_cycle2_exact_run_evidence_rejects_cross_paired_task_unit_child() -> None:
     closure = _cycle2_exact_run_evidence_with_task()
     message = closure.message_records[0]
@@ -602,11 +923,9 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
     run = AgentRunRecordV2(
         run_id=uuid4(),
         conversation_id=conversation.conversation_id,
-        status=AgentRunStatusV2.SUPERSEDED,
+        status=AgentRunStatusV2.RUNNING,
         provider_lane="offline_cycle2",
         started_at=UTC_NOW,
-        completed_at=UTC_NOW,
-        stop_reason=StopReasonV2.STATE_OR_BINDING_INVALIDATED,
     )
     query_binding = _input_binding_v2(
         binding_id=query_ref,
@@ -10887,6 +11206,18 @@ def test_cycle2_oa10_is_exact_no_result_closure() -> None:
         "message_record",
         "response_rendered",
     }.isdisjoint(FinalizeSupersededRunV2Command.model_fields)
+    actual_evidence = _cycle2_oa10_exact_run_evidence()
+    actual_values = {
+        field_name: getattr(actual_evidence, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    with pytest.raises(
+        ValidationError,
+        match="SupersededRunFinalizationEvidenceV2",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{**actual_values, "superseded_run_finalizations": (command,)}
+        )
 
     with pytest.raises(ValidationError, match="outbound or mutation refs"):
         FinalizeSupersededRunV2Command(
