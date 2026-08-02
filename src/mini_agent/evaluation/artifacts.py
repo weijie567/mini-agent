@@ -25,7 +25,7 @@ EXPECTED_MANIFEST_SHA256 = (
 )
 CYCLE2_MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-cycle2.v1.json"
 CYCLE2_EXPECTED_MANIFEST_SHA256 = (
-    "dca872d87c50f3496f5eb8f6b5a7a289865297d86b6fc8157129c2b19670e168"
+    "58d2127815c7ca9147d4694a15cdc081bcc4d2fd44c7964eabd38d8dc239304a"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -821,33 +821,33 @@ _CYCLE2_CASE_IDS = (
     "T2-two-active-packages-integrity-blocked",
 )
 _CYCLE2_CASE_CONTRACT_SHA256: Mapping[str, str] = {
-    "E2E01-02/unique-own-with-foreign-decoy": "068a18cf996563422bc60743a3a50c7b446a827f8d750749a11af8c42dd377e0",
-    "E2E01-02/no-match-safe-not-found": "b830a8ce1171355ef4b647845e52be5877b9de9a602f69be0c6d36098166df24",
-    "E2E01-03/multiple-minimum-summary": "b05eb93758ef2e086fcda22f333521a0d252c0b81bc2157d25afd824079884a3",
-    "E2E01-03/current-second-selected": "730f0e9f5ea000c3b42dd13336146ab21ab6801b4aa27e76a9628b597561195d",
-    "E2E01-03/expired-second-rejected": "87e0cfd2809eaad9cb52609644c58f5b4cf6cf5f693c4344d895140defca9b50",
-    "E2E01-03/cross-task-second-rejected": "b628b8b51e4c9c1c11a9b873d2b8f6a728bc4844571b8ceed556e6c9f7921250",
-    "E2E01-05/order-only-no-shipment": "a3cdf23a4a6c168600f23b1e6c58c92f37e72798d8b710aebe7bc31e470e51e1",
-    "E2E01-05/logistics-required-uses-shipment": "f6ec51cb713c240fb8a46cd38ab02254c2973f824eb77f883c3c4012d9f95d92",
-    "E2E01-06/stale-refresh-success": "64c1baaafb7f32524aa6a98bff0f5da3c873eb532cadba858168922c9bbec5ff",
-    "E2E01-06/transient-once-then-success": "295d45f71c7b72127a64d2210bf05c8efdff4fa82c2f5f9515b0dda56ae9f5ff",
-    "E2E01-06/transient-exhausted-blocked": "65515aef775dfadca70667cf17dad25edb3b57762e854c4715a133571a056e1f",
-    "E2E01-06/deterministic-source-integrity-no-retry": "bfcb5f511a9bb438565945c8b93d131eab81c79e584e0a7f50889495cb05a5be",
-    "E2E01-06/insufficient-promise-need-human": "7d1cd8c35b1f35ca059ce586f1ddf6b78793a1a4c55859aca19e3ca15c038e62",
-    "E2E01-06/no-shipment-need-human": "66c9d6d7ea0f932f6494ed8d9989cc8335c31755d53a18a1e7b31b2539d6efe7",
-    "T2-candidate-owner-mismatch-rejected": "09ffa3718fa344ea89aa55e5debbdf5adb7ed1bc844ae051464f270e7b02b99c",
-    "T2-candidate-superseded-rejected": "bd8e6d9244042b90bfc37e1bf1dbbb36b0ca439c6451285db83872b6acac1213",
-    "T2-candidate-out-of-range-rejected": "438f0498aa3ec3914e0c11f9a70d4824cd15182f2c28f2e0dcbb8357b121f3ee",
-    "T2-candidate-zero-or-multiple-current-rejected": "cee55679db23f28a73f30babbe951b407dcb448f9e96128b223cefa373aefd79",
-    "T2-assessment-delayed-boundary": "062b2a6064203c96fe425a1704ec95c6a782b9523d335f83789d655c3cdf419f",
-    "T2-assessment-delivered-not-received-current-claim": "10dd8f1b6939338b905c1c4215b2147d763d4d21a783fd6cb2815d1dd5a1614e",
-    "T2-assessment-claim-corrected": "04b60c59467ef3a81f8ddd1849f6a57c28b7d330ba0ebb86989ba260dedc4097",
-    "T2-timeout-after-dispatch-then-success": "8bcdfb7f4bc76ea896831ba2f89a8ce529b1db19ca09ec72321578943f4eb501",
-    "T2-retry-finalize-before-second-fence-recovery": "38a4b33f02839c9d6e21b80e5136af926a33b2b997f6d4ddaeb1900a047d9231",
-    "T2-retry-finalize-before-second-fence-state-invalidated": "c2defe8e7ebcdfcb8f5948f95048cd6089963d100d69dac128a1b04c217a262f",
-    "T2-retry-unfinished-attempt-restart-blocked": "375f4d99a9cf39f52d73c0ffeaf23778a781adbc853dddc19448a2446dd33436",
-    "T2-refresh-returns-already-stale-blocked": "98c38dda138b14648dab05549459d3abbbbb0fc79e80fc8be17c1ca73b692565",
-    "T2-two-active-packages-integrity-blocked": "44e64c7c5065e1a8ded15231967bca581199d0d5688e716593acfdae4f6d9560",
+    "E2E01-02/unique-own-with-foreign-decoy": "fb1c78f66453d0c1e8bb472e71d20391748d927b6b69bb119c397ba62e39becc",
+    "E2E01-02/no-match-safe-not-found": "18a26cd2c83d11283248eba6d07d0821c22f9e29de84211abab78f6f566c89ba",
+    "E2E01-03/multiple-minimum-summary": "8d06cfaf3325b405509af061412c49cb344c8e6155b0f412d0220ba46b7f2b36",
+    "E2E01-03/current-second-selected": "5ba183448cd6ac63af5f6d54e5d8e758a76f031b21803f65e1e060101cc394c9",
+    "E2E01-03/expired-second-rejected": "9126c7d19560812bb1f108bdd74b1e6f23c09876db250a86b60fc69fdfb7d4ed",
+    "E2E01-03/cross-task-second-rejected": "18b33a3dad2e2bac8c3e02505c908a46935c23648078d5f1d87e0c68974ee58e",
+    "E2E01-05/order-only-no-shipment": "25a945903f0af724109fc6b825118d37175cfaeab6355f1f02c39ac973b333ab",
+    "E2E01-05/logistics-required-uses-shipment": "39a6f3051320224e347f029e011e47312babe7e8fd9bd093f158ee658bb8252a",
+    "E2E01-06/stale-refresh-success": "e80f4eae205bb424c5e3e7439624113ed494bd99b51e2fb55c5e650540843f4a",
+    "E2E01-06/transient-once-then-success": "5b854aa16b740ec7fcf9eed573d19e5244adae8ccd176244820c860710bfc7d7",
+    "E2E01-06/transient-exhausted-blocked": "7552cb8f0477d20fea4674a5e59e4d6aa946e7f9e05dccb82a1040639af921f3",
+    "E2E01-06/deterministic-source-integrity-no-retry": "f2416899453bcb75b1fecb07fc10ea3b6972b7cfae4f6fa2f85816766cf81ebe",
+    "E2E01-06/insufficient-promise-need-human": "7fea580d4538fa85126c2a1b7373f41265f5d8c4849221e443f8d1815e4345a4",
+    "E2E01-06/no-shipment-need-human": "a852aa4322553a5b87ae2534a86b2dd66a6fce6af6387c6df97d9208d653271f",
+    "T2-candidate-owner-mismatch-rejected": "8512f4c68133de9eec8a90b0dd862d0ba4a983dae23cf9442abddcc0bc859396",
+    "T2-candidate-superseded-rejected": "901b05cdd993db748c598655ba0c653d38a8dcf7a95820aadc22b41838cb8e29",
+    "T2-candidate-out-of-range-rejected": "150fad168ec7bad7d2056a9cc94c2087c960d5af6af08fc27b4c05de3c854345",
+    "T2-candidate-zero-or-multiple-current-rejected": "25755821f99a6777330f1acc89e3f135cf5fcb68705c3274601dd389bd5af956",
+    "T2-assessment-delayed-boundary": "34326ec0ab1bfa0fb1c881093d0d1d3e98c2a796aa383c23101b9648e59f10b6",
+    "T2-assessment-delivered-not-received-current-claim": "b88891fa9dae73389096f21b4b6db2190e5592dcf3e51fe907550bc3dadcdc36",
+    "T2-assessment-claim-corrected": "b2e53c34be5dd6fb75a2e5e5703f56ad7f82e2e68924db30bf586d87e9ce4a97",
+    "T2-timeout-after-dispatch-then-success": "4daf287449ba080ffb15b4000d0ec7756932ac8b76cb89c8432f0459ac07868f",
+    "T2-retry-finalize-before-second-fence-recovery": "837587ef1b2972c014565a9175d0614dfc7d5bf9084b6e6b04bb79de563f4dba",
+    "T2-retry-finalize-before-second-fence-state-invalidated": "2601c882b43ff3322fa97ce3c2a44b08788248ed0445b4d3c582fcc38ef78d8f",
+    "T2-retry-unfinished-attempt-restart-blocked": "d9329f8544cbaec2e28c64814e5756a8963636eb453271f561917d0a92c6d85c",
+    "T2-refresh-returns-already-stale-blocked": "4e632845dbaa56415516e827c49aeaa6e22f1fe3944de9035f851ba8de02a636",
+    "T2-two-active-packages-integrity-blocked": "ce8a4d7d1f36a6024a18eee52ab2f830aa8c12e5c58acc6f7e95fd8a39b19a13",
 }
 _CYCLE2_SHARED_EXPECTATIONS = (
     "TRUSTED_IDENTITY_NOT_USER_CONTROLLED",
@@ -1022,7 +1022,7 @@ def _cycle2_validate_manifest(
         or manifest.get("created_from_base_sha")
         != "5f2fa6d28575bcdcaf8a4c650469acc7dd19b7de"
         or manifest.get("hash_algorithm") != "SHA-256"
-        or manifest.get("case_lifecycle_status") != "CONTRACT_DEFINED"
+        or manifest.get("case_lifecycle_status") != "EXECUTABLE"
         or manifest.get("eval_result_artifacts_created") is not False
         or manifest.get("baseline_result_artifacts_created") is not False
     ):
@@ -1211,7 +1211,7 @@ def _cycle2_validate_cases(
         case_id = case.get("case_id")
         if (
             case.get("title") != case_id
-            or case.get("lifecycle_status") != "CONTRACT_DEFINED"
+            or case.get("lifecycle_status") != "EXECUTABLE"
         ):
             raise ArtifactContractError("Cycle 2 Case lifecycle or title is invalid")
         requirement_refs = _expect_nonempty_strings(case.get("requirement_refs"))
@@ -1380,7 +1380,7 @@ def _cycle2_validate_cases(
         views.append(
             EvalCaseArtifact(
                 case_id=case_id,
-                lifecycle_status="CONTRACT_DEFINED",
+                lifecycle_status="EXECUTABLE",
                 requirement_refs=requirement_refs,
                 input=input_projection,
                 expectations=expectations,

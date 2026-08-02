@@ -1264,7 +1264,7 @@ def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None
     )
 
 
-def test_cycle2_bundle_has_exact_27_contract_defined_case_identities() -> None:
+def test_cycle2_bundle_has_exact_27_executable_case_identities() -> None:
     dataset = _load_json(CYCLE2_CASES_PATH)
     cases = dataset["cases"]
     case_ids = [case["case_id"] for case in cases]
@@ -1273,7 +1273,7 @@ def test_cycle2_bundle_has_exact_27_contract_defined_case_identities() -> None:
     assert len(case_ids) == len(set(case_ids))
     assert set(case_ids[:14]) == CYCLE2_LONGITUDINAL_CASE_IDS
     assert set(case_ids[14:]) == CYCLE2_TRAJECTORY_CASE_IDS
-    assert {case["lifecycle_status"] for case in cases} == {"CONTRACT_DEFINED"}
+    assert {case["lifecycle_status"] for case in cases} == {"EXECUTABLE"}
     assert all(case["title"] == case["case_id"] for case in cases)
     assert all(case["requirement_refs"][0] == "EVAL-CASE" for case in cases)
     assert all(
@@ -1361,7 +1361,7 @@ def test_cycle2_bundle_has_exact_pair_lane_and_bidirectional_closure() -> None:
     assert offline_lane["network_access"] == "FORBIDDEN"
     assert offline_lane["release_gate"] is True
     assert offline_lane["case_refs"] == case_ids
-    assert manifest["case_lifecycle_status"] == "CONTRACT_DEFINED"
+    assert manifest["case_lifecycle_status"] == "EXECUTABLE"
     assert manifest["eval_result_artifacts_created"] is False
     assert manifest["baseline_result_artifacts_created"] is False
 
@@ -1386,7 +1386,7 @@ def test_cycle2_manifest_authenticates_exact_companion_bytes() -> None:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]
 
 
-def test_cycle2_loader_authenticates_without_activating_cases() -> None:
+def test_cycle2_loader_authenticates_the_atomic_executable_bundle() -> None:
     bundle = artifacts_module.load_e2e01_cycle2_artifacts(
         REPO_ROOT,
         candidate_version="candidate:cycle2",
@@ -1395,9 +1395,7 @@ def test_cycle2_loader_authenticates_without_activating_cases() -> None:
     assert bundle.candidate_version == "candidate:cycle2"
     assert bundle.runtime_version == "runtime:cycle2"
     assert len(bundle.cases) == 27
-    assert {case.lifecycle_status for case in bundle.cases} == {
-        "CONTRACT_DEFINED"
-    }
+    assert {case.lifecycle_status for case in bundle.cases} == {"EXECUTABLE"}
     assert bundle.lane_by_name("offline_gate").case_refs == tuple(
         case.case_id for case in bundle.cases
     )
@@ -1463,9 +1461,7 @@ def test_cycle2_bundle_has_no_action_or_result_artifact_content() -> None:
     serialized = "\n".join(
         path.read_text(encoding="utf-8") for path in CYCLE2_ARTIFACT_PATHS
     )
-    assert "CONTRACT_DEFINED" in serialized
     for forbidden in (
-        "EXECUTABLE",
         "REGRESSION_GATE",
         "create_refund",
         "ActionLedger",

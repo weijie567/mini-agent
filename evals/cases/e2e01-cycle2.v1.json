@@ -32,7 +32,7 @@
     {
       "case_id": "E2E01-02/unique-own-with-foreign-decoy",
       "title": "E2E01-02/unique-own-with-foreign-decoy",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -168,7 +168,7 @@
     {
       "case_id": "E2E01-02/no-match-safe-not-found",
       "title": "E2E01-02/no-match-safe-not-found",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -292,7 +292,7 @@
     {
       "case_id": "E2E01-03/multiple-minimum-summary",
       "title": "E2E01-03/multiple-minimum-summary",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -424,7 +424,7 @@
     {
       "case_id": "E2E01-03/current-second-selected",
       "title": "E2E01-03/current-second-selected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -556,7 +556,7 @@
     {
       "case_id": "E2E01-03/expired-second-rejected",
       "title": "E2E01-03/expired-second-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -676,7 +676,7 @@
     {
       "case_id": "E2E01-03/cross-task-second-rejected",
       "title": "E2E01-03/cross-task-second-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -795,7 +795,7 @@
     {
       "case_id": "E2E01-05/order-only-no-shipment",
       "title": "E2E01-05/order-only-no-shipment",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -929,7 +929,7 @@
     {
       "case_id": "E2E01-05/logistics-required-uses-shipment",
       "title": "E2E01-05/logistics-required-uses-shipment",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -1071,7 +1071,7 @@
     {
       "case_id": "E2E01-06/stale-refresh-success",
       "title": "E2E01-06/stale-refresh-success",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -1199,7 +1199,7 @@
     {
       "case_id": "E2E01-06/transient-once-then-success",
       "title": "E2E01-06/transient-once-then-success",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "TOOL-CALL",
@@ -1330,7 +1330,7 @@
     {
       "case_id": "E2E01-06/transient-exhausted-blocked",
       "title": "E2E01-06/transient-exhausted-blocked",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-RESULT",
@@ -1460,7 +1460,7 @@
     {
       "case_id": "E2E01-06/deterministic-source-integrity-no-retry",
       "title": "E2E01-06/deterministic-source-integrity-no-retry",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-RESULT",
@@ -1588,7 +1588,7 @@
     {
       "case_id": "E2E01-06/insufficient-promise-need-human",
       "title": "E2E01-06/insufficient-promise-need-human",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -1713,7 +1713,7 @@
     {
       "case_id": "E2E01-06/no-shipment-need-human",
       "title": "E2E01-06/no-shipment-need-human",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -1837,7 +1837,7 @@
     {
       "case_id": "T2-candidate-owner-mismatch-rejected",
       "title": "T2-candidate-owner-mismatch-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -1960,7 +1960,7 @@
     {
       "case_id": "T2-candidate-superseded-rejected",
       "title": "T2-candidate-superseded-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -2080,7 +2080,7 @@
     {
       "case_id": "T2-candidate-out-of-range-rejected",
       "title": "T2-candidate-out-of-range-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -2200,7 +2200,7 @@
     {
       "case_id": "T2-candidate-zero-or-multiple-current-rejected",
       "title": "T2-candidate-zero-or-multiple-current-rejected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -2320,7 +2320,7 @@
     {
       "case_id": "T2-assessment-delayed-boundary",
       "title": "T2-assessment-delayed-boundary",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -2448,7 +2448,7 @@
     {
       "case_id": "T2-assessment-delivered-not-received-current-claim",
       "title": "T2-assessment-delivered-not-received-current-claim",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -2577,7 +2577,7 @@
     {
       "case_id": "T2-assessment-claim-corrected",
       "title": "T2-assessment-claim-corrected",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-E2E01",
@@ -2707,7 +2707,7 @@
     {
       "case_id": "T2-timeout-after-dispatch-then-success",
       "title": "T2-timeout-after-dispatch-then-success",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "TOOL-CALL",
@@ -2840,7 +2840,7 @@
     {
       "case_id": "T2-retry-finalize-before-second-fence-recovery",
       "title": "T2-retry-finalize-before-second-fence-recovery",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "TOOL-CALL",
@@ -2973,7 +2973,7 @@
     {
       "case_id": "T2-retry-finalize-before-second-fence-state-invalidated",
       "title": "T2-retry-finalize-before-second-fence-state-invalidated",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
@@ -3115,7 +3115,7 @@
     {
       "case_id": "T2-retry-unfinished-attempt-restart-blocked",
       "title": "T2-retry-unfinished-attempt-restart-blocked",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "TOOL-CALL",
@@ -3246,7 +3246,7 @@
     {
       "case_id": "T2-refresh-returns-already-stale-blocked",
       "title": "T2-refresh-returns-already-stale-blocked",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-RESULT",
@@ -3369,7 +3369,7 @@
     {
       "case_id": "T2-two-active-packages-integrity-blocked",
       "title": "T2-two-active-packages-integrity-blocked",
-      "lifecycle_status": "CONTRACT_DEFINED",
+      "lifecycle_status": "EXECUTABLE",
       "requirement_refs": [
         "EVAL-CASE",
         "BUS-SAFETY",
