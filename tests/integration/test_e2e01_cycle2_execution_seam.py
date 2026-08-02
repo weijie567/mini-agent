@@ -16,7 +16,7 @@ from mini_agent.application.persistence import (
 )
 from mini_agent.application.records import (
     AgentRunResult,
-    Cycle2ContinuationProviderProposal,
+    Cycle2ControlPurpose,
     Cycle2ExactRunEvidenceClosure,
     MessageDirection,
     MessageRecord,
@@ -24,6 +24,8 @@ from mini_agent.application.records import (
 )
 from mini_agent.bootstrap import Cycle2OfflineComposition
 from mini_agent.core.request_understanding import (
+    Cycle2ControlCandidate,
+    Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -137,57 +139,35 @@ class _Cycle2DirectProvider:
     async def propose_cycle2_continuation(
         self,
         request,
-    ) -> Cycle2ContinuationProviderProposal:
-        return Cycle2ContinuationProviderProposal(
-            input_candidate=Cycle2InputCandidate(
-                name="candidate_ordinal",
-                candidate_value=2,
-                source_ref=request.message_ref,
-                source_quote=request.original_query,
-                confidence=0.99,
-            ),
-            next_move_candidate=NextMove(
-                kind=NextMoveKind.CALL_TOOL,
+    ) -> Cycle2InputCandidate:
+        return Cycle2InputCandidate(
+            name="candidate_ordinal",
+            candidate_value=2,
+            source_ref=request.message_ref,
+            source_quote=request.original_query,
+            confidence=0.99,
+        )
+
+    async def propose_cycle2_control(
+        self,
+        _request,
+        purpose: Cycle2ControlPurpose,
+    ) -> Cycle2ControlCandidate:
+        if purpose is Cycle2ControlPurpose.PROPOSE_GET_ORDER:
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
                 requested_tool_name="get_order",
-                arguments={"order_id": "O-1001"},
-                base_task_state_version=3,
-            ),
-        )
-
-    async def propose_cycle2_search_followup(
-        self,
-        _request,
-        _projection,
-        current_task_state_version: int,
-    ) -> NextMove:
-        return NextMove(
-            kind=NextMoveKind.CALL_TOOL,
-            requested_tool_name="get_order",
-            arguments={"order_id": "O-1001"},
-            base_task_state_version=current_task_state_version,
-        )
-
-    async def propose_cycle2_order_followup(
-        self,
-        _request,
-        order_summary,
-        current_task_state_version: int,
-    ) -> NextMove:
-        return NextMove(
-            kind=(
-                NextMoveKind.CALL_TOOL
-                if self._include_shipment
-                else NextMoveKind.FINISH
-            ),
-            requested_tool_name=(
-                "get_shipment" if self._include_shipment else None
-            ),
-            arguments=(
-                {"order_id": order_summary.order_number}
-                if self._include_shipment
-                else None
-            ),
-            base_task_state_version=current_task_state_version,
+            )
+        if (
+            purpose is Cycle2ControlPurpose.PROPOSE_POST_ORDER
+            and self._include_shipment
+        ):
+            return Cycle2ControlCandidate(
+                kind=Cycle2ControlCandidateKind.CALL_TOOL,
+                requested_tool_name="get_shipment",
+            )
+        return Cycle2ControlCandidate(
+            kind=Cycle2ControlCandidateKind.FINISH,
         )
 
 
