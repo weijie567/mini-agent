@@ -3714,6 +3714,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     }
     versioned_encode_dependency_files = {
         "src/mini_agent/infrastructure/persistence/postgres.py",
+        "tests/integration/test_database_migrations.py",
         "tests/integration/test_postgres_record_adapters.py",
         "tests/integration/test_postgres_v2_request_understanding_writes.py",
     }
@@ -4148,6 +4149,30 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
             "status",
         }
     )
+
+    def is_exact_v3_state_version_getattr(node: ast.Call) -> bool:
+        target = node.args[0] if node.args else None
+        return (
+            len(node.args) == 3
+            and not node.keywords
+            and isinstance(target, ast.Attribute)
+            and target.attr == "source_record"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "desired_decoded"
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "state_version"
+            and isinstance(node.args[2], ast.Constant)
+            and node.args[2].value is None
+        )
+
+    exact_v3_state_version_getattrs = [
+        node
+        for node in ast.walk(postgres_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and is_exact_v3_state_version_getattr(node)
+    ]
     unsafe_getattr_calls = [
         node
         for node in ast.walk(postgres_tree)
@@ -4155,18 +4180,21 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
         and isinstance(node.func, ast.Name)
         and node.func.id == "getattr"
         and not (
-            len(node.args) in {2, 3}
-            and not node.keywords
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in {"record", "row"}
-            and (
-                (
-                    isinstance(node.args[1], ast.Name)
-                    and node.args[1].id == "field_name"
-                )
-                or (
-                    isinstance(node.args[1], ast.Constant)
-                    and node.args[1].value in allowed_getattr_fields
+            is_exact_v3_state_version_getattr(node)
+            or (
+                len(node.args) in {2, 3}
+                and not node.keywords
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in {"record", "row"}
+                and (
+                    (
+                        isinstance(node.args[1], ast.Name)
+                        and node.args[1].id == "field_name"
+                    )
+                    or (
+                        isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value in allowed_getattr_fields
+                    )
                 )
             )
         )
@@ -4226,6 +4254,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     assert not persistence_module_object_imports
     assert not dynamic_imports
     assert not dynamic_namespace_references
+    assert len(exact_v3_state_version_getattrs) == 1
     assert not unsafe_getattr_calls
     assert not constructed_codec_symbols
     assert not shadowing_bindings
@@ -4287,7 +4316,7 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     if postgres_rel in versioned_encode_matches:
         assert len(encoder_imports) == 1
         assert encoder_imports[0].asname is None
-        assert encoder_name_references
+        assert len(encoder_name_references) == 1
         assert not encoder_attribute_references
         for reference in encoder_name_references:
             call = parent_by_node[reference]
@@ -4349,9 +4378,23 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
     if postgres_rel in versioned_decode_matches:
         assert len(decoder_imports) == 1
         assert decoder_imports[0].asname is None
-        assert decoder_name_references
+        assert len(decoder_name_references) == 11
         assert not decoder_attribute_references
         assert not exact_reader_method_references
+        expected_decoder_owner_counts = {
+            "_load_exact_run_evidence_for_owner_version": 2,
+            "_ru_v2_write_decode_cycle2": 1,
+            "_ru_v2_write_encode": 1,
+            "_ru_v2_write_insert_targets": 1,
+            "_ru_v2_write_target_rows": 1,
+            "_ru_v2_write_validate_row": 1,
+            "_ru_v3_envelope_is_exact": 2,
+            "_ru_v3_generated_rows_state": 1,
+            "_ru_v3_insert_phase1_envelopes": 1,
+        }
+        decoder_owner_counts = {
+            owner_name: 0 for owner_name in expected_decoder_owner_counts
+        }
         for reference in decoder_name_references:
             call = parent_by_node[reference]
             assert isinstance(call, ast.Call) and call.func is reference
@@ -4384,10 +4427,8 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
                 isinstance(descendant, (ast.Yield, ast.YieldFrom))
                 for descendant in ast.walk(enclosing_function)
             )
-            assert (
-                enclosing_function.name == exact_reader_method_name
-                or enclosing_function.name.startswith("_ru_v2_write_")
-            )
+            assert enclosing_function.name in expected_decoder_owner_counts
+            decoder_owner_counts[enclosing_function.name] += 1
 
             enclosing_class: ast.AST | None = enclosing_function
             while enclosing_class is not None and not isinstance(
@@ -4398,6 +4439,8 @@ def test_codec_dependencies_are_scoped_without_active_routing_or_authority_claim
             assert isinstance(enclosing_class, ast.ClassDef)
             assert enclosing_class.name == "PostgresRecordAdapter"
             assert parent_by_node[enclosing_function] is enclosing_class
+        assert decoder_owner_counts == expected_decoder_owner_counts
+        assert len(encoder_name_references) + len(decoder_name_references) == 12
     else:
         assert not decoder_imports
         assert not decoder_name_references
