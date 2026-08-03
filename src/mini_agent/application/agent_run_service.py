@@ -36,14 +36,19 @@ from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     ApplyContinuationInputBindingV2Command,
+    ApplyContinuationTaskDeltaV3Command,
     ApplyTaskTransitionCommand,
     ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderCandidateSelectionV3Command,
     ApplyOrderSearchOutcomeV2Command,
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
+    ContinuationInputBindingReadClosure,
     CreateInitialTaskGraphV2Command,
+    CreateInitialTaskGraphV3Command,
     CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2InitialTaskGraphV3Command,
     CreateCycle2RunRootCommand,
     CreateToolCallV2Command,
     CreateRequestUnitCommand,
@@ -55,6 +60,7 @@ from mini_agent.application.records import (
     FinalizeStateInvalidatedToolRecoveryV2Command,
     FinalizeSupersededRunV2Command,
     InitialToolCallV2ReadClosure,
+    InitialAcceptedTaskGraphV3CommandItem,
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
@@ -67,6 +73,8 @@ from mini_agent.application.records import (
     SaveInputBindingCommand,
     SaveOrderObservationV2Command,
     SaveRequestUnderstandingV2AcceptedCommand,
+    SaveRejectedContinuationUnderstandingV3Command,
+    SaveRequestUnderstandingV3NoTaskCommand,
     SaveShipmentAssessmentV2Command,
     SaveShipmentObservationV2Command,
     StartCycle2RunCommand,
@@ -78,6 +86,7 @@ from mini_agent.application.records import (
     Cycle2CurrentSessionTaskClosure,
     IssuedSelectedTargetRef,
     build_order_candidate_selection_v2_command,
+    build_order_candidate_selection_v3_command,
 )
 from mini_agent.application.run_result_mapper import (
     Cycle2ExecutionOutcomeObservationV1,
@@ -138,41 +147,57 @@ from mini_agent.core.presentation_policy import (
 )
 from mini_agent.core.request_processing import (
     Cycle2ContinuationBindingDecision,
+    Cycle2AcceptedClaimRejectedSelection,
+    Cycle2ContinuationDecisionV3,
+    Cycle2ContinuationIdentityAllocationV3,
     Cycle2InitialRequestDecisionV2,
+    Cycle2InitialRequestDecisionV3,
     Cycle2OrdinalClaimPreparation,
     Cycle2OrdinalSelectionRejectionReason,
     InitialTaskIdentityAllocationV2,
+    InitialTaskIdentityAllocationV3,
+    InitialRequestNoTaskDecisionV2,
     InitialRequestRoutableTaskGraphDecisionV2,
+    InitialRequestUnroutedTaskGraphsDecisionV2,
     RequestProcessingError,
     RequestUnderstandingV2Error,
+    RejectedCycle2ContinuationDecisionV3,
+    RequestUnderstandingClosureV3,
+    build_request_understanding_closure_v3,
     build_cycle2_unique_auto_target_record,
     materialize_cycle2_control_next_move,
     prepare_cycle2_ordinal_claim,
     prepare_cycle2_ordinal_selection,
     reject_cycle2_ordinal_selection,
     reduce_cycle2_continuation_candidate,
+    reduce_cycle2_continuation_task_delta,
     revalidate_next_move_v2,
     route_cycle2_continuation_next_move,
     route_cycle2_selected_next_move,
     route_cycle2_unique_next_move,
     route_cycle2_verified_target_next_move,
     validate_and_reduce_cycle2_initial_request_v2,
+    validate_and_reduce_cycle2_initial_request_v3,
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
     Cycle2InputCandidate,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
     ModelVisibleTaskSummary,
     NextMove,
     NextMoveKind,
     RequestUnderstandingInput,
+    RequestUnderstandingOutputV2,
 )
 from mini_agent.core.task_state import (
     ORDER_CANDIDATE_SET_TTL,
+    AcceptedAddGoalTaskDeltaV3,
     InputBindingV2,
     OrderCandidateAutoTargetRecord,
     OrderCandidateSelectionRecord,
+    OrderCandidateSelectionRequest,
     OrderCandidateSetRecord,
     OrderCandidateSetEntry,
     OrderCandidateSetOutcome,
@@ -284,6 +309,383 @@ def _project_request_unit(
     }
     values.update(updates)
     return RequestUnitRecord(**values)
+
+
+def _build_generic_initial_v3_command(
+    *,
+    owner_scope: TrustedOwnerScope,
+    conversation: ConversationRecord,
+    messages: tuple[MessageRecord, ...],
+    running_run: AgentRunRecord,
+    closure: RequestUnderstandingClosureV3,
+    accepted_task_graphs: tuple[
+        InitialAcceptedTaskGraphV3CommandItem,
+        ...,
+    ] = (),
+) -> SaveRequestUnderstandingV3NoTaskCommand | CreateInitialTaskGraphV3Command:
+    """Choose one exact generic v3 atomic command without routing it."""
+
+    if accepted_task_graphs:
+        return CreateInitialTaskGraphV3Command(
+            owner_scope=owner_scope,
+            expected_conversation_record=conversation,
+            expected_message_records=messages,
+            expected_active_run_record=running_run,
+            request_understanding=closure,
+            accepted_task_graphs=accepted_task_graphs,
+        )
+    return SaveRequestUnderstandingV3NoTaskCommand(
+        owner_scope=owner_scope,
+        expected_conversation_record=conversation,
+        expected_message_records=messages,
+        expected_active_run_record=running_run,
+        request_understanding=closure,
+    )
+
+
+def _reduce_and_build_generic_initial_v3_command(
+    *,
+    owner_scope: TrustedOwnerScope,
+    conversation: ConversationRecord,
+    messages: tuple[MessageRecord, ...],
+    running_run: AgentRunRecord,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2,
+    customer_context: CustomerContext,
+    request_understanding_record_id: UUID,
+    candidate_identity_allocations: tuple[InitialTaskIdentityAllocationV2, ...],
+    next_move_candidate_ref: UUID,
+    now: datetime,
+) -> tuple[
+    SaveRequestUnderstandingV3NoTaskCommand | CreateInitialTaskGraphV3Command,
+    InitialRequestNoTaskDecisionV2
+    | InitialRequestRoutableTaskGraphDecisionV2
+    | InitialRequestUnroutedTaskGraphsDecisionV2,
+]:
+    """Run the generic reducer once, then project its authority into v3."""
+
+    decision = validate_and_reduce_initial_request_v2(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={
+            message.message_id: message.content for message in messages
+        },
+        customer_context=customer_context,
+        request_understanding_record_id=request_understanding_record_id,
+        candidate_identity_allocations=candidate_identity_allocations,
+        next_move_candidate_ref=next_move_candidate_ref,
+        now=now,
+    )
+    if type(decision) is InitialRequestNoTaskDecisionV2:
+        graphs = ()
+    elif type(decision) is InitialRequestRoutableTaskGraphDecisionV2:
+        graphs = (decision.task_graph,)
+    elif type(decision) is InitialRequestUnroutedTaskGraphsDecisionV2:
+        graphs = decision.task_graphs
+    else:
+        raise AgentRunExecutionError("generic v3 reduction result is unavailable")
+    accepted_children = tuple(
+        AcceptedAddGoalTaskDeltaV3(
+            **{
+                field_name: getattr(graph.accepted_delta, field_name)
+                for field_name in AcceptedAddGoalTaskDeltaV3.model_fields
+            }
+        )
+        for graph in graphs
+    )
+    v2_record = decision.closure.record
+    closure = build_request_understanding_closure_v3(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={
+            message.message_id: message.content for message in messages
+        },
+        request_understanding_record_id=request_understanding_record_id,
+        candidate_validation=v2_record.candidate_validation,
+        accepted_task_deltas=accepted_children,
+        proposed_base_task_state_version=(
+            v2_record.proposed_base_task_state_version
+        ),
+        validated_task_state_version=v2_record.validated_task_state_version,
+        next_move_candidate_ref=v2_record.next_move_candidate_ref,
+        now=now,
+    )
+    accepted_items = tuple(
+        InitialAcceptedTaskGraphV3CommandItem(
+            accepted_delta=child,
+            initial_task=CreateTaskCommand(initial_record=graph.task),
+            initial_request_unit=CreateRequestUnitCommand(
+                initial_record=graph.request_unit
+            ),
+            input_bindings=(
+                SaveInputBindingCommand(
+                    record=graph.input_binding,
+                    request_unit_id=graph.request_unit.request_unit_id,
+                ),
+            ),
+            conversation_task_link=ConversationTaskLinkRecord(
+                schema_version=_CONVERSATION_TASK_LINK_SCHEMA_VERSION,
+                conversation_id=conversation.conversation_id,
+                task_id=graph.task.task_id,
+                link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+                linked_at=now,
+            ),
+            run_task_link=CreateRunTaskLinkCommand(
+                active_record=RunTaskLinkRecord(
+                    schema_version=_RUN_TASK_LINK_SCHEMA_VERSION,
+                    run_id=running_run.run_id,
+                    task_id=graph.task.task_id,
+                    base_task_state_version=None,
+                )
+            ),
+        )
+        for graph, child in zip(graphs, accepted_children, strict=True)
+    )
+    return (
+        _build_generic_initial_v3_command(
+            owner_scope=owner_scope,
+            conversation=conversation,
+            messages=messages,
+            running_run=running_run,
+            closure=closure,
+            accepted_task_graphs=accepted_items,
+        ),
+        decision,
+    )
+
+
+def _build_v3_effect_trace_records(
+    *,
+    closure: RequestUnderstandingClosureV3,
+    input_bindings: tuple[InputBindingV2, ...],
+    task: TaskRecord,
+    request_unit: RequestUnitRecord,
+    trace_event_ids: tuple[UUID, ...],
+) -> tuple[TraceEventV2, ...]:
+    """Project the exact accepted-effect Trace sequence from trusted IDs."""
+
+    if len(closure.accepted_task_deltas) != 1:
+        raise AgentRunExecutionError("v3 effect Trace requires one accepted child")
+    expected_count = len(input_bindings) + 3
+    if (
+        len(trace_event_ids) != expected_count
+        or len(trace_event_ids) != len(set(trace_event_ids))
+    ):
+        raise AgentRunExecutionError("v3 effect Trace identity allocation mismatch")
+    child = closure.accepted_task_deltas[0]
+    event_types = (
+        TraceEventType.TASK_DELTA_VALIDATED,
+        TraceEventType.TASK_DELTA_ACCEPTED,
+        *(
+            TraceEventType.INPUT_BINDING_RECORDED
+            for _binding in input_bindings
+        ),
+        TraceEventType.TASK_STATE_CHANGED,
+    )
+    input_binding_refs: tuple[UUID | None, ...] = (
+        None,
+        None,
+        *(binding.binding_id for binding in input_bindings),
+        None,
+    )
+    return tuple(
+        TraceEventV2(
+            trace_event_id=trace_event_id,
+            event_type=event_type,
+            occurred_at=closure.record.created_at,
+            run_id=closure.record.run_id,
+            message_ref=closure.record.message_ref,
+            accepted_delta_ref=child.accepted_delta_id,
+            task_id=task.task_id,
+            request_unit_id=request_unit.request_unit_id,
+            input_binding_ref=input_binding_ref,
+        )
+        for trace_event_id, event_type, input_binding_ref in zip(
+            trace_event_ids,
+            event_types,
+            input_binding_refs,
+            strict=True,
+        )
+    )
+
+
+def _project_continuation_binding_refs_v3(
+    *,
+    current_unit: RequestUnitRecord,
+    current_bindings: tuple[InputBindingV2, ...],
+    new_bindings: tuple[InputBindingV2, ...],
+) -> tuple[UUID, ...]:
+    refs = list(current_unit.input_binding_refs)
+    current_by_name = {binding.name: binding for binding in current_bindings}
+    for binding in new_bindings:
+        previous = current_by_name.get(binding.name)
+        if previous is None:
+            refs.append(binding.binding_id)
+        else:
+            if binding.supersedes != previous.binding_id:
+                raise AgentRunExecutionError("v3 continuation supersession mismatch")
+            try:
+                index = refs.index(previous.binding_id)
+            except ValueError:
+                raise AgentRunExecutionError(
+                    "v3 continuation superseded ref is not current"
+                ) from None
+            refs[index] = binding.binding_id
+        current_by_name[binding.name] = binding
+    return tuple(refs)
+
+
+def _build_continuation_v3_command(
+    *,
+    loaded_closure: ContinuationInputBindingReadClosure,
+    decision: Cycle2ContinuationDecisionV3,
+    trace_event_ids: tuple[UUID, ...],
+    rejected_ordinal_selection: (
+        Cycle2AcceptedClaimRejectedSelection | None
+    ) = None,
+) -> ApplyContinuationTaskDeltaV3Command:
+    child = decision.closure.accepted_task_deltas[0]
+    next_task = _project_task(
+        loaded_closure.current_task_record,
+        state_version=child.result_task_state_version,
+        updated_at=decision.closure.record.created_at,
+    )
+    next_unit = _project_request_unit(
+        loaded_closure.current_request_unit_record,
+        input_binding_refs=_project_continuation_binding_refs_v3(
+            current_unit=loaded_closure.current_request_unit_record,
+            current_bindings=loaded_closure.current_input_binding_records,
+            new_bindings=decision.input_bindings,
+        ),
+        state_version=child.result_task_state_version,
+        updated_at=decision.closure.record.created_at,
+    )
+    traces = _build_v3_effect_trace_records(
+        closure=decision.closure,
+        input_bindings=decision.input_bindings,
+        task=next_task,
+        request_unit=next_unit,
+        trace_event_ids=trace_event_ids,
+    )
+    return ApplyContinuationTaskDeltaV3Command(
+        loaded_closure=loaded_closure,
+        decision=decision,
+        next_task_record=next_task,
+        next_request_unit_record=next_unit,
+        effect_trace_records=traces,
+        rejected_ordinal_selection=rejected_ordinal_selection,
+    )
+
+
+def _routing_trigger_binding_v3(
+    decision: Cycle2ContinuationDecisionV3,
+) -> InputBindingV2:
+    matching = tuple(
+        binding
+        for binding in decision.input_bindings
+        if binding.binding_id == decision.routing_trigger_binding_ref
+    )
+    if len(matching) != 1:
+        raise AgentRunExecutionError("v3 continuation trigger is unavailable")
+    return matching[0]
+
+
+def _build_order_selection_v3_staging_command(
+    *,
+    loaded_closure: OrderCandidateSelectionReadClosure,
+    decision: Cycle2ContinuationDecisionV3,
+    issued_selected_target: IssuedSelectedTargetRef,
+    selection_id: UUID,
+    trace_event_ids: tuple[UUID, ...],
+) -> ApplyOrderCandidateSelectionV3Command:
+    """Project one reducer-owned ordinal decision into its exact CAS command."""
+
+    ordinal_binding = _routing_trigger_binding_v3(decision)
+    if (
+        ordinal_binding.name != "candidate_ordinal"
+        or len(decision.input_bindings) != 1
+    ):
+        raise AgentRunExecutionError("v3 selection requires one ordinal binding")
+    selected_entries = tuple(
+        entry
+        for entry in loaded_closure.current_candidate_set_record.ordered_candidates
+        if entry.ordinal == ordinal_binding.normalized_value
+    )
+    if len(selected_entries) != 1:
+        raise AgentRunExecutionError("v3 selected CandidateSet entry unavailable")
+    selected = selected_entries[0]
+    current_task = loaded_closure.current_task_record
+    current_unit = loaded_closure.current_request_unit_record
+    selected_at = decision.closure.record.created_at
+    selection = OrderCandidateSelectionRecord(
+        selection_id=selection_id,
+        private_owner_scope_ref=loaded_closure.owner_scope.customer_id,
+        conversation_id=loaded_closure.conversation_id,
+        task_id=current_task.task_id,
+        request_unit_id=current_unit.request_unit_id,
+        source_message_ref=(
+            loaded_closure.saved_selection_message_record.message_id
+        ),
+        ordinal_input_binding_ref=ordinal_binding.binding_id,
+        candidate_set_ref=(
+            loaded_closure.current_candidate_set_record.candidate_set_id
+        ),
+        candidate_set_version=(
+            loaded_closure.current_candidate_set_record.candidate_set_version
+        ),
+        search_observation_ref=(
+            loaded_closure.search_observation_record.observation_id
+        ),
+        search_observation_record_schema_version=(
+            loaded_closure.search_observation_record.record_schema_version
+        ),
+        observation_candidate_ref=selected.observation_candidate_ref,
+        candidate_source_version=selected.candidate_source_version,
+        owner_scoped_order_target_ref=(
+            loaded_closure.resolved_owner_scoped_order_target_ref
+        ),
+        selected_target_ref=str(issued_selected_target.selected_target_ref),
+        base_task_state_version=current_task.state_version,
+        result_task_state_version=current_task.state_version + 1,
+        selected_at=selected_at,
+    )
+    next_task = _project_task(
+        current_task,
+        status=TaskStatus.ACTIVE,
+        state_version=current_task.state_version + 1,
+        updated_at=selected_at,
+    )
+    next_unit = _project_request_unit(
+        current_unit,
+        input_binding_refs=(
+            *current_unit.input_binding_refs,
+            ordinal_binding.binding_id,
+        ),
+        open_questions=(),
+        status=TaskStatus.ACTIVE,
+        state_version=current_unit.state_version + 1,
+        updated_at=selected_at,
+    )
+    traces = _build_v3_effect_trace_records(
+        closure=decision.closure,
+        input_bindings=(ordinal_binding,),
+        task=next_task,
+        request_unit=next_unit,
+        trace_event_ids=trace_event_ids,
+    )
+    return build_order_candidate_selection_v3_command(
+        loaded_closure=loaded_closure,
+        ordinal_input_binding_record=ordinal_binding,
+        issued_selected_target=issued_selected_target,
+        next_task_record=next_task,
+        next_request_unit_record=next_unit,
+        selection_record=selection,
+        closed_pending_candidate_set_ref=(
+            loaded_closure.pending_candidate_set_ref
+        ),
+        decision=decision,
+        effect_trace_records=traces,
+    )
 
 
 def _project_cycle2_run(
@@ -453,6 +855,67 @@ class AgentRunService:
             model_visible_toolset_hash=manifest.model_visible_toolset_hash,
         )
         return manifest
+
+    async def _stage_generic_initial_turn_v3(
+        self,
+        *,
+        command: AgentRunCommand,
+        owner_scope: TrustedOwnerScope,
+        conversation: ConversationRecord,
+        messages: tuple[MessageRecord, ...],
+        running_run: AgentRunRecord,
+        request_input: RequestUnderstandingInput,
+    ) -> tuple[
+        Cycle2WriteResult,
+        InitialRequestNoTaskDecisionV2
+        | InitialRequestRoutableTaskGraphDecisionV2
+        | InitialRequestUnroutedTaskGraphsDecisionV2
+        | None,
+    ]:
+        """Persist generic v3 staging; only APPLIED exposes its Core result."""
+
+        output = await self._model_provider.propose_next_move(request_input)
+        now = self._clock()
+        request_understanding_record_id = self._uuid_factory()
+        allocations = tuple(
+            InitialTaskIdentityAllocationV2(
+                candidate_ref=candidate.candidate_id,
+                accepted_delta_id=self._uuid_factory(),
+                task_id=self._uuid_factory(),
+                request_unit_id=self._uuid_factory(),
+                binding_id=self._uuid_factory(),
+            )
+            for candidate in output.task_delta_candidates
+        )
+        next_move_candidate_ref = self._uuid_factory()
+        staged, decision = _reduce_and_build_generic_initial_v3_command(
+            owner_scope=owner_scope,
+            conversation=conversation,
+            messages=messages,
+            running_run=running_run,
+            request_input=request_input,
+            output=output,
+            customer_context=command.customer_context,
+            request_understanding_record_id=(
+                request_understanding_record_id
+            ),
+            candidate_identity_allocations=allocations,
+            next_move_candidate_ref=next_move_candidate_ref,
+            now=now,
+        )
+        if type(staged) is SaveRequestUnderstandingV3NoTaskCommand:
+            result = await (
+                self._runtime_record_port
+                .save_request_understanding_v3_no_task_if_current(staged)
+            )
+        elif type(staged) is CreateInitialTaskGraphV3Command:
+            result = await (
+                self._runtime_record_port
+                .create_initial_task_graph_v3_if_current(staged)
+            )
+        else:
+            raise AgentRunExecutionError("generic v3 staging command unavailable")
+        return result, decision if result is Cycle2WriteResult.APPLIED else None
 
     async def handle(self, command: AgentRunCommand) -> AgentRunResult:
         failure_state = _RunFailureState()
@@ -2211,6 +2674,329 @@ class Cycle2AgentRunHandler:
             model_visible_toolset_hash=(
                 self._registry_snapshot.model_visible_toolset_hash
             ),
+        )
+
+    async def _stage_initial_turn_v3(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+    ) -> tuple[Cycle2WriteResult, Cycle2InitialRequestDecisionV3 | None]:
+        """Build and persist the non-routed initial v3 staging aggregate."""
+
+        output = await self._request_understanding_provider.propose_cycle2_initial(
+            turn.request_input
+        )
+        reduced_at = self._clock()
+        decision = validate_and_reduce_cycle2_initial_request_v3(
+            request_input=turn.request_input,
+            output=output,
+            authoritative_messages={
+                turn.user_message.message_id: turn.user_message.content
+            },
+            customer_context=command.customer_context,
+            identity_allocation=InitialTaskIdentityAllocationV3(
+                request_understanding_record_id=self._uuid_factory(),
+                accepted_delta_id=self._uuid_factory(),
+                candidate_ref=output.task_delta_candidates[0].candidate_id,
+                task_id=self._uuid_factory(),
+                request_unit_id=self._uuid_factory(),
+                binding_id=self._uuid_factory(),
+                next_move_candidate_ref=self._uuid_factory(),
+            ),
+            now=reduced_at,
+        )
+        graph = decision.task_graph
+        conversation_link = ConversationTaskLinkRecord(
+            schema_version=_CONVERSATION_TASK_LINK_SCHEMA_VERSION,
+            conversation_id=turn.conversation.conversation_id,
+            task_id=graph.task.task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=reduced_at,
+        )
+        active_link = RunTaskLinkRecordV2(
+            run_id=turn.running_run.run_id,
+            task_id=graph.task.task_id,
+        )
+        ordinary_traces = (
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.MESSAGE_ACCEPTED,
+                occurred_at=turn.running_run.started_at,
+                run_id=turn.running_run.run_id,
+                message_ref=turn.user_message.message_id,
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=turn.running_run.started_at,
+                run_id=turn.running_run.run_id,
+            ),
+            TraceEventV2(
+                trace_event_id=self._uuid_factory(),
+                event_type=TraceEventType.REQUEST_UNDERSTANDING_STARTED,
+                occurred_at=reduced_at,
+                run_id=turn.running_run.run_id,
+                message_ref=turn.user_message.message_id,
+                model_call_purpose="REQUEST_UNDERSTANDING",
+            ),
+        )
+        effect_traces = _build_v3_effect_trace_records(
+            closure=decision.closure,
+            input_bindings=(graph.input_binding,),
+            task=graph.task,
+            request_unit=graph.request_unit,
+            trace_event_ids=tuple(self._uuid_factory() for _ in range(4)),
+        )
+        staged = CreateCycle2InitialTaskGraphV3Command(
+            owner_scope=turn.owner_scope,
+            expected_conversation_record=turn.conversation,
+            expected_user_message_record=turn.user_message,
+            expected_running_run_record=turn.running_run,
+            reducer_decision=decision,
+            conversation_task_link_record=conversation_link,
+            active_run_task_link_record=active_link,
+            ordinary_trace_records=ordinary_traces,
+            effect_trace_records=effect_traces,
+        )
+        result = await (
+            self._runtime_record_port.create_cycle2_initial_task_graph_v3_if_current(
+                staged
+            )
+        )
+        return (
+            result,
+            decision if result is Cycle2WriteResult.APPLIED else None,
+        )
+
+    async def _stage_continuation_turn_v3(
+        self,
+        *,
+        command: AgentRunCommand,
+        turn: _Cycle2Turn,
+        current_session: Cycle2CurrentSessionTaskClosure,
+    ) -> tuple[
+        Cycle2WriteResult,
+        InputBindingV2 | None,
+    ]:
+        """Persist one v3 continuation decision but never route or dispatch it."""
+
+        output = await (
+            self._request_understanding_provider.propose_cycle2_continuation_v3(
+                turn.request_input
+            )
+        )
+        reduced_at = self._clock()
+        input_count = len(output.task_delta_candidates[0].input_candidates)
+        decision = reduce_cycle2_continuation_task_delta(
+            request_input=turn.request_input,
+            output=output,
+            authoritative_messages={
+                turn.user_message.message_id: turn.user_message.content
+            },
+            customer_context=command.customer_context,
+            current_task=current_session.current_task_record,
+            current_request_unit=current_session.current_request_unit_record,
+            current_input_bindings=(
+                current_session.current_input_binding_records
+            ),
+            identity_allocation=Cycle2ContinuationIdentityAllocationV3(
+                request_understanding_record_id=self._uuid_factory(),
+                accepted_delta_id=self._uuid_factory(),
+                input_binding_ids=tuple(
+                    self._uuid_factory() for _ in range(input_count)
+                ),
+            ),
+            now=reduced_at,
+        )
+        loaded = await (
+            self._runtime_record_port.load_continuation_input_binding_closure_for_owner(
+                owner_scope=turn.owner_scope,
+                conversation_id=turn.conversation.conversation_id,
+                message_id=turn.user_message.message_id,
+                task_id=current_session.current_task_record.task_id,
+                request_unit_id=(
+                    current_session.current_request_unit_record.request_unit_id
+                ),
+                trusted_now=reduced_at,
+            )
+        )
+        if loaded is None:
+            raise AgentRunExecutionError("v3 continuation closure unavailable")
+        if type(decision) is RejectedCycle2ContinuationDecisionV3:
+            result = await (
+                self._runtime_record_port
+                .save_rejected_continuation_understanding_if_current(
+                    SaveRejectedContinuationUnderstandingV3Command(
+                        loaded_closure=loaded,
+                        decision=decision,
+                    )
+                )
+            )
+            return result, None
+        if type(decision) is not Cycle2ContinuationDecisionV3:
+            raise AgentRunExecutionError("v3 continuation decision unavailable")
+        trigger = _routing_trigger_binding_v3(decision)
+        if trigger.name == "candidate_ordinal":
+            child = decision.closure.accepted_task_deltas[0]
+            claim = Cycle2OrdinalClaimPreparation(
+                ordinal_input_binding=trigger,
+                selection_request=OrderCandidateSelectionRequest(
+                    source_message_ref=turn.user_message.message_id,
+                    ordinal_input_binding_ref=trigger.binding_id,
+                    ordinal=trigger.normalized_value,
+                ),
+                base_task_state_version=child.base_task_state_version,
+                result_task_state_version=child.result_task_state_version,
+            )
+            proposal = output.task_delta_candidates[0].input_candidates[0]
+            try:
+                preparation = prepare_cycle2_ordinal_selection(
+                    request_input=turn.request_input,
+                    candidate=proposal,
+                    authoritative_messages={
+                        turn.user_message.message_id: turn.user_message.content
+                    },
+                    customer_context=command.customer_context,
+                    current_conversation_id=turn.conversation.conversation_id,
+                    current_task=current_session.current_task_record,
+                    current_request_unit=(
+                        current_session.current_request_unit_record
+                    ),
+                    current_input_bindings=(
+                        current_session.current_input_binding_records
+                    ),
+                    current_candidate_sets=(
+                        current_session.current_candidate_set_records
+                    ),
+                    pending_candidate_set_ref=(
+                        current_session.current_candidate_set_records[0]
+                        .candidate_set_id
+                        if current_session.current_candidate_set_records
+                        else None
+                    ),
+                    superseded_candidate_set_refs=(
+                        current_session.superseded_candidate_set_refs
+                    ),
+                    existing_selection_records=(
+                        current_session.existing_selection_records
+                    ),
+                    binding_id=trigger.binding_id,
+                    now=reduced_at,
+                )
+            except (RequestProcessingError, IndexError):
+                rejected = reject_cycle2_ordinal_selection(
+                    claim=claim,
+                    reason=self._ordinal_rejection_reason(
+                        current_session=current_session,
+                        ordinal=trigger.normalized_value,
+                        trusted_now=reduced_at,
+                    ),
+                )
+                staged = _build_continuation_v3_command(
+                    loaded_closure=loaded,
+                    decision=decision,
+                    trace_event_ids=tuple(
+                        self._uuid_factory() for _index in range(4)
+                    ),
+                    rejected_ordinal_selection=rejected,
+                )
+                result = await (
+                    self._runtime_record_port
+                    .apply_continuation_task_delta_if_current(staged)
+                )
+                return result, None
+            if preparation.ordinal_input_binding != trigger:
+                raise AgentRunExecutionError(
+                    "v3 ordinal preparation does not match reducer decision"
+                )
+            if preparation.selection_request != claim.selection_request:
+                raise AgentRunExecutionError(
+                    "v3 ordinal request does not match reducer decision"
+                )
+            selection_closure = await (
+                self._runtime_record_port
+                .load_order_candidate_selection_closure_for_owner(
+                    owner_scope=turn.owner_scope,
+                    conversation_id=turn.conversation.conversation_id,
+                    task_id=current_session.current_task_record.task_id,
+                    request_unit_id=(
+                        current_session.current_request_unit_record.request_unit_id
+                    ),
+                    selection_request=preparation.selection_request,
+                    trusted_now=reduced_at,
+                )
+            )
+            if type(selection_closure) is not OrderCandidateSelectionReadClosure:
+                rejected = reject_cycle2_ordinal_selection(
+                    claim=claim,
+                    reason=self._ordinal_rejection_reason(
+                        current_session=current_session,
+                        ordinal=trigger.normalized_value,
+                        trusted_now=reduced_at,
+                    ),
+                )
+                staged = _build_continuation_v3_command(
+                    loaded_closure=loaded,
+                    decision=decision,
+                    trace_event_ids=tuple(
+                        self._uuid_factory() for _index in range(4)
+                    ),
+                    rejected_ordinal_selection=rejected,
+                )
+                result = await (
+                    self._runtime_record_port
+                    .apply_continuation_task_delta_if_current(staged)
+                )
+                return result, None
+            return await self._stage_order_selection_v3(
+                loaded_closure=selection_closure,
+                decision=decision,
+            )
+        staged = _build_continuation_v3_command(
+            loaded_closure=loaded,
+            decision=decision,
+            trace_event_ids=tuple(
+                self._uuid_factory()
+                for _ in range(len(decision.input_bindings) + 3)
+            ),
+        )
+        result = await (
+            self._runtime_record_port.apply_continuation_task_delta_if_current(
+                staged
+            )
+        )
+        return (
+            result,
+            _routing_trigger_binding_v3(decision)
+            if result is Cycle2WriteResult.APPLIED
+            else None,
+        )
+
+    async def _stage_order_selection_v3(
+        self,
+        *,
+        loaded_closure: OrderCandidateSelectionReadClosure,
+        decision: Cycle2ContinuationDecisionV3,
+    ) -> tuple[Cycle2WriteResult, InputBindingV2 | None]:
+        """Persist ordinal v3 selection without entering the active route."""
+
+        staged = _build_order_selection_v3_staging_command(
+            loaded_closure=loaded_closure,
+            decision=decision,
+            issued_selected_target=IssuedSelectedTargetRef.fresh_v3(),
+            selection_id=self._uuid_factory(),
+            trace_event_ids=tuple(self._uuid_factory() for _index in range(4)),
+        )
+        result = await (
+            self._runtime_record_port
+            .apply_order_candidate_selection_v3_if_current(staged)
+        )
+        return (
+            result,
+            staged.ordinal_input_binding_record
+            if result is Cycle2WriteResult.APPLIED
+            else None,
         )
 
     async def _handle_initial_turn(

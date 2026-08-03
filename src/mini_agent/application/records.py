@@ -45,8 +45,12 @@ from mini_agent.core.memory import (
 from mini_agent.core.order import GetOrderOutcome, GetOrderResult
 from mini_agent.core.request_processing import (
     Cycle2AcceptedClaimRejectedSelection,
+    Cycle2ContinuationDecisionV3,
     Cycle2InitialRequestDecisionV2,
+    Cycle2InitialRequestDecisionV3,
     Cycle2OrdinalSelectionRejectionReason,
+    RejectedCycle2ContinuationDecisionV3,
+    RequestUnderstandingClosureV3,
     _normalize_order_id,
 )
 from mini_agent.core.request_understanding import (
@@ -63,6 +67,8 @@ from mini_agent.core.shipment import (
     shipment_snapshot_is_fresh_at_acceptance,
 )
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
@@ -871,6 +877,108 @@ def _validate_v2_owner_roots_and_messages(
             "RU-v2 creation timestamp cannot precede current Message or Run"
         )
     return current_message
+
+
+def _referenced_message_ids_v3(
+    closure: RequestUnderstandingClosureV3,
+) -> frozenset[UUID]:
+    record = closure.record
+    references = {
+        record.message_ref,
+        *record.contextualization.source_message_refs,
+    }
+    references.update(
+        candidate.source_ref
+        for candidate in record.contextualization.resolved_reference_candidates
+    )
+    references.update(
+        source_ref
+        for uncertainty in record.contextualization.uncertainties
+        for source_ref in uncertainty.source_message_refs
+    )
+    references.update(
+        candidate_input.source_ref
+        for candidate in record.task_delta_candidates
+        for candidate_input in candidate.input_candidates
+    )
+    return frozenset(references)
+
+
+def _validate_v3_owner_roots_and_messages(
+    *,
+    owner_scope: object,
+    conversation: object,
+    messages: object,
+    run: object,
+    closure: object,
+) -> tuple[RequestUnderstandingClosureV3, MessageRecord]:
+    owner = _require_exact_trusted_owner_scope(owner_scope)
+    canonical_conversation = _strict_rebuild_exact_write_contract_model(
+        conversation,
+        ConversationRecord,
+        error_message="RU-v3 Conversation must be canonical",
+    )
+    message_values = _strict_tuple_projection(
+        messages,
+        error_message="RU-v3 Message closure must be canonical",
+    )
+    canonical_messages = tuple(
+        _strict_rebuild_exact_write_contract_model(
+            message,
+            MessageRecord,
+            error_message="RU-v3 Message closure must be canonical",
+        )
+        for message in message_values
+    )
+    canonical_run = _strict_rebuild_exact_write_contract_model(
+        run,
+        AgentRunRecord,
+        error_message="RU-v3 Run must be canonical",
+    )
+    canonical_closure = _strict_rebuild_exact_write_contract_model(
+        closure,
+        RequestUnderstandingClosureV3,
+        error_message="RU-v3 closure must be recursively canonical",
+    )
+    record = canonical_closure.record
+    if record.model_output_schema_version != "e2e01-thin-v2":
+        raise ValueError("generic RU-v3 command requires the Phase 1 branch")
+    message_ids = tuple(message.message_id for message in canonical_messages)
+    if len(message_ids) != len(set(message_ids)):
+        raise ValueError("RU-v3 expected Message identities must be unique")
+    if canonical_conversation.owner_customer_id != owner.customer_id:
+        raise ValueError("RU-v3 Conversation must match trusted owner scope")
+    if any(
+        message.conversation_id != canonical_conversation.conversation_id
+        for message in canonical_messages
+    ):
+        raise ValueError("RU-v3 Messages must belong to the exact Conversation")
+    if set(message_ids) != set(_referenced_message_ids_v3(canonical_closure)):
+        raise ValueError("RU-v3 requires the exact referenced Message set")
+    current_messages = tuple(
+        message
+        for message in canonical_messages
+        if message.message_id == record.message_ref
+    )
+    if (
+        len(current_messages) != 1
+        or current_messages[0].direction is not MessageDirection.USER
+    ):
+        raise ValueError("RU-v3 current Message must be exactly one USER Message")
+    if (
+        canonical_run.status is not AgentRunStatus.RUNNING
+        or canonical_run.incomplete_reason is not None
+        or canonical_run.conversation_id != canonical_conversation.conversation_id
+        or record.run_id != canonical_run.run_id
+    ):
+        raise ValueError("RU-v3 requires the exact clean RUNNING Run")
+    current_message = current_messages[0]
+    if (
+        record.created_at < current_message.received_at
+        or record.created_at < canonical_run.started_at
+    ):
+        raise ValueError("RU-v3 creation timestamp precedes trusted roots")
+    return canonical_closure, current_message
 
 
 class SaveRequestUnderstandingV2AcceptedCommand(_StrictRuntimePrivateRecord):
@@ -2018,6 +2126,270 @@ class CreateInitialTaskGraphV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class InitialAcceptedTaskGraphV3CommandItem(_StrictRuntimePrivateRecord):
+    """One Candidate-ordered generic Phase 1 v3 accepted Task effect."""
+
+    accepted_delta: AcceptedAddGoalTaskDeltaV3
+    initial_task: CreateTaskCommand
+    initial_request_unit: CreateRequestUnitCommand
+    input_bindings: Annotated[
+        tuple[SaveInputBindingCommand, ...],
+        Field(min_length=1),
+    ]
+    conversation_task_link: ConversationTaskLinkRecord
+    run_task_link: CreateRunTaskLinkCommand
+
+    @model_validator(mode="after")
+    def accepted_graph_is_exact(self) -> Self:
+        child = _strict_rebuild_exact_write_contract_model(
+            self.accepted_delta,
+            AcceptedAddGoalTaskDeltaV3,
+            error_message="RU-v3 accepted child must be canonical",
+        )
+        task = _strict_rebuild_create_task_command(
+            self.initial_task
+        ).initial_record
+        unit = _strict_rebuild_create_request_unit_command(
+            self.initial_request_unit
+        ).initial_record
+        binding_commands = tuple(
+            _strict_rebuild_save_input_binding_command(command)
+            for command in self.input_bindings
+        )
+        bindings = tuple(command.record for command in binding_commands)
+        conversation_link = _strict_rebuild_exact_write_contract_model(
+            self.conversation_task_link,
+            ConversationTaskLinkRecord,
+            error_message="RU-v3 ConversationTaskLink must be canonical",
+        )
+        run_link = _strict_rebuild_create_run_task_link_command(
+            self.run_task_link
+        ).active_record
+        binding_ids = tuple(binding.binding_id for binding in bindings)
+        if (
+            child.base_task_state_version is not None
+            or child.result_task_state_version != 1
+            or task.task_id != child.task_id
+            or task.status is not TaskStatus.ACTIVE
+            or task.state_version != child.result_task_state_version
+            or task.last_outcome_ref is not None
+            or unit.task_id != task.task_id
+            or unit.goal_text != child.goal_text
+            or unit.goal_source_refs != (child.message_ref,)
+            or unit.input_binding_refs != binding_ids
+            or unit.status is not TaskStatus.ACTIVE
+            or unit.state_version != child.result_task_state_version
+            or child.input_binding_refs != binding_ids
+            or len(binding_ids) != len(set(binding_ids))
+        ):
+            raise ValueError("RU-v3 accepted Task graph does not match child")
+        if any(
+            command.request_unit_id != unit.request_unit_id
+            or binding.validation_status is not InputValidationStatus.ACCEPTED
+            or binding.confirmed_by_user is not True
+            or binding.supersedes is not None
+            for command, binding in zip(
+                binding_commands,
+                bindings,
+                strict=True,
+            )
+        ):
+            raise ValueError("RU-v3 accepted Binding graph is not clean")
+        if (
+            conversation_link.task_id != task.task_id
+            or conversation_link.ended_at is not None
+            or run_link.task_id != task.task_id
+            or run_link.base_task_state_version is not None
+            or run_link.result_task_state_version is not None
+        ):
+            raise ValueError("RU-v3 initial links do not bind the accepted Task")
+        timestamps = {
+            child.accepted_at,
+            task.created_at,
+            task.updated_at,
+            unit.created_at,
+            unit.updated_at,
+            conversation_link.linked_at,
+            *(binding.created_at for binding in bindings),
+            *(binding.updated_at for binding in bindings),
+        }
+        if len(timestamps) != 1:
+            raise ValueError("RU-v3 accepted graph must use one trusted timestamp")
+        return self
+
+
+class SaveRequestUnderstandingV3NoTaskCommand(_StrictRuntimePrivateRecord):
+    """Persist one complete generic Phase 1 v3 closure with no Task effect."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_message_records: Annotated[
+        tuple[MessageRecord, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    expected_active_run_record: AgentRunRecord
+    request_understanding: RequestUnderstandingClosureV3
+
+    @model_validator(mode="after")
+    def closure_has_no_accepted_effect(self) -> Self:
+        closure, _ = _validate_v3_owner_roots_and_messages(
+            owner_scope=self.owner_scope,
+            conversation=self.expected_conversation_record,
+            messages=self.expected_message_records,
+            run=self.expected_active_run_record,
+            closure=self.request_understanding,
+        )
+        record = closure.record
+        if (
+            closure.accepted_task_deltas
+            or record.accepted_delta_refs
+            or any(
+                decision.decision is CandidateValidationDecision.ACCEPT
+                for decision in record.candidate_validation
+            )
+            or record.next_move_candidate_ref is not None
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version is not None
+        ):
+            raise ValueError("RU-v3 no-task command contains accepted authority")
+        return self
+
+
+class CreateInitialTaskGraphV3Command(_StrictRuntimePrivateRecord):
+    """Atomically persist all Candidate-ordered generic Phase 1 v3 effects."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_message_records: Annotated[
+        tuple[MessageRecord, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    expected_active_run_record: AgentRunRecord
+    request_understanding: RequestUnderstandingClosureV3
+    accepted_task_graphs: Annotated[
+        tuple[InitialAcceptedTaskGraphV3CommandItem, ...],
+        Field(min_length=1),
+    ]
+
+    @model_validator(mode="after")
+    def all_accepted_effects_form_one_atomic_tuple(self) -> Self:
+        closure, current_message = _validate_v3_owner_roots_and_messages(
+            owner_scope=self.owner_scope,
+            conversation=self.expected_conversation_record,
+            messages=self.expected_message_records,
+            run=self.expected_active_run_record,
+            closure=self.request_understanding,
+        )
+        graphs = tuple(
+            _strict_rebuild_exact_write_contract_model(
+                graph,
+                InitialAcceptedTaskGraphV3CommandItem,
+                error_message="RU-v3 accepted graph item must be canonical",
+            )
+            for graph in self.accepted_task_graphs
+        )
+        children = closure.accepted_task_deltas
+        candidate_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in closure.record.task_delta_candidates
+        }
+        if (
+            not children
+            or any(type(child) is not AcceptedAddGoalTaskDeltaV3 for child in children)
+            or tuple(graph.accepted_delta for graph in graphs) != children
+        ):
+            raise ValueError(
+                "RU-v3 accepted graph tuple must preserve Candidate ACCEPT order"
+            )
+        task_ids = tuple(graph.initial_task.initial_record.task_id for graph in graphs)
+        unit_ids = tuple(
+            graph.initial_request_unit.initial_record.request_unit_id
+            for graph in graphs
+        )
+        binding_ids = tuple(
+            command.record.binding_id
+            for graph in graphs
+            for command in graph.input_bindings
+        )
+        accepted_ids = tuple(child.accepted_delta_id for child in children)
+        all_generated_ids = (
+            closure.record.request_understanding_record_id,
+            *accepted_ids,
+            *task_ids,
+            *unit_ids,
+            *binding_ids,
+        )
+        if closure.record.next_move_candidate_ref is not None:
+            all_generated_ids = (
+                *all_generated_ids,
+                closure.record.next_move_candidate_ref,
+            )
+        if (
+            len(task_ids) != len(set(task_ids))
+            or len(unit_ids) != len(set(unit_ids))
+            or len(binding_ids) != len(set(binding_ids))
+            or len(all_generated_ids) != len(set(all_generated_ids))
+        ):
+            raise ValueError("RU-v3 accepted graph identities must be unique")
+        for graph in graphs:
+            task = graph.initial_task.initial_record
+            unit = graph.initial_request_unit.initial_record
+            child = graph.accepted_delta
+            candidate = candidate_by_id[child.candidate_ref]
+            binding_commands = graph.input_bindings
+            bindings = tuple(command.record for command in binding_commands)
+            if (
+                task.owner_customer_id != self.owner_scope.customer_id
+                or graph.conversation_task_link.conversation_id
+                != self.expected_conversation_record.conversation_id
+                or graph.run_task_link.active_record.run_id
+                != self.expected_active_run_record.run_id
+                or graph.accepted_delta.accepted_at
+                < current_message.received_at
+                or graph.accepted_delta.accepted_at
+                < self.expected_active_run_record.started_at
+            ):
+                raise ValueError("RU-v3 accepted graph trusted roots mismatch")
+            if (
+                unit.contextualization_ref is not None
+                or unit.constraint_refs
+                or unit.dependency_refs
+                or unit.open_questions
+                or unit.observation_refs
+                or unit.evidence_binding_refs
+                or unit.pending_action_ref is not None
+                or unit.result_refs
+            ):
+                raise ValueError("RU-v3 requires a clean initial RequestUnit")
+            if len(bindings) != len(candidate.input_candidates) or any(
+                command.request_unit_id != unit.request_unit_id
+                or binding.name != candidate_input.name
+                or binding.normalized_value
+                != _normalize_order_id(candidate_input.candidate_value)
+                or binding.authority is not candidate_input.authority
+                or binding.source_refs != (candidate_input.source_ref,)
+                for command, binding, candidate_input in zip(
+                    binding_commands,
+                    bindings,
+                    candidate.input_candidates,
+                    strict=True,
+                )
+            ):
+                raise ValueError(
+                    "RU-v3 accepted Binding projection does not match Candidate"
+                )
+        previous_result_by_task: dict[UUID, int] = {}
+        for child in children:
+            previous_result = previous_result_by_task.get(child.task_id)
+            if previous_result is None:
+                if child.base_task_state_version is not None:
+                    raise ValueError("RU-v3 initial Task chain must start at null")
+            elif child.base_task_state_version != previous_result:
+                raise ValueError("RU-v3 per-Task effect chain is not contiguous")
+            previous_result_by_task[child.task_id] = child.result_task_state_version
+        return self
+
+
 _TASK_STABLE_FIELDS = (
     "task_id",
     "owner_customer_id",
@@ -2935,6 +3307,99 @@ class CreateCycle2InitialTaskGraphCommand(_StrictRuntimePrivateRecord):
             )
         ):
             raise ValueError("Cycle 2 initial ordinary Trace closure is unsafe")
+        return self
+
+
+class CreateCycle2InitialTaskGraphV3Command(_StrictRuntimePrivateRecord):
+    """Stage one exact Cycle 2 initial v3 closure without activating its route."""
+
+    owner_scope: TrustedOwnerScope
+    expected_conversation_record: ConversationRecord
+    expected_user_message_record: MessageRecord
+    expected_running_run_record: AgentRunRecordV2
+    reducer_decision: Cycle2InitialRequestDecisionV3
+    conversation_task_link_record: ConversationTaskLinkRecord
+    active_run_task_link_record: RunTaskLinkRecordV2
+    ordinary_trace_records: Annotated[
+        tuple[TraceEventV2, ...], Field(min_length=1, max_length=8)
+    ]
+    effect_trace_records: Annotated[
+        tuple[TraceEventV2, ...], Field(min_length=4, max_length=8)
+    ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def initial_children_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "owner_scope": TrustedOwnerScope,
+                "expected_conversation_record": ConversationRecord,
+                "expected_user_message_record": MessageRecord,
+                "expected_running_run_record": AgentRunRecordV2,
+                "reducer_decision": Cycle2InitialRequestDecisionV3,
+                "conversation_task_link_record": ConversationTaskLinkRecord,
+                "active_run_task_link_record": RunTaskLinkRecordV2,
+            },
+            tuple_model_fields={
+                "ordinary_trace_records": TraceEventV2,
+                "effect_trace_records": TraceEventV2,
+            },
+        )
+
+    @model_validator(mode="after")
+    def initial_v3_graph_closes_real_run(self) -> Self:
+        conversation = self.expected_conversation_record
+        message = self.expected_user_message_record
+        run = self.expected_running_run_record
+        decision = self.reducer_decision
+        graph = decision.task_graph
+        record = decision.closure.record
+        conversation_link = self.conversation_task_link_record
+        run_link = self.active_run_task_link_record
+        if (
+            conversation.owner_customer_id != self.owner_scope.customer_id
+            or message.direction is not MessageDirection.USER
+            or message.conversation_id != conversation.conversation_id
+            or run.conversation_id != conversation.conversation_id
+            or run.status is not AgentRunStatusV2.RUNNING
+            or record.run_id != run.run_id
+            or record.message_ref != message.message_id
+            or graph.task.owner_customer_id != self.owner_scope.customer_id
+            or conversation_link.conversation_id != conversation.conversation_id
+            or conversation_link.task_id != graph.task.task_id
+            or conversation_link.ended_at is not None
+            or run_link.run_id != run.run_id
+            or run_link.task_id != graph.task.task_id
+            or run_link.base_task_state_version is not None
+            or run_link.result_task_state_version is not None
+            or conversation_link.linked_at != record.created_at
+        ):
+            raise ValueError("Cycle 2 initial v3 root graph mismatch")
+        ordinary_ids = tuple(
+            trace.trace_event_id for trace in self.ordinary_trace_records
+        )
+        effect_ids = tuple(
+            trace.trace_event_id for trace in self.effect_trace_records
+        )
+        if (
+            len((*ordinary_ids, *effect_ids))
+            != len(set((*ordinary_ids, *effect_ids)))
+            or any(
+                trace.run_id != run.run_id
+                or trace.case_id is not None
+                or trace.accepted_delta_ref is not None
+                for trace in self.ordinary_trace_records
+            )
+        ):
+            raise ValueError("Cycle 2 initial v3 ordinary Trace is unsafe")
+        _validate_accepted_task_delta_trace_records_v3(
+            trace_records=self.effect_trace_records,
+            decision_closure=decision.closure,
+            input_bindings=(graph.input_binding,),
+            task_record=graph.task,
+            request_unit_record=graph.request_unit,
+        )
         return self
 
 
@@ -4060,6 +4525,216 @@ class ApplyContinuationInputBindingV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+def _validate_accepted_task_delta_trace_records_v3(
+    *,
+    trace_records: tuple[TraceEventV2, ...],
+    decision_closure: RequestUnderstandingClosureV3,
+    input_bindings: tuple[InputBindingV2, ...],
+    task_record: TaskRecord,
+    request_unit_record: RequestUnitRecord,
+) -> None:
+    if len(decision_closure.accepted_task_deltas) != 1:
+        raise ValueError("accepted effect Trace requires one accepted child")
+    child = decision_closure.accepted_task_deltas[0]
+    if type(child) not in (
+        AcceptedAddGoalTaskDeltaV3,
+        AcceptedSupplyInputTaskDeltaV3,
+    ):
+        raise ValueError("accepted effect Trace child is not exact v3")
+    expected_types = (
+        TraceEventType.TASK_DELTA_VALIDATED,
+        TraceEventType.TASK_DELTA_ACCEPTED,
+        *(
+            TraceEventType.INPUT_BINDING_RECORDED
+            for _binding in input_bindings
+        ),
+        TraceEventType.TASK_STATE_CHANGED,
+    )
+    if tuple(trace.event_type for trace in trace_records) != expected_types:
+        raise ValueError("accepted effect Trace order/cardinality mismatch")
+    trace_ids = tuple(trace.trace_event_id for trace in trace_records)
+    if len(trace_ids) != len(set(trace_ids)):
+        raise ValueError("accepted effect Trace identities must be unique")
+    binding_refs: tuple[UUID | None, ...] = (
+        None,
+        None,
+        *(binding.binding_id for binding in input_bindings),
+        None,
+    )
+    for trace, expected_type, binding_ref in zip(
+        trace_records,
+        expected_types,
+        binding_refs,
+        strict=True,
+    ):
+        expected = TraceEventV2(
+            trace_event_id=trace.trace_event_id,
+            event_type=expected_type,
+            occurred_at=decision_closure.record.created_at,
+            run_id=decision_closure.record.run_id,
+            message_ref=decision_closure.record.message_ref,
+            accepted_delta_ref=child.accepted_delta_id,
+            task_id=task_record.task_id,
+            request_unit_id=request_unit_record.request_unit_id,
+            input_binding_ref=binding_ref,
+        )
+        if trace != expected:
+            raise ValueError("accepted effect Trace projection is not exact")
+
+
+class SaveRejectedContinuationUnderstandingV3Command(
+    _StrictRuntimePrivateRecord
+):
+    """Persist one keyed continuation REJECT without any authority effect."""
+
+    loaded_closure: ContinuationInputBindingReadClosure
+    decision: RejectedCycle2ContinuationDecisionV3
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ContinuationInputBindingReadClosure,
+                "decision": RejectedCycle2ContinuationDecisionV3,
+            },
+        )
+
+    @model_validator(mode="after")
+    def rejected_closure_matches_loaded_message(self) -> Self:
+        loaded = self.loaded_closure
+        record = self.decision.closure.record
+        if (
+            record.message_ref != loaded.saved_user_message_record.message_id
+            or record.created_at != loaded.trusted_now
+            or self.decision.closure.accepted_task_deltas
+            or record.accepted_delta_refs
+        ):
+            raise ValueError("continuation REJECT does not match loaded closure")
+        return self
+
+
+class ApplyContinuationTaskDeltaV3Command(_StrictRuntimePrivateRecord):
+    """CAS one accepted v3 continuation, all Bindings, and one Task effect."""
+
+    loaded_closure: ContinuationInputBindingReadClosure
+    decision: Cycle2ContinuationDecisionV3
+    next_task_record: TaskRecord
+    next_request_unit_record: RequestUnitRecord
+    effect_trace_records: Annotated[
+        tuple[TraceEventV2, ...],
+        Field(min_length=4, max_length=8),
+    ]
+    rejected_ordinal_selection: Cycle2AcceptedClaimRejectedSelection | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(cls, value: object) -> object:
+        return _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": ContinuationInputBindingReadClosure,
+                "decision": Cycle2ContinuationDecisionV3,
+                "next_task_record": TaskRecord,
+                "next_request_unit_record": RequestUnitRecord,
+            },
+            optional_model_fields={
+                "rejected_ordinal_selection": Cycle2AcceptedClaimRejectedSelection,
+            },
+            tuple_model_fields={"effect_trace_records": TraceEventV2},
+        )
+
+    @model_validator(mode="after")
+    def continuation_effect_is_one_atomic_closure(self) -> Self:
+        loaded = self.loaded_closure
+        decision = self.decision
+        record = decision.closure.record
+        child = decision.closure.accepted_task_deltas[0]
+        if type(child) is not AcceptedSupplyInputTaskDeltaV3:
+            raise ValueError("continuation command requires SUPPLY_INPUT child")
+        current_task = loaded.current_task_record
+        current_unit = loaded.current_request_unit_record
+        bindings = decision.input_bindings
+        if (
+            record.message_ref != loaded.saved_user_message_record.message_id
+            or record.created_at != loaded.trusted_now
+            or child.task_id != current_task.task_id
+            or child.target_request_unit_id != current_unit.request_unit_id
+            or child.base_task_state_version != current_task.state_version
+            or child.result_task_state_version != current_task.state_version + 1
+        ):
+            raise ValueError("continuation decision does not match loaded Task graph")
+        expected_refs = list(current_unit.input_binding_refs)
+        current_by_name = {
+            binding.name: binding
+            for binding in loaded.current_input_binding_records
+        }
+        for binding in bindings:
+            previous = current_by_name.get(binding.name)
+            expected_supersedes = (
+                None if previous is None else previous.binding_id
+            )
+            if binding.supersedes != expected_supersedes:
+                raise ValueError("continuation supersession is not exact")
+            if expected_supersedes is None:
+                expected_refs.append(binding.binding_id)
+            else:
+                try:
+                    index = expected_refs.index(expected_supersedes)
+                except ValueError:
+                    raise ValueError(
+                        "continuation superseded ref is not current"
+                    ) from None
+                expected_refs[index] = binding.binding_id
+            current_by_name[binding.name] = binding
+        if tuple(expected_refs) != self.next_request_unit_record.input_binding_refs:
+            raise ValueError("continuation RequestUnit Binding refs mismatch")
+        _task_pair_advances_once(
+            expected_task_record=current_task,
+            next_task_record=self.next_task_record,
+            expected_request_unit_record=current_unit,
+            next_request_unit_record=self.next_request_unit_record,
+            result_state_version=child.result_task_state_version,
+            changed_at=record.created_at,
+            allowed_request_unit_delta_fields=frozenset({"input_binding_refs"}),
+        )
+        if (
+            self.next_task_record.status is not current_task.status
+            or self.next_request_unit_record.status is not current_unit.status
+        ):
+            raise ValueError("ordinary continuation cannot change Task status")
+        rejection = self.rejected_ordinal_selection
+        trigger = next(
+            binding
+            for binding in bindings
+            if binding.binding_id == decision.routing_trigger_binding_ref
+        )
+        if trigger.name == "candidate_ordinal":
+            if (
+                len(bindings) != 1
+                or type(rejection) is not Cycle2AcceptedClaimRejectedSelection
+                or rejection.ordinal_input_binding != trigger
+                or rejection.base_task_state_version
+                != child.base_task_state_version
+                or rejection.result_task_state_version
+                != child.result_task_state_version
+            ):
+                raise ValueError(
+                    "ordinal continuation requires exact rejected selection child"
+                )
+        elif rejection is not None:
+            raise ValueError("non-ordinal continuation cannot carry rejection")
+        _validate_accepted_task_delta_trace_records_v3(
+            trace_records=self.effect_trace_records,
+            decision_closure=decision.closure,
+            input_bindings=bindings,
+            task_record=self.next_task_record,
+            request_unit_record=self.next_request_unit_record,
+        )
+        return self
+
+
 class AcceptedOrderSearchQueryBindingReadClosure(_StrictRuntimePrivateRecord):
     """Exact owner-reader projection of one still-current search query Claim."""
 
@@ -4877,7 +5552,10 @@ class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
         value: object,
         info: ValidationInfo,
     ) -> object:
-        if not _issued_selected_target_context_is_live(info.context):
+        if not (
+            _issued_selected_target_context_is_live(info.context)
+            or _issued_selected_target_v3_context_is_live(info.context)
+        ):
             raise ValueError(
                 "IssuedSelectedTargetRef must be created by fresh()"
             )
@@ -4895,6 +5573,12 @@ class IssuedSelectedTargetRef(_StrictRuntimePrivateRecord):
         """Generate a fresh target internally; callers cannot supply entropy."""
 
         return _issue_selected_target_ref()
+
+    @classmethod
+    def fresh_v3(cls) -> Self:
+        """Generate a target capability isolated to one v3 command factory."""
+
+        return _issue_selected_target_ref_v3()
 
 
 class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
@@ -5080,6 +5764,225 @@ class ApplyOrderCandidateSelectionV2Command(_StrictRuntimePrivateRecord):
         return self
 
 
+class ApplyOrderCandidateSelectionV3Command(_StrictRuntimePrivateRecord):
+    """Stage one exact ordinal v3 closure behind an isolated live target fence."""
+
+    loaded_closure: OrderCandidateSelectionReadClosure
+    ordinal_input_binding_record: InputBindingV2
+    issued_selected_target: IssuedSelectedTargetRef
+    next_task_record: TaskRecord
+    next_request_unit_record: RequestUnitRecord
+    selection_record: OrderCandidateSelectionRecord
+    closed_pending_candidate_set_ref: UUID
+    decision: Cycle2ContinuationDecisionV3
+    effect_trace_records: Annotated[
+        tuple[TraceEventV2, ...],
+        Field(min_length=4, max_length=8),
+    ]
+
+    def require_live_target_issuance(self) -> None:
+        """Reject a v3 command not returned by the isolated live factory."""
+
+        _require_live_order_candidate_selection_v3_command(self)
+
+    @property
+    def selected_target_ref(self) -> UUID:
+        return self.issued_selected_target.selected_target_ref
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_records_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if not _order_selection_v3_command_context_is_live(info.context):
+            raise ValueError(
+                "selection v3 command must be created by its Application factory"
+            )
+        if not isinstance(value, Mapping):
+            raise ValueError("selection v3 command requires a mapping")
+        issued_target = value.get("issued_selected_target")
+        if type(issued_target) is not IssuedSelectedTargetRef:
+            raise ValueError(
+                "issued_selected_target must be an exact live issuance"
+            )
+        canonical = _require_exact_cycle2_inputs(
+            value,
+            model_fields={
+                "loaded_closure": OrderCandidateSelectionReadClosure,
+                "ordinal_input_binding_record": InputBindingV2,
+                "next_task_record": TaskRecord,
+                "next_request_unit_record": RequestUnitRecord,
+                "selection_record": OrderCandidateSelectionRecord,
+                "decision": Cycle2ContinuationDecisionV3,
+            },
+            tuple_model_fields={"effect_trace_records": TraceEventV2},
+        )
+        canonical["issued_selected_target"] = issued_target
+        return canonical
+
+    @model_validator(mode="after")
+    def selection_effect_is_exact(self, info: ValidationInfo) -> Self:
+        closure = self.loaded_closure
+        current_task = closure.current_task_record
+        current_unit = closure.current_request_unit_record
+        candidate_set = closure.current_candidate_set_record
+        observation = closure.search_observation_record
+        request = closure.selection_request
+        ordinal_binding = self.ordinal_input_binding_record
+        selection = self.selection_record
+
+        validated_selection = validate_candidate_selection_closure(
+            current_candidate_sets=(candidate_set,),
+            observation=observation,
+            request=request,
+            trusted_owner_scope_ref=closure.owner_scope.customer_id,
+            conversation_id=closure.conversation_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            pending_candidate_set_ref=closure.pending_candidate_set_ref,
+            current_task_state_version=current_task.state_version,
+            current_query_binding_refs=closure.current_query_binding_refs,
+            trusted_now=closure.trusted_now,
+            resolved_owner_scoped_order_target_ref=(
+                closure.resolved_owner_scoped_order_target_ref
+            ),
+            superseded_candidate_set_refs=closure.superseded_candidate_set_refs,
+            existing_selection_records=closure.existing_selection_records,
+        )
+        exact_values = {
+            "private_owner_scope_ref": closure.owner_scope.customer_id,
+            "conversation_id": closure.conversation_id,
+            "task_id": current_task.task_id,
+            "request_unit_id": current_unit.request_unit_id,
+            "source_message_ref": request.source_message_ref,
+            "ordinal_input_binding_ref": request.ordinal_input_binding_ref,
+            "candidate_set_ref": candidate_set.candidate_set_id,
+            "candidate_set_version": candidate_set.candidate_set_version,
+            "search_observation_ref": observation.observation_id,
+            "search_observation_record_schema_version": (
+                observation.record_schema_version
+            ),
+            "observation_candidate_ref": (
+                validated_selection.observation_candidate_ref
+            ),
+            "candidate_source_version": (
+                validated_selection.candidate_source_version
+            ),
+            "owner_scoped_order_target_ref": (
+                closure.resolved_owner_scoped_order_target_ref
+            ),
+            "selected_target_ref": str(self.selected_target_ref),
+            "base_task_state_version": current_task.state_version,
+        }
+        if any(
+            getattr(selection, field_name) != expected_value
+            for field_name, expected_value in exact_values.items()
+        ):
+            raise ValueError("SelectionRecord does not match exact loaded closure")
+        if self.closed_pending_candidate_set_ref != candidate_set.candidate_set_id:
+            raise ValueError("selection must close the exact pending CandidateSet")
+        if selection.selected_at != closure.trusted_now:
+            raise ValueError("selection timestamp must equal trusted transaction time")
+        if (
+            self.selected_target_ref.version != 4
+            or not _is_canonical_uuid_text(selection.selected_target_ref)
+            or selection.selected_target_ref
+            == closure.resolved_owner_scoped_order_target_ref
+            or self.selected_target_ref
+            in {
+                request.ordinal_input_binding_ref,
+                request.source_message_ref,
+                candidate_set.candidate_set_id,
+                observation.observation_id,
+                validated_selection.observation_candidate_ref,
+                selection.selection_id,
+                current_task.task_id,
+                current_unit.request_unit_id,
+            }
+        ):
+            raise ValueError(
+                "selected target must be a fresh independent canonical UUID"
+            )
+        if (
+            ordinal_binding.binding_id != request.ordinal_input_binding_ref
+            or ordinal_binding.name != "candidate_ordinal"
+            or type(ordinal_binding.normalized_value) is not int
+            or ordinal_binding.normalized_value != request.ordinal
+            or ordinal_binding.source_refs
+            != (closure.saved_selection_message_record.message_id,)
+            or ordinal_binding.created_at != closure.trusted_now
+            or ordinal_binding.updated_at != closure.trusted_now
+            or ordinal_binding.supersedes is not None
+            or ordinal_binding.binding_id in current_unit.input_binding_refs
+        ):
+            raise ValueError(
+                "selection must create one exact new ordinal InputBindingV2"
+            )
+        expected_next_refs = (
+            *current_unit.input_binding_refs,
+            ordinal_binding.binding_id,
+        )
+        if self.next_request_unit_record.input_binding_refs != expected_next_refs:
+            raise ValueError("selection must append exactly the ordinal binding ref")
+        _task_pair_advances_once(
+            expected_task_record=current_task,
+            next_task_record=self.next_task_record,
+            expected_request_unit_record=current_unit,
+            next_request_unit_record=self.next_request_unit_record,
+            result_state_version=selection.result_task_state_version,
+            changed_at=selection.selected_at,
+            allowed_request_unit_delta_fields=frozenset(
+                {"input_binding_refs", "open_questions"}
+            ),
+        )
+        if self.next_task_record.status is not TaskStatus.ACTIVE:
+            raise ValueError("successful selection must reactivate Task")
+        if (
+            len(current_unit.open_questions) != 1
+            or self.next_request_unit_record.open_questions
+        ):
+            raise ValueError("successful selection must close pending question")
+
+        decision = self.decision
+        child = decision.closure.accepted_task_deltas[0]
+        if (
+            type(child) is not AcceptedSupplyInputTaskDeltaV3
+            or len(decision.input_bindings) != 1
+            or decision.input_bindings[0] != ordinal_binding
+            or decision.routing_trigger_binding_ref != ordinal_binding.binding_id
+            or child.task_id != current_task.task_id
+            or child.target_request_unit_id != current_unit.request_unit_id
+            or child.base_task_state_version
+            != selection.base_task_state_version
+            or child.result_task_state_version
+            != selection.result_task_state_version
+            or decision.closure.record.message_ref
+            != closure.saved_selection_message_record.message_id
+            or decision.closure.record.run_id
+            != closure.current_run_record.run_id
+            or decision.closure.record.created_at != selection.selected_at
+        ):
+            raise ValueError("selection v3 RU closure does not match selection")
+        _validate_accepted_task_delta_trace_records_v3(
+            trace_records=self.effect_trace_records,
+            decision_closure=decision.closure,
+            input_bindings=decision.input_bindings,
+            task_record=self.next_task_record,
+            request_unit_record=self.next_request_unit_record,
+        )
+        if not _order_selection_v3_command_context_is_live(info.context, self):
+            raise ValueError(
+                "selection v3 command must retain its Application factory context"
+            )
+        _bind_issued_selected_target_to_v3_command(
+            self.issued_selected_target,
+            self,
+        )
+        return self
+
+
 def _build_order_selection_target_issuer() -> tuple[Any, ...]:
     """Keep UUID issuance, factory tokens, and provenance state in closure."""
 
@@ -5099,8 +6002,7 @@ def _build_order_selection_target_issuer() -> tuple[Any, ...]:
         tuple[
             weakref.ReferenceType[IssuedSelectedTargetRef],
             UUID,
-            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command]
-            | None,
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV2Command] | None,
             str | None,
         ],
     ] = {}
@@ -5269,6 +6171,193 @@ def _build_order_selection_target_issuer() -> tuple[Any, ...]:
     build_order_candidate_selection_v2_command,
 ) = _build_order_selection_target_issuer()
 del _build_order_selection_target_issuer
+
+
+def _build_order_selection_v3_target_issuer() -> tuple[Any, ...]:
+    """Keep v3 UUID issuance and command provenance isolated from v2."""
+
+    generate_uuid4 = uuid4
+    issue_factory_token = object()
+    command_factory_token = object()
+    active_command_contexts: dict[int, object] = {}
+    active_command_candidates: dict[
+        int,
+        tuple[weakref.ReferenceType[ApplyOrderCandidateSelectionV3Command], int],
+    ] = {}
+    issue_registry: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[IssuedSelectedTargetRef],
+            UUID,
+            weakref.ReferenceType[ApplyOrderCandidateSelectionV3Command] | None,
+            str | None,
+        ],
+    ] = {}
+
+    def issue_context_is_live(context: object) -> bool:
+        return (
+            type(context) is dict
+            and context.get("issued_selected_target_v3_factory_context")
+            is issue_factory_token
+        )
+
+    def command_context_is_live(
+        context: object,
+        candidate: object | None = None,
+    ) -> bool:
+        context_is_live = (
+            type(context) is dict
+            and active_command_contexts.get(id(context)) is context
+            and context.get("order_selection_v3_command_factory_context")
+            is command_factory_token
+        )
+        if not context_is_live:
+            return False
+        if candidate is None:
+            return True
+        if type(candidate) is not ApplyOrderCandidateSelectionV3Command:
+            return False
+        active_command_candidates[id(candidate)] = (
+            weakref.ref(candidate),
+            id(context),
+        )
+        return True
+
+    def issue_selected_target_ref() -> IssuedSelectedTargetRef:
+        issued_target = IssuedSelectedTargetRef.model_validate(
+            {"selected_target_ref": generate_uuid4()},
+            strict=True,
+            context={
+                "issued_selected_target_v3_factory_context": issue_factory_token
+            },
+        )
+        issued_id = id(issued_target)
+
+        def discard_if_same(
+            expired: weakref.ReferenceType[IssuedSelectedTargetRef],
+            *,
+            registered_id: int = issued_id,
+        ) -> None:
+            registered = issue_registry.get(registered_id)
+            if registered is not None and registered[0] is expired:
+                issue_registry.pop(registered_id, None)
+
+        issue_registry[issued_id] = (
+            weakref.ref(issued_target, discard_if_same),
+            issued_target.selected_target_ref,
+            None,
+            None,
+        )
+        return issued_target
+
+    def bind_issued_target_to_command(
+        issued_target: IssuedSelectedTargetRef,
+        command: ApplyOrderCandidateSelectionV3Command,
+    ) -> None:
+        registered = issue_registry.get(id(issued_target))
+        candidate = active_command_candidates.pop(id(command), None)
+        if (
+            candidate is None
+            or candidate[0]() is not command
+            or active_command_contexts.get(candidate[1]) is None
+            or type(issued_target) is not IssuedSelectedTargetRef
+            or type(command) is not ApplyOrderCandidateSelectionV3Command
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is not None
+            or registered[3] is not None
+        ):
+            raise ValueError(
+                "selected target requires one fresh v3 Application issuance"
+            )
+        issue_registry[id(issued_target)] = (
+            registered[0],
+            registered[1],
+            weakref.ref(command),
+            command.model_dump_json(),
+        )
+
+    def require_live_command(
+        command: ApplyOrderCandidateSelectionV3Command,
+    ) -> None:
+        if type(command) is not ApplyOrderCandidateSelectionV3Command:
+            raise ValueError(
+                "selection v3 command lacks fresh Application target issuance"
+            )
+        issued_target = command.issued_selected_target
+        registered = issue_registry.get(id(issued_target))
+        if (
+            type(issued_target) is not IssuedSelectedTargetRef
+            or registered is None
+            or registered[0]() is not issued_target
+            or registered[1] != issued_target.selected_target_ref
+            or registered[2] is None
+            or registered[2]() is not command
+            or registered[3] != command.model_dump_json()
+        ):
+            raise ValueError(
+                "selection v3 command lacks fresh Application target issuance"
+            )
+
+    def build_command(
+        *,
+        loaded_closure: OrderCandidateSelectionReadClosure,
+        ordinal_input_binding_record: InputBindingV2,
+        issued_selected_target: IssuedSelectedTargetRef,
+        next_task_record: TaskRecord,
+        next_request_unit_record: RequestUnitRecord,
+        selection_record: OrderCandidateSelectionRecord,
+        closed_pending_candidate_set_ref: UUID,
+        decision: Cycle2ContinuationDecisionV3,
+        effect_trace_records: tuple[TraceEventV2, ...],
+    ) -> ApplyOrderCandidateSelectionV3Command:
+        context = {
+            "order_selection_v3_command_factory_context": command_factory_token
+        }
+        context_id = id(context)
+        active_command_contexts[context_id] = context
+        try:
+            return ApplyOrderCandidateSelectionV3Command.model_validate(
+                {
+                    "loaded_closure": loaded_closure,
+                    "ordinal_input_binding_record": ordinal_input_binding_record,
+                    "issued_selected_target": issued_selected_target,
+                    "next_task_record": next_task_record,
+                    "next_request_unit_record": next_request_unit_record,
+                    "selection_record": selection_record,
+                    "closed_pending_candidate_set_ref": (
+                        closed_pending_candidate_set_ref
+                    ),
+                    "decision": decision,
+                    "effect_trace_records": effect_trace_records,
+                },
+                strict=True,
+                context=context,
+            )
+        finally:
+            if active_command_contexts.get(context_id) is context:
+                active_command_contexts.pop(context_id, None)
+
+    return (
+        issue_selected_target_ref,
+        issue_context_is_live,
+        command_context_is_live,
+        bind_issued_target_to_command,
+        require_live_command,
+        build_command,
+    )
+
+
+(
+    _issue_selected_target_ref_v3,
+    _issued_selected_target_v3_context_is_live,
+    _order_selection_v3_command_context_is_live,
+    _bind_issued_selected_target_to_v3_command,
+    _require_live_order_candidate_selection_v3_command,
+    build_order_candidate_selection_v3_command,
+) = _build_order_selection_v3_target_issuer()
+del _build_order_selection_v3_target_issuer
 
 
 class InitialToolCallV2ReadClosure(_StrictRuntimePrivateRecord):

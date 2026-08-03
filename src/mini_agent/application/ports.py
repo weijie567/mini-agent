@@ -12,12 +12,15 @@ from mini_agent.application.records import (
     AppendInitialToolAttemptV2Command,
     AppendRecoveredToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
+    ApplyContinuationTaskDeltaV3Command,
     ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderCandidateSelectionV3Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2InitialTaskGraphV3Command,
     CreateCycle2RunRootCommand,
     Cycle2ReadDispatchGrant,
     Cycle2ControlPurpose,
@@ -28,6 +31,7 @@ from mini_agent.application.records import (
     ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
     CreateInitialTaskGraphV2Command,
+    CreateInitialTaskGraphV3Command,
     CreateRunCommand,
     CreateToolCallCommand,
     CreateToolCallV2Command,
@@ -59,6 +63,8 @@ from mini_agent.application.records import (
     SaveShipmentAssessmentV2Command,
     SaveShipmentObservationV2Command,
     SaveRequestUnderstandingV2NoTaskCommand,
+    SaveRejectedContinuationUnderstandingV3Command,
+    SaveRequestUnderstandingV3NoTaskCommand,
     SaveObservationCommand,
     StartCycle2RunCommand,
     ToolDispatchFenceWriteResult,
@@ -88,6 +94,7 @@ from mini_agent.core.presentation import (
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2InitialRequestUnderstandingOutputV2,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
@@ -261,6 +268,20 @@ class RuntimeRecordPort(Protocol):
         PROJECTION_CONFLICT and NOT_APPLICABLE guarantee zero writes. An absent
         and an unauthorized owner graph remain indistinguishable.
         """
+        ...
+
+    async def save_request_understanding_v3_no_task_if_current(
+        self,
+        command: SaveRequestUnderstandingV3NoTaskCommand,
+    ) -> Cycle2WriteResult:
+        """Stage one exact generic v3 no-task closure; never fall back to v2."""
+        ...
+
+    async def create_initial_task_graph_v3_if_current(
+        self,
+        command: CreateInitialTaskGraphV3Command,
+    ) -> Cycle2WriteResult:
+        """Stage all generic v3 accepted effects in one identity-first write."""
         ...
 
     async def apply_task_transition_if_current(
@@ -470,6 +491,13 @@ class Cycle2RuntimeRecordPort(Protocol):
         """Create the reviewed initial Task graph against exact current roots."""
         ...
 
+    async def create_cycle2_initial_task_graph_v3_if_current(
+        self,
+        command: CreateCycle2InitialTaskGraphV3Command,
+    ) -> Cycle2WriteResult:
+        """Stage the exact initial v3 closure without switching the active route."""
+        ...
+
     async def finalize_cycle2_run_if_current(
         self,
         command: FinalizeCycle2RunCommand,
@@ -516,6 +544,20 @@ class Cycle2RuntimeRecordPort(Protocol):
         commits nothing. Every non-APPLIED result means zero writes. This
         method never accepts ``candidate_ordinal`` and grants no dispatch.
         """
+        ...
+
+    async def save_rejected_continuation_understanding_if_current(
+        self,
+        command: SaveRejectedContinuationUnderstandingV3Command,
+    ) -> Cycle2WriteResult:
+        """Stage one identity-first v3 REJECT with no accepted authority."""
+        ...
+
+    async def apply_continuation_task_delta_if_current(
+        self,
+        command: ApplyContinuationTaskDeltaV3Command,
+    ) -> Cycle2WriteResult:
+        """Stage one accepted v3 delta, all Bindings, Trace, and one Task CAS."""
         ...
 
     async def load_order_search_current_closure_for_owner(
@@ -578,6 +620,13 @@ class Cycle2RuntimeRecordPort(Protocol):
         closes the exact pending question, and advances Task/RequestUnit once.
         Every non-APPLIED result means zero writes across the full graph.
         """
+        ...
+
+    async def apply_order_candidate_selection_v3_if_current(
+        self,
+        command: ApplyOrderCandidateSelectionV3Command,
+    ) -> Cycle2WriteResult:
+        """Stage the v3 ordinal closure while retaining live target issuance."""
         ...
 
     async def load_initial_tool_call_v2_closure_for_owner(
@@ -888,6 +937,13 @@ class Cycle2RequestUnderstandingProvider(Protocol):
         self,
         request: RequestUnderstandingInput,
     ) -> Cycle2InputCandidate: ...
+
+    async def propose_cycle2_continuation_v3(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+        """Staging-only exact envelope; never a fallback for the active v2 call."""
+        ...
 
     async def propose_cycle2_control(
         self,
