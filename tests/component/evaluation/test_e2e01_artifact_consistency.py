@@ -1214,7 +1214,7 @@ def test_artifacts_contain_only_declared_synthetic_data_and_no_secrets() -> None
             assert not string_value.startswith(("http://", "https://"))
 
 
-def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None:
+def test_eval_provider_contract_uses_v3_evidence_with_staged_provider_output() -> None:
     serialized_artifacts = "\n".join(
         path.read_text(encoding="utf-8") for path in ARTIFACT_PATHS
     )
@@ -1241,15 +1241,19 @@ def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None
 
     assert {
         "request_understanding_output",
-        "request_understanding_records",
-        "accepted_task_deltas",
         "observation_persistence_envelopes",
-    }.isdisjoint(graders_module.EvalEvidence.model_fields)
-    assert {
         "request_understanding_records_v2",
         "accepted_task_deltas_v2",
+    }.isdisjoint(graders_module.EvalEvidence.model_fields)
+    assert {
+        "request_understanding_records",
+        "accepted_task_deltas",
         "task_state_transitions",
     } <= set(graders_module.EvalEvidence.model_fields)
+    continuation_signature = signature(
+        scripted_v2.propose_cycle2_continuation_v3
+    )
+    assert tuple(continuation_signature.parameters) == ("self", "request")
     harness_source = getsource(harness_module)
     assert "ScriptedModelProviderV2" in harness_source
     assert "ScriptedModelProvider," not in harness_source
@@ -1264,6 +1268,9 @@ def test_eval_provider_contract_is_v2_only_without_artifact_activation() -> None
         "http_status",
         "agent_result",
         "closure",
+    )
+    assert mapper_signature.parameters["closure"].annotation == (
+        "ExactRunEvidenceV3Closure"
     )
     assert all(
         parameter.kind.name == "KEYWORD_ONLY"

@@ -56,18 +56,23 @@ from mini_agent.core.request_understanding import (
     ReferenceSourceKindV2,
     TaskDeltaOperation,
 )
+from mini_agent.core.request_processing import RequestUnderstandingClosureV3
 from mini_agent.core.task_state import (
-    AcceptedTaskDeltaV2,
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
-    DurableTaskDeltaCandidateV2,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     InputBinding,
     InputBindingV2,
     InputValidationStatus,
-    RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -1141,8 +1146,8 @@ def _variant_evidence(
     if variant.task_status is None:
         common.update(
             {
-                "request_understanding_records_v2": (),
-                "accepted_task_deltas_v2": (),
+                "request_understanding_records": (),
+                "accepted_task_deltas": (),
                 "task_state_transitions": (),
                 "input_bindings": (),
                 "task_records": (),
@@ -1476,7 +1481,7 @@ def _base_evidence_values() -> dict[str, object]:
     return values
 
 
-def _v2_evidence(**overrides: object) -> EvalEvidence:
+def _v3_evidence(**overrides: object) -> EvalEvidence:
     base_values = _base_evidence_values()
     message = base_values["message_records"][0]  # type: ignore[index]
     task = base_values["task_records"][0]  # type: ignore[index]
@@ -1499,20 +1504,20 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
         source_quote_sha256=source_hash,
         confidence=1.0,
     )
-    durable_candidate = DurableTaskDeltaCandidateV2(
+    durable_candidate = DurablePhase1AddGoalTaskDeltaCandidateV3(
         candidate_id=CANDIDATE_ID,
         operation=TaskDeltaOperation.ADD_GOAL,
         goal_patch="查询指定订单状态",
         input_candidates=(durable_input,),
         confidence=1.0,
     )
-    understanding = RequestUnderstandingRecordV2(
+    understanding = RequestUnderstandingRecordV3(
         request_understanding_record_id=UUID(
             "00000000-0000-4000-8000-000000000518"
         ),
         run_id=RUN_ID,
         message_ref=message.message_id,
-        schema_version="request_understanding_record.p0.v2",
+        record_schema_version="request_understanding_record.p0.v3",
         model_input_schema_version="e2e01-thin-v1",
         model_output_schema_version="e2e01-thin-v2",
         contextualization=DurableQueryContextualizationCandidateV2(
@@ -1545,7 +1550,7 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
         next_move_candidate_ref=NEXT_MOVE_REF,
         created_at=NOW,
     )
-    accepted = AcceptedTaskDeltaV2(
+    accepted = AcceptedAddGoalTaskDeltaV3(
         accepted_delta_id=ACCEPTED_DELTA_ID,
         candidate_ref=CANDIDATE_ID,
         message_ref=message.message_id,
@@ -1574,8 +1579,8 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
     }
     values.update(
         {
-            "request_understanding_records_v2": (understanding,),
-            "accepted_task_deltas_v2": (accepted,),
+            "request_understanding_records": (understanding,),
+            "accepted_task_deltas": (accepted,),
             "task_state_transitions": (transition,),
         }
     )
@@ -1584,7 +1589,7 @@ def _v2_evidence(**overrides: object) -> EvalEvidence:
 
 
 def _evidence(**overrides: object) -> EvalEvidence:
-    return _v2_evidence(**overrides)
+    return _v3_evidence(**overrides)
 
 
 def _minimal_self_attested_evidence() -> EvalEvidence:
@@ -1640,13 +1645,13 @@ def _tampered(grader_name: str) -> EvalEvidence:
         )
         return _evidence(task_records=(task,))
     if grader_name == "RequestUnderstandingGrader":
-        understanding = evidence.request_understanding_records_v2[0]
+        understanding = evidence.request_understanding_records[0]
         candidate = understanding.task_delta_candidates[0]
         tampered_input = candidate.input_candidates[0].model_copy(
             update={"candidate_value": "O-2001"}
         )
         return _evidence(
-            request_understanding_records_v2=(
+            request_understanding_records=(
                 understanding.model_copy(
                     update={
                         "task_delta_candidates": (
@@ -2413,47 +2418,47 @@ def test_registry_membership_is_exactly_the_13_artifact_names() -> None:
     assert all(registry[name].name == name for name in GRADER_NAMES)
 
 
-def test_eval_evidence_exposes_only_durable_v2_request_understanding_graph() -> None:
-    v2 = _v2_evidence()
+def test_eval_evidence_exposes_only_durable_v3_request_understanding_graph() -> None:
+    v3 = _v3_evidence()
     assert {
         "request_understanding_output",
-        "request_understanding_records",
-        "accepted_task_deltas",
+        "request_understanding_records_v2",
+        "accepted_task_deltas_v2",
         "observation_persistence_envelopes",
     }.isdisjoint(EvalEvidence.model_fields)
-    assert len(v2.request_understanding_records_v2) == 1
-    assert len(v2.accepted_task_deltas_v2) == 1
-    assert len(v2.task_state_transitions) == 1
+    assert len(v3.request_understanding_records) == 1
+    assert len(v3.accepted_task_deltas) == 1
+    assert len(v3.task_state_transitions) == 1
 
 
 @pytest.mark.parametrize(
     "bypass",
     (
-        "missing_v2_record_with_child",
-        "missing_v2_record_with_transition",
-        "duplicate_v2_record",
+        "missing_v3_record_with_child",
+        "missing_v3_record_with_transition",
+        "duplicate_v3_record",
         "accepted_ref_mismatch",
         "accepted_candidate_mismatch",
     ),
 )
 @pytest.mark.parametrize("construction", ("model_copy", "model_construct"))
-def test_every_noncanonical_mixed_v2_bypass_fails_before_grading(
+def test_every_noncanonical_mixed_v3_bypass_fails_before_grading(
     bypass: str,
     construction: str,
 ) -> None:
-    canonical = _v2_evidence()
+    canonical = _v3_evidence()
     update: dict[str, object]
-    if bypass == "missing_v2_record_with_child":
-        update = {"request_understanding_records_v2": ()}
-    elif bypass == "missing_v2_record_with_transition":
+    if bypass == "missing_v3_record_with_child":
+        update = {"request_understanding_records": ()}
+    elif bypass == "missing_v3_record_with_transition":
         update = {
-            "request_understanding_records_v2": (),
-            "accepted_task_deltas_v2": (),
+            "request_understanding_records": (),
+            "accepted_task_deltas": (),
         }
-    elif bypass == "duplicate_v2_record":
-        understanding = canonical.request_understanding_records_v2[0]
+    elif bypass == "duplicate_v3_record":
+        understanding = canonical.request_understanding_records[0]
         update = {
-            "request_understanding_records_v2": (
+            "request_understanding_records": (
                 understanding,
                 understanding.model_copy(
                     update={
@@ -2463,18 +2468,18 @@ def test_every_noncanonical_mixed_v2_bypass_fails_before_grading(
             )
         }
     elif bypass == "accepted_ref_mismatch":
-        understanding = canonical.request_understanding_records_v2[0]
+        understanding = canonical.request_understanding_records[0]
         update = {
-            "request_understanding_records_v2": (
+            "request_understanding_records": (
                 understanding.model_copy(
                     update={"accepted_delta_refs": (UUID(int=952),)}
                 ),
             )
         }
     else:
-        child = canonical.accepted_task_deltas_v2[0]
+        child = canonical.accepted_task_deltas[0]
         update = {
-            "accepted_task_deltas_v2": (
+            "accepted_task_deltas": (
                 child.model_copy(update={"candidate_ref": UUID(int=953)}),
             )
         }
@@ -2499,11 +2504,11 @@ def test_every_noncanonical_mixed_v2_bypass_fails_before_grading(
 
 
 @pytest.mark.parametrize("grader_name", GRADER_NAMES)
-def test_every_registered_grader_passes_durable_v2_evidence(
+def test_every_registered_grader_passes_durable_v3_evidence(
     grader_name: str,
 ) -> None:
     result = grader_registry()[grader_name].grade(
-        _v2_evidence(),
+        _v3_evidence(),
         _expectations(),
     )
     assert result == EvalGraderResult(
@@ -2530,10 +2535,10 @@ def test_every_registered_grader_passes_durable_v2_evidence(
 def test_v2_logical_evidence_rejects_directed_provenance_tamper(
     tamper: str,
 ) -> None:
-    evidence = _v2_evidence()
+    evidence = _v3_evidence()
     updates: dict[str, object] = {}
     if tamper in {"source_hash", "source_span"}:
-        understanding = evidence.request_understanding_records_v2[0]
+        understanding = evidence.request_understanding_records[0]
         candidate = understanding.task_delta_candidates[0]
         source = candidate.input_candidates[0]
         source_update = (
@@ -2548,7 +2553,7 @@ def test_v2_logical_evidence_rejects_directed_provenance_tamper(
         changed_candidate = candidate.model_copy(
             update={"input_candidates": (changed_source,)}
         )
-        updates["request_understanding_records_v2"] = (
+        updates["request_understanding_records"] = (
             understanding.model_copy(
                 update={"task_delta_candidates": (changed_candidate,)}
             ),
@@ -2608,7 +2613,7 @@ def test_v2_logical_evidence_rejects_directed_provenance_tamper(
         )
         updates["trace_events"] = trace_events
 
-    tampered = _v2_evidence(**updates)
+    tampered = _v3_evidence(**updates)
     for grader_name in GRADER_NAMES:
         result = grader_registry()[grader_name].grade(
             tampered,
@@ -2632,7 +2637,7 @@ def test_v2_logical_evidence_rejects_directed_provenance_tamper(
 
 
 def test_v2_complete_task_transition_history_is_required_without_restart_cap() -> None:
-    evidence = _v2_evidence()
+    evidence = _v3_evidence()
     first = evidence.task_state_transitions[0].model_copy(
         update={"to_status": TaskStatus.WAITING_USER}
     )
@@ -2650,7 +2655,7 @@ def test_v2_complete_task_transition_history_is_required_without_restart_cap() -
         (),
         (first, extra),
     ):
-        tampered = _v2_evidence(task_state_transitions=transitions)
+        tampered = _v3_evidence(task_state_transitions=transitions)
         for grader_name in ("PersistenceGrader", "TraceCompletenessGrader"):
             result = grader_registry()[grader_name].grade(
                 tampered,
@@ -2727,7 +2732,7 @@ def test_persistence_grader_requires_complete_authoritative_record_graph(
 def test_persistence_and_trace_resolve_accepted_delta_refs_authoritatively() -> None:
     evidence = _evidence()
     foreign_ref = UUID(int=930)
-    understanding = evidence.request_understanding_records_v2[0].model_copy(
+    understanding = evidence.request_understanding_records[0].model_copy(
         update={"accepted_delta_refs": (foreign_ref,)}
     )
     events = tuple(
@@ -2738,7 +2743,7 @@ def test_persistence_and_trace_resolve_accepted_delta_refs_authoritatively() -> 
     )
     tampered = evidence.model_copy(
         update={
-            "request_understanding_records_v2": (understanding,),
+            "request_understanding_records": (understanding,),
             "trace_events": events,
         }
     )
@@ -3389,7 +3394,7 @@ def test_message_refs_resolve_only_from_authoritative_message_record(
 ) -> None:
     evidence = _evidence()
     foreign_message_ref = UUID(int=924)
-    understanding = evidence.request_understanding_records_v2[0]
+    understanding = evidence.request_understanding_records[0]
     delta = understanding.task_delta_candidates[0]
     input_candidate = delta.input_candidates[0].model_copy(
         update={"source_ref": foreign_message_ref}
@@ -3427,7 +3432,7 @@ def test_message_refs_resolve_only_from_authoritative_message_record(
 
     result = grader_registry()[grader_name].grade(
         _evidence(
-            request_understanding_records_v2=(foreign_understanding,),
+            request_understanding_records=(foreign_understanding,),
             input_bindings=(binding,),
             request_units=(request_unit,),
             context_manifests=manifests,
@@ -3925,6 +3930,88 @@ def test_cycle2_exact_closure_adapter_maps_actual_result_mapper_and_pair() -> No
     assert not evidence.supporting_tool_calls
 
 
+def test_cycle2_exact_closure_adapter_preserves_v3_parent_child_order() -> None:
+    source = _binding_complete_cycle2_evidence()
+    base = _completed_cycle2_exact_closure()
+    completed_at = NOW + timedelta(milliseconds=500)
+    task = source.task_records[0].model_copy(
+        update={
+            "status": TaskStatus.COMPLETED,
+            "state_version": 2,
+            "updated_at": completed_at,
+        }
+    )
+    unit = source.request_units[0].model_copy(
+        update={
+            "status": TaskStatus.COMPLETED,
+            "state_version": 2,
+            "updated_at": completed_at,
+        }
+    )
+    user_message = source.message_records[0].model_copy(
+        update={"conversation_id": CONVERSATION_ID}
+    )
+    transition = TaskStateTransition(
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=TaskStatus.COMPLETED,
+        base_state_version=1,
+        result_state_version=2,
+        reason_ref=UUID(int=9890),
+        changed_at=completed_at,
+    )
+    request_understanding = RequestUnderstandingClosureV3(
+        record=source.request_understanding_records[0],
+        accepted_task_deltas=source.accepted_task_deltas,
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    closure = Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "message_records": (user_message, base.message_records[1]),
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=RUN_ID,
+                    task_id=task.task_id,
+                    base_task_state_version=None,
+                    result_task_state_version=2,
+                ),
+            ),
+            "task_records": (task,),
+            "request_unit_records": (unit,),
+            "input_binding_records": source.input_bindings,
+            "request_understanding_closures": (request_understanding,),
+            "task_state_transition_records": (transition,),
+        }
+    )
+    actual_mapping = RunResultMapper().observe_cycle2(
+        run_id=RUN_ID,
+        signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+        observed_outcome=AgentOutcome.COMPLETED,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+        response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+        agent_result_emitted=True,
+    )
+
+    unbound = map_cycle2_exact_run_evidence_to_unbound(
+        closure=closure,
+        outcome_observation=actual_mapping,
+        pair_evidence=None,
+        http_status=200,
+    )
+
+    assert unbound.request_understanding_records == (
+        request_understanding.record,
+    )
+    assert unbound.accepted_task_deltas == (
+        *request_understanding.accepted_task_deltas,
+    )
+
+
 def test_cycle2_exact_closure_adapter_requires_matching_actual_mapper_capture() -> None:
     closure = _completed_cycle2_exact_closure()
 
@@ -4225,12 +4312,13 @@ def _binding_complete_cycle2_evidence(
     duplicate_current_binding: bool = False,
 ) -> Cycle2EvalEvidence:
     binding_id = UUID(int=9851)
+    message_id = UUID(int=9852)
     binding = InputBindingV2(
         binding_id=binding_id,
         name="product_description",
         normalized_value="跑鞋",
         authority=InputAuthority.USER_CLAIM,
-        source_refs=(UUID(int=9852),),
+        source_refs=(message_id,),
         validation_status=InputValidationStatus.ACCEPTED,
         confirmed_by_user=True,
         created_at=NOW,
@@ -4255,7 +4343,7 @@ def _binding_complete_cycle2_evidence(
         request_unit_id=UUID(int=9855),
         task_id=task_id,
         goal_text="查询跑鞋订单",
-        goal_source_refs=(UUID(int=9856),),
+        goal_source_refs=(message_id,),
         input_binding_refs=tuple(item.binding_id for item in bindings),
         status=TaskStatus.ACTIVE,
         state_version=1,
@@ -4263,6 +4351,73 @@ def _binding_complete_cycle2_evidence(
         updated_at=NOW,
     )
     evidence = _minimal_cycle2_evidence()
+    message = MessageRecord(
+        schema_version="application-records-v1",
+        message_id=message_id,
+        conversation_id=UUID(int=9856),
+        direction=MessageDirection.USER,
+        content="查询跑鞋订单",
+        received_at=NOW,
+    )
+    candidate_id = UUID(int=9858)
+    accepted_delta_id = UUID(int=9859)
+    candidate = DurableCycle2AddGoalTaskDeltaCandidateV3(
+        candidate_id=candidate_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch=unit.goal_text,
+        input_candidates=(
+            DurableCycle2InputCandidateV3(
+                name="product_description",
+                normalized_candidate_value="跑鞋",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message_id,
+                source_span_start=2,
+                source_span_end_exclusive=4,
+                source_quote_sha256=hashlib.sha256("跑鞋".encode()).hexdigest(),
+                confidence=0.99,
+            ),
+        ),
+        confidence=0.99,
+    )
+    understanding = RequestUnderstandingRecordV3(
+        request_understanding_record_id=UUID(int=9860),
+        run_id=evidence.run_record.run_id,
+        message_ref=message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-initial.p0.v1",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text=message.content,
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_id,),
+        ),
+        task_delta_candidates=(candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(accepted_delta_id,),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        next_move_candidate_ref=UUID(int=9861),
+        created_at=NOW,
+    )
+    accepted = AcceptedAddGoalTaskDeltaV3(
+        accepted_delta_id=accepted_delta_id,
+        candidate_ref=candidate_id,
+        message_ref=message_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text=unit.goal_text,
+        input_binding_refs=(binding_id,),
+        accepted_at=NOW,
+        task_id=task_id,
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
     gate_event = TraceEventV2(
         trace_event_id=UUID(int=9857),
         event_type=TraceEventType.GATE_DECISION_RECORDED,
@@ -4277,6 +4432,9 @@ def _binding_complete_cycle2_evidence(
     return evidence.model_copy(
         update={
             "input_bindings": bindings,
+            "message_records": (message,),
+            "request_understanding_records": (understanding,),
+            "accepted_task_deltas": (accepted,),
             "task_records": (task,),
             "request_units": (unit,),
             "trace_events": (
@@ -4316,6 +4474,290 @@ def test_cycle2_required_binding_matches_one_current_typed_record() -> None:
         _binding_cycle2_expectations(),
     )
     assert outcome.status is EvalResultStatus.PASS
+
+
+def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
+    evidence = _minimal_cycle2_evidence()
+    message = MessageRecord(
+        schema_version="application-records-v1",
+        message_id=UUID(int=9870),
+        conversation_id=UUID(int=9871),
+        direction=MessageDirection.USER,
+        content="订单 O-1001 显示已送达，但我没有收到",
+        received_at=NOW,
+    )
+    order_start = message.content.index("O-1001")
+    claim_start = message.content.index("没有收到")
+    order_binding = InputBindingV2(
+        binding_id=UUID(int=9872),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(message.message_id,),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    claim_binding = InputBindingV2(
+        binding_id=UUID(int=9873),
+        name="shipment_not_received",
+        normalized_value=True,
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(message.message_id,),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    task = TaskRecord(
+        task_id=UUID(int=9874),
+        owner_customer_id="customer-A",
+        status=TaskStatus.ACTIVE,
+        state_version=2,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    unit = RequestUnitRecord(
+        request_unit_id=UUID(int=9875),
+        task_id=task.task_id,
+        goal_text="查询未收到的配送",
+        goal_source_refs=(message.message_id,),
+        input_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        status=TaskStatus.ACTIVE,
+        state_version=2,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=UUID(int=9876),
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="current-task",
+        target_request_unit_alias="current-request",
+        input_candidates=(
+            DurableCycle2InputCandidateV3(
+                name="order_id",
+                normalized_candidate_value="O-1001",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message.message_id,
+                source_span_start=order_start,
+                source_span_end_exclusive=order_start + len("O-1001"),
+                source_quote_sha256=hashlib.sha256(
+                    "O-1001".encode()
+                ).hexdigest(),
+                confidence=0.99,
+            ),
+            DurableCycle2InputCandidateV3(
+                name="shipment_not_received",
+                normalized_candidate_value=True,
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message.message_id,
+                source_span_start=claim_start,
+                source_span_end_exclusive=claim_start + len("没有收到"),
+                source_quote_sha256=hashlib.sha256(
+                    "没有收到".encode()
+                ).hexdigest(),
+                confidence=0.99,
+            ),
+        ),
+        confidence=0.99,
+    )
+    accepted = AcceptedSupplyInputTaskDeltaV3(
+        accepted_delta_id=UUID(int=9877),
+        candidate_ref=candidate.candidate_id,
+        message_ref=message.message_id,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        task_id=task.task_id,
+        target_request_unit_id=unit.request_unit_id,
+        input_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        accepted_at=NOW,
+        base_task_state_version=1,
+        result_task_state_version=2,
+    )
+    understanding = RequestUnderstandingRecordV3(
+        request_understanding_record_id=UUID(int=9878),
+        run_id=evidence.run_record.run_id,
+        message_ref=message.message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text=message.content,
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=(candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(accepted.accepted_delta_id,),
+        created_at=NOW,
+    )
+    gate = TraceEventV2(
+        trace_event_id=UUID(int=9879),
+        event_type=TraceEventType.GATE_DECISION_RECORDED,
+        occurred_at=NOW + timedelta(milliseconds=500),
+        run_id=evidence.run_record.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=2,
+        argument_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        gate_decision=GateDecisionValue.ACCEPT,
+    )
+    values = {
+        field_name: getattr(evidence, field_name)
+        for field_name in Cycle2EvalEvidence.model_fields
+    }
+    return Cycle2EvalEvidence(
+        **{
+            **values,
+            "message_records": (message,),
+            "input_bindings": (order_binding, claim_binding),
+            "request_understanding_records": (understanding,),
+            "accepted_task_deltas": (accepted,),
+            "task_records": (task,),
+            "request_units": (unit,),
+            "trace_events": (
+                evidence.trace_events[0],
+                gate,
+                evidence.trace_events[1],
+            ),
+        }
+    )
+
+
+def test_cycle2_dnr_dual_claims_close_one_supply_input_child() -> None:
+    expectations = _minimal_cycle2_expectations().model_copy(
+        update={
+            "required_predicates": (
+                Cycle2Predicate(
+                    name="REQ_BINDING",
+                    operands=(
+                        "order_id",
+                        "$ORDER_BINDING_REF",
+                        "$TASK_VERSION_AT_GATE",
+                    ),
+                ),
+                Cycle2Predicate(
+                    name="REQ_BINDING",
+                    operands=(
+                        "shipment_not_received",
+                        "$CLAIM_BINDING_REF",
+                        "$TASK_VERSION_AT_GATE",
+                    ),
+                ),
+                Cycle2Predicate(
+                    name="REQ_STOP",
+                    operands=("COMPLETED", "GOAL_COMPLETED"),
+                ),
+            )
+        }
+    )
+    outcome = grade_cycle2_evidence(
+        CYCLE2_GRADER_NAMES,
+        _dnr_binding_complete_cycle2_evidence(),
+        expectations,
+    )
+    results = {
+        result.grader_name: result for result in outcome.grader_results
+    }
+
+    assert results["SchemaGrader"].status is EvalGraderStatus.PASS
+    assert results["RequestUnderstandingGrader"].status is EvalGraderStatus.PASS
+    assert results["InputBindingGrader"].status is EvalGraderStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "wrong_run",
+        "wrong_branch",
+        "wrong_source_hash",
+        "wrong_order",
+        "wrong_parent",
+        "missing_child",
+    ),
+)
+def test_cycle2_request_understanding_v3_tamper_fails_closed(
+    mutation: str,
+) -> None:
+    evidence = (
+        _dnr_binding_complete_cycle2_evidence()
+        if mutation == "wrong_order"
+        else _binding_complete_cycle2_evidence()
+    )
+    record = evidence.request_understanding_records[0]
+    if mutation == "wrong_run":
+        record = record.model_copy(update={"run_id": UUID(int=9880)})
+    elif mutation == "wrong_branch":
+        record = record.model_copy(
+            update={
+                "model_output_schema_version": (
+                    "e2e01-cycle2-continuation.p0.v2"
+                )
+            }
+        )
+    elif mutation == "wrong_source_hash":
+        candidate = record.task_delta_candidates[0]
+        candidate_input = candidate.input_candidates[0].model_copy(
+            update={"source_quote_sha256": "0" * 64}
+        )
+        record = record.model_copy(
+            update={
+                "task_delta_candidates": (
+                    candidate.model_copy(
+                        update={"input_candidates": (candidate_input,)}
+                    ),
+                )
+            }
+        )
+    elif mutation == "wrong_order":
+        child = evidence.accepted_task_deltas[0]
+        evidence = evidence.model_copy(
+            update={
+                "accepted_task_deltas": (
+                    child.model_copy(
+                        update={
+                            "input_binding_refs": tuple(
+                                reversed(child.input_binding_refs)
+                            )
+                        }
+                    ),
+                )
+            }
+        )
+    elif mutation == "wrong_parent":
+        evidence = evidence.model_copy(
+            update={
+                "request_understanding_records": (
+                    record,
+                    record.model_copy(
+                        update={
+                            "request_understanding_record_id": UUID(int=9881)
+                        }
+                    ),
+                )
+            }
+        )
+    elif mutation == "missing_child":
+        evidence = evidence.model_copy(update={"accepted_task_deltas": ()})
+    if mutation != "wrong_parent":
+        evidence = evidence.model_copy(
+            update={"request_understanding_records": (record,)}
+        )
+
+    result = cycle2_grader_registry()["RequestUnderstandingGrader"].grade(
+        evidence,
+        _binding_cycle2_expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
 
 
 @pytest.mark.parametrize(

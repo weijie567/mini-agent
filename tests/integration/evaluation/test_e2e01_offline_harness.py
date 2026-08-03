@@ -31,7 +31,7 @@ from mini_agent.application.records import (
     EvalGraderStatus,
     EvalResultRecord,
     EvalResultStatus,
-    ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     InsertOnlyWriteResult,
     MessageDirection,
     MessageRecord,
@@ -79,17 +79,18 @@ from mini_agent.core.request_understanding import (
     TaskDeltaCandidate,
     TaskDeltaOperation,
 )
+from mini_agent.core.request_processing import RequestUnderstandingClosureV3
 from mini_agent.core.task_state import (
-    AcceptedTaskDeltaV2,
+    AcceptedAddGoalTaskDeltaV3,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
-    DurableTaskDeltaCandidateV2,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     InputBinding,
     InputValidationStatus,
-    RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -966,7 +967,7 @@ def _synthetic_trace(
     identity_seed: str,
     run_id: UUID,
     message_ref: UUID,
-    accepted_delta: AcceptedTaskDeltaV2,
+    accepted_delta: AcceptedAddGoalTaskDeltaV3,
     binding: InputBinding,
     task: TaskRecord,
     request_unit: RequestUnitRecord,
@@ -1209,7 +1210,7 @@ class SyntheticSut:
             created_at=NOW,
             updated_at=NOW + timedelta(seconds=1),
         )
-        accepted_delta = AcceptedTaskDeltaV2(
+        accepted_delta = AcceptedAddGoalTaskDeltaV3(
             accepted_delta_id=_case_uuid(identity_seed, "accepted-delta"),
             candidate_ref=proposed_delta.candidate_id,
             message_ref=message_ref,
@@ -1239,21 +1240,21 @@ class SyntheticSut:
             source_quote_sha256=source_hash,
             confidence=1.0,
         )
-        durable_candidate = DurableTaskDeltaCandidateV2(
+        durable_candidate = DurablePhase1AddGoalTaskDeltaCandidateV3(
             candidate_id=proposed_delta.candidate_id,
             operation=proposed_delta.operation,
             goal_patch=proposed_delta.goal_patch,
             input_candidates=(durable_input,),
             confidence=proposed_delta.confidence,
         )
-        request_understanding_record = RequestUnderstandingRecordV2(
+        request_understanding_record = RequestUnderstandingRecordV3(
             request_understanding_record_id=_case_uuid(
                 identity_seed,
                 "request-understanding-record",
             ),
             run_id=run_id,
             message_ref=message_ref,
-            schema_version="request_understanding_record.p0.v2",
+            record_schema_version="request_understanding_record.p0.v3",
             model_input_schema_version="e2e01-thin-v1",
             model_output_schema_version="e2e01-thin-v2",
             contextualization=DurableQueryContextualizationCandidateV2(
@@ -1568,10 +1569,10 @@ class SyntheticSut:
                     received_at=NOW,
                 ),
             ),
-            "request_understanding_records_v2": (
+            "request_understanding_records": (
                 request_understanding_record,
             ),
-            "accepted_task_deltas_v2": (accepted_delta,),
+            "accepted_task_deltas": (accepted_delta,),
             "task_state_transitions": transitions,
             "input_bindings": (binding,) if binding is not None else (),
             "task_records": (task,) if task is not None else (),
@@ -1613,7 +1614,7 @@ class SyntheticSut:
             mismatched_input = candidate.input_candidates[0].model_copy(
                 update={"candidate_value": "O-2001"}
             )
-            evidence_values["request_understanding_records_v2"] = (
+            evidence_values["request_understanding_records"] = (
                 request_understanding_record.model_copy(
                     update={
                         "task_delta_candidates": (
@@ -1645,42 +1646,42 @@ class SyntheticSut:
 
 
 def _rebuild_exact_closure(
-    closure: ExactRunEvidenceClosure,
+    closure: ExactRunEvidenceV3Closure,
     **updates: object,
-) -> ExactRunEvidenceClosure:
+) -> ExactRunEvidenceV3Closure:
     values = {
         field_name: getattr(closure, field_name)
-        for field_name in ExactRunEvidenceClosure.model_fields
+        for field_name in ExactRunEvidenceV3Closure.model_fields
     }
     values.update(updates)
-    return ExactRunEvidenceClosure(**values)
+    return ExactRunEvidenceV3Closure(**values)
 
 
 def _exact_closure_from_synthetic_result(
     result: EvalCaseSutResult,
     *,
     request_understanding_record_id: UUID,
-) -> ExactRunEvidenceClosure:
+) -> ExactRunEvidenceV3Closure:
     evidence = result.evidence
     assert evidence.run_record is not None
     assert len(evidence.conversation_records) == 1
     assert len(evidence.message_records) == 1
-    assert len(evidence.request_understanding_records_v2) == 1
-    assert len(evidence.accepted_task_deltas_v2) == 1
+    assert len(evidence.request_understanding_records) == 1
+    assert len(evidence.accepted_task_deltas) == 1
     assert len(evidence.input_bindings) == 1
     assert len(evidence.task_records) == 1
     assert len(evidence.request_units) == 1
     conversation = evidence.conversation_records[0]
     task = evidence.task_records[0]
     unit = evidence.request_units[0]
-    understanding = evidence.request_understanding_records_v2[0].model_copy(
+    understanding = evidence.request_understanding_records[0].model_copy(
         update={
             "request_understanding_record_id": (
                 request_understanding_record_id
             )
         }
     )
-    child = evidence.accepted_task_deltas_v2[0]
+    child = evidence.accepted_task_deltas[0]
     transitions = evidence.task_state_transitions
 
     trace_events = list(evidence.trace_events)
@@ -1781,12 +1782,14 @@ def _exact_closure_from_synthetic_result(
         )
         observations = (observation,)
 
-    return ExactRunEvidenceClosure(
+    return ExactRunEvidenceV3Closure(
         conversation_record=conversation,
         run_record=evidence.run_record,
         message_records=evidence.message_records,
-        request_understanding_record=understanding,
-        accepted_task_deltas=(child,),
+        request_understanding_closure=RequestUnderstandingClosureV3(
+            record=understanding,
+            accepted_task_deltas=(child,),
+        ),
         input_binding_records=evidence.input_bindings,
         task_records=evidence.task_records,
         task_state_transitions=transitions,
@@ -1809,7 +1812,7 @@ def _exact_closure_for_script(
     script_ref: str,
     *,
     fixture_slot: int,
-) -> tuple[ExactRunEvidenceClosure, AgentRunResult]:
+) -> tuple[ExactRunEvidenceV3Closure, AgentRunResult]:
     (
         sut_execution_ref,
         script_execution_ref,
@@ -1860,7 +1863,7 @@ def _exact_closure_for_script(
 
 
 def _minimal_input_invalid_closure() -> tuple[
-    ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     AgentRunResult,
 ]:
     (
@@ -1919,7 +1922,7 @@ def _minimal_input_invalid_closure() -> tuple[
             stop_reason=StopReason.INPUT_INVALID,
         ),
     )
-    closure = ExactRunEvidenceClosure(
+    closure = ExactRunEvidenceV3Closure(
         conversation_record=ConversationRecord(
             schema_version="conversation_record.p0.v1",
             conversation_id=conversation_id,
@@ -1945,8 +1948,7 @@ def _minimal_input_invalid_closure() -> tuple[
                 received_at=NOW,
             ),
         ),
-        request_understanding_record=None,
-        accepted_task_deltas=(),
+        request_understanding_closure=None,
         input_binding_records=(),
         task_records=(),
         task_state_transitions=(),
@@ -1972,7 +1974,7 @@ def _minimal_input_invalid_closure() -> tuple[
 
 
 def _order_service_unavailable_closure() -> tuple[
-    ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     AgentRunResult,
 ]:
     closure, _result = _exact_closure_for_script(
@@ -2162,7 +2164,7 @@ class ResultBoundaryMutationSut:
             )
             return result
         if self._mutation == "nested_payload_cycle":
-            understanding = result.evidence.request_understanding_records_v2[0]
+            understanding = result.evidence.request_understanding_records[0]
             object.__setattr__(
                 understanding,
                 "task_delta_candidates",
@@ -2174,7 +2176,7 @@ class ResultBoundaryMutationSut:
             target: BaseModel = result
             storage_field = "safe_observable"
             if location == "nested":
-                target = result.evidence.request_understanding_records_v2[0]
+                target = result.evidence.request_understanding_records[0]
                 storage_field = "contextualization"
             else:
                 assert location == "root"
@@ -3223,7 +3225,7 @@ def test_execution_ref_result_correlation_has_zero_argument_nonce_seam() -> None
 def _map_exact_result(
     *,
     execution_ref: UUID,
-    closure: ExactRunEvidenceClosure,
+    closure: ExactRunEvidenceV3Closure,
     agent_result: AgentRunResult,
     http_status: int = 200,
 ) -> EvalCaseSutResult:
@@ -3326,7 +3328,7 @@ def test_exact_run_mapper_surface_is_case_and_oracle_free() -> None:
         "execution_ref": "UUID",
         "http_status": "int",
         "agent_result": "AgentRunResult",
-        "closure": "ExactRunEvidenceClosure",
+        "closure": "ExactRunEvidenceV3Closure",
     }
     assert mapper_signature.return_annotation == "EvalCaseSutResult"
     assert {
@@ -3488,12 +3490,13 @@ def test_exact_run_mapper_projects_closed_terminal_paths_without_oracles(
         closure.conversation_record,
     )
     assert result.evidence.message_records == closure.message_records
-    assert result.evidence.request_understanding_records_v2 == (
-        closure.request_understanding_record,
+    assert closure.request_understanding_closure is not None
+    assert result.evidence.request_understanding_records == (
+        closure.request_understanding_closure.record,
     )
     assert (
-        result.evidence.accepted_task_deltas_v2
-        == closure.accepted_task_deltas
+        result.evidence.accepted_task_deltas
+        == closure.request_understanding_closure.accepted_task_deltas
     )
     assert (
         result.evidence.task_state_transitions
@@ -3560,8 +3563,8 @@ def test_exact_run_mapper_projects_input_invalid_without_synthetic_runtime_recor
     assert result.evidence.run_record.stop_reason is StopReason.INPUT_INVALID
     assert result.evidence.observed_outcome is AgentOutcome.BLOCKED
     assert result.safe_observable.response_policy == "FIXED_SAFE_PROCESSING_ERROR"
-    assert result.evidence.request_understanding_records_v2 == ()
-    assert result.evidence.accepted_task_deltas_v2 == ()
+    assert result.evidence.request_understanding_records == ()
+    assert result.evidence.accepted_task_deltas == ()
     assert result.evidence.task_records == ()
     assert result.evidence.request_units == ()
     assert result.evidence.gate_decisions == ()
@@ -3712,7 +3715,7 @@ def test_exact_run_mapper_rejects_identity_outcome_and_policy_mismatch_boundedly
             "customer-A",
         }.isdisjoint(strings)
         assert AgentRunResult not in value_types
-        assert ExactRunEvidenceClosure not in value_types
+        assert ExactRunEvidenceV3Closure not in value_types
     assert errors[0] is not errors[1]
 
 
@@ -8330,7 +8333,7 @@ def test_qwen_runner_mock_transport_runs_real_postgres_composition(
         for result in sut_results
     )
     assert all(
-        len(result.evidence.request_understanding_records_v2) == 1
+        len(result.evidence.request_understanding_records) == 1
         for result in sut_results
     )
     assert tuple(
