@@ -3855,20 +3855,19 @@ def route_cycle2_continuation_next_move(
         )
         arguments = move.arguments
         if (
-            origin.binding_id != trigger.binding_id
-            or trigger.normalized_value != target.order_id
+            trigger.normalized_value != target.order_id
             or move.requested_tool_name not in {"get_order", "get_shipment"}
             or set(arguments) != {"order_id"}
             or type(arguments.get("order_id")) is not str
             or arguments["order_id"] != target.order_id
         ):
             raise _cycle2_routing_error()
-        argument_binding_refs = (trigger.binding_id,)
-        verified_target_ref = (
-            None
-            if move.requested_tool_name == "get_order"
-            else target.verified_target_ref
-        )
+        if move.requested_tool_name == "get_order":
+            argument_binding_refs = (trigger.binding_id,)
+            verified_target_ref = None
+        else:
+            argument_binding_refs = (origin.binding_id,)
+            verified_target_ref = target.verified_target_ref
     elif trigger.name == "shipment_not_received":
         if trigger.normalized_value is not True:
             raise _cycle2_routing_error()

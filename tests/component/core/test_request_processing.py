@@ -6728,9 +6728,11 @@ def test_cycle2_control_candidate_materializes_only_from_verified_order_id() -> 
     ("requested_tool_name", "expected_verified_target"),
     [("get_order", False), ("get_shipment", True)],
 )
+@pytest.mark.parametrize("distinct_query_origin", [False, True])
 def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
     requested_tool_name: str,
     expected_verified_target: bool,
+    distinct_query_origin: bool,
 ) -> None:
     message_ref = uuid4()
     request_input = _request_input_v2(
@@ -6739,7 +6741,25 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
         run_id=uuid4(),
     )
     old_binding = _cycle2_binding(name="order_id", value="O-1001")
+    query_binding = _cycle2_binding(
+        name="product_description",
+        value="轻量跑鞋",
+    )
     task, unit = _cycle2_current_task_graph(binding=old_binding)
+    if distinct_query_origin:
+        unit = unit.model_copy(
+            update={
+                "input_binding_refs": (
+                    query_binding.binding_id,
+                    old_binding.binding_id,
+                )
+            }
+        )
+    current_bindings = (
+        (query_binding, old_binding)
+        if distinct_query_origin
+        else (old_binding,)
+    )
     decision = reduce_cycle2_continuation_candidate(
         request_input=request_input,
         candidate=_cycle2_input_candidate(
@@ -6752,7 +6772,7 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
         customer_context=_customer_context(),
         current_task=task,
         current_request_unit=unit,
-        current_input_bindings=(old_binding,),
+        current_input_bindings=current_bindings,
         binding_id=uuid4(),
         now=NOW,
     )
@@ -6761,10 +6781,17 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
     )
     next_unit = unit.model_copy(
         update={
-            "input_binding_refs": (decision.input_binding.binding_id,),
+            "input_binding_refs": (
+                (query_binding.binding_id, decision.input_binding.binding_id)
+                if distinct_query_origin
+                else (decision.input_binding.binding_id,)
+            ),
             "state_version": unit.state_version + 1,
             "updated_at": NOW,
         }
+    )
+    target_origin = (
+        query_binding if distinct_query_origin else decision.input_binding
     )
     target = Cycle2VerifiedOrderTargetFacts(
         verified_target_ref=uuid4(),
@@ -6776,7 +6803,7 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
         order_id="O-1001",
         source_observation_ref=uuid4(),
         source_observation_version="order-observation-v1",
-        input_binding_refs=(decision.input_binding.binding_id,),
+        input_binding_refs=(target_origin.binding_id,),
     )
     next_unit = next_unit.model_copy(
         update={"observation_refs": (target.source_observation_ref,)}
@@ -6807,14 +6834,25 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
         customer_context=_customer_context(),
         current_task=next_task,
         current_request_unit=next_unit,
-        current_input_bindings=(decision.input_binding,),
+        current_input_bindings=(
+            (query_binding, decision.input_binding)
+            if distinct_query_origin
+            else (decision.input_binding,)
+        ),
         verified_target=target,
         verified_target_observation=observation,
         model_call_id=uuid4(),
         context_manifest_id=uuid4(),
         trusted_now=NOW,
     )
-    assert routed.argument_binding_refs == (decision.input_binding.binding_id,)
+    expected_argument_binding = (
+        target_origin
+        if requested_tool_name == "get_shipment"
+        else decision.input_binding
+    )
+    assert routed.argument_binding_refs == (
+        expected_argument_binding.binding_id,
+    )
     assert (routed.verified_target_ref == target.verified_target_ref) is (
         expected_verified_target
     )
@@ -6827,7 +6865,11 @@ def test_cycle2_order_id_claim_routes_only_through_exact_current_target(
             customer_context=_customer_context(),
             current_task=next_task,
             current_request_unit=next_unit,
-            current_input_bindings=(decision.input_binding,),
+            current_input_bindings=(
+                (query_binding, decision.input_binding)
+                if distinct_query_origin
+                else (decision.input_binding,)
+            ),
             verified_target=target.model_copy(update={"order_id": "O-1002"}),
             verified_target_observation=observation,
             model_call_id=uuid4(),
