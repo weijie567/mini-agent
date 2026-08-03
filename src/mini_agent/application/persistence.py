@@ -314,7 +314,7 @@ class P0RecordSchemaSpec:
 @dataclass(frozen=True, slots=True)
 class _P0LogicalChildSchemaSpec:
     child_code: P0LogicalChildCode
-    source_model: type[ContractModel]
+    source_model: type[ContractModel] | tuple[type[ContractModel], ...]
     parent_record_code: P0RecordCode
     identity_fields: tuple[str, ...]
     closure_strategy: _ClosureStrategy
@@ -1918,6 +1918,9 @@ def _decode(
         child_spec = P0_LOGICAL_CHILD_SPECS.get(child_payload.child_code)
         if child_spec is None:
             _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_models = _logical_child_source_models(child_spec)
+        if len(child_models) != 1:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
         child_json = _json_mapping_text(
             child_payload.data,
             failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
@@ -1925,7 +1928,7 @@ def _decode(
         child: ContractModel | None = None
         category = None
         try:
-            child = child_spec.source_model.model_validate_json(
+            child = child_models[0].model_validate_json(
                 child_json,
                 strict=True,
             )
@@ -2003,9 +2006,15 @@ def decode_persistence_record(
 # codec entry points above intentionally serve only the 16 non-RU families.
 from pydantic import BaseModel as _P0V2BaseModel
 
+from mini_agent.core.request_processing import (
+    RequestUnderstandingClosureV3 as _RequestUnderstandingClosureV3,
+)
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3 as _AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3 as _AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2 as _AcceptedTaskDeltaV2,
     RequestUnderstandingRecordV2 as _RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3 as _RequestUnderstandingRecordV3,
 )
 
 
@@ -2157,6 +2166,42 @@ _ACCEPTED_TASK_DELTA_V2_SPEC = _P0LogicalChildSchemaSpec(
     identity_fields=("accepted_delta_id",),
     closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
     projection_decisions=_ACCEPTED_TASK_DELTA_V2_PROJECTIONS,
+)
+
+_REQUEST_UNDERSTANDING_V3_PROJECTIONS = _REQUEST_UNDERSTANDING_V2_PROJECTIONS
+_ACCEPTED_TASK_DELTA_V3_PROJECTIONS = _ACCEPTED_TASK_DELTA_V2_PROJECTIONS
+
+
+def _request_understanding_v3_version_is_exact(
+    record: ContractModel,
+) -> bool:
+    return (
+        type(record) is _RequestUnderstandingRecordV3
+        and record.record_schema_version
+        == "request_understanding_record.p0.v3"
+    )
+
+
+_REQUEST_UNDERSTANDING_V3_SPEC = P0RecordSchemaSpec(
+    record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+    record_schema_version="request_understanding_record.p0.v3",
+    source_model=_RequestUnderstandingRecordV3,
+    identity_fields=("request_understanding_record_id",),
+    projection_decisions=_REQUEST_UNDERSTANDING_V3_PROJECTIONS,
+    allowed_child_codes=(P0LogicalChildCode.ACCEPTED_TASK_DELTA,),
+    specialized_version_validator=_request_understanding_v3_version_is_exact,
+)
+
+_ACCEPTED_TASK_DELTA_V3_SPEC = _P0LogicalChildSchemaSpec(
+    child_code=P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+    source_model=(
+        _AcceptedAddGoalTaskDeltaV3,
+        _AcceptedSupplyInputTaskDeltaV3,
+    ),
+    parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+    identity_fields=("accepted_delta_id",),
+    closure_strategy=_ClosureStrategy.LOCAL_CLOSED,
+    projection_decisions=_ACCEPTED_TASK_DELTA_V3_PROJECTIONS,
 )
 
 
@@ -2626,6 +2671,19 @@ _REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG: Mapping[
     }
 )
 
+_REQUEST_UNDERSTANDING_V3_CHILD_SPEC_CATALOG: Mapping[
+    tuple[P0RecordCode, str, P0LogicalChildCode],
+    _P0LogicalChildSchemaSpec,
+] = MappingProxyType(
+    {
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v3",
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        ): _ACCEPTED_TASK_DELTA_V3_SPEC,
+    }
+)
+
 P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG: Mapping[
     tuple[P0RecordCode, str, P0LogicalChildCode],
     _P0LogicalChildSchemaSpec,
@@ -2642,6 +2700,7 @@ P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG: Mapping[
             for child_code, spec in _NON_RU_LOGICAL_CHILD_SPECS.items()
         },
         **_REQUEST_UNDERSTANDING_V2_CHILD_SPEC_CATALOG,
+        **_REQUEST_UNDERSTANDING_V3_CHILD_SPEC_CATALOG,
         (
             P0RecordCode.TOOL_CALL_RECORD,
             "tool_call_record.p0.v2",
@@ -2681,6 +2740,10 @@ P0_RECORD_SCHEMA_VERSION_CATALOG: Mapping[
             P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
             "request_understanding_record.p0.v2",
         ): _REQUEST_UNDERSTANDING_V2_SPEC,
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v3",
+        ): _REQUEST_UNDERSTANDING_V3_SPEC,
         **{
             (code, spec.record_schema_version): spec
             for code, spec in _CYCLE2_NEW_TOP_LEVEL_SPECS.items()
@@ -2966,6 +3029,13 @@ def _strict_selected_versioned_record(
     )
 
 
+def _logical_child_source_models(
+    spec: _P0LogicalChildSchemaSpec,
+) -> tuple[type[ContractModel], ...]:
+    source_model = spec.source_model
+    return source_model if type(source_model) is tuple else (source_model,)
+
+
 def _strict_selected_versioned_children(
     spec: P0RecordSchemaSpec,
     logical_children: object,
@@ -2985,13 +3055,15 @@ def _strict_selected_versioned_children(
                 ]
                 for child_code in spec.allowed_child_codes
                 if type(child)
-                is P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
-                    (
-                        spec.record_code,
-                        spec.record_schema_version,
-                        child_code,
-                    )
-                ].source_model
+                in _logical_child_source_models(
+                    P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                        (
+                            spec.record_code,
+                            spec.record_schema_version,
+                            child_code,
+                        )
+                    ]
+                )
             ),
             None,
         )
@@ -3000,7 +3072,7 @@ def _strict_selected_versioned_children(
         canonical.append(
             _strict_versioned_model(
                 child,
-                child_spec.source_model,
+                type(child),
                 failure_category=(
                     P0PersistenceIntegrityCategory.CHILD_MISMATCH
                 ),
@@ -3199,13 +3271,15 @@ def _selected_versioned_child_payloads(
                 ]
                 for child_code in parent_spec.allowed_child_codes
                 if type(child)
-                is P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
-                    (
-                        parent_spec.record_code,
-                        parent_spec.record_schema_version,
-                        child_code,
-                    )
-                ].source_model
+                in _logical_child_source_models(
+                    P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG[
+                        (
+                            parent_spec.record_code,
+                            parent_spec.record_schema_version,
+                            child_code,
+                        )
+                    ]
+                )
             ),
             None,
         )
@@ -3478,6 +3552,145 @@ def _build_request_understanding_v2_envelope(
     )
 
 
+def _request_understanding_v3_child_payloads(
+    parent_record: ContractModel,
+    parent_identity: LogicalIdentity,
+    logical_children: tuple[ContractModel, ...],
+) -> tuple[
+    tuple[P0LogicalChildPayload, ...],
+    tuple[P0RecordReference, ...],
+]:
+    if type(logical_children) is not tuple:
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    validated_children: list[ContractModel] = []
+    for child in logical_children:
+        if type(child) not in _logical_child_source_models(
+            _ACCEPTED_TASK_DELTA_V3_SPEC
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        validated_children.append(
+            _strict_versioned_model(
+                child,
+                type(child),
+                failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+            )
+        )
+
+    try:
+        closure = _RequestUnderstandingClosureV3(
+            record=parent_record,
+            accepted_task_deltas=tuple(validated_children),
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    if (
+        type(closure.record) is not _RequestUnderstandingRecordV3
+        or not _versioned_runtime_values_match_exactly(
+            closure.record,
+            parent_record,
+        )
+        or len(closure.accepted_task_deltas) != len(validated_children)
+        or any(
+            not _versioned_runtime_values_match_exactly(expected, actual)
+            for expected, actual in zip(
+                closure.accepted_task_deltas,
+                validated_children,
+                strict=True,
+            )
+        )
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+
+    parent_data = parent_record.model_dump(mode="json", warnings="error")
+    payloads: list[P0LogicalChildPayload] = []
+    child_references: list[P0RecordReference] = []
+    for child in validated_children:
+        child_data = child.model_dump(mode="json", warnings="error")
+        for rule in _ACCEPTED_TASK_DELTA_V3_SPEC.projection_decisions:
+            values = _projected_values(rule, child_data)
+            if rule.classification is _D.PARENT_FIELD_EQUALITY:
+                if any(
+                    value != parent_data.get(rule.field_label)
+                    for value in values
+                ):
+                    _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+            elif rule.classification is _D.CHILD_TOP_LEVEL_P0_REFERENCE:
+                child_references.extend(
+                    _reference_for_value(rule, value) for value in values
+                )
+        payloads.append(
+            P0LogicalChildPayload(
+                child_code=P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+                parent_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                parent_logical_identity=parent_identity,
+                logical_identity=_logical_identity(
+                    child,
+                    _ACCEPTED_TASK_DELTA_V3_SPEC.identity_fields,
+                ),
+                data=child_data,
+            )
+        )
+    return (
+        tuple(payloads),
+        _normalize_references(
+            tuple(child_references),
+            collapse_duplicates=True,
+        ),
+    )
+
+
+def _build_request_understanding_v3_envelope(
+    record: object,
+    *,
+    external_references: tuple[P0RecordReference, ...],
+    logical_children: tuple[ContractModel, ...],
+) -> P0PersistenceEnvelope:
+    if type(external_references) is not tuple:
+        _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+    validated = _strict_selected_versioned_record(
+        _REQUEST_UNDERSTANDING_V3_SPEC,
+        record,
+    )
+    identity = _logical_identity(
+        validated,
+        _REQUEST_UNDERSTANDING_V3_SPEC.identity_fields,
+    )
+    owner, source_references = _versioned_top_level_projection(
+        _REQUEST_UNDERSTANDING_V3_SPEC,
+        validated,
+    )
+    external = _validate_external_references(
+        _REQUEST_UNDERSTANDING_V3_SPEC,
+        external_references,
+    )
+    children, child_references = _request_understanding_v3_child_payloads(
+        validated,
+        identity,
+        logical_children,
+    )
+    references = _normalize_references(
+        (*source_references, *external, *child_references),
+        collapse_duplicates=True,
+    )
+    return P0PersistenceEnvelope(
+        record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        record_schema_version=(
+            _REQUEST_UNDERSTANDING_V3_SPEC.record_schema_version
+        ),
+        logical_identity=identity,
+        direct_owner_customer_id=owner,
+        record_references=references,
+        payload=P0VersionedPayload(
+            record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            record_schema_version=(
+                _REQUEST_UNDERSTANDING_V3_SPEC.record_schema_version
+            ),
+            data=validated.model_dump(mode="json", warnings="error"),
+            logical_children=children,
+        ),
+    )
+
+
 def encode_persistence_record_versioned(
     record_code: P0RecordCode,
     schema_version: str,
@@ -3504,6 +3717,12 @@ def encode_persistence_record_versioned(
             )
         if selected is _REQUEST_UNDERSTANDING_V2_SPEC:
             result = _build_request_understanding_v2_envelope(
+                record,
+                external_references=external_references,
+                logical_children=logical_children,
+            )
+        elif selected is _REQUEST_UNDERSTANDING_V3_SPEC:
+            result = _build_request_understanding_v3_envelope(
                 record,
                 external_references=external_references,
                 logical_children=logical_children,
@@ -3725,6 +3944,119 @@ def _decode_request_understanding_v2(
     )
 
 
+def _decode_request_understanding_v3(
+    envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
+    expected_record_code: P0RecordCode,
+    expected_schema_version: str,
+) -> DecodedP0PersistenceRecord:
+    if (
+        isinstance(envelope, P0PersistenceEnvelope)
+        and _versioned_undeclared_model_state_keys(envelope)
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    raw_json = _json_input(envelope)
+    outer_data = _classify_outer_versioned(
+        raw_json,
+        expected_record_code,
+        expected_schema_version,
+        _REQUEST_UNDERSTANDING_V3_SPEC,
+    )
+    inner_data = outer_data.get("payload")
+    if (
+        not isinstance(inner_data, dict)
+        or inner_data.get("record_code") != expected_record_code.value
+        or inner_data.get("record_schema_version")
+        != expected_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    try:
+        validated_envelope = P0PersistenceEnvelope.model_validate_json(
+            raw_json,
+            strict=True,
+        )
+    except ValidationError as error:
+        _raise_signal(_envelope_validation_category(error))
+    except (TypeError, ValueError, RecursionError):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        validated_envelope.payload.record_code is not expected_record_code
+        or validated_envelope.payload.record_schema_version
+        != expected_schema_version
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.METADATA_PAYLOAD_MISMATCH)
+
+    source_json = _json_mapping_text(
+        validated_envelope.payload.data,
+        failure_category=P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+    )
+    try:
+        source_record = _RequestUnderstandingRecordV3.model_validate_json(
+            source_json,
+            strict=True,
+        )
+    except (TypeError, ValueError, ValidationError, RecursionError):
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    source_record = _strict_selected_versioned_record(
+        _REQUEST_UNDERSTANDING_V3_SPEC,
+        source_record,
+    )
+
+    child_model_by_operation: Mapping[str, type[ContractModel]] = {
+        "ADD_GOAL": _AcceptedAddGoalTaskDeltaV3,
+        "SUPPLY_INPUT": _AcceptedSupplyInputTaskDeltaV3,
+    }
+    children: list[ContractModel] = []
+    for child_payload in validated_envelope.payload.logical_children:
+        if (
+            child_payload.child_code
+            is not P0LogicalChildCode.ACCEPTED_TASK_DELTA
+        ):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_model = child_model_by_operation.get(
+            child_payload.data.get("operation")
+        )
+        if child_model is None:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_json = _json_mapping_text(
+            child_payload.data,
+            failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+        )
+        try:
+            child = child_model.model_validate_json(child_json, strict=True)
+        except (TypeError, ValueError, ValidationError, RecursionError):
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        children.append(child)
+
+    expected = _build_request_understanding_v3_envelope(
+        source_record,
+        external_references=(),
+        logical_children=tuple(children),
+    )
+    if expected.logical_identity != validated_envelope.logical_identity:
+        _raise_signal(P0PersistenceIntegrityCategory.IDENTITY_MISMATCH)
+    if (
+        expected.direct_owner_customer_id
+        != validated_envelope.direct_owner_customer_id
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH)
+    if expected.record_references != validated_envelope.record_references:
+        _raise_signal(P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH)
+    if expected.payload.data != validated_envelope.payload.data:
+        _raise_signal(P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED)
+    if (
+        expected.payload.logical_children
+        != validated_envelope.payload.logical_children
+    ):
+        _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+    return DecodedP0PersistenceRecord(
+        record_code=expected_record_code,
+        record_schema_version=expected_schema_version,
+        source_record=source_record,
+        logical_children=tuple(children),
+    )
+
+
 def _decode_selected_versioned(
     envelope: P0PersistenceEnvelope | Mapping[str, object] | str | bytes,
     spec: P0RecordSchemaSpec,
@@ -3801,13 +4133,16 @@ def _decode_selected_versioned(
         )
         if child_spec is None:
             _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
+        child_models = _logical_child_source_models(child_spec)
+        if len(child_models) != 1:
+            _raise_signal(P0PersistenceIntegrityCategory.CHILD_MISMATCH)
         child_json = _json_mapping_text(
             child_payload.data,
             failure_category=P0PersistenceIntegrityCategory.CHILD_MISMATCH,
         )
         child: ContractModel | None = None
         try:
-            child = child_spec.source_model.model_validate_json(
+            child = child_models[0].model_validate_json(
                 child_json,
                 strict=True,
             )
@@ -3883,6 +4218,12 @@ def decode_persistence_record_versioned(
             )
         if selected is _REQUEST_UNDERSTANDING_V2_SPEC:
             result = _decode_request_understanding_v2(
+                envelope,
+                expected_record_code,
+                expected_schema_version,
+            )
+        elif selected is _REQUEST_UNDERSTANDING_V3_SPEC:
+            result = _decode_request_understanding_v3(
                 envelope,
                 expected_record_code,
                 expected_schema_version,
