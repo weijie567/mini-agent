@@ -26,12 +26,16 @@ from mini_agent.bootstrap import Cycle2OfflineComposition
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
+    ModelVisibleTaskSummary,
     NextMove,
     NextMoveKind,
     QueryContextualizationCandidateV2,
+    RequestUnderstandingInput,
 )
 from mini_agent.core.task_state import (
     InputBindingV2,
@@ -148,6 +152,39 @@ class _Cycle2DirectProvider:
             confidence=0.99,
         )
 
+    async def propose_cycle2_continuation_v3(
+        self,
+        request,
+    ) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+        return Cycle2ContinuationRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-continuation.p0.v2",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text="选择当前订单候选",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2ContinuationTaskDeltaCandidateV2(
+                    candidate_id=uuid4(),
+                    operation=TaskDeltaOperation.SUPPLY_INPUT,
+                    target_task_alias="current-task",
+                    target_request_unit_alias="current-request",
+                    input_candidates=(
+                        Cycle2InputCandidate(
+                            name="candidate_ordinal",
+                            candidate_value=2,
+                            source_ref=request.message_ref,
+                            source_quote="第二",
+                            confidence=0.99,
+                        ),
+                    ),
+                    confidence=0.99,
+                ),
+            ),
+        )
+
     async def propose_cycle2_control(
         self,
         _request,
@@ -169,6 +206,59 @@ class _Cycle2DirectProvider:
         return Cycle2ControlCandidate(
             kind=Cycle2ControlCandidateKind.FINISH,
         )
+
+
+async def test_direct_provider_v3_continuation_is_exact_frozen_envelope() -> None:
+    snapshot = build_cycle2_registry_snapshot()
+    run_id = uuid4()
+    message_ref = uuid4()
+    focused = ModelVisibleTaskSummary(
+        task_alias="current-task",
+        request_unit_alias="current-request",
+        goal_summary="查找最近购买的跑鞋订单",
+        status=TaskStatus.WAITING_USER.value,
+        open_questions=("请选择订单候选",),
+    )
+    request = RequestUnderstandingInput(
+        run_id=run_id,
+        message_ref=message_ref,
+        original_query="第二个",
+        active_task_summaries=(focused,),
+        focused_task_summary=focused,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+    )
+
+    output = await _Cycle2DirectProvider(
+        product_description="跑鞋"
+    ).propose_cycle2_continuation_v3(request)
+    assert (
+        Cycle2ContinuationRequestUnderstandingOutputV2.model_validate(
+            output.model_dump(mode="python"),
+            strict=True,
+        )
+        == output
+    )
+    assert output.schema_version == "e2e01-cycle2-continuation.p0.v2"
+    assert output.message_ref == message_ref
+    assert output.contextualization.text == "选择当前订单候选"
+    assert output.contextualization.resolved_reference_candidates == ()
+    assert output.contextualization.uncertainties == ()
+    assert output.contextualization.source_message_refs == (message_ref,)
+    assert len(output.task_delta_candidates) == 1
+    delta = output.task_delta_candidates[0]
+    assert delta.candidate_id not in {run_id, message_ref}
+    assert delta.operation is TaskDeltaOperation.SUPPLY_INPUT
+    assert delta.target_task_alias == focused.task_alias
+    assert delta.target_request_unit_alias == focused.request_unit_alias
+    assert delta.confidence == 0.99
+    assert len(delta.input_candidates) == 1
+    candidate = delta.input_candidates[0]
+    assert candidate.name == "candidate_ordinal"
+    assert candidate.candidate_value == 2
+    assert candidate.source_ref == message_ref
+    assert candidate.source_quote == "第二"
+    assert candidate.confidence == 0.99
 
 
 async def _post(app, message: str) -> AgentRunResult:
