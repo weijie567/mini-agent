@@ -1834,18 +1834,26 @@ from mini_agent.core.request_understanding import (
     ReferenceSourceKindV2,
 )
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationRecordV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
     DurableInputCandidateV2,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
     RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
 )
 
 
 RU_V2_SCHEMA_VERSION = "request_understanding_record.p0.v2"
+RU_V3_SCHEMA_VERSION = "request_understanding_record.p0.v3"
 
 
 def _non_ru_registry() -> MappingProxyType:
@@ -1863,6 +1871,15 @@ def _non_ru_registry() -> MappingProxyType:
 class RequestUnderstandingV2Case:
     record: RequestUnderstandingRecordV2
     children: tuple[AcceptedTaskDeltaV2, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestUnderstandingV3Case:
+    record: RequestUnderstandingRecordV3
+    children: tuple[
+        AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3,
+        ...,
+    ]
 
 
 def _durable_resolved_reference_v2(
@@ -2083,6 +2100,217 @@ def _decode_v2(
     )
 
 
+def _phase1_v3_case(shape: str) -> RequestUnderstandingV3Case:
+    source = _request_understanding_v2_case(shape)
+    candidates = tuple(
+        DurablePhase1AddGoalTaskDeltaCandidateV3(**candidate.model_dump())
+        for candidate in source.record.task_delta_candidates
+    )
+    child_by_candidate = {
+        child.candidate_ref: AcceptedAddGoalTaskDeltaV3(**child.model_dump())
+        for child in source.children
+    }
+    children = tuple(
+        child_by_candidate[candidate.candidate_id]
+        for candidate in candidates
+        if candidate.candidate_id in child_by_candidate
+    )
+    return RequestUnderstandingV3Case(
+        record=RequestUnderstandingRecordV3(
+            request_understanding_record_id=(
+                source.record.request_understanding_record_id
+            ),
+            run_id=source.record.run_id,
+            message_ref=source.record.message_ref,
+            record_schema_version=RU_V3_SCHEMA_VERSION,
+            model_input_schema_version=(
+                source.record.model_input_schema_version
+            ),
+            model_output_schema_version=(
+                source.record.model_output_schema_version
+            ),
+            contextualization=source.record.contextualization,
+            task_delta_candidates=candidates,
+            candidate_validation=source.record.candidate_validation,
+            accepted_delta_refs=source.record.accepted_delta_refs,
+            proposed_base_task_state_version=(
+                source.record.proposed_base_task_state_version
+            ),
+            validated_task_state_version=(
+                source.record.validated_task_state_version
+            ),
+            next_move_candidate_ref=source.record.next_move_candidate_ref,
+            created_at=source.record.created_at,
+        ),
+        children=children,
+    )
+
+
+def _cycle2_initial_v3_case() -> RequestUnderstandingV3Case:
+    context = _request_understanding_v2_case("zero").record.contextualization
+    message_ref = context.source_message_refs[0]
+    candidate_ref = _uuid(320)
+    accepted_delta_ref = _uuid(321)
+    task_id = _uuid(322)
+    binding_ref = _uuid(323)
+    candidate = DurableCycle2AddGoalTaskDeltaCandidateV3(
+        candidate_id=candidate_ref,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查找轻量跑鞋订单",
+        input_candidates=(
+            DurableCycle2InputCandidateV3(
+                name="product_description",
+                normalized_candidate_value="轻量 跑鞋",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message_ref,
+                source_span_start=2,
+                source_span_end_exclusive=7,
+                source_quote_sha256="e" * 64,
+                confidence=0.99,
+            ),
+        ),
+        confidence=0.98,
+    )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=_uuid(324),
+        run_id=_uuid(3),
+        message_ref=message_ref,
+        record_schema_version=RU_V3_SCHEMA_VERSION,
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-initial.p0.v1",
+        contextualization=context,
+        task_delta_candidates=(candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate_ref,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(accepted_delta_ref,),
+        validated_task_state_version=1,
+        next_move_candidate_ref=_uuid(325),
+        created_at=UTC_NOW,
+    )
+    child = AcceptedAddGoalTaskDeltaV3(
+        accepted_delta_id=accepted_delta_ref,
+        candidate_ref=candidate_ref,
+        message_ref=message_ref,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text=candidate.goal_patch,
+        input_binding_refs=(binding_ref,),
+        accepted_at=UTC_NOW,
+        task_id=task_id,
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    return RequestUnderstandingV3Case(record=record, children=(child,))
+
+
+def _cycle2_continuation_v3_case(
+    *,
+    accepted: bool = True,
+) -> RequestUnderstandingV3Case:
+    context = _request_understanding_v2_case("zero").record.contextualization
+    message_ref = context.source_message_refs[0]
+    candidate_ref = _uuid(330)
+    accepted_delta_ref = _uuid(331)
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=candidate_ref,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="task-current",
+        target_request_unit_alias="unit-current",
+        input_candidates=(
+            DurableCycle2InputCandidateV3(
+                name="order_id",
+                normalized_candidate_value="O-1001",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message_ref,
+                source_span_start=4,
+                source_span_end_exclusive=10,
+                source_quote_sha256="f" * 64,
+                confidence=0.99,
+            ),
+            DurableCycle2InputCandidateV3(
+                name="shipment_not_received",
+                normalized_candidate_value=True,
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message_ref,
+                source_span_start=12,
+                source_span_end_exclusive=16,
+                source_quote_sha256="a" * 64,
+                confidence=0.98,
+            ),
+        ),
+        confidence=0.97,
+    )
+    validation = CandidateValidationRecordV2(
+        candidate_ref=candidate_ref,
+        decision=(
+            CandidateValidationDecision.ACCEPT
+            if accepted
+            else CandidateValidationDecision.REJECT
+        ),
+        reason_code=(
+            None
+            if accepted
+            else CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+        ),
+    )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=_uuid(332),
+        run_id=_uuid(3),
+        message_ref=message_ref,
+        record_schema_version=RU_V3_SCHEMA_VERSION,
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+        contextualization=context,
+        task_delta_candidates=(candidate,),
+        candidate_validation=(validation,),
+        accepted_delta_refs=((accepted_delta_ref,) if accepted else ()),
+        created_at=UTC_NOW,
+    )
+    children: tuple[AcceptedSupplyInputTaskDeltaV3, ...] = ()
+    if accepted:
+        children = (
+            AcceptedSupplyInputTaskDeltaV3(
+                accepted_delta_id=accepted_delta_ref,
+                candidate_ref=candidate_ref,
+                message_ref=message_ref,
+                operation=TaskDeltaOperation.SUPPLY_INPUT,
+                task_id=_uuid(333),
+                target_request_unit_id=_uuid(334),
+                input_binding_refs=(_uuid(335), _uuid(336)),
+                accepted_at=UTC_NOW,
+                base_task_state_version=3,
+                result_task_state_version=4,
+            ),
+        )
+    return RequestUnderstandingV3Case(record=record, children=children)
+
+
+def _encode_v3(case: RequestUnderstandingV3Case) -> P0PersistenceEnvelope:
+    return persistence_module.encode_persistence_record_versioned(
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        RU_V3_SCHEMA_VERSION,
+        case.record,
+        logical_children=case.children,
+    )
+
+
+def _decode_v3(
+    envelope: P0PersistenceEnvelope | dict[str, object] | str | bytes,
+) -> DecodedP0PersistenceRecord:
+    return persistence_module.decode_persistence_record_versioned(
+        envelope,
+        expected_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        expected_schema_version=RU_V3_SCHEMA_VERSION,
+        correlation_ref=_uuid(399),
+    )
+
+
 def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
     source_path = Path(inspect.getsourcefile(persistence_module) or "")
     source_tree = ast.parse(source_path.read_text())
@@ -2218,7 +2446,7 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
     ru_v1_version = "request_understanding_record.p0.v1"
     assert isinstance(catalog, MappingProxyType)
-    assert len(catalog) == 28
+    assert len(catalog) == 29
     assert len(P0_PERSISTENCE_REGISTRY) == 17
     assert tuple(P0_PERSISTENCE_REGISTRY) == tuple(P0RecordCode)[:17]
     assert {
@@ -2230,6 +2458,7 @@ def test_ru_codec_surface_is_current_only_and_v1_absent() -> None:
         for code, spec in P0_PERSISTENCE_REGISTRY.items()
     )
     assert (ru_code, ru_v1_version) not in catalog
+    assert (ru_code, RU_V3_SCHEMA_VERSION) in catalog
     assert (
         P0_PERSISTENCE_REGISTRY[ru_code].record_schema_version
         == RU_V2_SCHEMA_VERSION
@@ -2326,13 +2555,14 @@ def test_version_catalog_is_exact_immutable_and_current_only() -> None:
     ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
 
     assert isinstance(catalog, MappingProxyType)
-    assert len(catalog) == 28
+    assert len(catalog) == 29
     assert {code for code, _ in catalog} == set(P0RecordCode)
     counts = Counter(code for code, _ in catalog)
     assert {count for count in counts.values()} == {1, 2}
     assert {
         code for code, count in counts.items() if count == 2
     } == {
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
         P0RecordCode.INPUT_BINDING_RECORD,
         P0RecordCode.GATE_DECISION_RECORD,
         P0RecordCode.TOOL_CALL_RECORD,
@@ -2348,10 +2578,17 @@ def test_version_catalog_is_exact_immutable_and_current_only() -> None:
     v2_spec = catalog[
         (ru_code, RU_V2_SCHEMA_VERSION)
     ]
+    v3_spec = catalog[(ru_code, RU_V3_SCHEMA_VERSION)]
     assert v2_spec.source_model is RequestUnderstandingRecordV2
     assert v2_spec.identity_fields == ("request_understanding_record_id",)
     assert v2_spec.version_mirror_field == "schema_version"
     assert v2_spec.allowed_child_codes == (
+        P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+    )
+    assert v3_spec.source_model is RequestUnderstandingRecordV3
+    assert v3_spec.identity_fields == ("request_understanding_record_id",)
+    assert v3_spec.version_mirror_field is None
+    assert v3_spec.allowed_child_codes == (
         P0LogicalChildCode.ACCEPTED_TASK_DELTA,
     )
     with pytest.raises(TypeError):
@@ -2368,6 +2605,332 @@ def test_version_catalog_is_exact_immutable_and_current_only() -> None:
             P0LogicalChildCode.ACCEPTED_TASK_DELTA
         ].source_model
         is AcceptedTaskDeltaV2
+    )
+
+
+def test_ru_v3_codec_is_explicitly_staged_without_active_registry_switch() -> None:
+    ru_code = P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+    catalog = persistence_module.P0_RECORD_SCHEMA_VERSION_CATALOG
+    child_catalog = persistence_module.P0_LOGICAL_CHILD_SCHEMA_VERSION_CATALOG
+
+    assert P0_PERSISTENCE_REGISTRY[ru_code] is catalog[
+        (ru_code, RU_V2_SCHEMA_VERSION)
+    ]
+    assert catalog[(ru_code, RU_V3_SCHEMA_VERSION)].source_model is (
+        RequestUnderstandingRecordV3
+    )
+    child_spec = child_catalog[
+        (
+            ru_code,
+            RU_V3_SCHEMA_VERSION,
+            P0LogicalChildCode.ACCEPTED_TASK_DELTA,
+        )
+    ]
+    assert child_spec.source_model == (
+        AcceptedAddGoalTaskDeltaV3,
+        AcceptedSupplyInputTaskDeltaV3,
+    )
+    assert child_spec.closure_strategy.value == "LOCAL_CLOSED"
+
+    case = _phase1_v3_case("partial")
+    with pytest.raises(P0PersistenceIntegrityError) as direct:
+        encode_persistence_record(
+            ru_code,
+            case.record,
+            logical_children=case.children,
+        )
+    assert (
+        direct.value.category
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        _phase1_v3_case("zero"),
+        _phase1_v3_case("all_reject"),
+        _phase1_v3_case("partial"),
+        _phase1_v3_case("multi"),
+        _cycle2_initial_v3_case(),
+        _cycle2_continuation_v3_case(),
+        _cycle2_continuation_v3_case(accepted=False),
+    ),
+    ids=(
+        "phase1-zero",
+        "phase1-all-reject",
+        "phase1-partial",
+        "phase1-multi",
+        "cycle2-initial",
+        "cycle2-continuation-dual",
+        "cycle2-continuation-rejected",
+    ),
+)
+def test_ru_v3_explicit_codec_round_trips_exact_closed_branches(
+    case: RequestUnderstandingV3Case,
+) -> None:
+    envelope = _encode_v3(case)
+    decoded = _decode_v3(envelope.model_dump_json())
+
+    assert envelope.record_schema_version == RU_V3_SCHEMA_VERSION
+    assert envelope.payload.record_schema_version == RU_V3_SCHEMA_VERSION
+    assert decoded.source_record == case.record
+    assert decoded.logical_children == case.children
+    assert tuple(
+        child.logical_identity
+        for child in envelope.payload.logical_children
+    ) == tuple(
+        (("accepted_delta_id", str(child.accepted_delta_id)),)
+        for child in case.children
+    )
+    assert tuple(
+        child.data["operation"]
+        for child in envelope.payload.logical_children
+    ) == tuple(child.operation.value for child in case.children)
+
+    for expected, payload in zip(
+        case.children,
+        envelope.payload.logical_children,
+        strict=True,
+    ):
+        assert tuple(payload.data["input_binding_refs"]) == tuple(
+            str(binding_ref) for binding_ref in expected.input_binding_refs
+        )
+
+
+def test_ru_v3_dual_binding_child_preserves_order_and_reference_closure() -> None:
+    case = _cycle2_continuation_v3_case()
+    envelope = _encode_v3(case)
+    child = case.children[0]
+    payload = envelope.payload.logical_children[0]
+
+    assert type(child) is AcceptedSupplyInputTaskDeltaV3
+    assert tuple(payload.data["input_binding_refs"]) == tuple(
+        str(binding_ref) for binding_ref in child.input_binding_refs
+    )
+    assert {
+        (
+            reference.relation,
+            reference.target_record_code,
+            reference.target_logical_identity,
+        )
+        for reference in envelope.record_references
+        if reference.relation in {"input_binding_ref", "accepted_delta_task_id"}
+    } == {
+        (
+            "input_binding_ref",
+            P0RecordCode.INPUT_BINDING_RECORD,
+            (("binding_id", str(binding_ref)),),
+        )
+        for binding_ref in child.input_binding_refs
+    } | {
+        (
+            "accepted_delta_task_id",
+            P0RecordCode.TASK_RECORD,
+            (("task_id", str(child.task_id)),),
+        )
+    }
+
+
+def test_ru_v3_codec_rejects_cross_version_children_and_reordered_closure() -> None:
+    v2 = _request_understanding_v2_case("partial")
+    v3 = _phase1_v3_case("partial")
+    with pytest.raises(P0PersistenceIntegrityError) as v2_child_under_v3:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            RU_V3_SCHEMA_VERSION,
+            v3.record,
+            logical_children=v2.children,
+        )
+    assert (
+        v2_child_under_v3.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as v3_child_under_v2:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            RU_V2_SCHEMA_VERSION,
+            v2.record,
+            logical_children=v3.children,
+        )
+    assert (
+        v3_child_under_v2.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+
+    multi = _phase1_v3_case("multi")
+    with pytest.raises(P0PersistenceIntegrityError) as reordered:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            RU_V3_SCHEMA_VERSION,
+            multi.record,
+            logical_children=tuple(reversed(multi.children)),
+        )
+    assert (
+        reordered.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+
+
+def test_ru_v3_decode_rejects_discriminator_and_version_mutation() -> None:
+    envelope = _encode_v3(_cycle2_continuation_v3_case()).model_dump(
+        mode="json"
+    )
+    operation_mutation = json.loads(json.dumps(envelope))
+    operation_mutation["payload"]["logical_children"][0]["data"][
+        "operation"
+    ] = "ADD_GOAL"
+    with pytest.raises(P0PersistenceIntegrityError) as wrong_branch:
+        _decode_v3(operation_mutation)
+    assert (
+        wrong_branch.value.category
+        is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+    )
+
+    inner_version_mutation = json.loads(json.dumps(envelope))
+    inner_version_mutation["payload"]["data"]["record_schema_version"] = (
+        RU_V2_SCHEMA_VERSION
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as wrong_inner_version:
+        _decode_v3(inner_version_mutation)
+    assert wrong_inner_version.value.category in {
+        P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH,
+    }
+
+    with pytest.raises(P0PersistenceIntegrityError) as wrong_expected_pair:
+        persistence_module.decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            expected_schema_version=RU_V2_SCHEMA_VERSION,
+            correlation_ref=_uuid(399),
+        )
+    assert (
+        wrong_expected_pair.value.category
+        is P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "children"),
+    (
+        (
+            _phase1_v3_case("partial").record,
+            (),
+        ),
+        (
+            _phase1_v3_case("partial").record,
+            _phase1_v3_case("partial").children * 2,
+        ),
+        (
+            _phase1_v3_case("multi").record,
+            _phase1_v3_case("multi").children[:1],
+        ),
+        (
+            _phase1_v3_case("multi").record,
+            (
+                _phase1_v3_case("multi").children[0],
+                _phase1_v3_case("multi").children[1].model_copy(
+                    update={
+                        "accepted_delta_id": (
+                            _phase1_v3_case("multi")
+                            .children[0]
+                            .accepted_delta_id
+                        )
+                    }
+                ),
+            ),
+        ),
+        (
+            _phase1_v3_case("multi").record,
+            (
+                _phase1_v3_case("multi").children[0],
+                _phase1_v3_case("multi").children[1].model_copy(
+                    update={
+                        "task_id": (
+                            _phase1_v3_case("multi").children[0].task_id
+                        ),
+                        "base_task_state_version": 2,
+                        "result_task_state_version": 3,
+                    }
+                ),
+            ),
+        ),
+    ),
+    ids=(
+        "missing-accepted-child",
+        "extra-duplicate-child",
+        "partial-multi-closure",
+        "colliding-accepted-identity",
+        "broken-task-chain",
+    ),
+)
+def test_ru_v3_encode_rejects_incomplete_or_conflicting_closure(
+    record: RequestUnderstandingRecordV3,
+    children: tuple[object, ...],
+) -> None:
+    with pytest.raises(P0PersistenceIntegrityError) as raised:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            RU_V3_SCHEMA_VERSION,
+            record,
+            logical_children=children,
+        )
+    assert raised.value.category is P0PersistenceIntegrityCategory.CHILD_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing-child", "extra-child", "provenance-source"),
+)
+def test_ru_v3_decode_rejects_closure_and_provenance_mutation(
+    mutation: str,
+) -> None:
+    raw = _encode_v3(_cycle2_continuation_v3_case()).model_dump(mode="json")
+    if mutation == "missing-child":
+        raw["payload"]["logical_children"] = []
+    elif mutation == "extra-child":
+        raw["payload"]["logical_children"].append(
+            raw["payload"]["logical_children"][0]
+        )
+    else:
+        raw["payload"]["data"]["task_delta_candidates"][0][
+            "input_candidates"
+        ][0]["source_ref"] = str(_uuid(398))
+
+    with pytest.raises(P0PersistenceIntegrityError) as raised:
+        _decode_v3(raw)
+    assert raised.value.category in {
+        P0PersistenceIntegrityCategory.PAYLOAD_VALIDATION_FAILED,
+        P0PersistenceIntegrityCategory.CHILD_MISMATCH,
+    }
+
+
+def test_ru_v3_version_alias_never_falls_back_to_known_pair() -> None:
+    case = _phase1_v3_case("partial")
+    envelope = _encode_v3(case)
+    alias = f"{RU_V3_SCHEMA_VERSION} "
+    with pytest.raises(P0PersistenceIntegrityError) as encoded:
+        persistence_module.encode_persistence_record_versioned(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            alias,
+            case.record,
+            logical_children=case.children,
+        )
+    assert (
+        encoded.value.category
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
+    )
+    with pytest.raises(P0PersistenceIntegrityError) as decoded:
+        persistence_module.decode_persistence_record_versioned(
+            envelope,
+            expected_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            expected_schema_version=alias,
+            correlation_ref=_uuid(399),
+        )
+    assert (
+        decoded.value.category
+        is P0PersistenceIntegrityCategory.UNKNOWN_RECORD_SCHEMA_VERSION
     )
 
 
