@@ -8035,17 +8035,21 @@ class PostgresRecordAdapter:
             record.candidate_set_id: record for record in candidate_sets
         }
         ordinal_selections: list[OrderCandidateSelectionRecord] = []
+        auto_targets: list[OrderCandidateAutoTargetRecord] = []
         for selection in selections:
             candidate_set = candidate_by_id.get(selection.candidate_set_ref)
             if candidate_set is None:
                 raise _integrity(
                     P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
                 )
-            if self._cycle2_auto_target_from_selection(
+            auto_target = self._cycle2_auto_target_from_selection(
                 record=selection,
                 candidate_set=candidate_set,
-            ) is None:
+            )
+            if auto_target is None:
                 ordinal_selections.append(selection)
+            else:
+                auto_targets.append(auto_target)
         selections = ordinal_selections
 
         source_edge_facts: dict[
@@ -8160,6 +8164,26 @@ class PostgresRecordAdapter:
         tool_by_id = {
             record.tool_call_id: record for record in tool_calls
         }
+        gate_decisions: list[GateDecisionV2] = []
+        for tool_call in tool_calls:
+            loaded = self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.GATE_DECISION_RECORD,
+                logical_identity=(
+                    ("gate_decision_id", tool_call.gate_decision_id),
+                ),
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not GateDecisionV2
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            gate_decisions.append(
+                cast(GateDecisionV2, loaded[1].source_record)
+            )
         binding_by_id = {
             record.binding_id: record for record in bindings
         }
@@ -8562,6 +8586,24 @@ class PostgresRecordAdapter:
                 ),
                 observation_source_edges=tuple(source_edges),
                 shipment_assessment_records=tuple(assessments),
+                gate_decision_records=tuple(
+                    sorted(
+                        gate_decisions,
+                        key=lambda record: (
+                            record.decided_at,
+                            str(record.gate_decision_id),
+                        ),
+                    )
+                ),
+                auto_target_records=tuple(
+                    sorted(
+                        auto_targets,
+                        key=lambda record: (
+                            record.verified_at,
+                            str(record.verified_target_ref),
+                        ),
+                    )
+                ),
                 tool_call_records=tool_calls,
                 recovery_decision_records=recovery_decisions,
                 superseded_run_finalizations=superseded_finalizations,
