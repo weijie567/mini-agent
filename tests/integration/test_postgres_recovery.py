@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.exc import OperationalError
 
 from mini_agent.application.persistence import (
@@ -317,6 +317,23 @@ async def test_w12_recovery_setup_reads_exact_root_and_supporting_closure(
         assert len(root_tools) == 1
         assert root_tools[0].attempts[0].retry_decision.value == "RETRY_SCHEDULED"
         assert len(supporting_tools) == 1
+        assert len(closure.gate_decision_records) == len(
+            closure.tool_call_records
+        )
+        assert {
+            record.gate_decision_id
+            for record in closure.gate_decision_records
+        } == {
+            record.gate_decision_id
+            for record in closure.tool_call_records
+        }
+        assert closure.candidate_selection_records == ()
+        assert len(closure.auto_target_records) == 1
+        auto_target = closure.auto_target_records[0]
+        assert any(
+            record.verified_target_ref == auto_target.verified_target_ref
+            for record in closure.tool_call_records
+        )
         assert all(
             edge.source_run_id != closure.run_record.run_id
             for edge in closure.observation_source_edges
@@ -324,6 +341,48 @@ async def test_w12_recovery_setup_reads_exact_root_and_supporting_closure(
         serialized = closure.model_dump_json()
         assert "customer-B" not in serialized
         assert "O-9001" not in serialized
+
+        missing_gate_id = root_tools[0].gate_decision_id
+        with factory() as session:
+            with session.begin():
+                gate_rows = tuple(
+                    session.scalars(
+                        select(P0RecordModel).where(
+                            P0RecordModel.record_code
+                            == P0RecordCode.GATE_DECISION_RECORD.value,
+                            P0RecordModel.scope_owner_customer_id
+                            == closure.owner_scope.customer_id,
+                        )
+                    )
+                )
+                missing_gate_row = next(
+                    row
+                    for row in gate_rows
+                    if row.logical_identity
+                    == [["gate_decision_id", str(missing_gate_id)]]
+                )
+                session.execute(
+                    delete(P0RecordReferenceModel).where(
+                        P0RecordReferenceModel.target_record_code
+                        == missing_gate_row.record_code,
+                        P0RecordReferenceModel.target_logical_identity
+                        == missing_gate_row.logical_identity,
+                    )
+                )
+                session.execute(
+                    delete(P0RecordModel).where(
+                        P0RecordModel.record_id
+                        == missing_gate_row.record_id
+                    )
+                )
+        with pytest.raises(P0PersistenceIntegrityError) as caught:
+            await adapter.load_cycle2_exact_run_evidence_for_owner(
+                owner_scope=_w12_owner_scope(),
+                run_id=plan.runtime_state.recovery_subject_run_id,
+            )
+        assert caught.value.category is (
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
         setup.detach()
         setup.dispose()
     finally:

@@ -1615,6 +1615,7 @@ def _search_graph(
         model_call_id=model_call_id,
         context_manifest_id=manifest_id,
         gate_decision_id=gate_id,
+        provider_tool_call_id=f"w12-{source_suffix}",
         canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
         tool_registry_version=snapshot.tool_registry_version,
         private_owner_scope_ref=_OWNER_A,
@@ -1836,7 +1837,7 @@ def _add_stale_shipment_observation_graph(
         _runtime_record(fixture_ref, "supporting_run.shipment", P0RecordCode.AGENT_RUN_RECORD, AgentRunRecordV2(run_id=run_id, conversation_id=target.conversation_id, status=AgentRunStatusV2.COMPLETED, provider_lane="scripted-cycle2", started_at=observed_at, completed_at=recorded_at, stop_reason=StopReasonV2.GOAL_COMPLETED)),
         _runtime_record(fixture_ref, "supporting_link.shipment", P0RecordCode.RUN_TASK_LINK_RECORD, RunTaskLinkRecordV2(run_id=run_id, task_id=task.task_id, base_task_state_version=2, result_task_state_version=3)),
         _runtime_record(fixture_ref, "supporting_gate.shipment", P0RecordCode.GATE_DECISION_RECORD, GateDecisionV2(gate_decision_id=gate_id, model_call_id=model_call_id, context_manifest_id=manifest_id, provider_tool_call_id="w12-stale-get-shipment", requested_provider_tool_name=Cycle2ToolName.GET_SHIPMENT.value, resolved_canonical_tool_name=Cycle2ToolName.GET_SHIPMENT, snapshot_match=True, registration_valid=True, schema_valid=True, trusted_field_valid=True, argument_binding_valid=True, argument_binding_refs=(binding.binding_id,), budget_valid=True, progress_valid=True, proposed_base_task_state_version=2, validated_task_state_version=2, state_version_valid=True, action_boundary_valid=True, decision=GateDecisionValue.ACCEPT, decided_at=observed_at, verified_target_ref=target.verified_target_ref, validated_arguments={"order_id": target.order_id})),
-        _runtime_record(fixture_ref, "supporting_tool.shipment", P0RecordCode.TOOL_CALL_RECORD, ToolCallRecordV2(tool_call_id=tool_id, run_id=run_id, task_id=task.task_id, request_unit_id=unit.request_unit_id, model_call_id=model_call_id, context_manifest_id=manifest_id, gate_decision_id=gate_id, canonical_tool_name=Cycle2ToolName.GET_SHIPMENT, tool_registry_version=snapshot.tool_registry_version, private_owner_scope_ref=_OWNER_A, validated_task_state_version=2, argument_binding_refs=(binding.binding_id,), verified_target_ref=target.verified_target_ref, effect=ToolEffect.READ, attempt_count=1, attempts=(attempt,), status=ToolCallStatus.SUCCEEDED, started_at=observed_at, finished_at=recorded_at, result_ref=result_ref)),
+        _runtime_record(fixture_ref, "supporting_tool.shipment", P0RecordCode.TOOL_CALL_RECORD, ToolCallRecordV2(tool_call_id=tool_id, run_id=run_id, task_id=task.task_id, request_unit_id=unit.request_unit_id, model_call_id=model_call_id, context_manifest_id=manifest_id, gate_decision_id=gate_id, provider_tool_call_id="w12-stale-get-shipment", canonical_tool_name=Cycle2ToolName.GET_SHIPMENT, tool_registry_version=snapshot.tool_registry_version, private_owner_scope_ref=_OWNER_A, validated_task_state_version=2, argument_binding_refs=(binding.binding_id,), verified_target_ref=target.verified_target_ref, effect=ToolEffect.READ, attempt_count=1, attempts=(attempt,), status=ToolCallStatus.SUCCEEDED, started_at=observed_at, finished_at=recorded_at, result_ref=result_ref)),
         _runtime_record(fixture_ref, "context_manifest.shipment", P0RecordCode.CONTEXT_MANIFEST_RECORD, ContextManifest(context_manifest_id=manifest_id, run_id=run_id, model_call_id=model_call_id, tool_registry_version=snapshot.tool_registry_version, model_visible_toolset_hash=snapshot.model_visible_toolset_hash, selected_message_refs=binding.source_refs, task_state_ref_and_version=TaskStateRefAndVersion(task_id=task.task_id, state_version=2), redaction_policy_version="redaction.p0.v1", token_counts=TokenCounts(), assembled_at=observed_at)),
     )
 
@@ -2186,6 +2187,7 @@ def _runtime_setup(
                     model_call_id=root_model_call_id,
                     context_manifest_id=root_manifest_id,
                     gate_decision_id=root_gate_id,
+                    provider_tool_call_id="w12-recovery-get-shipment",
                     canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
                     tool_registry_version=snapshot.tool_registry_version,
                     private_owner_scope_ref=_OWNER_A,

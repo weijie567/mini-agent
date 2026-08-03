@@ -457,12 +457,34 @@ async def test_cycle2_unique_first_turn_persists_real_normal_graph_and_exact_evi
         assert evidence.task_state_transition_records == ()
         assert len(evidence.candidate_set_records) == 1
         assert evidence.candidate_selection_records == ()
+        assert len(evidence.auto_target_records) == 1
         assert len(evidence.search_observation_records) == 1
         assert len(evidence.order_observation_records) == 1
         assert evidence.shipment_observation_records == ()
         assert len(evidence.observation_source_edges) == 2
         assert evidence.shipment_assessment_records == ()
         assert len(evidence.tool_call_records) == 2
+        assert len(evidence.gate_decision_records) == 2
+        assert {
+            record.gate_decision_id
+            for record in evidence.gate_decision_records
+        } == {
+            record.gate_decision_id
+            for record in evidence.tool_call_records
+        }
+        auto_target = evidence.auto_target_records[0]
+        target_calls = tuple(
+            record
+            for record in evidence.tool_call_records
+            if record.verified_target_ref is not None
+        )
+        assert len(target_calls) == 1
+        assert target_calls[0].verified_target_ref == auto_target.verified_target_ref
+        assert next(
+            record
+            for record in evidence.gate_decision_records
+            if record.gate_decision_id == target_calls[0].gate_decision_id
+        ).verified_target_ref == auto_target.verified_target_ref
         assert evidence.recovery_decision_records == ()
         assert evidence.superseded_run_finalizations == ()
         assert len(evidence.context_manifest_records) == 2
