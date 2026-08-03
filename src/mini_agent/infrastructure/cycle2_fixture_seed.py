@@ -902,12 +902,31 @@ class Cycle2RuntimeSetupV1(_SeedModel):
             for message in self.historical_user_messages
         ):
             raise ValueError("runtime setup can only preseed historical USER messages")
+        if (
+            self.recovery_subject_run_id is None
+            and self.historical_user_messages
+        ):
+            raise ValueError(
+                "ordinary setup cannot use the recovery message family"
+            )
         if self.recovery_subject_run_id is not None and (
             len(self.historical_user_messages) != 1
             or self.historical_user_messages[0].direction
             is not MessageDirection.USER
         ):
             raise ValueError("recovery setup requires one historical USER Message")
+        base_messages = tuple(
+            record.source_record
+            for record in self.base_records
+            if type(record.source_record) is MessageRecord
+        )
+        if self.recovery_subject_run_id is not None and (
+            self.historical_user_messages[0] not in base_messages
+            or base_messages.count(self.historical_user_messages[0]) != 1
+        ):
+            raise ValueError(
+                "recovery message family must name one exact base Message"
+            )
         identities = tuple(
             (record.record_code, record.record_role)
             for record in self.base_records
@@ -1398,6 +1417,32 @@ def _search_graph(
         created_at=started_at,
         updated_at=started_at,
     )
+    order_message = None
+    order_binding = None
+    if unique_target:
+        order_message = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=deterministic_cycle2_setup_uuid(
+                fixture_ref, "message.historical_user.order_id"
+            ),
+            conversation_id=conversation_id,
+            direction=MessageDirection.USER,
+            content="我要查询订单 O-1001。",
+            received_at=started_at + timedelta(microseconds=1),
+        )
+        order_binding = InputBindingV2(
+            binding_id=deterministic_cycle2_setup_uuid(
+                fixture_ref, "binding.order_id"
+            ),
+            name="order_id",
+            normalized_value="O-1001",
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(order_message.message_id,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=order_message.received_at,
+            updated_at=order_message.received_at,
+        )
     candidate_refs = tuple(
         deterministic_cycle2_setup_uuid(
             fixture_ref,
@@ -1501,7 +1546,11 @@ def _search_graph(
         task_id=task_id,
         goal_text="查询最近购买的跑鞋订单",
         goal_source_refs=(message_id,),
-        input_binding_refs=(binding_id,),
+        input_binding_refs=(
+            (binding_id,)
+            if order_binding is None
+            else (binding_id, order_binding.binding_id)
+        ),
         open_questions=("请选择候选订单序号。",) if current_status is TaskStatus.WAITING_USER else (),
         observation_refs=(observation_id,),
         status=current_status,
@@ -1614,6 +1663,23 @@ def _search_graph(
         _runtime_record(fixture_ref, "toolset_artifact", P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT, snapshot.artifact()),
     ]
     if unique_target:
+        assert order_message is not None and order_binding is not None
+        records.extend(
+            (
+                _runtime_record(
+                    fixture_ref,
+                    "message.historical_user.order_id",
+                    P0RecordCode.MESSAGE_RECORD,
+                    order_message,
+                ),
+                _runtime_record(
+                    fixture_ref,
+                    "binding.order_id",
+                    P0RecordCode.INPUT_BINDING_RECORD,
+                    order_binding,
+                ),
+            )
+        )
         candidate = candidates[0]
         auto_target = OrderCandidateAutoTargetRecord(
             verified_target_ref=deterministic_cycle2_setup_uuid(
@@ -1897,98 +1963,122 @@ def _runtime_setup(
         else _candidate_runtime_graph(graph_definitions[0])
     )
     recovery_ref = None
-    messages = tuple(
-        item.source_record
-        for item in base_records
-        if item.record_code is P0RecordCode.MESSAGE_RECORD
-        and type(item.source_record) is MessageRecord
-    )
+    messages: tuple[MessageRecord, ...] = ()
     if graph_definitions and graph_definitions[0].recipe is Cycle2W12FixtureRecipe.RETRY_SCHEDULED_OBSOLETE_RUN:
         if type(authenticated_user_message) is not str or not authenticated_user_message:
             raise Cycle2SeedError("recovery root requires the authenticated single USER message")
         fixture_ref = graph_definitions[0].fixture_ref
         recovery_ref = deterministic_cycle2_setup_uuid(fixture_ref, "recovery_root.run")
+        target = next(
+            item.source_record
+            for item in base_records
+            if type(item.source_record) is OrderCandidateAutoTargetRecord
+        )
+        query_binding = next(
+            item.source_record
+            for item in base_records
+            if item.record_role == "binding.product_description"
+            and type(item.source_record) is InputBindingV2
+        )
+        old_order_binding = next(
+            item.source_record
+            for item in base_records
+            if item.record_role == "binding.order_id"
+            and type(item.source_record) is InputBindingV2
+        )
+        task = next(
+            item.source_record
+            for item in base_records
+            if item.record_role == "task.current"
+            and type(item.source_record) is TaskRecord
+        )
+        unit = next(
+            item.source_record
+            for item in base_records
+            if item.record_role == "request_unit.current"
+            and type(item.source_record) is RequestUnitRecord
+        )
+        if (
+            task.state_version != 2
+            or unit.state_version != 2
+            or unit.input_binding_refs
+            != (query_binding.binding_id, old_order_binding.binding_id)
+            or target.query_input_binding_ref != query_binding.binding_id
+        ):
+            raise Cycle2SeedError("recovery pre-CAS v2 snapshot is not exact")
+        root_started = datetime(2026, 7, 31, 11, 49, tzinfo=UTC)
+        attempt_finished = root_started + timedelta(seconds=1)
+        invalidated_at = datetime(2026, 7, 31, 11, 50, tzinfo=UTC)
         historical = MessageRecord(
             schema_version="message_record.p0.v1",
             message_id=deterministic_cycle2_setup_uuid(fixture_ref, "message.historical_user.recovery"),
             conversation_id=deterministic_cycle2_setup_uuid(fixture_ref, "conversation.current"),
             direction=MessageDirection.USER,
             content=authenticated_user_message,
-            received_at=datetime(2026, 7, 31, 11, 28, tzinfo=UTC),
+            received_at=root_started,
         )
-        old_messages = {
-            item.source_record.message_id
-            for item in base_records
-            if type(item.source_record) is MessageRecord
-        }
-        rewritten: list[Cycle2RuntimeBaseRecordV1] = []
-        for item in base_records:
-            source = item.source_record
-            if type(source) is MessageRecord:
-                continue
-            if type(source) is InputBindingV2 and set(source.source_refs).intersection(old_messages):
-                source = source.model_copy(update={"source_refs": (historical.message_id,)})
-            elif type(source) is RequestUnitRecord:
-                source = source.model_copy(
+        fresh_order_binding = InputBindingV2(
+            binding_id=deterministic_cycle2_setup_uuid(
+                fixture_ref, "binding.order_id.recovery_root"
+            ),
+            name="order_id",
+            normalized_value="O-1001",
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(historical.message_id,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=root_started,
+            updated_at=root_started,
+            supersedes=old_order_binding.binding_id,
+        )
+        final_binding_refs = tuple(
+            fresh_order_binding.binding_id
+            if ref == old_order_binding.binding_id
+            else ref
+            for ref in unit.input_binding_refs
+        )
+        base_records = _replace_runtime_record(
+            base_records,
+            role="task.current",
+            replacement=_runtime_record(
+                fixture_ref,
+                "task.current",
+                P0RecordCode.TASK_RECORD,
+                task.model_copy(
+                    update={"state_version": 4, "updated_at": invalidated_at}
+                ),
+            ),
+        )
+        base_records = _replace_runtime_record(
+            base_records,
+            role="request_unit.current",
+            replacement=_runtime_record(
+                fixture_ref,
+                "request_unit.current",
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                unit.model_copy(
                     update={
-                        "goal_source_refs": tuple(
-                            historical.message_id if ref in old_messages else ref
-                            for ref in source.goal_source_refs
-                        ),
-                        "state_version": 3,
-                        "updated_at": datetime(2026, 7, 31, 11, 50, tzinfo=UTC),
+                        "state_version": 4,
+                        "updated_at": invalidated_at,
+                        "input_binding_refs": final_binding_refs,
                     }
-                )
-            elif type(source) is TaskRecord:
-                source = source.model_copy(
-                    update={
-                        "state_version": 3,
-                        "updated_at": datetime(2026, 7, 31, 11, 50, tzinfo=UTC),
-                    }
-                )
-            elif type(source) is ContextManifest:
-                source = source.model_copy(
-                    update={
-                        "selected_message_refs": tuple(
-                            historical.message_id if ref in old_messages else ref
-                            for ref in source.selected_message_refs
-                        )
-                    }
-                )
-            rewritten.append(item.model_copy(update={"source_record": source}))
-        base_records = tuple(rewritten) + (
+                ),
+            ),
+        )
+        base_records += (
             _runtime_record(
                 fixture_ref,
                 "message.historical_user.recovery",
                 P0RecordCode.MESSAGE_RECORD,
                 historical,
             ),
+            _runtime_record(
+                fixture_ref,
+                "binding.order_id.recovery_root",
+                P0RecordCode.INPUT_BINDING_RECORD,
+                fresh_order_binding,
+            ),
         )
-        target = next(
-            item.source_record
-            for item in base_records
-            if type(item.source_record) is OrderCandidateAutoTargetRecord
-        )
-        binding = next(
-            item.source_record
-            for item in base_records
-            if type(item.source_record) is InputBindingV2
-            and item.source_record.binding_id == target.query_input_binding_ref
-        )
-        task = next(
-            item.source_record
-            for item in base_records
-            if type(item.source_record) is TaskRecord
-            and item.record_role == "task.current"
-        )
-        unit = next(
-            item.source_record
-            for item in base_records
-            if type(item.source_record) is RequestUnitRecord
-            and item.record_role == "request_unit.current"
-        )
-        root_started = datetime(2026, 7, 31, 11, 49, tzinfo=UTC)
-        attempt_finished = root_started + timedelta(seconds=1)
         root_manifest_id = deterministic_cycle2_setup_uuid(
             fixture_ref, "recovery_root.context_manifest"
         )
@@ -2048,7 +2138,7 @@ def _runtime_setup(
                     selected_message_refs=(historical.message_id,),
                     task_state_ref_and_version=TaskStateRefAndVersion(
                         task_id=task.task_id,
-                        state_version=2,
+                        state_version=3,
                     ),
                     redaction_policy_version="redaction.p0.v1",
                     token_counts=TokenCounts(),
@@ -2071,11 +2161,11 @@ def _runtime_setup(
                     schema_valid=True,
                     trusted_field_valid=True,
                     argument_binding_valid=True,
-                    argument_binding_refs=(binding.binding_id,),
+                    argument_binding_refs=(query_binding.binding_id,),
                     budget_valid=True,
                     progress_valid=True,
-                    proposed_base_task_state_version=2,
-                    validated_task_state_version=2,
+                    proposed_base_task_state_version=3,
+                    validated_task_state_version=3,
                     state_version_valid=True,
                     action_boundary_valid=True,
                     decision=GateDecisionValue.ACCEPT,
@@ -2099,8 +2189,8 @@ def _runtime_setup(
                     canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
                     tool_registry_version=snapshot.tool_registry_version,
                     private_owner_scope_ref=_OWNER_A,
-                    validated_task_state_version=2,
-                    argument_binding_refs=(binding.binding_id,),
+                    validated_task_state_version=3,
+                    argument_binding_refs=(query_binding.binding_id,),
                     verified_target_ref=target.verified_target_ref,
                     effect=ToolEffect.READ,
                     attempt_count=1,
@@ -2135,21 +2225,147 @@ def _runtime_setup(
         if not graph_definitions or graph_definitions[0].recipe is not Cycle2W12FixtureRecipe.VERIFIED_ORDER_TARGET:
             raise Cycle2SeedError("correction overlay requires the verified target base graph")
         fixture_ref = graph_definitions[0].fixture_ref
-        message = messages[0]
         task_item = next(item for item in base_records if item.record_role == "task.current")
         unit_item = next(item for item in base_records if item.record_role == "request_unit.current")
+        conversation = next(
+            item.source_record
+            for item in base_records
+            if item.record_role == "conversation.current"
+        )
         task = task_item.source_record
         unit = unit_item.source_record
-        assert type(task) is TaskRecord and type(unit) is RequestUnitRecord
-        true_binding = InputBindingV2(binding_id=deterministic_cycle2_setup_uuid(fixture_ref, "binding.shipment_not_received.true"), name="shipment_not_received", normalized_value=True, authority=InputAuthority.USER_CLAIM, source_refs=(message.message_id,), validation_status=InputValidationStatus.ACCEPTED, confirmed_by_user=True, created_at=task.updated_at, updated_at=task.updated_at)
-        base_task = task.model_copy(update={"state_version": 3})
-        base_unit = unit.model_copy(update={"state_version": 3, "input_binding_refs": (*unit.input_binding_refs, true_binding.binding_id)})
+        assert (
+            type(conversation) is ConversationRecord
+            and type(task) is TaskRecord
+            and type(unit) is RequestUnitRecord
+        )
+        true_message = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=deterministic_cycle2_setup_uuid(
+                fixture_ref,
+                "message.historical_user.shipment_not_received.true",
+            ),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.USER,
+            content="订单 O-1001 显示已送达，但我没有收到。",
+            received_at=task.updated_at,
+        )
+        true_binding = InputBindingV2(
+            binding_id=deterministic_cycle2_setup_uuid(
+                fixture_ref, "binding.shipment_not_received.true"
+            ),
+            name="shipment_not_received",
+            normalized_value=True,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(true_message.message_id,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=true_message.received_at,
+            updated_at=true_message.received_at,
+        )
+        base_task = task.model_copy(
+            update={"state_version": 3, "updated_at": true_binding.updated_at}
+        )
+        base_unit = unit.model_copy(
+            update={
+                "state_version": 3,
+                "updated_at": true_binding.updated_at,
+                "input_binding_refs": (
+                    *unit.input_binding_refs,
+                    true_binding.binding_id,
+                ),
+            }
+        )
         base_records = _replace_runtime_record(base_records, role="task.current", replacement=_runtime_record(fixture_ref, "task.current", P0RecordCode.TASK_RECORD, base_task))
         base_records = _replace_runtime_record(base_records, role="request_unit.current", replacement=_runtime_record(fixture_ref, "request_unit.current", P0RecordCode.REQUEST_UNIT_RECORD, base_unit))
-        base_records += (_runtime_record(fixture_ref, "binding.shipment_not_received.true", P0RecordCode.INPUT_BINDING_RECORD, true_binding),)
+        base_records += (
+            _runtime_record(
+                fixture_ref,
+                "message.historical_user.shipment_not_received.true",
+                P0RecordCode.MESSAGE_RECORD,
+                true_message,
+            ),
+            _runtime_record(fixture_ref, "binding.shipment_not_received.true", P0RecordCode.INPUT_BINDING_RECORD, true_binding),
+        )
         false_ref = "fx-corrected-not-received-claim-owner-a-v1"
-        false_binding = InputBindingV2(binding_id=deterministic_cycle2_setup_uuid(false_ref, "binding.shipment_not_received.false"), name="shipment_not_received", normalized_value=False, authority=InputAuthority.USER_CLAIM, source_refs=(message.message_id,), validation_status=InputValidationStatus.ACCEPTED, confirmed_by_user=True, created_at=task.updated_at + timedelta(microseconds=1), updated_at=task.updated_at + timedelta(microseconds=1), supersedes=true_binding.binding_id)
-        overlays = (Cycle2RuntimeOverlayV1(fixture_ref=false_ref, prerequisite_fixture_ref=fixture_ref, expected_pre_images=(next(item for item in base_records if item.record_role == "task.current"), next(item for item in base_records if item.record_role == "request_unit.current")), next_records=(_runtime_record(false_ref, "task.current", P0RecordCode.TASK_RECORD, base_task.model_copy(update={"state_version": 4, "updated_at": false_binding.updated_at})), _runtime_record(false_ref, "request_unit.current", P0RecordCode.REQUEST_UNIT_RECORD, base_unit.model_copy(update={"state_version": 4, "updated_at": false_binding.updated_at, "input_binding_refs": (*base_unit.input_binding_refs, false_binding.binding_id)})), _runtime_record(false_ref, "binding.shipment_not_received.false", P0RecordCode.INPUT_BINDING_RECORD, false_binding))),)
+        false_message = MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=deterministic_cycle2_setup_uuid(
+                false_ref,
+                "message.historical_user.shipment_not_received.false",
+            ),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.USER,
+            content="更正：订单 O-1001 已经收到了。",
+            received_at=true_binding.updated_at + timedelta(microseconds=1),
+        )
+        false_binding = InputBindingV2(
+            binding_id=deterministic_cycle2_setup_uuid(
+                false_ref, "binding.shipment_not_received.false"
+            ),
+            name="shipment_not_received",
+            normalized_value=False,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(false_message.message_id,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=false_message.received_at,
+            updated_at=false_message.received_at,
+            supersedes=true_binding.binding_id,
+        )
+        final_binding_refs = tuple(
+            false_binding.binding_id
+            if ref == true_binding.binding_id
+            else ref
+            for ref in base_unit.input_binding_refs
+        )
+        overlays = (
+            Cycle2RuntimeOverlayV1(
+                fixture_ref=false_ref,
+                prerequisite_fixture_ref=fixture_ref,
+                expected_pre_images=(
+                    next(item for item in base_records if item.record_role == "task.current"),
+                    next(item for item in base_records if item.record_role == "request_unit.current"),
+                ),
+                next_records=(
+                    _runtime_record(
+                        false_ref,
+                        "message.historical_user.shipment_not_received.false",
+                        P0RecordCode.MESSAGE_RECORD,
+                        false_message,
+                    ),
+                    _runtime_record(
+                        false_ref,
+                        "task.current",
+                        P0RecordCode.TASK_RECORD,
+                        base_task.model_copy(
+                            update={
+                                "state_version": 4,
+                                "updated_at": false_binding.updated_at,
+                            }
+                        ),
+                    ),
+                    _runtime_record(
+                        false_ref,
+                        "request_unit.current",
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        base_unit.model_copy(
+                            update={
+                                "state_version": 4,
+                                "updated_at": false_binding.updated_at,
+                                "input_binding_refs": final_binding_refs,
+                            }
+                        ),
+                    ),
+                    _runtime_record(
+                        false_ref,
+                        "binding.shipment_not_received.false",
+                        P0RecordCode.INPUT_BINDING_RECORD,
+                        false_binding,
+                    ),
+                ),
+            ),
+        )
     vectors = tuple(definition.integrity_vector for definition in definitions if definition.integrity_vector is not None)
     return Cycle2RuntimeSetupV1(base_records=base_records, overlays=overlays, historical_user_messages=messages, recovery_subject_run_id=recovery_ref, integrity_vectors=vectors)
 
@@ -2284,6 +2500,22 @@ def _runtime_record_envelope(
             if type(candidate.source_record) is RequestUnitRecord
             and source.binding_id in candidate.source_record.input_binding_refs
         }
+        successors = tuple(
+            candidate.source_record
+            for candidate in graph
+            if type(candidate.source_record) is InputBindingV2
+            and candidate.source_record.supersedes == source.binding_id
+        )
+        if not request_unit_ids and len(successors) == 1:
+            request_unit_ids = {
+                candidate.source_record.request_unit_id
+                for candidate in graph
+                if type(candidate.source_record) is RequestUnitRecord
+                and successors[0].binding_id
+                in candidate.source_record.input_binding_refs
+            }
+        if len(successors) > 1:
+            raise Cycle2SeedError("input binding has multiple direct successors")
         if len(request_unit_ids) != 1:
             raise Cycle2SeedError("input binding does not have one RequestUnit parent")
         return PostgresRecordAdapter._cycle2_encode_input_binding(
@@ -2339,6 +2571,440 @@ def _runtime_identity_text(identity: object) -> str:
             default=str,
         )
     )
+
+
+def _runtime_source_for_role(
+    graph: tuple[Cycle2RuntimeBaseRecordV1, ...],
+    *,
+    role: str,
+    expected_type: type[object],
+) -> object:
+    matches = tuple(
+        record.source_record
+        for record in graph
+        if record.record_role == role
+        and type(record.source_record) is expected_type
+    )
+    if len(matches) != 1:
+        raise Cycle2SeedError(f"runtime role {role} is not exact")
+    return matches[0]
+
+
+def _runtime_message_referrers(
+    graph: tuple[Cycle2RuntimeBaseRecordV1, ...],
+    *,
+    message_id: UUID,
+) -> tuple[str, ...]:
+    referrers: list[str] = []
+    for record in graph:
+        source = record.source_record
+        references: tuple[UUID, ...] = ()
+        if type(source) is InputBindingV2:
+            references = source.source_refs
+        elif type(source) is RequestUnitRecord:
+            references = source.goal_source_refs
+        elif type(source) is ContextManifest:
+            references = source.selected_message_refs
+        elif type(source) is TraceEventV2 and source.message_ref is not None:
+            references = (source.message_ref,)
+        referrers.extend(
+            record.record_role for reference in references if reference == message_id
+        )
+    return tuple(referrers)
+
+
+def _recovery_task_state_snapshots(
+    runtime_state: Cycle2RuntimeSetupV1,
+    graph: tuple[Cycle2RuntimeBaseRecordV1, ...],
+) -> tuple[
+    TaskRecord,
+    RequestUnitRecord,
+    TaskRecord,
+    RequestUnitRecord,
+    TaskRecord,
+    RequestUnitRecord,
+] | None:
+    if runtime_state.recovery_subject_run_id is None:
+        return None
+    final_task = _runtime_source_for_role(
+        graph,
+        role="task.current",
+        expected_type=TaskRecord,
+    )
+    final_unit = _runtime_source_for_role(
+        graph,
+        role="request_unit.current",
+        expected_type=RequestUnitRecord,
+    )
+    target = _runtime_source_for_role(
+        graph,
+        role="auto_target.current",
+        expected_type=OrderCandidateAutoTargetRecord,
+    )
+    query_binding = _runtime_source_for_role(
+        graph,
+        role="binding.product_description",
+        expected_type=InputBindingV2,
+    )
+    old_order_binding = _runtime_source_for_role(
+        graph,
+        role="binding.order_id",
+        expected_type=InputBindingV2,
+    )
+    fresh_order_binding = _runtime_source_for_role(
+        graph,
+        role="binding.order_id.recovery_root",
+        expected_type=InputBindingV2,
+    )
+    assert (
+        type(final_task) is TaskRecord
+        and type(final_unit) is RequestUnitRecord
+        and type(target) is OrderCandidateAutoTargetRecord
+        and type(query_binding) is InputBindingV2
+        and type(old_order_binding) is InputBindingV2
+        and type(fresh_order_binding) is InputBindingV2
+    )
+    version_2_task = final_task.model_copy(
+        update={"state_version": 2, "updated_at": target.verified_at}
+    )
+    version_2_unit = final_unit.model_copy(
+        update={
+            "state_version": 2,
+            "updated_at": target.verified_at,
+            "input_binding_refs": (
+                query_binding.binding_id,
+                old_order_binding.binding_id,
+            ),
+        }
+    )
+    version_3_task = final_task.model_copy(
+        update={
+            "state_version": 3,
+            "updated_at": fresh_order_binding.updated_at,
+        }
+    )
+    version_3_unit = final_unit.model_copy(
+        update={
+            "state_version": 3,
+            "updated_at": fresh_order_binding.updated_at,
+        }
+    )
+    return (
+        version_2_task,
+        version_2_unit,
+        version_3_task,
+        version_3_unit,
+        final_task,
+        final_unit,
+    )
+
+
+def _validate_cycle2_w12_provenance_graph(
+    runtime_state: Cycle2RuntimeSetupV1,
+    graph: tuple[Cycle2RuntimeBaseRecordV1, ...],
+) -> None:
+    target_items = tuple(
+        record
+        for record in graph
+        if record.record_role == "auto_target.current"
+        and type(record.source_record) is OrderCandidateAutoTargetRecord
+    )
+    if not target_items:
+        if runtime_state.recovery_subject_run_id is not None:
+            raise Cycle2SeedError("recovery setup lacks its verified target")
+        return
+    if len(target_items) != 1:
+        raise Cycle2SeedError("verified target provenance is not unique")
+
+    fixture_ref = target_items[0].fixture_ref
+    target = target_items[0].source_record
+    conversation = _runtime_source_for_role(
+        graph,
+        role="conversation.current",
+        expected_type=ConversationRecord,
+    )
+    search_message = _runtime_source_for_role(
+        graph,
+        role="message.historical_user.search",
+        expected_type=MessageRecord,
+    )
+    order_message = _runtime_source_for_role(
+        graph,
+        role="message.historical_user.order_id",
+        expected_type=MessageRecord,
+    )
+    query_binding = _runtime_source_for_role(
+        graph,
+        role="binding.product_description",
+        expected_type=InputBindingV2,
+    )
+    old_order_binding = _runtime_source_for_role(
+        graph,
+        role="binding.order_id",
+        expected_type=InputBindingV2,
+    )
+    task = _runtime_source_for_role(
+        graph,
+        role="task.current",
+        expected_type=TaskRecord,
+    )
+    unit = _runtime_source_for_role(
+        graph,
+        role="request_unit.current",
+        expected_type=RequestUnitRecord,
+    )
+    assert (
+        type(target) is OrderCandidateAutoTargetRecord
+        and type(conversation) is ConversationRecord
+        and type(search_message) is MessageRecord
+        and type(order_message) is MessageRecord
+        and type(query_binding) is InputBindingV2
+        and type(old_order_binding) is InputBindingV2
+        and type(task) is TaskRecord
+        and type(unit) is RequestUnitRecord
+    )
+
+    if (
+        target.query_input_binding_ref != query_binding.binding_id
+        or query_binding.source_refs != (search_message.message_id,)
+        or unit.goal_source_refs != (search_message.message_id,)
+    ):
+        raise Cycle2SeedError("search query provenance was rewritten")
+    if (
+        order_message.message_id
+        != deterministic_cycle2_setup_uuid(
+            fixture_ref, "message.historical_user.order_id"
+        )
+        or order_message.conversation_id != conversation.conversation_id
+        or order_message.direction is not MessageDirection.USER
+        or order_message.content != "我要查询订单 O-1001。"
+        or order_message.received_at <= search_message.received_at
+        or old_order_binding.binding_id
+        != deterministic_cycle2_setup_uuid(fixture_ref, "binding.order_id")
+        or old_order_binding.name != "order_id"
+        or old_order_binding.normalized_value != "O-1001"
+        or old_order_binding.authority is not InputAuthority.USER_CLAIM
+        or old_order_binding.validation_status
+        is not InputValidationStatus.ACCEPTED
+        or old_order_binding.confirmed_by_user is not True
+        or old_order_binding.source_refs != (order_message.message_id,)
+        or old_order_binding.supersedes is not None
+        or old_order_binding.created_at != order_message.received_at
+        or old_order_binding.updated_at != order_message.received_at
+        or order_message.received_at > task.updated_at
+        or order_message.received_at > unit.updated_at
+        or _runtime_message_referrers(
+            graph, message_id=order_message.message_id
+        )
+        != ("binding.order_id",)
+    ):
+        raise Cycle2SeedError("ordinary order Claim provenance is not exact")
+
+    recovery = runtime_state.recovery_subject_run_id is not None
+    if not recovery:
+        if (
+            runtime_state.historical_user_messages
+            or unit.input_binding_refs.count(query_binding.binding_id) != 1
+            or unit.input_binding_refs.count(old_order_binding.binding_id) != 1
+        ):
+            raise Cycle2SeedError("ordinary current binding closure is not exact")
+    else:
+        auxiliary = _runtime_source_for_role(
+            graph,
+            role="message.historical_user.recovery",
+            expected_type=MessageRecord,
+        )
+        fresh_order_binding = _runtime_source_for_role(
+            graph,
+            role="binding.order_id.recovery_root",
+            expected_type=InputBindingV2,
+        )
+        run = _runtime_source_for_role(
+            graph,
+            role="recovery_root.run",
+            expected_type=AgentRunRecordV2,
+        )
+        link = _runtime_source_for_role(
+            graph,
+            role="recovery_root.link",
+            expected_type=RunTaskLinkRecordV2,
+        )
+        manifest = _runtime_source_for_role(
+            graph,
+            role="recovery_root.context_manifest",
+            expected_type=ContextManifest,
+        )
+        gate = _runtime_source_for_role(
+            graph,
+            role="recovery_root.gate",
+            expected_type=GateDecisionV2,
+        )
+        tool = _runtime_source_for_role(
+            graph,
+            role="recovery_root.tool_call",
+            expected_type=ToolCallRecordV2,
+        )
+        trace = _runtime_source_for_role(
+            graph,
+            role="recovery_root.trace.message_accepted",
+            expected_type=TraceEventV2,
+        )
+        assert (
+            type(auxiliary) is MessageRecord
+            and type(fresh_order_binding) is InputBindingV2
+            and type(run) is AgentRunRecordV2
+            and type(link) is RunTaskLinkRecordV2
+            and type(manifest) is ContextManifest
+            and type(gate) is GateDecisionV2
+            and type(tool) is ToolCallRecordV2
+            and type(trace) is TraceEventV2
+        )
+        attempt = tool.attempts[0] if len(tool.attempts) == 1 else None
+        if (
+            runtime_state.historical_user_messages != (auxiliary,)
+            or auxiliary.conversation_id != conversation.conversation_id
+            or auxiliary.direction is not MessageDirection.USER
+            or auxiliary.content != "订单 O-1001 到哪了？"
+            or auxiliary.received_at != run.started_at
+            or not (
+                search_message.received_at
+                < order_message.received_at
+                < auxiliary.received_at
+            )
+            or fresh_order_binding.name != "order_id"
+            or fresh_order_binding.normalized_value != "O-1001"
+            or fresh_order_binding.authority is not InputAuthority.USER_CLAIM
+            or fresh_order_binding.validation_status
+            is not InputValidationStatus.ACCEPTED
+            or fresh_order_binding.confirmed_by_user is not True
+            or fresh_order_binding.source_refs != (auxiliary.message_id,)
+            or fresh_order_binding.supersedes != old_order_binding.binding_id
+            or fresh_order_binding.created_at != fresh_order_binding.updated_at
+            or fresh_order_binding.created_at < auxiliary.received_at
+            or fresh_order_binding.updated_at > manifest.assembled_at
+            or fresh_order_binding.updated_at > gate.decided_at
+            or fresh_order_binding.updated_at > tool.started_at
+            or task.state_version != 4
+            or unit.state_version != 4
+            or task.updated_at != unit.updated_at
+            or unit.input_binding_refs
+            != (query_binding.binding_id, fresh_order_binding.binding_id)
+            or old_order_binding.binding_id in unit.input_binding_refs
+            or run.run_id != runtime_state.recovery_subject_run_id
+            or run.status is not AgentRunStatusV2.RUNNING
+            or link.run_id != run.run_id
+            or link.task_id != task.task_id
+            or link.base_task_state_version != 2
+            or link.result_task_state_version is not None
+            or manifest.run_id != run.run_id
+            or manifest.selected_message_refs != (auxiliary.message_id,)
+            or manifest.task_state_ref_and_version.task_id != task.task_id
+            or manifest.task_state_ref_and_version.state_version != 3
+            or gate.context_manifest_id != manifest.context_manifest_id
+            or gate.argument_binding_refs != (query_binding.binding_id,)
+            or gate.proposed_base_task_state_version != 3
+            or gate.validated_task_state_version != 3
+            or gate.verified_target_ref != target.verified_target_ref
+            or tool.run_id != run.run_id
+            or tool.context_manifest_id != manifest.context_manifest_id
+            or tool.gate_decision_id != gate.gate_decision_id
+            or tool.argument_binding_refs != (query_binding.binding_id,)
+            or tool.validated_task_state_version != 3
+            or tool.verified_target_ref != target.verified_target_ref
+            or attempt is None
+            or attempt.retry_decision is not ToolRetryDecision.RETRY_SCHEDULED
+            or attempt.finished_at is None
+            or task.updated_at <= attempt.finished_at
+            or trace.event_type is not TraceEventType.MESSAGE_ACCEPTED
+            or trace.message_ref != auxiliary.message_id
+            or _runtime_message_referrers(
+                graph, message_id=auxiliary.message_id
+            )
+            != (
+                "binding.order_id.recovery_root",
+                "recovery_root.context_manifest",
+                "recovery_root.trace.message_accepted",
+            )
+        ):
+            raise Cycle2SeedError("recovery v2-v3-v4 provenance is not exact")
+
+    overlay_bindings = tuple(
+        record
+        for record in graph
+        if record.record_role
+        in {
+            "binding.shipment_not_received.true",
+            "binding.shipment_not_received.false",
+        }
+    )
+    if overlay_bindings:
+        true_message = _runtime_source_for_role(
+            graph,
+            role="message.historical_user.shipment_not_received.true",
+            expected_type=MessageRecord,
+        )
+        false_message = _runtime_source_for_role(
+            graph,
+            role="message.historical_user.shipment_not_received.false",
+            expected_type=MessageRecord,
+        )
+        true_binding = _runtime_source_for_role(
+            graph,
+            role="binding.shipment_not_received.true",
+            expected_type=InputBindingV2,
+        )
+        false_binding = _runtime_source_for_role(
+            graph,
+            role="binding.shipment_not_received.false",
+            expected_type=InputBindingV2,
+        )
+        assert (
+            type(true_message) is MessageRecord
+            and type(false_message) is MessageRecord
+            and type(true_binding) is InputBindingV2
+            and type(false_binding) is InputBindingV2
+        )
+        if (
+            len(runtime_state.overlays) != 1
+            or true_message.conversation_id != conversation.conversation_id
+            or false_message.conversation_id != conversation.conversation_id
+            or true_message.message_id == false_message.message_id
+            or true_message.content
+            != "订单 O-1001 显示已送达，但我没有收到。"
+            or false_message.content != "更正：订单 O-1001 已经收到了。"
+            or true_message.direction is not MessageDirection.USER
+            or false_message.direction is not MessageDirection.USER
+            or true_message.received_at >= false_message.received_at
+            or true_binding.name != "shipment_not_received"
+            or type(true_binding.normalized_value) is not bool
+            or true_binding.normalized_value is not True
+            or true_binding.source_refs != (true_message.message_id,)
+            or true_binding.supersedes is not None
+            or true_binding.created_at != true_message.received_at
+            or true_binding.updated_at != true_message.received_at
+            or false_binding.name != "shipment_not_received"
+            or type(false_binding.normalized_value) is not bool
+            or false_binding.normalized_value is not False
+            or false_binding.source_refs != (false_message.message_id,)
+            or false_binding.supersedes != true_binding.binding_id
+            or false_binding.created_at != false_message.received_at
+            or false_binding.updated_at != false_message.received_at
+            or task.state_version != 4
+            or unit.state_version != 4
+            or task.updated_at != false_binding.updated_at
+            or unit.updated_at != false_binding.updated_at
+            or true_binding.binding_id in unit.input_binding_refs
+            or unit.input_binding_refs.count(false_binding.binding_id) != 1
+            or _runtime_message_referrers(
+                graph, message_id=true_message.message_id
+            )
+            != ("binding.shipment_not_received.true",)
+            or _runtime_message_referrers(
+                graph, message_id=false_message.message_id
+            )
+            != ("binding.shipment_not_received.false",)
+        ):
+            raise Cycle2SeedError("corrected Claim provenance is not exact")
 
 
 def fold_cycle2_runtime_records(
@@ -2447,6 +3113,7 @@ def fold_cycle2_runtime_records(
             or recovery_runs[0].stop_reason is not None
         ):
             raise Cycle2SeedError("recovery subject is not one non-terminal root")
+    _validate_cycle2_w12_provenance_graph(runtime_state, graph)
     return graph
 
 
@@ -2514,8 +3181,43 @@ def apply_cycle2_execution_setup_plan(
     ):
         raise Cycle2SeedError("exact digest-bound W12 setup plan required")
     graph = fold_cycle2_runtime_records(plan.runtime_state)
+    recovery_snapshots = _recovery_task_state_snapshots(
+        plan.runtime_state, graph
+    )
+    install_graph = graph
+    if recovery_snapshots is not None:
+        version_2_task, version_2_unit, _, _, _, _ = recovery_snapshots
+        install_graph = _replace_runtime_record(
+            install_graph,
+            role="task.current",
+            replacement=_runtime_record(
+                next(
+                    record.fixture_ref
+                    for record in graph
+                    if record.record_role == "task.current"
+                ),
+                "task.current",
+                P0RecordCode.TASK_RECORD,
+                version_2_task,
+            ),
+        )
+        install_graph = _replace_runtime_record(
+            install_graph,
+            role="request_unit.current",
+            replacement=_runtime_record(
+                next(
+                    record.fixture_ref
+                    for record in graph
+                    if record.record_role == "request_unit.current"
+                ),
+                "request_unit.current",
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                version_2_unit,
+            ),
+        )
     envelopes = tuple(
-        _runtime_record_envelope(record, graph=graph) for record in graph
+        _runtime_record_envelope(record, graph=graph)
+        for record in install_graph
     )
     controller = (
         None
@@ -2574,6 +3276,71 @@ def apply_cycle2_execution_setup_plan(
                 private_envelopes,
                 owner_customer_id=plan.owner_customer_id,
             )
+            if recovery_snapshots is not None:
+                (
+                    version_2_task,
+                    version_2_unit,
+                    version_3_task,
+                    version_3_unit,
+                    final_task,
+                    final_unit,
+                ) = recovery_snapshots
+
+                def replace_state_record(
+                    record_code: P0RecordCode,
+                    logical_identity: tuple[tuple[str, object], ...],
+                    expected_record: TaskRecord | RequestUnitRecord,
+                    next_record: TaskRecord | RequestUnitRecord,
+                ) -> None:
+                    loaded = adapter._cycle2_row(
+                        session,
+                        owner_customer_id=plan.owner_customer_id,
+                        record_code=record_code,
+                        logical_identity=logical_identity,
+                        for_update=True,
+                    )
+                    if loaded is None:
+                        raise Cycle2SeedError(
+                            "recovery Task snapshot row is missing"
+                        )
+                    adapter._cycle2_replace(
+                        session,
+                        loaded[0],
+                        owner_customer_id=plan.owner_customer_id,
+                        expected_record=expected_record,
+                        next_envelope=adapter._cycle2_encode(
+                            record_code, next_record
+                        ),
+                    )
+
+                task_identity = (("task_id", final_task.task_id),)
+                unit_identity = (
+                    ("request_unit_id", final_unit.request_unit_id),
+                )
+                replace_state_record(
+                    P0RecordCode.TASK_RECORD,
+                    task_identity,
+                    version_2_task,
+                    version_3_task,
+                )
+                replace_state_record(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    unit_identity,
+                    version_2_unit,
+                    version_3_unit,
+                )
+                replace_state_record(
+                    P0RecordCode.TASK_RECORD,
+                    task_identity,
+                    version_3_task,
+                    final_task,
+                )
+                replace_state_record(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    unit_identity,
+                    version_3_unit,
+                    final_unit,
+                )
             detached.attach(attachment_target)
     except Cycle2SeedError:
         try:
