@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from contextlib import contextmanager
@@ -10,6 +11,14 @@ from pydantic import ValidationError
 import pytest
 from sqlalchemy import func, select
 
+from mini_agent.application.persistence import P0RecordCode
+from mini_agent.application.records import (
+    RunTaskLinkRecordV2,
+    SupersededRunInvalidationKind,
+    TrustedOwnerScope,
+)
+from mini_agent.core.identity import CustomerContext
+from mini_agent.core.trace import AgentRunRecordV2, AgentRunStatusV2
 from mini_agent.infrastructure.cycle2_fixture_seed import (
     W12_SETUP_SCHEMA_VERSION,
     W12_TRUSTED_CLOCK,
@@ -35,7 +44,33 @@ from mini_agent.infrastructure.persistence.models import (
     MockOrderSearchDocumentModel,
     MockShipmentModel,
     P0RecordModel,
+    P0RecordStateHistoryModel,
 )
+from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+
+
+def _runtime_source(records, role: str):
+    matches = tuple(
+        record.source_record
+        for record in records
+        if record.record_role == role
+    )
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _replace_runtime_source(records, *, role: str, update: dict[str, object]):
+    assert sum(record.record_role == role for record in records) == 1
+    return tuple(
+        record.model_copy(
+            update={
+                "source_record": record.source_record.model_copy(update=update)
+            }
+        )
+        if record.record_role == role
+        else record
+        for record in records
+    )
 
 
 def test_w9_catalog_is_closed_owner_scoped_and_never_preseeds_runtime() -> None:
@@ -275,6 +310,356 @@ def test_w12_resolver_closes_overlay_pair_recovery_and_unknown_authority() -> No
             environment_fixture_refs=("fx-search-no-match-owner-a-v1",),
             fault_ref="fault:get-shipment:unknown-v1",
         )
+
+
+@pytest.mark.parametrize(
+    "fixture_ref",
+    (
+        "fx-verified-order-target-o1001-owner-a-v1",
+        "fx-stale-shipment-observation-owner-a-v1",
+    ),
+)
+def test_unique_target_fixture_has_distinct_search_and_order_claim_sources(
+    fixture_ref: str,
+) -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(fixture_ref,),
+        environment_fixture_refs=(),
+        fault_ref=None,
+    )
+    graph = fold_cycle2_runtime_records(plan.runtime_state)
+    search_message = _runtime_source(
+        graph, "message.historical_user.search"
+    )
+    order_message = _runtime_source(
+        graph, "message.historical_user.order_id"
+    )
+    query_binding = _runtime_source(graph, "binding.product_description")
+    order_binding = _runtime_source(graph, "binding.order_id")
+    target = _runtime_source(graph, "auto_target.current")
+    unit = _runtime_source(graph, "request_unit.current")
+
+    assert plan.runtime_state.historical_user_messages == ()
+    assert search_message.message_id != order_message.message_id
+    assert order_message.content == "我要查询订单 O-1001。"
+    assert order_message.message_id == deterministic_cycle2_setup_uuid(
+        fixture_ref, "message.historical_user.order_id"
+    )
+    assert search_message.received_at < order_message.received_at
+    assert query_binding.source_refs == (search_message.message_id,)
+    assert order_binding.source_refs == (order_message.message_id,)
+    assert order_binding.normalized_value == "O-1001"
+    assert order_binding.supersedes is None
+    assert order_binding.created_at == order_message.received_at
+    assert order_binding.updated_at == order_message.received_at
+    assert unit.goal_source_refs == (search_message.message_id,)
+    assert unit.input_binding_refs.count(query_binding.binding_id) == 1
+    assert unit.input_binding_refs.count(order_binding.binding_id) == 1
+    assert target.query_input_binding_ref == query_binding.binding_id
+    assert target.query_input_binding_ref != order_binding.binding_id
+
+
+def test_recovery_fixture_materializes_old_fresh_and_invalidated_snapshots() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-retry-scheduled-obsolete-run-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-current-owner-a-v1",),
+        fault_ref=(
+            "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1"
+        ),
+        authenticated_user_message="订单 O-1001 到哪了？",
+    )
+    graph = fold_cycle2_runtime_records(plan.runtime_state)
+    search_message = _runtime_source(
+        graph, "message.historical_user.search"
+    )
+    order_message = _runtime_source(
+        graph, "message.historical_user.order_id"
+    )
+    auxiliary = _runtime_source(
+        graph, "message.historical_user.recovery"
+    )
+    query_binding = _runtime_source(graph, "binding.product_description")
+    old_order_binding = _runtime_source(graph, "binding.order_id")
+    fresh_order_binding = _runtime_source(
+        graph, "binding.order_id.recovery_root"
+    )
+    task = _runtime_source(graph, "task.current")
+    unit = _runtime_source(graph, "request_unit.current")
+    target = _runtime_source(graph, "auto_target.current")
+    run = _runtime_source(graph, "recovery_root.run")
+    link = _runtime_source(graph, "recovery_root.link")
+    manifest = _runtime_source(graph, "recovery_root.context_manifest")
+    gate = _runtime_source(graph, "recovery_root.gate")
+    tool = _runtime_source(graph, "recovery_root.tool_call")
+    trace = _runtime_source(
+        graph, "recovery_root.trace.message_accepted"
+    )
+
+    assert plan.runtime_state.historical_user_messages == (auxiliary,)
+    assert search_message.received_at < order_message.received_at
+    assert order_message.received_at < auxiliary.received_at
+    assert auxiliary.received_at == run.started_at
+    assert old_order_binding.source_refs == (order_message.message_id,)
+    assert old_order_binding.supersedes is None
+    assert fresh_order_binding.source_refs == (auxiliary.message_id,)
+    assert fresh_order_binding.supersedes == old_order_binding.binding_id
+    assert unit.goal_source_refs == (search_message.message_id,)
+    assert unit.input_binding_refs == (
+        query_binding.binding_id,
+        fresh_order_binding.binding_id,
+    )
+    assert task.state_version == unit.state_version == 4
+    assert link.base_task_state_version == 2
+    assert link.result_task_state_version is None
+    assert manifest.selected_message_refs == (auxiliary.message_id,)
+    assert manifest.task_state_ref_and_version.state_version == 3
+    assert gate.proposed_base_task_state_version == 3
+    assert gate.validated_task_state_version == 3
+    assert tool.validated_task_state_version == 3
+    assert gate.argument_binding_refs == (query_binding.binding_id,)
+    assert tool.argument_binding_refs == (query_binding.binding_id,)
+    assert gate.verified_target_ref == target.verified_target_ref
+    assert tool.verified_target_ref == target.verified_target_ref
+    assert trace.message_ref == auxiliary.message_id
+    assert task.updated_at == unit.updated_at
+    assert task.updated_at > tool.attempts[0].finished_at
+
+
+def test_corrected_claim_overlay_preserves_history_and_only_false_is_current() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-corrected-not-received-claim-owner-a-v1",
+            "fx-verified-order-target-o1001-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-delivered-owner-a-v1",),
+        fault_ref=None,
+    )
+    graph = fold_cycle2_runtime_records(plan.runtime_state)
+    true_message = _runtime_source(
+        graph, "message.historical_user.shipment_not_received.true"
+    )
+    false_message = _runtime_source(
+        graph, "message.historical_user.shipment_not_received.false"
+    )
+    true_binding = _runtime_source(
+        graph, "binding.shipment_not_received.true"
+    )
+    false_binding = _runtime_source(
+        graph, "binding.shipment_not_received.false"
+    )
+    task = _runtime_source(graph, "task.current")
+    unit = _runtime_source(graph, "request_unit.current")
+
+    assert plan.runtime_state.historical_user_messages == ()
+    assert true_message.message_id != false_message.message_id
+    assert true_message.received_at < false_message.received_at
+    assert true_binding.normalized_value is True
+    assert true_binding.source_refs == (true_message.message_id,)
+    assert true_binding.supersedes is None
+    assert false_binding.normalized_value is False
+    assert false_binding.source_refs == (false_message.message_id,)
+    assert false_binding.supersedes == true_binding.binding_id
+    assert true_binding.binding_id not in unit.input_binding_refs
+    assert unit.input_binding_refs.count(false_binding.binding_id) == 1
+    assert task.state_version == unit.state_version == 4
+    assert task.updated_at == unit.updated_at == false_binding.updated_at
+
+
+def test_unique_target_provenance_tampering_fails_closed() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-verified-order-target-o1001-owner-a-v1",
+        ),
+        environment_fixture_refs=(),
+        fault_ref=None,
+    )
+    state = plan.runtime_state
+    query_binding = _runtime_source(
+        state.base_records, "binding.product_description"
+    )
+    order_message = _runtime_source(
+        state.base_records, "message.historical_user.order_id"
+    )
+    unit = _runtime_source(state.base_records, "request_unit.current")
+    tampered_records = (
+        _replace_runtime_source(
+            state.base_records,
+            role="message.historical_user.order_id",
+            update={"content": "我要查询订单 O-1002。"},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="binding.order_id",
+            update={"source_refs": query_binding.source_refs},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="binding.order_id",
+            update={"supersedes": query_binding.binding_id},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="request_unit.current",
+            update={"input_binding_refs": (query_binding.binding_id,)},
+        ),
+    )
+    for records in tampered_records:
+        with pytest.raises(Cycle2SeedError):
+            fold_cycle2_runtime_records(
+                state.model_copy(update={"base_records": records})
+            )
+    with pytest.raises(Cycle2SeedError):
+        fold_cycle2_runtime_records(
+            state.model_copy(
+                update={"historical_user_messages": (order_message,)}
+            )
+        )
+    assert len(unit.input_binding_refs) == 2
+
+
+def test_recovery_provenance_tampering_fails_closed() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-retry-scheduled-obsolete-run-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-current-owner-a-v1",),
+        fault_ref=(
+            "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1"
+        ),
+        authenticated_user_message="订单 O-1001 到哪了？",
+    )
+    state = plan.runtime_state
+    old_order_binding = _runtime_source(state.base_records, "binding.order_id")
+    query_binding = _runtime_source(
+        state.base_records, "binding.product_description"
+    )
+    auxiliary = _runtime_source(
+        state.base_records, "message.historical_user.recovery"
+    )
+    order_message = _runtime_source(
+        state.base_records, "message.historical_user.order_id"
+    )
+    tool = _runtime_source(state.base_records, "recovery_root.tool_call")
+    tampered_records = (
+        _replace_runtime_source(
+            state.base_records,
+            role="binding.order_id.recovery_root",
+            update={"source_refs": (order_message.message_id,)},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="binding.order_id.recovery_root",
+            update={"supersedes": None},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="request_unit.current",
+            update={
+                "input_binding_refs": (
+                    query_binding.binding_id,
+                    old_order_binding.binding_id,
+                )
+            },
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="recovery_root.gate",
+            update={
+                "proposed_base_task_state_version": 2,
+                "validated_task_state_version": 2,
+            },
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="task.current",
+            update={"updated_at": tool.attempts[0].finished_at},
+        ),
+    )
+    for records in tampered_records:
+        with pytest.raises(Cycle2SeedError):
+            fold_cycle2_runtime_records(
+                state.model_copy(update={"base_records": records})
+            )
+    with pytest.raises(Cycle2SeedError):
+        fold_cycle2_runtime_records(
+            state.model_copy(
+                update={"historical_user_messages": (order_message,)}
+            )
+        )
+    assert state.historical_user_messages == (auxiliary,)
+
+
+def test_corrected_claim_overlay_tampering_fails_closed() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-corrected-not-received-claim-owner-a-v1",
+            "fx-verified-order-target-o1001-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-delivered-owner-a-v1",),
+        fault_ref=None,
+    )
+    state = plan.runtime_state
+    overlay = state.overlays[0]
+    true_message = _runtime_source(
+        state.base_records,
+        "message.historical_user.shipment_not_received.true",
+    )
+    true_binding = _runtime_source(
+        state.base_records, "binding.shipment_not_received.true"
+    )
+    false_binding = _runtime_source(
+        overlay.next_records, "binding.shipment_not_received.false"
+    )
+    unit = _runtime_source(overlay.next_records, "request_unit.current")
+    tampered_next_records = (
+        _replace_runtime_source(
+            overlay.next_records,
+            role="message.historical_user.shipment_not_received.false",
+            update={"content": "订单 O-1001 仍未收到。"},
+        ),
+        _replace_runtime_source(
+            overlay.next_records,
+            role="binding.shipment_not_received.false",
+            update={"source_refs": (true_message.message_id,)},
+        ),
+        _replace_runtime_source(
+            overlay.next_records,
+            role="binding.shipment_not_received.false",
+            update={"supersedes": None},
+        ),
+        _replace_runtime_source(
+            overlay.next_records,
+            role="request_unit.current",
+            update={
+                "input_binding_refs": (
+                    *unit.input_binding_refs,
+                    true_binding.binding_id,
+                )
+            },
+        ),
+    )
+    for next_records in tampered_next_records:
+        with pytest.raises(Cycle2SeedError):
+            fold_cycle2_runtime_records(
+                state.model_copy(
+                    update={
+                        "overlays": (
+                            overlay.model_copy(
+                                update={"next_records": next_records}
+                            ),
+                        )
+                    }
+                )
+            )
+    assert false_binding.supersedes == true_binding.binding_id
 
 
 def test_seed_resolution_rejects_unknown_fault_only_and_conflicting_rows() -> None:
@@ -618,6 +1003,232 @@ def test_w12_overlay_stale_and_recovery_graphs_survive_atomic_postgres_encoding(
         with factory() as session:
             assert session.scalar(select(func.count()).select_from(P0RecordModel)) == len(
                 fold_cycle2_runtime_records(plan.runtime_state)
+            )
+            history_rows = tuple(
+                session.scalars(select(P0RecordStateHistoryModel))
+            )
+            if plan.runtime_state.recovery_subject_run_id is None:
+                assert history_rows == ()
+            else:
+                assert {
+                    (row.record_code, row.state_version)
+                    for row in history_rows
+                } == {
+                    (P0RecordCode.TASK_RECORD.value, 2),
+                    (P0RecordCode.TASK_RECORD.value, 3),
+                    (P0RecordCode.REQUEST_UNIT_RECORD.value, 2),
+                    (P0RecordCode.REQUEST_UNIT_RECORD.value, 3),
+                }
+                graph = fold_cycle2_runtime_records(plan.runtime_state)
+                task = _runtime_source(graph, "task.current")
+                unit = _runtime_source(graph, "request_unit.current")
+                query_binding = _runtime_source(
+                    graph, "binding.product_description"
+                )
+                old_order_binding = _runtime_source(
+                    graph, "binding.order_id"
+                )
+                fresh_order_binding = _runtime_source(
+                    graph, "binding.order_id.recovery_root"
+                )
+                target_record = _runtime_source(
+                    graph, "auto_target.current"
+                )
+                recovery_tool = _runtime_source(
+                    graph, "recovery_root.tool_call"
+                )
+                historical_task_v2 = (
+                    PostgresRecordAdapter._cycle2_historical_row(
+                        session,
+                        owner_customer_id="customer-A",
+                        record_code=P0RecordCode.TASK_RECORD,
+                        logical_identity=(("task_id", task.task_id),),
+                        state_version=2,
+                    )
+                )
+                historical_unit_v2 = (
+                    PostgresRecordAdapter._cycle2_historical_row(
+                        session,
+                        owner_customer_id="customer-A",
+                        record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                        logical_identity=(
+                            ("request_unit_id", unit.request_unit_id),
+                        ),
+                        state_version=2,
+                    )
+                )
+                historical_task_v3 = (
+                    PostgresRecordAdapter._cycle2_historical_row(
+                        session,
+                        owner_customer_id="customer-A",
+                        record_code=P0RecordCode.TASK_RECORD,
+                        logical_identity=(("task_id", task.task_id),),
+                        state_version=3,
+                    )
+                )
+                historical_unit_v3 = (
+                    PostgresRecordAdapter._cycle2_historical_row(
+                        session,
+                        owner_customer_id="customer-A",
+                        record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                        logical_identity=(
+                            ("request_unit_id", unit.request_unit_id),
+                        ),
+                        state_version=3,
+                    )
+                )
+                assert historical_task_v2 is not None
+                assert historical_unit_v2 is not None
+                assert historical_task_v3 is not None
+                assert historical_unit_v3 is not None
+                assert historical_task_v2.source_record.state_version == 2
+                assert (
+                    historical_task_v2.source_record.updated_at
+                    == target_record.verified_at
+                )
+                assert (
+                    historical_unit_v2.source_record.updated_at
+                    == target_record.verified_at
+                )
+                assert historical_unit_v2.source_record.input_binding_refs == (
+                    query_binding.binding_id,
+                    old_order_binding.binding_id,
+                )
+                assert historical_task_v3.source_record.state_version == 3
+                assert (
+                    historical_task_v3.source_record.updated_at
+                    == fresh_order_binding.updated_at
+                )
+                assert (
+                    historical_unit_v3.source_record.updated_at
+                    == fresh_order_binding.updated_at
+                )
+                assert historical_unit_v3.source_record.input_binding_refs == (
+                    query_binding.binding_id,
+                    fresh_order_binding.binding_id,
+                )
+                current_task = PostgresRecordAdapter._cycle2_row(
+                    session,
+                    owner_customer_id="customer-A",
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=(("task_id", task.task_id),),
+                )
+                current_unit = PostgresRecordAdapter._cycle2_row(
+                    session,
+                    owner_customer_id="customer-A",
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=(
+                        ("request_unit_id", unit.request_unit_id),
+                    ),
+                )
+                assert current_task is not None
+                assert current_unit is not None
+                assert current_task[1].source_record.state_version == 4
+                assert current_unit[1].source_record.state_version == 4
+                assert current_unit[1].source_record.input_binding_refs == (
+                    query_binding.binding_id,
+                    fresh_order_binding.binding_id,
+                )
+                assert (
+                    current_task[1].source_record.updated_at
+                    == current_unit[1].source_record.updated_at
+                )
+                assert (
+                    current_task[1].source_record.updated_at
+                    > recovery_tool.attempts[0].finished_at
+                )
+        if plan.runtime_state.recovery_subject_run_id is not None:
+            graph = fold_cycle2_runtime_records(plan.runtime_state)
+            task = _runtime_source(graph, "task.current")
+            unit = _runtime_source(graph, "request_unit.current")
+            obsolete_run = _runtime_source(graph, "recovery_root.run")
+            query_binding = _runtime_source(
+                graph, "binding.product_description"
+            )
+            old_order_binding = _runtime_source(graph, "binding.order_id")
+            fresh_order_binding = _runtime_source(
+                graph, "binding.order_id.recovery_root"
+            )
+            replacement_run_id = deterministic_cycle2_setup_uuid(
+                "fx-retry-scheduled-obsolete-run-owner-a-v1",
+                "recovery_replacement.run",
+            )
+            replacement_run = AgentRunRecordV2(
+                run_id=replacement_run_id,
+                conversation_id=obsolete_run.conversation_id,
+                status=AgentRunStatusV2.RUNNING,
+                provider_lane="scripted-cycle2",
+                started_at=task.updated_at,
+            )
+            replacement_link = RunTaskLinkRecordV2(
+                run_id=replacement_run_id,
+                task_id=task.task_id,
+                base_task_state_version=task.state_version,
+                result_task_state_version=None,
+            )
+            reader = PostgresRecordAdapter(
+                factory,
+                cycle2_clock=lambda: W12_TRUSTED_CLOCK,
+            )
+            with factory.begin() as session:
+                reader._cycle2_insert(
+                    session,
+                    (
+                        reader._cycle2_encode(
+                            P0RecordCode.AGENT_RUN_RECORD,
+                            replacement_run,
+                        ),
+                        reader._cycle2_encode(
+                            P0RecordCode.RUN_TASK_LINK_RECORD,
+                            replacement_link,
+                        ),
+                    ),
+                    owner_customer_id="customer-A",
+                )
+            owner_scope = TrustedOwnerScope.from_customer_context(
+                CustomerContext(
+                    subject_ref="subject-A",
+                    customer_id="customer-A",
+                    auth_scopes=frozenset({"orders:read"}),
+                    authenticated_at=datetime(
+                        2026, 7, 31, 11, 0, tzinfo=UTC
+                    ),
+                    session_ref_hash="0" * 64,
+                )
+            )
+            superseded = asyncio.run(
+                reader.load_superseded_run_closure_for_owner(
+                    owner_scope=owner_scope,
+                    obsolete_run_id=obsolete_run.run_id,
+                    replacement_run_id=replacement_run_id,
+                    request_unit_id=unit.request_unit_id,
+                )
+            )
+            assert superseded is not None
+            assert superseded.obsolete_task_record is not None
+            assert superseded.obsolete_request_unit_record is not None
+            assert superseded.obsolete_task_record.state_version == 2
+            assert (
+                superseded.obsolete_request_unit_record.input_binding_refs
+                == (
+                    query_binding.binding_id,
+                    old_order_binding.binding_id,
+                )
+            )
+            assert superseded.current_task_record.state_version == 4
+            assert superseded.current_request_unit_record.input_binding_refs == (
+                query_binding.binding_id,
+                fresh_order_binding.binding_id,
+            )
+            assert (
+                superseded.invalidation_kind
+                is SupersededRunInvalidationKind.BINDING_INVALIDATED
+            )
+            assert superseded.obsolete_binding_refs == (
+                old_order_binding.binding_id,
+            )
+            assert superseded.invalidated_binding_refs == (
+                old_order_binding.binding_id,
             )
         setup.detach()
         setup.dispose()
