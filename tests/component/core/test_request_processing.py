@@ -1,5 +1,6 @@
 import ast
 import gc
+from inspect import Parameter, getsource, signature
 import pickle
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -32,44 +33,55 @@ from mini_agent.core.order_search import (
 )
 from mini_agent.core.request_processing import (
     Cycle2AcceptedClaimRejectedSelection,
+    Cycle2ContinuationDecisionV3,
+    Cycle2ContinuationIdentityAllocationV3,
     Cycle2InitialAcceptedTaskGraphV2,
     Cycle2InitialRequestDecisionV2,
     Cycle2ContinuationBindingDecision,
     Cycle2OrdinalSelectionPreparation,
     Cycle2OrdinalSelectionRejectionReason,
+    Cycle2InitialRequestDecisionV3,
     InitialAcceptedTaskGraphV2,
     InitialRequestNoTaskDecisionV2,
     InitialRequestRoutableTaskGraphDecisionV2,
     InitialRequestUnroutedTaskGraphsDecisionV2,
     InitialTaskIdentityAllocationV2,
+    InitialTaskIdentityAllocationV3,
     RequestProcessingError,
     RequestUnderstandingClosureV2,
+    RequestUnderstandingClosureV3,
     RequestUnderstandingV2Error,
     RevalidatedNextMove,
     build_cycle2_unique_auto_target_record,
     build_request_understanding_closure_v2,
+    build_request_understanding_closure_v3,
     materialize_cycle2_control_next_move,
     prepare_cycle2_ordinal_claim,
     prepare_cycle2_ordinal_selection,
     reject_cycle2_ordinal_selection,
     revalidate_next_move_v2,
     reduce_cycle2_continuation_candidate,
+    reduce_cycle2_continuation_task_delta,
     route_cycle2_continuation_next_move,
     route_cycle2_selected_next_move,
     route_cycle2_unique_next_move,
     route_cycle2_verified_target_next_move,
     validate_and_reduce_cycle2_initial_request_v2,
+    validate_and_reduce_cycle2_initial_request_v3,
     validate_and_reduce_initial_request_v2,
 )
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
     InputSourceKind,
+    ModelVisibleTaskSummary,
     NextMove,
     NextMoveKind,
     QueryContextualizationCandidateV2,
@@ -83,6 +95,8 @@ from mini_agent.core.request_understanding import (
     UncertaintyV2,
 )
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationDecision,
@@ -97,6 +111,7 @@ from mini_agent.core.task_state import (
     RequestUnitRecord,
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
+    RequestUnderstandingRecordV3,
     TaskStatus,
     TaskRecord,
     compute_order_candidate_set_version,
@@ -7237,3 +7252,911 @@ def test_cycle2_initial_reducer_rejects_phase1_output_and_bypassed_shape() -> No
     bypassed = valid.model_copy(update={"task_delta_candidates": ()})
     with pytest.raises(RequestProcessingError):
         _reduce_cycle2_initial_v2(output=bypassed)
+
+
+def _continuation_request_input_v3(
+    *,
+    message_ref: UUID,
+    message: str,
+    task: TaskRecord,
+    unit: RequestUnitRecord,
+) -> RequestUnderstandingInput:
+    base = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+        run_id=UUID(int=message_ref.int ^ 4),
+    )
+    focused = ModelVisibleTaskSummary(
+        task_alias="task-1",
+        request_unit_alias="unit-1",
+        goal_summary=unit.goal_text,
+        status=task.status.value,
+        open_questions=unit.open_questions,
+    )
+    return RequestUnderstandingInput.model_validate(
+        {
+            **base.model_dump(),
+            "active_task_summaries": (focused,),
+            "focused_task_summary": focused,
+        }
+    )
+
+
+def test_v3_public_reducer_surface_has_exact_fields_and_keyword_signatures() -> None:
+    assert not hasattr(
+        request_processing_module,
+        "RequestUnderstandingV3Error",
+    )
+    assert tuple(InitialTaskIdentityAllocationV3.model_fields) == (
+        "request_understanding_record_id",
+        "accepted_delta_id",
+        "candidate_ref",
+        "task_id",
+        "request_unit_id",
+        "binding_id",
+        "next_move_candidate_ref",
+    )
+    assert tuple(Cycle2ContinuationIdentityAllocationV3.model_fields) == (
+        "request_understanding_record_id",
+        "accepted_delta_id",
+        "input_binding_ids",
+    )
+    assert tuple(Cycle2ContinuationDecisionV3.model_fields) == (
+        "closure",
+        "input_bindings",
+        "routing_trigger_binding_ref",
+    )
+    assert tuple(RequestUnderstandingClosureV3.model_fields) == (
+        "record",
+        "accepted_task_deltas",
+    )
+
+    expected_parameters = {
+        build_request_understanding_closure_v3: (
+            "request_input",
+            "output",
+            "authoritative_messages",
+            "request_understanding_record_id",
+            "candidate_validation",
+            "accepted_task_deltas",
+            "proposed_base_task_state_version",
+            "validated_task_state_version",
+            "next_move_candidate_ref",
+            "now",
+        ),
+        validate_and_reduce_cycle2_initial_request_v3: (
+            "request_input",
+            "output",
+            "authoritative_messages",
+            "customer_context",
+            "identity_allocation",
+            "now",
+        ),
+        reduce_cycle2_continuation_task_delta: (
+            "request_input",
+            "output",
+            "authoritative_messages",
+            "customer_context",
+            "current_task",
+            "current_request_unit",
+            "current_input_bindings",
+            "identity_allocation",
+            "now",
+        ),
+    }
+    for function, names in expected_parameters.items():
+        parameters = signature(function).parameters
+        assert tuple(parameters) == names
+        assert all(
+            parameter.kind is Parameter.KEYWORD_ONLY
+            for parameter in parameters.values()
+        )
+        source = getsource(function)
+        assert "uuid4" not in source
+        assert "datetime.now" not in source
+        assert "utcnow" not in source
+
+
+def _continuation_output_v3(
+    *,
+    message_ref: UUID,
+    candidates: tuple[Cycle2InputCandidate, ...],
+    operation: TaskDeltaOperation = TaskDeltaOperation.SUPPLY_INPUT,
+    task_alias: str = "task-1",
+    request_unit_alias: str = "unit-1",
+) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+    return Cycle2ContinuationRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-continuation.p0.v2",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="继续当前配送售后任务",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=(
+            Cycle2ContinuationTaskDeltaCandidateV2(
+                candidate_id=UUID(int=message_ref.int ^ 1),
+                operation=operation,
+                target_task_alias=task_alias,
+                target_request_unit_alias=request_unit_alias,
+                input_candidates=candidates,
+                confidence=0.99,
+            ),
+        ),
+    )
+
+
+def _continuation_allocation_v3(
+    *,
+    count: int,
+    record_id: UUID | None = None,
+    accepted_delta_id: UUID | None = None,
+    binding_ids: tuple[UUID, ...] | None = None,
+) -> Cycle2ContinuationIdentityAllocationV3:
+    return Cycle2ContinuationIdentityAllocationV3(
+        request_understanding_record_id=record_id or uuid4(),
+        accepted_delta_id=accepted_delta_id or uuid4(),
+        input_binding_ids=binding_ids
+        or tuple(uuid4() for _index in range(count)),
+    )
+
+
+def _reduce_continuation_v3(
+    *,
+    message: str,
+    candidates: tuple[Cycle2InputCandidate, ...],
+    current_binding: InputBindingV2 | None = None,
+    current_bindings: tuple[InputBindingV2, ...] | None = None,
+    operation: TaskDeltaOperation = TaskDeltaOperation.SUPPLY_INPUT,
+    task_alias: str = "task-1",
+    allocation: Cycle2ContinuationIdentityAllocationV3 | None = None,
+) -> Cycle2ContinuationDecisionV3 | object:
+    message_ref = candidates[0].source_ref
+    actual_bindings = current_bindings or (
+        current_binding
+        or _cycle2_binding(
+            name="order_id",
+            value="O-1001",
+        ),
+    )
+    task, unit = _cycle2_current_task_graph(
+        binding=actual_bindings[0],
+        task_id=UUID(int=message_ref.int ^ 2),
+        request_unit_id=UUID(int=message_ref.int ^ 3),
+    )
+    unit = unit.model_copy(
+        update={
+            "input_binding_refs": tuple(
+                binding.binding_id for binding in actual_bindings
+            )
+        }
+    )
+    request_input = _continuation_request_input_v3(
+        message_ref=message_ref,
+        message=message,
+        task=task,
+        unit=unit,
+    )
+    output = _continuation_output_v3(
+        message_ref=message_ref,
+        candidates=candidates,
+        operation=operation,
+        task_alias=task_alias,
+    )
+    return reduce_cycle2_continuation_task_delta(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={message_ref: message},
+        customer_context=_customer_context(),
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=actual_bindings,
+        identity_allocation=allocation
+        or _continuation_allocation_v3(count=len(candidates)),
+        now=NOW,
+    )
+
+
+def test_v3_generic_builder_preserves_zero_and_exact_binding_cardinality() -> None:
+    message_ref = uuid4()
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="请帮我看看订单",
+    )
+    output = _initial_output_v2(message_ref=message_ref, candidates=())
+    closure = build_request_understanding_closure_v3(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={message_ref: request_input.original_query},
+        request_understanding_record_id=uuid4(),
+        candidate_validation=(),
+        accepted_task_deltas=(),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=None,
+        next_move_candidate_ref=None,
+        now=NOW,
+    )
+    assert type(closure) is RequestUnderstandingClosureV3
+    assert type(closure.record) is RequestUnderstandingRecordV3
+    assert closure.record.record_schema_version == (
+        "request_understanding_record.p0.v3"
+    )
+    assert closure.record.task_delta_candidates == ()
+
+    candidate_id = uuid4()
+    accepted_output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(
+            _task_delta_v2(
+                candidate_id=candidate_id,
+                message_ref=message_ref,
+                order_id="O-4242",
+                source_quote="订单 O-4242",
+            ),
+        ),
+    )
+    accepted_input = _request_input_v2(
+        message_ref=message_ref,
+        message="请查询订单 O-4242",
+        run_id=request_input.run_id,
+    )
+    child = AcceptedAddGoalTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=candidate_id,
+        message_ref=message_ref,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text="查询 O-4242 的状态",
+        input_binding_refs=(uuid4(), uuid4()),
+        accepted_at=NOW,
+        task_id=uuid4(),
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        build_request_understanding_closure_v3(
+            request_input=accepted_input,
+            output=accepted_output,
+            authoritative_messages={message_ref: accepted_input.original_query},
+            request_understanding_record_id=uuid4(),
+            candidate_validation=(
+                CandidateValidationRecordV2(
+                    candidate_ref=candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            accepted_task_deltas=(child,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=1,
+            next_move_candidate_ref=uuid4(),
+            now=NOW,
+        )
+    assert caught.value.reason_code is (
+        RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+    )
+
+
+def test_v3_generic_builder_preserves_multi_partial_sequence_and_nextmove() -> None:
+    message_ref = uuid4()
+    message = "比较订单 O-4242、订单 invalid-order 与订单 O-4343"
+    candidate_ids = (uuid4(), uuid4(), uuid4())
+    candidates = (
+        _task_delta_v2(
+            candidate_id=candidate_ids[0],
+            message_ref=message_ref,
+            order_id="O-4242",
+            source_quote="订单 O-4242",
+        ),
+        _task_delta_v2(
+            candidate_id=candidate_ids[1],
+            message_ref=message_ref,
+            order_id="invalid-order",
+            source_quote="订单 invalid-order",
+        ),
+        _task_delta_v2(
+            candidate_id=candidate_ids[2],
+            message_ref=message_ref,
+            order_id="O-4343",
+            source_quote="订单 O-4343",
+        ),
+    )
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message=message,
+    )
+    output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=candidates,
+    )
+    children = tuple(
+        AcceptedAddGoalTaskDeltaV3(
+            accepted_delta_id=uuid4(),
+            candidate_ref=candidate.candidate_id,
+            message_ref=message_ref,
+            operation=TaskDeltaOperation.ADD_GOAL,
+            goal_text=candidate.goal_patch,
+            input_binding_refs=(uuid4(),),
+            accepted_at=NOW,
+            task_id=uuid4(),
+            base_task_state_version=None,
+            result_task_state_version=1,
+        )
+        for candidate in (candidates[0], candidates[2])
+    )
+    validations = (
+        CandidateValidationRecordV2(
+            candidate_ref=candidate_ids[0],
+            decision=CandidateValidationDecision.ACCEPT,
+        ),
+        CandidateValidationRecordV2(
+            candidate_ref=candidate_ids[1],
+            decision=CandidateValidationDecision.REJECT,
+            reason_code=CandidateRejectionReasonCode.INPUT_VALUE_INVALID,
+        ),
+        CandidateValidationRecordV2(
+            candidate_ref=candidate_ids[2],
+            decision=CandidateValidationDecision.ACCEPT,
+        ),
+    )
+    closure = build_request_understanding_closure_v3(
+        request_input=request_input,
+        output=output,
+        authoritative_messages={message_ref: message},
+        request_understanding_record_id=uuid4(),
+        candidate_validation=validations,
+        accepted_task_deltas=children,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=None,
+        next_move_candidate_ref=None,
+        now=NOW,
+    )
+    assert tuple(
+        child.candidate_ref for child in closure.accepted_task_deltas
+    ) == (candidate_ids[0], candidate_ids[2])
+    assert closure.record.accepted_delta_refs == tuple(
+        child.accepted_delta_id for child in children
+    )
+
+    with pytest.raises(RequestUnderstandingV2Error):
+        build_request_understanding_closure_v3(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: message},
+            request_understanding_record_id=uuid4(),
+            candidate_validation=validations,
+            accepted_task_deltas=tuple(reversed(children)),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=None,
+            next_move_candidate_ref=None,
+            now=NOW,
+        )
+
+    one_output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(candidates[0],),
+    )
+    with pytest.raises(RequestUnderstandingV2Error):
+        build_request_understanding_closure_v3(
+            request_input=request_input,
+            output=one_output,
+            authoritative_messages={message_ref: message},
+            request_understanding_record_id=uuid4(),
+            candidate_validation=(validations[0],),
+            accepted_task_deltas=(children[0],),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=2,
+            next_move_candidate_ref=uuid4(),
+            now=NOW,
+        )
+
+    valid_nextmove = build_request_understanding_closure_v3(
+        request_input=request_input,
+        output=one_output,
+        authoritative_messages={message_ref: message},
+        request_understanding_record_id=uuid4(),
+        candidate_validation=(validations[0],),
+        accepted_task_deltas=(children[0],),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        next_move_candidate_ref=uuid4(),
+        now=NOW,
+    )
+    assert valid_nextmove.record.validated_task_state_version == (
+        children[0].result_task_state_version
+    )
+
+    shared_task_id = uuid4()
+    chain_children = (
+        children[0].model_copy(
+            update={
+                "task_id": shared_task_id,
+                "base_task_state_version": None,
+                "result_task_state_version": 1,
+            }
+        ),
+        children[1].model_copy(
+            update={
+                "task_id": shared_task_id,
+                "base_task_state_version": 1,
+                "result_task_state_version": 2,
+            }
+        ),
+    )
+    chain_output = _initial_output_v2(
+        message_ref=message_ref,
+        candidates=(candidates[0], candidates[2]),
+    )
+    chain_validations = (validations[0], validations[2])
+    chained = build_request_understanding_closure_v3(
+        request_input=request_input,
+        output=chain_output,
+        authoritative_messages={message_ref: message},
+        request_understanding_record_id=uuid4(),
+        candidate_validation=chain_validations,
+        accepted_task_deltas=chain_children,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=None,
+        next_move_candidate_ref=None,
+        now=NOW,
+    )
+    assert tuple(
+        (
+            child.base_task_state_version,
+            child.result_task_state_version,
+        )
+        for child in chained.accepted_task_deltas
+    ) == ((None, 1), (1, 2))
+
+    for invalid_second in (
+        chain_children[1].model_copy(
+            update={
+                "base_task_state_version": None,
+                "result_task_state_version": 1,
+            }
+        ),
+        chain_children[1].model_copy(
+            update={
+                "base_task_state_version": 2,
+                "result_task_state_version": 3,
+            }
+        ),
+    ):
+        with pytest.raises(RequestUnderstandingV2Error):
+            build_request_understanding_closure_v3(
+                request_input=request_input,
+                output=chain_output,
+                authoritative_messages={message_ref: message},
+                request_understanding_record_id=uuid4(),
+                candidate_validation=chain_validations,
+                accepted_task_deltas=(chain_children[0], invalid_second),
+                proposed_base_task_state_version=None,
+                validated_task_state_version=None,
+                next_move_candidate_ref=None,
+                now=NOW,
+            )
+
+
+def test_cycle2_initial_v3_builds_exact_closure_and_search_audit() -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    allocation = InitialTaskIdentityAllocationV3(
+        request_understanding_record_id=uuid4(),
+        accepted_delta_id=uuid4(),
+        candidate_ref=output.task_delta_candidates[0].candidate_id,
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        binding_id=uuid4(),
+        next_move_candidate_ref=uuid4(),
+    )
+    result = validate_and_reduce_cycle2_initial_request_v3(
+        request_input=_request_input_v2(
+            message_ref=message_ref,
+            message="帮我查最近买的 轻量　跑鞋",
+        ),
+        output=output,
+        authoritative_messages={message_ref: "帮我查最近买的 轻量　跑鞋"},
+        customer_context=_customer_context(),
+        identity_allocation=allocation,
+        now=NOW,
+    )
+    assert type(result) is Cycle2InitialRequestDecisionV3
+    assert result.closure.record.model_output_schema_version == (
+        "e2e01-cycle2-initial.p0.v1"
+    )
+    assert result.closure.record.next_move_candidate_ref == (
+        allocation.next_move_candidate_ref
+    )
+    assert type(result.closure.accepted_task_deltas[0]) is (
+        AcceptedAddGoalTaskDeltaV3
+    )
+    assert result.task_graph.accepted_delta == (
+        result.closure.accepted_task_deltas[0]
+    )
+
+
+def test_cycle2_initial_v3_preserves_aggregate_provenance_reason() -> None:
+    message_ref = uuid4()
+    output = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    allocation = InitialTaskIdentityAllocationV3(
+        request_understanding_record_id=uuid4(),
+        accepted_delta_id=uuid4(),
+        candidate_ref=output.task_delta_candidates[0].candidate_id,
+        task_id=uuid4(),
+        request_unit_id=uuid4(),
+        binding_id=uuid4(),
+        next_move_candidate_ref=uuid4(),
+    )
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        validate_and_reduce_cycle2_initial_request_v3(
+            request_input=_request_input_v2(
+                message_ref=message_ref,
+                message="帮我查最近买的 轻量　跑鞋",
+            ),
+            output=output,
+            authoritative_messages={message_ref: "被替换的消息"},
+            customer_context=_customer_context(),
+            identity_allocation=allocation,
+            now=NOW,
+        )
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+
+
+@pytest.mark.parametrize(
+    "collision_field",
+    (
+        "request_understanding_record_id",
+        "accepted_delta_id",
+        "task_id",
+        "request_unit_id",
+        "binding_id",
+        "next_move_candidate_ref",
+    ),
+)
+@pytest.mark.parametrize("collision_source", ("run", "message"))
+def test_cycle2_initial_v3_rejects_full_trusted_identity_collisions(
+    collision_field: str,
+    collision_source: str,
+) -> None:
+    message_ref = uuid4()
+    run_id = uuid4()
+    output = _cycle2_initial_request_output_v2(message_ref=message_ref)
+    request_input = _request_input_v2(
+        message_ref=message_ref,
+        message="帮我查最近买的 轻量　跑鞋",
+        run_id=run_id,
+    )
+    values: dict[str, object] = {
+        "request_understanding_record_id": uuid4(),
+        "accepted_delta_id": uuid4(),
+        "candidate_ref": output.task_delta_candidates[0].candidate_id,
+        "task_id": uuid4(),
+        "request_unit_id": uuid4(),
+        "binding_id": uuid4(),
+        "next_move_candidate_ref": uuid4(),
+    }
+    values[collision_field] = run_id if collision_source == "run" else message_ref
+    allocation = InitialTaskIdentityAllocationV3.model_validate(values)
+    with pytest.raises(RequestProcessingError):
+        validate_and_reduce_cycle2_initial_request_v3(
+            request_input=request_input,
+            output=output,
+            authoritative_messages={message_ref: request_input.original_query},
+            customer_context=_customer_context(),
+            identity_allocation=allocation,
+            now=NOW,
+        )
+
+    candidate_collision_output = output.model_copy(
+        update={
+            "task_delta_candidates": (
+                output.task_delta_candidates[0].model_copy(
+                    update={"candidate_id": run_id}
+                ),
+            )
+        }
+    )
+    candidate_collision_allocation = allocation.model_copy(
+        update={
+            collision_field: uuid4(),
+            "candidate_ref": run_id,
+        }
+    )
+    with pytest.raises(RequestProcessingError):
+        validate_and_reduce_cycle2_initial_request_v3(
+            request_input=request_input,
+            output=candidate_collision_output,
+            authoritative_messages={message_ref: request_input.original_query},
+            customer_context=_customer_context(),
+            identity_allocation=candidate_collision_allocation,
+            now=NOW,
+        )
+
+
+def test_cycle2_continuation_v3_accepts_atomic_dnr_dual_binding() -> None:
+    message_ref = uuid4()
+    message = "订单 O-1001 显示已送达，但我没有收到"
+    candidates = (
+        _cycle2_input_candidate(
+            message_ref=message_ref,
+            name="order_id",
+            value="O-1001",
+            quote="O-1001",
+        ),
+        _cycle2_input_candidate(
+            message_ref=message_ref,
+            name="shipment_not_received",
+            value=True,
+            quote="没有收到",
+        ),
+    )
+    old_order = _cycle2_binding(name="order_id", value="O-1001")
+    allocation = _continuation_allocation_v3(count=2)
+    first = _reduce_continuation_v3(
+        message=message,
+        candidates=candidates,
+        current_binding=old_order,
+        allocation=allocation,
+    )
+    second = _reduce_continuation_v3(
+        message=message,
+        candidates=candidates,
+        current_binding=old_order,
+        allocation=allocation,
+    )
+
+    assert type(first) is Cycle2ContinuationDecisionV3
+    assert first == second
+    assert tuple(binding.name for binding in first.input_bindings) == (
+        "order_id",
+        "shipment_not_received",
+    )
+    assert first.input_bindings[0].supersedes == old_order.binding_id
+    assert first.input_bindings[1].supersedes is None
+    assert first.routing_trigger_binding_ref == first.input_bindings[1].binding_id
+    child = first.closure.accepted_task_deltas[0]
+    assert type(child) is AcceptedSupplyInputTaskDeltaV3
+    assert child.input_binding_refs == tuple(
+        binding.binding_id for binding in first.input_bindings
+    )
+    assert child.result_task_state_version == child.base_task_state_version + 1
+    serialized = first.model_dump_json()
+    assert '"source_quote":' not in serialized
+    assert "没有收到" not in serialized
+
+    old_dnr = _cycle2_binding(
+        name="shipment_not_received",
+        value=False,
+    )
+    superseding = _reduce_continuation_v3(
+        message=message,
+        candidates=candidates,
+        current_bindings=(old_order, old_dnr),
+        allocation=_continuation_allocation_v3(count=2),
+    )
+    assert type(superseding) is Cycle2ContinuationDecisionV3
+    assert tuple(
+        binding.supersedes for binding in superseding.input_bindings
+    ) == (old_order.binding_id, old_dnr.binding_id)
+    superseding_child = superseding.closure.accepted_task_deltas[0]
+    assert superseding_child.result_task_state_version == (
+        superseding_child.base_task_state_version + 1
+    )
+    assert superseding.routing_trigger_binding_ref == (
+        superseding.input_bindings[1].binding_id
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "candidate_specs"),
+    [
+        (
+            "订单 O-1001 和 O-1002 都没问题",
+            (
+                ("order_id", "O-1001", "O-1001"),
+                ("order_id", "O-1002", "O-1002"),
+            ),
+        ),
+        (
+            "我没有收到订单 O-1001",
+            (
+                ("shipment_not_received", True, "没有收到"),
+                ("order_id", "O-1001", "O-1001"),
+            ),
+        ),
+        (
+            "订单 O-1001 我已经收到",
+            (
+                ("order_id", "O-1001", "O-1001"),
+                ("shipment_not_received", False, "已经收到"),
+            ),
+        ),
+    ],
+)
+def test_cycle2_continuation_v3_business_invalid_pairs_are_keyed_rejects(
+    message: str,
+    candidate_specs: tuple[tuple[str, object, str], ...],
+) -> None:
+    message_ref = uuid4()
+    candidates = tuple(
+        _cycle2_input_candidate(
+            message_ref=message_ref,
+            name=name,
+            value=value,
+            quote=quote,
+        )
+        for name, value, quote in candidate_specs
+    )
+    record_id = uuid4()
+    task_collision = uuid4()
+    first = _reduce_continuation_v3(
+        message=message,
+        candidates=candidates,
+        allocation=_continuation_allocation_v3(
+            count=2,
+            record_id=record_id,
+            accepted_delta_id=task_collision,
+            binding_ids=(task_collision, task_collision),
+        ),
+    )
+    second = _reduce_continuation_v3(
+        message=message,
+        candidates=candidates,
+        allocation=_continuation_allocation_v3(
+            count=2,
+            record_id=record_id,
+        ),
+    )
+    assert type(first).__name__ == "RejectedCycle2ContinuationDecisionV3"
+    assert first.closure == second.closure
+    assert first.closure.record.candidate_validation[0].reason_code is (
+        CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+    )
+    assert first.closure.accepted_task_deltas == ()
+
+
+def test_cycle2_continuation_v3_partitions_provenance_and_keyed_rejects() -> None:
+    message_ref = uuid4()
+    ordinal = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="candidate_ordinal",
+        value=2,
+        quote="第二",
+    )
+    accepted = _reduce_continuation_v3(
+        message="第二个",
+        candidates=(ordinal,),
+        current_binding=_cycle2_binding(
+            name="product_description",
+            value="跑鞋",
+        ),
+    )
+    assert type(accepted) is Cycle2ContinuationDecisionV3
+    assert accepted.input_bindings[0].normalized_value == 2
+
+    sixth_ref = uuid4()
+    sixth = _cycle2_input_candidate(
+        message_ref=sixth_ref,
+        name="candidate_ordinal",
+        value=6,
+        quote="第六",
+    )
+    sixth_accepted = _reduce_continuation_v3(
+        message="第六个",
+        candidates=(sixth,),
+        current_binding=_cycle2_binding(
+            name="product_description",
+            value="跑鞋",
+        ),
+    )
+    assert type(sixth_accepted) is Cycle2ContinuationDecisionV3
+    assert sixth_accepted.input_bindings[0].normalized_value == 6
+
+    correction_ref = uuid4()
+    correction = _cycle2_input_candidate(
+        message_ref=correction_ref,
+        name="shipment_not_received",
+        value=False,
+        quote="已经收到",
+    )
+    corrected = _reduce_continuation_v3(
+        message="谢谢，我已经收到包裹",
+        candidates=(correction,),
+    )
+    assert type(corrected) is Cycle2ContinuationDecisionV3
+    assert corrected.input_bindings[0].normalized_value is False
+
+    whole_message = ordinal.model_copy(update={"source_quote": "第二个"})
+    with pytest.raises(RequestUnderstandingV2Error) as caught:
+        _reduce_continuation_v3(
+            message="第二个",
+            candidates=(whole_message,),
+            current_binding=_cycle2_binding(
+                name="product_description",
+                value="跑鞋",
+            ),
+        )
+    assert caught.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+
+    message_ref = uuid4()
+    product = _cycle2_input_candidate(
+        message_ref=message_ref,
+        name="product_description",
+        value="跑鞋",
+        quote="跑鞋",
+    )
+    unsupported = _reduce_continuation_v3(
+        message="继续查跑鞋订单",
+        candidates=(product,),
+        operation=TaskDeltaOperation.AMEND_GOAL,
+        task_alias="wrong-but-schema-valid",
+    )
+    assert unsupported.closure.record.candidate_validation[0].reason_code is (
+        CandidateRejectionReasonCode.OPERATION_NOT_SUPPORTED
+    )
+
+    alias_rejected = _reduce_continuation_v3(
+        message="继续查跑鞋订单",
+        candidates=(product,),
+        task_alias="wrong-but-schema-valid",
+    )
+    assert alias_rejected.closure.record.candidate_validation[0].reason_code is (
+        CandidateRejectionReasonCode.REFERENCE_UNRESOLVED
+    )
+
+
+def test_cycle2_continuation_v3_preserves_outer_failure_reason_codes() -> None:
+    input_message_ref = uuid4()
+    output_message_ref = uuid4()
+    binding = _cycle2_binding(name="order_id", value="O-1001")
+    task, unit = _cycle2_current_task_graph(binding=binding)
+    request_input = _continuation_request_input_v3(
+        message_ref=input_message_ref,
+        message="继续查跑鞋订单",
+        task=task,
+        unit=unit,
+    )
+    output = _continuation_output_v3(
+        message_ref=output_message_ref,
+        candidates=(
+            _cycle2_input_candidate(
+                message_ref=output_message_ref,
+                name="product_description",
+                value="跑鞋",
+                quote="跑鞋",
+            ),
+        ),
+    )
+    arguments = {
+        "request_input": request_input,
+        "output": output,
+        "authoritative_messages": {
+            input_message_ref: request_input.original_query,
+            output_message_ref: request_input.original_query,
+        },
+        "customer_context": _customer_context(),
+        "current_task": task,
+        "current_request_unit": unit,
+        "current_input_bindings": (binding,),
+        "identity_allocation": _continuation_allocation_v3(count=1),
+        "now": NOW,
+    }
+    with pytest.raises(RequestUnderstandingV2Error) as provenance_failure:
+        reduce_cycle2_continuation_task_delta(**arguments)
+    assert provenance_failure.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+    )
+
+    invalid_schema = output.model_copy(
+        update={"schema_version": "e2e01-cycle2-continuation.p0.v999"}
+    )
+    with pytest.raises(RequestUnderstandingV2Error) as schema_failure:
+        reduce_cycle2_continuation_task_delta(
+            **{**arguments, "output": invalid_schema}
+        )
+    assert schema_failure.value.reason_code is (
+        RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
+    )

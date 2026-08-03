@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, ClassVar, Literal, Self, cast
+from typing import Annotated, ClassVar, Literal, Self, TypeAlias, cast
 from uuid import UUID
 
 from pydantic import (
@@ -492,6 +492,303 @@ class RequestUnderstandingRecordV2(AuditOnlyModel):
             raise ValueError(
                 "next_move versions require next_move_candidate_ref"
             )
+        return self
+
+
+class DurableCycle2InputCandidateV3(AuditOnlyModel):
+    """Safe durable projection of one current-message Cycle 2 Claim."""
+
+    name: InputBindingNameV2
+    normalized_candidate_value: InputBindingNormalizedValueV2
+    authority: Literal[InputAuthority.USER_CLAIM]
+    source_kind: Literal[InputSourceKind.CURRENT_MESSAGE]
+    source_ref: UUID
+    source_span_start: StrictNonNegativeSpanV2
+    source_span_end_exclusive: StrictNonNegativeSpanV2
+    source_quote_sha256: SourceQuoteSha256V2
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def normalized_name_value_and_span_are_exact(self) -> Self:
+        value = self.normalized_candidate_value
+        if self.name == "order_id":
+            _STRICT_ORDER_ID_V2_ADAPTER.validate_python(value)
+        elif self.name == "product_description":
+            if (
+                type(value) is not str
+                or normalize_product_description(value) != value
+            ):
+                raise ValueError(
+                    "product_description must be the exact normalized value"
+                )
+        elif self.name == "candidate_ordinal":
+            if (
+                type(value) is not int
+                or not 1 <= value <= CYCLE2_ORDINAL_CLAIM_MAX
+            ):
+                raise ValueError(
+                    "candidate_ordinal must be a strict integer from 1 to 99"
+                )
+        elif type(value) is not bool:
+            raise ValueError("shipment_not_received must be a strict boolean")
+        if self.source_span_end_exclusive <= self.source_span_start:
+            raise ValueError("source span end must be greater than start")
+        return self
+
+
+class DurablePhase1AddGoalTaskDeltaCandidateV3(AuditOnlyModel):
+    candidate_id: UUID
+    operation: Literal[TaskDeltaOperation.ADD_GOAL]
+    goal_patch: NonEmptyString
+    input_candidates: Annotated[
+        tuple[DurableInputCandidateV2, ...],
+        Field(min_length=1),
+    ]
+    confidence: Confidence
+
+    @field_validator("input_candidates")
+    @classmethod
+    def input_candidate_names_are_unique(
+        cls,
+        value: tuple[DurableInputCandidateV2, ...],
+    ) -> tuple[DurableInputCandidateV2, ...]:
+        names = tuple(candidate.name for candidate in value)
+        if len(names) != len(set(names)):
+            raise ValueError("input candidate names must be unique")
+        return value
+
+
+class DurableCycle2AddGoalTaskDeltaCandidateV3(AuditOnlyModel):
+    candidate_id: UUID
+    operation: Literal[TaskDeltaOperation.ADD_GOAL]
+    goal_patch: NonEmptyString
+    input_candidates: Annotated[
+        tuple[DurableCycle2InputCandidateV3, ...],
+        Field(min_length=1, max_length=1),
+    ]
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def exact_initial_product_candidate_is_present(self) -> Self:
+        if self.input_candidates[0].name != "product_description":
+            raise ValueError(
+                "Cycle 2 initial Candidate requires product_description"
+            )
+        return self
+
+
+class DurableCycle2ContinuationTaskDeltaCandidateV3(AuditOnlyModel):
+    candidate_id: UUID
+    operation: TaskDeltaOperation
+    target_task_alias: NonEmptyString
+    target_request_unit_alias: NonEmptyString
+    input_candidates: Annotated[
+        tuple[DurableCycle2InputCandidateV3, ...],
+        Field(min_length=1, max_length=2),
+    ]
+    confidence: Confidence
+
+
+DurableTaskDeltaCandidateV3: TypeAlias = (
+    DurablePhase1AddGoalTaskDeltaCandidateV3
+    | DurableCycle2AddGoalTaskDeltaCandidateV3
+    | DurableCycle2ContinuationTaskDeltaCandidateV3
+)
+
+
+class AcceptedAddGoalTaskDeltaV3(AuditOnlyModel):
+    accepted_delta_id: UUID
+    candidate_ref: UUID
+    message_ref: UUID
+    operation: Literal[TaskDeltaOperation.ADD_GOAL]
+    goal_text: NonEmptyString
+    input_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    accepted_at: datetime
+    task_id: UUID
+    base_task_state_version: StrictPositiveStateVersionV2 | None
+    result_task_state_version: StrictPositiveStateVersionV2
+
+    @field_validator("input_binding_refs")
+    @classmethod
+    def input_binding_refs_are_unique(
+        cls,
+        value: tuple[UUID, ...],
+    ) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("input binding refs must be unique")
+        return value
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="accepted_at")
+
+    @model_validator(mode="after")
+    def task_effect_versions_form_one_chain(self) -> Self:
+        if self.base_task_state_version is None:
+            if self.result_task_state_version != 1:
+                raise ValueError("new Task ADD_GOAL effect must result in version 1")
+        elif self.result_task_state_version != self.base_task_state_version + 1:
+            raise ValueError("Task effect must increment state_version exactly once")
+        return self
+
+
+class AcceptedSupplyInputTaskDeltaV3(AuditOnlyModel):
+    accepted_delta_id: UUID
+    candidate_ref: UUID
+    message_ref: UUID
+    operation: Literal[TaskDeltaOperation.SUPPLY_INPUT]
+    task_id: UUID
+    target_request_unit_id: UUID
+    input_binding_refs: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=2),
+    ]
+    accepted_at: datetime
+    base_task_state_version: StrictPositiveStateVersionV2
+    result_task_state_version: StrictPositiveStateVersionV2
+
+    @field_validator("input_binding_refs")
+    @classmethod
+    def input_binding_refs_are_unique(
+        cls,
+        value: tuple[UUID, ...],
+    ) -> tuple[UUID, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("input binding refs must be unique")
+        return value
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="accepted_at")
+
+    @model_validator(mode="after")
+    def task_effect_increments_version_once(self) -> Self:
+        if self.result_task_state_version != self.base_task_state_version + 1:
+            raise ValueError("Task effect must increment state_version exactly once")
+        return self
+
+
+AcceptedTaskDeltaV3: TypeAlias = (
+    AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3
+)
+
+
+class RequestUnderstandingRecordV3(AuditOnlyModel):
+    request_understanding_record_id: UUID
+    run_id: UUID
+    message_ref: UUID
+    record_schema_version: Literal["request_understanding_record.p0.v3"]
+    model_input_schema_version: Literal["e2e01-thin-v1"]
+    model_output_schema_version: Literal[
+        "e2e01-thin-v2",
+        "e2e01-cycle2-initial.p0.v1",
+        "e2e01-cycle2-continuation.p0.v2",
+    ]
+    contextualization: DurableQueryContextualizationCandidateV2
+    task_delta_candidates: tuple[DurableTaskDeltaCandidateV3, ...]
+    candidate_validation: tuple[CandidateValidationRecordV2, ...]
+    accepted_delta_refs: tuple[UUID, ...]
+    proposed_base_task_state_version: StrictPositiveStateVersionV2 | None = None
+    validated_task_state_version: StrictPositiveStateVersionV2 | None = None
+    next_move_candidate_ref: UUID | None = None
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_is_utc(cls, value: datetime) -> datetime:
+        return require_utc(value, field_name="created_at")
+
+    @model_validator(mode="after")
+    def record_graph_and_branch_are_locally_closed(self) -> Self:
+        candidate_ids = tuple(
+            candidate.candidate_id for candidate in self.task_delta_candidates
+        )
+        validation_refs = tuple(
+            validation.candidate_ref
+            for validation in self.candidate_validation
+        )
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("candidate IDs must be unique")
+        if len(validation_refs) != len(set(validation_refs)):
+            raise ValueError("candidate validation refs must be unique")
+        if set(validation_refs) != set(candidate_ids):
+            raise ValueError(
+                "candidate validation refs must exactly match candidates"
+            )
+        if len(self.accepted_delta_refs) != len(set(self.accepted_delta_refs)):
+            raise ValueError("accepted delta refs must be unique")
+        accepted_count = sum(
+            validation.decision is CandidateValidationDecision.ACCEPT
+            for validation in self.candidate_validation
+        )
+        if len(self.accepted_delta_refs) != accepted_count:
+            raise ValueError("accepted delta refs must match accepted decisions")
+        if self.message_ref not in self.contextualization.source_message_refs:
+            raise ValueError("contextualization must include the current message")
+        if any(
+            input_candidate.source_ref != self.message_ref
+            for candidate in self.task_delta_candidates
+            for input_candidate in candidate.input_candidates
+        ):
+            raise ValueError(
+                "durable input candidates must bind to current message"
+            )
+
+        output_version = self.model_output_schema_version
+        if output_version == "e2e01-thin-v2":
+            if any(
+                type(candidate) is not DurablePhase1AddGoalTaskDeltaCandidateV3
+                for candidate in self.task_delta_candidates
+            ):
+                raise ValueError("thin-v2 requires only Phase 1 ADD_GOAL Candidates")
+            if self.next_move_candidate_ref is None and (
+                self.proposed_base_task_state_version is not None
+                or self.validated_task_state_version is not None
+            ):
+                raise ValueError("NextMove versions require a candidate ref")
+        elif output_version == "e2e01-cycle2-initial.p0.v1":
+            if (
+                len(self.task_delta_candidates) != 1
+                or type(self.task_delta_candidates[0])
+                is not DurableCycle2AddGoalTaskDeltaCandidateV3
+            ):
+                raise ValueError(
+                    "Cycle 2 initial requires exactly one ADD_GOAL Candidate"
+                )
+            if (
+                len(self.candidate_validation) != 1
+                or self.candidate_validation[0].decision
+                is not CandidateValidationDecision.ACCEPT
+                or len(self.accepted_delta_refs) != 1
+            ):
+                raise ValueError(
+                    "Cycle 2 initial requires one accepted Candidate effect"
+                )
+            if (
+                self.next_move_candidate_ref is None
+                or self.proposed_base_task_state_version is not None
+                or self.validated_task_state_version != 1
+            ):
+                raise ValueError(
+                    "Cycle 2 initial requires exact search NextMove audit"
+                )
+        else:
+            if (
+                len(self.task_delta_candidates) != 1
+                or type(self.task_delta_candidates[0])
+                is not DurableCycle2ContinuationTaskDeltaCandidateV3
+            ):
+                raise ValueError(
+                    "Cycle 2 continuation requires exactly one continuation Candidate"
+                )
+            if (
+                self.proposed_base_task_state_version is not None
+                or self.validated_task_state_version is not None
+                or self.next_move_candidate_ref is not None
+            ):
+                raise ValueError("Cycle 2 continuation cannot own NextMove audit")
         return self
 
 

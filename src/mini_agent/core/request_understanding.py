@@ -83,6 +83,10 @@ class RequestUnderstandingInput(ModelVisibleModel):
 
 class TaskDeltaOperation(StrEnum):
     ADD_GOAL = "ADD_GOAL"
+    AMEND_GOAL = "AMEND_GOAL"
+    SUPPLY_INPUT = "SUPPLY_INPUT"
+    CANCEL_GOAL = "CANCEL_GOAL"
+    CONFIRMATION_CANDIDATE = "CONFIRMATION_CANDIDATE"
 
 
 class InputAuthority(StrEnum):
@@ -268,6 +272,20 @@ class Cycle2InitialTaskDeltaCandidateV2(ModelVisibleModel):
         return self
 
 
+class Cycle2ContinuationTaskDeltaCandidateV2(ModelVisibleModel):
+    """One scoped continuation proposal without trusted target authority."""
+
+    candidate_id: UUID
+    operation: TaskDeltaOperation
+    target_task_alias: NonEmptyString
+    target_request_unit_alias: NonEmptyString
+    input_candidates: Annotated[
+        tuple[Cycle2InputCandidate, ...],
+        Field(min_length=1, max_length=2),
+    ]
+    confidence: Confidence
+
+
 class ReferenceSourceKindV2(StrEnum):
     CURRENT_MESSAGE = "CURRENT_MESSAGE"
     RECENT_MESSAGE = "RECENT_MESSAGE"
@@ -363,6 +381,18 @@ class QueryContextualizationCandidateV2(ModelVisibleModel):
                 "uncertainty source refs must be in source_message_refs"
             )
         return self
+
+
+class Cycle2ContinuationRequestUnderstandingOutputV2(ModelVisibleModel):
+    """Closed Cycle 2 continuation envelope with no NextMove authority."""
+
+    schema_version: Literal["e2e01-cycle2-continuation.p0.v2"]
+    message_ref: UUID
+    contextualization: QueryContextualizationCandidateV2
+    task_delta_candidates: Annotated[
+        tuple[Cycle2ContinuationTaskDeltaCandidateV2, ...],
+        Field(min_length=1, max_length=1),
+    ]
 
 
 class Cycle2InitialRequestUnderstandingOutputV2(ModelVisibleModel):
