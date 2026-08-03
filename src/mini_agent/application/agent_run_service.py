@@ -2777,7 +2777,7 @@ class Cycle2AgentRunHandler:
         current_session: Cycle2CurrentSessionTaskClosure,
     ) -> tuple[
         Cycle2WriteResult,
-        InputBindingV2 | None,
+        InputBindingV2 | ApplyOrderCandidateSelectionV3Command | None,
     ]:
         """Persist one v3 continuation decision but never route or dispatch it."""
 
@@ -2978,7 +2978,10 @@ class Cycle2AgentRunHandler:
         *,
         loaded_closure: OrderCandidateSelectionReadClosure,
         decision: Cycle2ContinuationDecisionV3,
-    ) -> tuple[Cycle2WriteResult, InputBindingV2 | None]:
+    ) -> tuple[
+        Cycle2WriteResult,
+        ApplyOrderCandidateSelectionV3Command | None,
+    ]:
         """Persist ordinal v3 selection without entering the active route."""
 
         staged = _build_order_selection_v3_staging_command(
@@ -2994,7 +2997,7 @@ class Cycle2AgentRunHandler:
         )
         return (
             result,
-            staged.ordinal_input_binding_record
+            staged
             if result is Cycle2WriteResult.APPLIED
             else None,
         )

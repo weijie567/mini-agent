@@ -40,6 +40,7 @@ from mini_agent.application.records import (
     AgentRunResult,
     ApplyTaskTransitionCommand,
     ApplyContinuationTaskDeltaV3Command,
+    ApplyOrderCandidateSelectionV3Command,
     ConditionalWriteResult,
     ConversationRecord,
     ConversationTaskLinkRecord,
@@ -2824,6 +2825,10 @@ class _Cycle2RuntimeHarness:
         self.v3_continuation_write_result = Cycle2WriteResult.APPLIED
         self.v3_continuation_commands: list[object] = []
         self.v3_saved_user_message: MessageRecord | None = None
+        self.v3_running_run: AgentRunRecordV2 | None = None
+        self.v3_active_link: RunTaskLinkRecordV2 | None = None
+        self.v3_selection_write_result = Cycle2WriteResult.APPLIED
+        self.v3_selection_commands: list[object] = []
         self.search_write_result = Cycle2WriteResult.APPLIED
         self.search_commands: list[object] = []
         self.selection_commands: list[object] = []
@@ -2921,9 +2926,12 @@ class _Cycle2RuntimeHarness:
         return OrderCandidateSelectionReadClosure(
             owner_scope=session.owner_scope,
             trusted_conversation_record=session.conversation_record,
-            current_run_record=self.running_records[-1],
+            current_run_record=(
+                self.v3_running_run or self.running_records[-1]
+            ),
             current_run_task_link_record=(
-                self.root_commands[-1].active_run_task_link_record
+                self.v3_active_link
+                or self.root_commands[-1].active_run_task_link_record
             ),
             current_task_record=session.current_task_record,
             current_request_unit_record=session.current_request_unit_record,
@@ -2931,7 +2939,8 @@ class _Cycle2RuntimeHarness:
             search_observation_record=observation,
             selection_request=request,
             saved_selection_message_record=(
-                self.root_commands[-1].user_message_record
+                self.v3_saved_user_message
+                or self.root_commands[-1].user_message_record
             ),
             current_query_binding=AcceptedOrderSearchQueryBindingReadClosure(
                 binding_ref=binding.binding_id,
@@ -2954,6 +2963,13 @@ class _Cycle2RuntimeHarness:
     async def apply_order_candidate_selection_if_current(self, command: object):
         self.selection_commands.append(command)
         return Cycle2WriteResult.APPLIED
+
+    async def apply_order_candidate_selection_v3_if_current(
+        self,
+        command: object,
+    ):
+        self.v3_selection_commands.append(command)
+        return self.v3_selection_write_result
 
     async def load_continuation_input_binding_closure_for_owner(
         self,
@@ -5052,3 +5068,80 @@ def test_cycle2_v3_out_of_range_ordinal_is_atomic_rejected_claim(
         TraceEventType.INPUT_BINDING_RECORDED,
         TraceEventType.TASK_STATE_CHANGED,
     )
+
+
+@pytest.mark.parametrize("write_result", tuple(Cycle2WriteResult))
+def test_cycle2_v3_successful_ordinal_preserves_applied_live_authority_only(
+    write_result: Cycle2WriteResult,
+) -> None:
+    provider = _Cycle2ProviderHarness(ordinal=2)
+    handler, runtime, _sentinel, _search_command = (
+        _prepare_cycle2_waiting_session(provider=provider)
+    )
+    session = runtime.current_session
+    assert session is not None
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        direction=MessageDirection.USER,
+        content="第二个",
+        received_at=NOW,
+    )
+    running_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted-cycle2",
+        started_at=NOW,
+    )
+    active_link = RunTaskLinkRecordV2(
+        run_id=running_run.run_id,
+        task_id=session.current_task_record.task_id,
+        base_task_state_version=session.current_task_record.state_version,
+    )
+    turn = agent_run_service_module._Cycle2Turn(
+        owner_scope=session.owner_scope,
+        conversation=session.conversation_record,
+        user_message=message,
+        running_run=running_run,
+        active_link=active_link,
+        request_input=handler._request_input(
+            run=running_run,
+            message=message,
+            current_session=session,
+        ),
+        tool_progress=[],
+    )
+    runtime.v3_saved_user_message = message
+    runtime.v3_running_run = running_run
+    runtime.v3_active_link = active_link
+    runtime.v3_selection_write_result = write_result
+
+    result, authority = asyncio.run(
+        handler._stage_continuation_turn_v3(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message=message.content,
+            ),
+            turn=turn,
+            current_session=session,
+        )
+    )
+
+    assert result is write_result
+    assert len(runtime.v3_selection_commands) == 1
+    staged = runtime.v3_selection_commands[0]
+    assert type(staged) is ApplyOrderCandidateSelectionV3Command
+    assert runtime.v3_continuation_commands == []
+    if write_result is Cycle2WriteResult.APPLIED:
+        assert authority is staged
+        authority.require_live_target_issuance()
+        assert authority.selected_target_ref == UUID(
+            authority.selection_record.selected_target_ref
+        )
+        assert authority.ordinal_input_binding_record.name == (
+            "candidate_ordinal"
+        )
+    else:
+        assert authority is None
