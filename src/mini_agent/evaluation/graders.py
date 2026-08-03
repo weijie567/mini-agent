@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +13,14 @@ from types import MappingProxyType
 from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from mini_agent.application.records import (
     AgentRunResult,
@@ -63,6 +71,7 @@ from mini_agent.core.task_state import (
     InputBindingV2,
     OrderCandidateSelectionRecord,
     OrderCandidateSetRecord,
+    OrderCandidateAutoTargetRecord,
     RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
@@ -71,6 +80,7 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
@@ -548,6 +558,16 @@ class Cycle2MapperEvidence(AuditOnlyModel):
         return self
 
 
+def _cycle2_canonical_target_uuid(value: str) -> UUID | None:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return None
+    if parsed.version != 4 or str(parsed) != value:
+        return None
+    return parsed
+
+
 class Cycle2EvalEvidence(AuditOnlyModel):
     """Actual typed records returned by a Cycle 2 SUT evidence reader.
 
@@ -584,6 +604,8 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     shipment_observations: tuple[ShipmentObservation, ...] = ()
     observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...] = ()
     shipment_assessments: tuple[ShipmentAssessment, ...] = ()
+    gate_decisions: tuple[GateDecisionV2, ...] = ()
+    auto_targets: tuple[OrderCandidateAutoTargetRecord, ...] = ()
     tool_calls: tuple[ToolCallRecordV2, ...] = ()
     supporting_tool_calls: tuple[ToolCallRecordV2, ...] = ()
     recovery_decisions: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
@@ -595,6 +617,54 @@ class Cycle2EvalEvidence(AuditOnlyModel):
     model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...] = ()
     pair_evidence: Cycle2PairExecutionEvidenceV1 | None = None
     trace_events: tuple[TraceEventV2, ...]
+
+    @field_validator("gate_decisions", mode="before")
+    @classmethod
+    def persisted_gate_children_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if info.mode == "json":
+            if type(value) is not list:
+                raise ValueError("Cycle 2 Eval Gate JSON evidence must be an array")
+            return tuple(
+                GateDecisionV2.model_validate_json(
+                    json.dumps(record),
+                    strict=True,
+                )
+                for record in value
+            )
+        if type(value) is not tuple or any(
+            type(record) is not GateDecisionV2 for record in value
+        ):
+            raise ValueError("Cycle 2 Eval Gate evidence must be exact")
+        return value
+
+    @field_validator("auto_targets", mode="before")
+    @classmethod
+    def auto_target_children_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if info.mode == "json":
+            if type(value) is not list:
+                raise ValueError(
+                    "Cycle 2 Eval AutoTarget JSON evidence must be an array"
+                )
+            return tuple(
+                OrderCandidateAutoTargetRecord.model_validate_json(
+                    json.dumps(record),
+                    strict=True,
+                )
+                for record in value
+            )
+        if type(value) is not tuple or any(
+            type(record) is not OrderCandidateAutoTargetRecord for record in value
+        ):
+            raise ValueError("Cycle 2 Eval AutoTarget evidence must be exact")
+        return value
 
     @model_validator(mode="after")
     def actual_record_graph_has_unique_identities(self) -> "Cycle2EvalEvidence":
@@ -628,6 +698,8 @@ class Cycle2EvalEvidence(AuditOnlyModel):
                 for record in self.observation_source_edges
             ),
             tuple(record.assessment_id for record in self.shipment_assessments),
+            tuple(record.gate_decision_id for record in self.gate_decisions),
+            tuple(record.verified_target_ref for record in self.auto_targets),
             tuple(
                 record.tool_call_id
                 for record in (*self.tool_calls, *self.supporting_tool_calls)
@@ -712,7 +784,30 @@ class Cycle2EvalEvidence(AuditOnlyModel):
             raise ValueError(
                 "Cycle 2 Request Understanding parent-local closure is incomplete"
             )
-        if any(event.run_id != self.run_record.run_id for event in self.trace_events):
+        root_completed_at = self.run_record.completed_at
+        root_started_events = tuple(
+            event
+            for event in self.trace_events
+            if event.event_type is TraceEventType.RUN_STARTED
+        )
+        root_stopped_events = tuple(
+            event
+            for event in self.trace_events
+            if event.event_type is TraceEventType.RUN_STOPPED
+        )
+        if (
+            root_completed_at is None
+            or len(root_started_events) != 1
+            or root_started_events[0].occurred_at != self.run_record.started_at
+            or len(root_stopped_events) != 1
+            or root_stopped_events[0].occurred_at != root_completed_at
+            or any(
+                event.run_id != self.run_record.run_id
+                or event.occurred_at < self.run_record.started_at
+                or event.occurred_at > root_completed_at
+                for event in self.trace_events
+            )
+        ):
             raise ValueError("Cycle 2 Trace must belong to the evidenced Run")
         if any(link.run_id != self.run_record.run_id for link in self.run_task_links):
             raise ValueError("Cycle 2 RunTaskLink must belong to the evidenced Run")
@@ -739,6 +834,15 @@ class Cycle2EvalEvidence(AuditOnlyModel):
             for call in self.supporting_tool_calls
         ):
             raise ValueError("Cycle 2 supporting record crossed its Run partition")
+        all_link_pairs = {
+            (link.run_id, link.task_id)
+            for link in (*self.run_task_links, *self.supporting_run_task_links)
+        }
+        if any(
+            (call.run_id, call.task_id) not in all_link_pairs
+            for call in (*self.tool_calls, *self.supporting_tool_calls)
+        ):
+            raise ValueError("Cycle 2 ToolCall lacks its exact RunTaskLink")
         observations = {
             record.observation_id: record
             for record in (
@@ -786,6 +890,317 @@ class Cycle2EvalEvidence(AuditOnlyModel):
             for call in self.supporting_tool_calls
         ):
             raise ValueError("Cycle 2 supporting ToolCall lacks Observation source")
+        task_by_id = {record.task_id: record for record in self.task_records}
+        unit_by_id = {
+            record.request_unit_id: record for record in self.request_units
+        }
+        manifest_by_id = {
+            record.context_manifest_id: record
+            for record in self.context_manifests
+        }
+        all_call_records = (*self.tool_calls, *self.supporting_tool_calls)
+        run_by_id = {
+            self.run_record.run_id: self.run_record,
+            **{
+                record.run_id: record for record in self.supporting_run_records
+            },
+        }
+        gate_by_id = {
+            record.gate_decision_id: record for record in self.gate_decisions
+        }
+        gate_ref_counts = Counter(
+            record.gate_decision_id for record in all_call_records
+        )
+        if (
+            set(gate_by_id) != set(gate_ref_counts)
+            or any(count != 1 for count in gate_ref_counts.values())
+        ):
+            raise ValueError("Cycle 2 Eval Gate owner family is incomplete")
+        for call in all_call_records:
+            gate = gate_by_id[call.gate_decision_id]
+            task = task_by_id.get(call.task_id)
+            unit = unit_by_id.get(call.request_unit_id)
+            manifest = manifest_by_id.get(call.context_manifest_id)
+            owning_run = run_by_id.get(call.run_id)
+            if (
+                task is None
+                or unit is None
+                or manifest is None
+                or owning_run is None
+                or owning_run.completed_at is None
+                or unit.task_id != task.task_id
+                or call.private_owner_scope_ref != task.owner_customer_id
+                or any(
+                    reference not in unit.input_binding_refs
+                    for reference in call.argument_binding_refs
+                )
+                or manifest.run_id != call.run_id
+                or manifest.model_call_id != call.model_call_id
+                or manifest.tool_registry_version != call.tool_registry_version
+                or (
+                    manifest.task_state_ref_and_version is not None
+                    and (
+                        manifest.task_state_ref_and_version.task_id != call.task_id
+                        or manifest.task_state_ref_and_version.state_version
+                        != call.validated_task_state_version
+                    )
+                )
+                or gate.decision is not GateDecisionValue.ACCEPT
+                or gate.model_call_id != call.model_call_id
+                or gate.context_manifest_id != call.context_manifest_id
+                or gate.provider_tool_call_id != call.provider_tool_call_id
+                or gate.resolved_canonical_tool_name
+                != call.canonical_tool_name.value
+                or gate.argument_binding_refs != call.argument_binding_refs
+                or gate.validated_task_state_version
+                != call.validated_task_state_version
+                or gate.verified_target_ref != call.verified_target_ref
+                or gate.decided_at < owning_run.started_at
+                or gate.decided_at > call.started_at
+                or call.started_at > owning_run.completed_at
+                or call.finished_at is None
+                or call.finished_at > owning_run.completed_at
+                or any(
+                    attempt.started_at < owning_run.started_at
+                    or (
+                        attempt.finished_at is not None
+                        and attempt.finished_at > owning_run.completed_at
+                    )
+                    for attempt in call.attempts
+                )
+            ):
+                raise ValueError("Cycle 2 Eval Gate ToolCall graph mismatch")
+        binding_by_id = {
+            record.binding_id: record for record in self.input_bindings
+        }
+        superseded_binding_ids = {
+            record.supersedes
+            for record in self.input_bindings
+            if record.supersedes is not None
+        }
+        current_binding_ids = set(binding_by_id) - superseded_binding_ids
+        candidate_set_by_id = {
+            record.candidate_set_id: record for record in self.candidate_sets
+        }
+        search_by_id = {
+            record.observation_id: record for record in self.search_observations
+        }
+        auto_target_by_ref = {
+            record.verified_target_ref: record for record in self.auto_targets
+        }
+        for record in self.auto_targets:
+            task = task_by_id.get(record.task_id)
+            unit = unit_by_id.get(record.request_unit_id)
+            query = binding_by_id.get(record.query_input_binding_ref)
+            candidate_set = candidate_set_by_id.get(record.candidate_set_ref)
+            search = search_by_id.get(record.search_observation_ref)
+            source_call = all_calls.get(record.source_tool_call_id)
+            matching_candidates = (
+                ()
+                if candidate_set is None
+                else tuple(
+                    item
+                    for item in candidate_set.ordered_candidates
+                    if item.observation_candidate_ref
+                    == record.observation_candidate_ref
+                    and item.candidate_source_version
+                    == record.candidate_source_version
+                )
+            )
+            matching_search_candidates = (
+                ()
+                if search is None
+                else tuple(
+                    item
+                    for item in search.normalized_value.ordered_candidates
+                    if item.observation_candidate_ref
+                    == record.observation_candidate_ref
+                    and item.candidate_source_version
+                    == record.candidate_source_version
+                )
+            )
+            matching_private_targets = (
+                ()
+                if search is None
+                else tuple(
+                    item
+                    for item in search.candidate_target_bindings
+                    if item.observation_candidate_ref
+                    == record.observation_candidate_ref
+                    and item.candidate_source_version
+                    == record.candidate_source_version
+                )
+            )
+            if (
+                task is None
+                or unit is None
+                or unit.task_id != record.task_id
+                or record.private_owner_scope_ref != task.owner_customer_id
+                or query is None
+                or query.binding_id not in current_binding_ids
+                or query.name != "product_description"
+                or query.binding_id not in unit.input_binding_refs
+                or candidate_set is None
+                or candidate_set.outcome.value != "UNIQUE"
+                or candidate_set.private_owner_scope_ref
+                != record.private_owner_scope_ref
+                or candidate_set.conversation_id != record.conversation_id
+                or candidate_set.task_id != record.task_id
+                or candidate_set.request_unit_id != record.request_unit_id
+                or candidate_set.query_binding_refs
+                != (record.query_input_binding_ref,)
+                or candidate_set.candidate_set_version
+                != record.candidate_set_version
+                or candidate_set.source_tool_call_id
+                != record.source_tool_call_id
+                or candidate_set.search_observation_ref
+                != record.search_observation_ref
+                or candidate_set.search_observation_record_schema_version
+                != record.search_observation_record_schema_version
+                or candidate_set.search_observation_source_version
+                != record.search_observation_source_version
+                or candidate_set.base_task_state_version
+                != record.base_task_state_version
+                or candidate_set.result_task_state_version
+                != record.result_task_state_version
+                or search is None
+                or search.private_owner_scope
+                != record.private_owner_scope_ref
+                or search.record_schema_version
+                != record.search_observation_record_schema_version
+                or search.source_version
+                != record.search_observation_source_version
+                or search.source_tool_call_id != record.source_tool_call_id
+                or source_call is None
+                or source_call.canonical_tool_name.value != "search_orders"
+                or source_call.task_id != record.task_id
+                or source_call.request_unit_id != record.request_unit_id
+                or source_call.argument_binding_refs
+                != (record.query_input_binding_ref,)
+                or source_call.validated_task_state_version
+                != record.base_task_state_version
+                or len(matching_candidates) != 1
+                or len(matching_search_candidates) != 1
+                or len(matching_private_targets) != 1
+                or matching_search_candidates[0].public_summary.order_number
+                != record.order_id
+                or matching_private_targets[0].owner_scoped_order_ref
+                != record.owner_scoped_order_target_ref
+                or record.verified_at != candidate_set.created_at
+                or record.verified_at != search.recorded_at
+            ):
+                raise ValueError("Cycle 2 Eval AutoTarget graph mismatch")
+        selection_target_by_ref: dict[UUID, OrderCandidateSelectionRecord] = {}
+        for record in self.candidate_selections:
+            target_ref = _cycle2_canonical_target_uuid(record.selected_target_ref)
+            if target_ref is None or target_ref in selection_target_by_ref:
+                raise ValueError("Cycle 2 Eval Selection target identity mismatch")
+            selection_target_by_ref[target_ref] = record
+        if set(auto_target_by_ref).intersection(selection_target_by_ref):
+            raise ValueError("Cycle 2 Eval target authority families overlap")
+        referenced_target_refs = {
+            call.verified_target_ref
+            for call in all_call_records
+            if call.verified_target_ref is not None
+        }
+        if not set(auto_target_by_ref).issubset(referenced_target_refs):
+            raise ValueError("Cycle 2 Eval AutoTarget owner family is unused")
+        for call in all_call_records:
+            gate = gate_by_id[call.gate_decision_id]
+            expected_arguments: dict[str, object]
+            if call.canonical_tool_name.value == "search_orders":
+                query = (
+                    binding_by_id.get(call.argument_binding_refs[0])
+                    if len(call.argument_binding_refs) == 1
+                    else None
+                )
+                if (
+                    call.verified_target_ref is not None
+                    or query is None
+                    or query.name != "product_description"
+                ):
+                    raise ValueError("Cycle 2 search ToolCall authority mismatch")
+                expected_arguments = {
+                    "product_description": query.normalized_value,
+                }
+            elif call.verified_target_ref is None:
+                direct_order = (
+                    binding_by_id.get(call.argument_binding_refs[0])
+                    if len(call.argument_binding_refs) == 1
+                    else None
+                )
+                if (
+                    call.canonical_tool_name.value == "get_shipment"
+                    or direct_order is None
+                    or direct_order.name != "order_id"
+                    or direct_order.binding_id not in current_binding_ids
+                ):
+                    raise ValueError(
+                        "Cycle 2 ToolCall target authority is missing"
+                    )
+                expected_arguments = {"order_id": direct_order.normalized_value}
+            else:
+                auto_target = auto_target_by_ref.get(call.verified_target_ref)
+                selection = selection_target_by_ref.get(call.verified_target_ref)
+                if (auto_target is None) == (selection is None):
+                    raise ValueError(
+                        "Cycle 2 ToolCall target authority is missing"
+                    )
+                authority = auto_target if auto_target is not None else selection
+                if authority is None:
+                    raise ValueError(
+                        "Cycle 2 ToolCall target authority is missing"
+                    )
+                origin_binding_ref = (
+                    authority.query_input_binding_ref
+                    if type(authority) is OrderCandidateAutoTargetRecord
+                    else authority.ordinal_input_binding_ref
+                )
+                selected_order_id = (
+                    authority.order_id
+                    if type(authority) is OrderCandidateAutoTargetRecord
+                    else None
+                )
+                if type(authority) is OrderCandidateSelectionRecord:
+                    candidate_set = candidate_set_by_id.get(
+                        authority.candidate_set_ref
+                    )
+                    search = (
+                        None
+                        if candidate_set is None
+                        else search_by_id.get(candidate_set.search_observation_ref)
+                    )
+                    matches = (
+                        ()
+                        if search is None
+                        else tuple(
+                            candidate
+                            for candidate in search.normalized_value.ordered_candidates
+                            if candidate.observation_candidate_ref
+                            == authority.observation_candidate_ref
+                            and candidate.candidate_source_version
+                            == authority.candidate_source_version
+                        )
+                    )
+                    if len(matches) == 1:
+                        selected_order_id = matches[0].public_summary.order_number
+                if (
+                    call.private_owner_scope_ref
+                    != authority.private_owner_scope_ref
+                    or call.task_id != authority.task_id
+                    or call.request_unit_id != authority.request_unit_id
+                    or call.argument_binding_refs != (origin_binding_ref,)
+                    or selected_order_id is None
+                ):
+                    raise ValueError(
+                        "Cycle 2 Eval ToolCall target authority mismatch"
+                    )
+                expected_arguments = {"order_id": selected_order_id}
+            if (
+                gate.validated_arguments is None
+                or dict(gate.validated_arguments) != expected_arguments
+            ):
+                raise ValueError("Cycle 2 Eval Gate arguments mismatch")
         if self.pair_evidence is not None:
             if type(self.pair_evidence) is not Cycle2PairExecutionEvidenceV1:
                 raise ValueError("Cycle 2 pair evidence must be the actual typed record")
@@ -3590,6 +4005,78 @@ def _cycle2_binding_predicate_matches(
         or binding.source_refs != (understanding.message_ref,)
     ):
         return False
+    source_messages = tuple(
+        message
+        for message in evidence.message_records
+        if message.message_id == understanding.message_ref
+    )
+    if (
+        len(source_messages) != 1
+        or source_messages[0].direction is not MessageDirection.USER
+        or binding.validation_status.value != "ACCEPTED"
+        or binding.authority is not InputAuthority.USER_CLAIM
+        or not binding.confirmed_by_user
+        or source_messages[0].received_at > binding.created_at
+        or binding.created_at > binding.updated_at
+        or accepted_child.accepted_at > binding.updated_at
+    ):
+        return False
+    superseded_binding_ids = {
+        candidate.supersedes
+        for candidate in evidence.input_bindings
+        if candidate.supersedes is not None
+    }
+    current_same_name_bindings = tuple(
+        candidate
+        for candidate in evidence.input_bindings
+        if candidate.name == binding_name
+        and candidate.binding_id not in superseded_binding_ids
+    )
+    if current_same_name_bindings != (binding,):
+        return False
+    if binding_name == "order_id":
+        predecessors = tuple(
+            predecessor
+            for predecessor in evidence.input_bindings
+            if predecessor.binding_id == binding.supersedes
+        )
+        if len(predecessors) != 1:
+            return False
+        predecessor = predecessors[0]
+        predecessor_messages = tuple(
+            message
+            for message in evidence.message_records
+            if message.message_id in predecessor.source_refs
+        )
+        if (
+            predecessor.name != "order_id"
+            or predecessor.normalized_value != binding.normalized_value
+            or predecessor.validation_status.value != "ACCEPTED"
+            or predecessor.authority is not InputAuthority.USER_CLAIM
+            or not predecessor.confirmed_by_user
+            or len(predecessor.source_refs) != 1
+            or len(predecessor_messages) != 1
+            or predecessor_messages[0].direction is not MessageDirection.USER
+            or predecessor.source_refs == binding.source_refs
+            or predecessor.updated_at > binding.created_at
+        ):
+            return False
+    owning_units = tuple(
+        unit
+        for unit in evidence.request_units
+        if binding.binding_id in unit.input_binding_refs
+    )
+    if len(owning_units) != 1:
+        return False
+    owning_unit = owning_units[0]
+    owning_tasks = tuple(
+        task
+        for task in evidence.task_records
+        if task.task_id == owning_unit.task_id
+    )
+    if len(owning_tasks) != 1:
+        return False
+    owning_task = owning_tasks[0]
     if version_symbol == "$SELECTION_EXPECTED_TASK_VERSION":
         selections = tuple(
             selection
@@ -3610,23 +4097,7 @@ def _cycle2_binding_predicate_matches(
         ):
             return False
         referenced_versions = {selections[0].base_task_state_version}
-    else:
-        owning_units = tuple(
-            unit
-            for unit in evidence.request_units
-            if binding.binding_id in unit.input_binding_refs
-        )
-        if len(owning_units) != 1:
-            return False
-        owning_unit = owning_units[0]
-        owning_tasks = tuple(
-            task
-            for task in evidence.task_records
-            if task.task_id == owning_unit.task_id
-        )
-        if len(owning_tasks) != 1:
-            return False
-        owning_task = owning_tasks[0]
+    elif binding_name == "candidate_ordinal":
         gate_events = tuple(
             event
             for event in evidence.trace_events
@@ -3662,6 +4133,48 @@ def _cycle2_binding_predicate_matches(
         ):
             return False
         referenced_versions = gate_versions
+    else:
+        gate_by_id = {
+            gate.gate_decision_id: gate for gate in evidence.gate_decisions
+        }
+        relevant_calls = tuple(
+            call
+            for call in evidence.tool_calls
+            if call.gate_decision_id in gate_by_id
+            and call.task_id == owning_task.task_id
+            and call.request_unit_id == owning_unit.request_unit_id
+            and binding.updated_at
+            <= gate_by_id[call.gate_decision_id].decided_at
+        )
+        if binding_name == "product_description":
+            relevant_calls = tuple(
+                call
+                for call in relevant_calls
+                if binding.binding_id in call.argument_binding_refs
+            )
+        else:
+            relevant_calls = tuple(
+                call
+                for call in relevant_calls
+                if call.canonical_tool_name.value in {"get_order", "get_shipment"}
+            )
+        referenced_versions: set[int | None] = set()
+        for call in relevant_calls:
+            gate = gate_by_id[call.gate_decision_id]
+            version_at_gate = _cycle2_task_version_at(
+                evidence,
+                task=owning_task,
+                request_unit=owning_unit,
+                occurred_at=gate.decided_at,
+            )
+            if (
+                gate.decision is not GateDecisionValue.ACCEPT
+                or gate.validated_task_state_version
+                != call.validated_task_state_version
+                or gate.validated_task_state_version != version_at_gate
+            ):
+                return False
+            referenced_versions.add(gate.validated_task_state_version)
     return bool(referenced_versions) and all(
         type(version) is int and version >= 1
         for version in referenced_versions
@@ -4130,6 +4643,28 @@ def _cycle2_record_storage_is_exact(record: BaseModel) -> bool:
     )
 
 
+def _cycle2_gate_storage_is_exact(record: GateDecisionV2) -> bool:
+    fields = frozenset(GateDecisionV2.model_fields)
+    private = record.__pydantic_private__
+    if (
+        type(record) is not GateDecisionV2
+        or frozenset(vars(record)) != fields
+        or not record.model_fields_set.issubset(fields)
+        or record.__pydantic_extra__ is not None
+        or type(private) is not dict
+        or private
+    ):
+        return False
+    try:
+        rebuilt = GateDecisionV2.model_validate_json(
+            record.model_dump_json(round_trip=True, warnings="error"),
+            strict=True,
+        )
+    except (TypeError, ValidationError, ValueError):
+        return False
+    return rebuilt == record
+
+
 def _nested_string_values(value: object) -> set[str]:
     if type(value) is str:
         return {value}
@@ -4179,6 +4714,19 @@ def _cycle2_raw_disclosure_tokens(evidence: Cycle2EvalEvidence) -> frozenset[str
                 record.candidate_source_version,
             }
         )
+    for record in evidence.auto_targets:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                str(record.verified_target_ref),
+                record.candidate_set_version,
+                record.search_observation_source_version,
+                record.candidate_source_version,
+                record.owner_scoped_order_target_ref,
+            }
+        )
+        if record.supersedes_verified_target_ref is not None:
+            tokens.add(str(record.supersedes_verified_target_ref))
     for record in evidence.search_observations:
         tokens.update(
             {
@@ -4242,6 +4790,19 @@ def _cycle2_outbound_private_tokens(
                 record.candidate_source_version,
             }
         )
+    for record in evidence.auto_targets:
+        tokens.update(
+            {
+                record.private_owner_scope_ref,
+                str(record.verified_target_ref),
+                record.candidate_set_version,
+                record.search_observation_source_version,
+                record.candidate_source_version,
+                record.owner_scoped_order_target_ref,
+            }
+        )
+        if record.supersedes_verified_target_ref is not None:
+            tokens.add(str(record.supersedes_verified_target_ref))
     for record in evidence.search_observations:
         tokens.update(
             {
@@ -4337,9 +4898,14 @@ def _cycle2_schema_reason(
                 evidence.shipment_observations,
                 evidence.observation_source_edges,
                 evidence.shipment_assessments,
+                evidence.auto_targets,
                 evidence.recovery_decisions,
             )
             for record in family
+        )
+        or any(
+            not _cycle2_gate_storage_is_exact(record)
+            for record in evidence.gate_decisions
         )
     ):
         return EvalGraderReasonCode.MISSING_RECORD
@@ -4379,6 +4945,8 @@ def _cycle2_binding_reason(
         for reference in record.query_binding_refs
     } | {
         record.ordinal_input_binding_ref for record in evidence.candidate_selections
+    } | {
+        record.query_input_binding_ref for record in evidence.auto_targets
     }
     if not referenced <= binding_ids:
         return EvalGraderReasonCode.MISSING_RECORD
@@ -4414,6 +4982,43 @@ def _cycle2_tool_reason(
     reason = _cycle2_binding_reason(evidence, expectations)
     if reason is not None:
         return reason
+    try:
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(evidence, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError):
+        return EvalGraderReasonCode.ASSERTION_FAILED
+    all_calls = (*evidence.tool_calls, *evidence.supporting_tool_calls)
+    gate_by_id = {
+        gate.gate_decision_id: gate for gate in evidence.gate_decisions
+    }
+    if set(gate_by_id) != {call.gate_decision_id for call in all_calls}:
+        return EvalGraderReasonCode.MISSING_RECORD
+    for call in evidence.tool_calls:
+        gate = gate_by_id[call.gate_decision_id]
+        trace_matches = tuple(
+            event
+            for event in evidence.trace_events
+            if event.event_type is TraceEventType.GATE_DECISION_RECORDED
+            and event.run_id == call.run_id
+            and event.task_id == call.task_id
+            and event.request_unit_id == call.request_unit_id
+            and event.model_call_id == gate.model_call_id
+            and event.context_manifest_id == gate.context_manifest_id
+            and event.requested_tool_name
+            == gate.requested_provider_tool_name
+            and event.validated_task_state_version
+            == gate.validated_task_state_version
+            and event.argument_binding_refs == gate.argument_binding_refs
+            and event.gate_decision is gate.decision
+            and event.gate_reason_code is gate.reason_code
+            and event.occurred_at == gate.decided_at
+        )
+        if len(trace_matches) != 1:
+            return EvalGraderReasonCode.MISSING_RECORD
     if any(
         call.attempt_count != len(call.attempts)
         for call in (*evidence.tool_calls, *evidence.supporting_tool_calls)

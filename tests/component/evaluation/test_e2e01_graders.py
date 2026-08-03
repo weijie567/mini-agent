@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from mini_agent.application.records import (
     AgentRunResult,
@@ -41,6 +42,7 @@ from mini_agent.core.memory import (
     ContextManifest,
     ObservationVisibility,
     OrderObservation,
+    SearchOrdersObservation,
     TaskStateRefAndVersion,
     TokenCounts,
     VersionedRecordRef,
@@ -72,6 +74,8 @@ from mini_agent.core.task_state import (
     InputBinding,
     InputBindingV2,
     InputValidationStatus,
+    OrderCandidateAutoTargetRecord,
+    OrderCandidateSetRecord,
     RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
@@ -80,6 +84,7 @@ from mini_agent.core.task_state import (
 )
 from mini_agent.core.tool_system import (
     GateDecision,
+    GateDecisionV2,
     GateDecisionValue,
     GateReasonCode,
     ModelVisibleToolsetArtifact,
@@ -147,6 +152,8 @@ from mini_agent.evaluation.harness import (
 )
 from mini_agent.infrastructure.cycle2_fixture_seed import (
     Cycle2PairExecutionEvidenceV1,
+    fold_cycle2_runtime_records,
+    resolve_cycle2_execution_setup_plan,
 )
 
 
@@ -3894,6 +3901,467 @@ def _cycle2_pair_evidence() -> Cycle2PairExecutionEvidenceV1:
     )
 
 
+def _unique_auto_target_cycle2_evidence(
+    *,
+    target_tool_name: Cycle2ToolName = Cycle2ToolName.GET_ORDER,
+) -> Cycle2EvalEvidence:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-verified-order-target-o1001-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-current-owner-a-v1",),
+        fault_ref=None,
+    )
+    graph = fold_cycle2_runtime_records(plan.runtime_state)
+
+    def one(expected_type: type[object]) -> object:
+        matches = tuple(
+            record.source_record
+            for record in graph
+            if type(record.source_record) is expected_type
+        )
+        assert len(matches) == 1
+        return matches[0]
+
+    conversation = one(ConversationRecord)
+    run = one(AgentRunRecordV2)
+    task = one(TaskRecord)
+    unit = one(RequestUnitRecord)
+    run_task_link = one(RunTaskLinkRecordV2)
+    candidate_set = one(OrderCandidateSetRecord)
+    search_observation = one(SearchOrdersObservation)
+    search_gate = one(GateDecisionV2)
+    search_call = one(ToolCallRecordV2)
+    search_manifest = one(ContextManifest)
+    auto_target = one(OrderCandidateAutoTargetRecord)
+    toolset = one(ModelVisibleToolsetArtifact)
+    assert type(conversation) is ConversationRecord
+    assert type(run) is AgentRunRecordV2
+    assert type(task) is TaskRecord
+    assert type(unit) is RequestUnitRecord
+    assert type(run_task_link) is RunTaskLinkRecordV2
+    assert type(candidate_set) is OrderCandidateSetRecord
+    assert type(search_observation) is SearchOrdersObservation
+    assert type(search_gate) is GateDecisionV2
+    assert type(search_call) is ToolCallRecordV2
+    assert type(search_manifest) is ContextManifest
+    assert type(auto_target) is OrderCandidateAutoTargetRecord
+    assert type(toolset) is ModelVisibleToolsetArtifact
+    assert run.completed_at is not None
+    search_gate = GateDecisionV2.model_validate_json(
+        search_gate.model_dump_json(round_trip=True, warnings="error"),
+        strict=True,
+    )
+
+    target_call_id = UUID("93000000-0000-4000-8000-000000000001")
+    target_model_call_id = UUID("93000000-0000-4000-8000-000000000002")
+    target_manifest_id = UUID("93000000-0000-4000-8000-000000000003")
+    target_gate_id = UUID("93000000-0000-4000-8000-000000000004")
+    target_result_ref = UUID("93000000-0000-4000-8000-000000000005")
+    query_binding_ref = auto_target.query_input_binding_ref
+    target_attempt = ToolAttemptRecordV2(
+        tool_call_id=target_call_id,
+        attempt_no=1,
+        started_at=run.completed_at,
+        finished_at=run.completed_at,
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    target_gate = GateDecisionV2(
+        gate_decision_id=target_gate_id,
+        model_call_id=target_model_call_id,
+        context_manifest_id=target_manifest_id,
+        provider_tool_call_id=f"eval-auto-target-{target_tool_name.value}",
+        requested_provider_tool_name=target_tool_name.value,
+        resolved_canonical_tool_name=target_tool_name,
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(query_binding_ref,),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=task.state_version,
+        validated_task_state_version=task.state_version,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        reason_code=None,
+        decided_at=run.completed_at,
+        verified_target_ref=auto_target.verified_target_ref,
+        validated_arguments={"order_id": auto_target.order_id},
+    )
+    target_gate = GateDecisionV2.model_validate_json(
+        target_gate.model_dump_json(round_trip=True, warnings="error"),
+        strict=True,
+    )
+    target_call = ToolCallRecordV2(
+        tool_call_id=target_call_id,
+        run_id=run.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=target_model_call_id,
+        context_manifest_id=target_manifest_id,
+        gate_decision_id=target_gate_id,
+        provider_tool_call_id=target_gate.provider_tool_call_id,
+        canonical_tool_name=target_tool_name,
+        tool_registry_version=search_call.tool_registry_version,
+        private_owner_scope_ref=task.owner_customer_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(query_binding_ref,),
+        verified_target_ref=auto_target.verified_target_ref,
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        attempts=(target_attempt,),
+        status=ToolCallStatus.SUCCEEDED,
+        started_at=run.completed_at,
+        finished_at=run.completed_at,
+        result_ref=target_result_ref,
+    )
+    target_manifest = ContextManifest(
+        context_manifest_id=target_manifest_id,
+        run_id=run.run_id,
+        model_call_id=target_model_call_id,
+        tool_registry_version=target_call.tool_registry_version,
+        model_visible_toolset_hash=toolset.model_visible_toolset_hash,
+        selected_message_refs=(
+            next(
+                binding.source_refs[0]
+                for binding in (
+                    record.source_record
+                    for record in graph
+                    if type(record.source_record) is InputBindingV2
+                )
+                if binding.binding_id == query_binding_ref
+            ),
+        ),
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=task.state_version,
+        ),
+        redaction_policy_version="redaction.p0.v1",
+        token_counts=TokenCounts(),
+        assembled_at=run.completed_at,
+    )
+    gate_traces = tuple(
+        TraceEventV2(
+            trace_event_id=trace_event_id,
+            event_type=TraceEventType.GATE_DECISION_RECORDED,
+            occurred_at=gate.decided_at,
+            run_id=run.run_id,
+            task_id=task.task_id,
+            request_unit_id=unit.request_unit_id,
+            model_call_id=gate.model_call_id,
+            context_manifest_id=gate.context_manifest_id,
+            requested_tool_name=gate.requested_provider_tool_name,
+            validated_task_state_version=gate.validated_task_state_version,
+            argument_binding_refs=gate.argument_binding_refs,
+            gate_decision=gate.decision,
+            gate_reason_code=gate.reason_code,
+        )
+        for trace_event_id, gate in (
+            (UUID("93000000-0000-4000-8000-000000000006"), search_gate),
+            (UUID("93000000-0000-4000-8000-000000000007"), target_gate),
+        )
+    )
+    source_messages = tuple(
+        record.source_record
+        for record in graph
+        if type(record.source_record) is MessageRecord
+    )
+    messages = (
+        *source_messages,
+        MessageRecord(
+            schema_version="message_record.p0.v1",
+            message_id=UUID("93000000-0000-4000-8000-000000000010"),
+            conversation_id=conversation.conversation_id,
+            direction=MessageDirection.ASSISTANT,
+            content="确定性安全结果。",
+            received_at=run.completed_at,
+        ),
+    )
+    bindings = tuple(
+        record.source_record
+        for record in graph
+        if type(record.source_record) is InputBindingV2
+    )
+    return Cycle2EvalEvidence(
+        case_id="synthetic-cycle2-component",
+        http_status=200,
+        observed_outcome=AgentOutcome.COMPLETED,
+        response_policy="SHIPMENT_ASSESSMENT_DETERMINISTIC",
+        run_record=run,
+        mapper_evidence=Cycle2MapperEvidence(
+            mapping_source_kind=Cycle2MappingSourceKind.CYCLE2_DELTA,
+            signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+            row_id="RM-18",
+            disposition=MapperDisposition.EMIT,
+            stop_reason=StopReasonV2.GOAL_COMPLETED,
+            outcome=AgentOutcome.COMPLETED,
+            response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+        ),
+        conversation_records=(conversation,),
+        agent_results=(
+            AgentRunResult(
+                run_id=run.run_id,
+                outcome=AgentOutcome.COMPLETED,
+                message="确定性安全结果。",
+            ),
+        ),
+        message_records=messages,
+        input_bindings=bindings,
+        task_records=(task,),
+        request_units=(unit,),
+        run_task_links=(run_task_link,),
+        candidate_sets=(candidate_set,),
+        search_observations=(search_observation,),
+        observation_source_edges=(
+            Cycle2ObservationSourceEdge(
+                observation_ref=search_observation.observation_id,
+                source_tool_call_id=search_call.tool_call_id,
+                source_run_id=run.run_id,
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+            ),
+        ),
+        gate_decisions=(search_gate, target_gate),
+        auto_targets=(auto_target,),
+        tool_calls=(search_call, target_call),
+        context_manifests=(search_manifest, target_manifest),
+        model_visible_toolset_artifacts=(toolset,),
+        trace_events=(
+            TraceEventV2(
+                trace_event_id=UUID(
+                    "93000000-0000-4000-8000-000000000008"
+                ),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=run.started_at,
+                run_id=run.run_id,
+            ),
+            *gate_traces,
+            TraceEventV2(
+                trace_event_id=UUID(
+                    "93000000-0000-4000-8000-000000000009"
+                ),
+                event_type=TraceEventType.RUN_STOPPED,
+                occurred_at=run.completed_at,
+                run_id=run.run_id,
+                user_outcome=AgentOutcome.COMPLETED,
+                stop_reason=run.stop_reason,
+            ),
+        ),
+    )
+
+
+def _unique_auto_target_cycle2_closure() -> Cycle2ExactRunEvidenceClosure:
+    evidence = _unique_auto_target_cycle2_evidence()
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=_cycle2_owner_scope(),
+        conversation_record=evidence.conversation_records[0],
+        run_record=evidence.run_record,
+        message_records=evidence.message_records,
+        run_task_link_records=evidence.run_task_links,
+        task_records=evidence.task_records,
+        request_unit_records=evidence.request_units,
+        input_binding_records=evidence.input_bindings,
+        candidate_set_records=evidence.candidate_sets,
+        search_observation_records=evidence.search_observations,
+        observation_source_edges=evidence.observation_source_edges,
+        gate_decision_records=evidence.gate_decisions,
+        auto_target_records=evidence.auto_targets,
+        tool_call_records=evidence.tool_calls,
+        context_manifest_records=evidence.context_manifests,
+        model_visible_toolset_artifacts=(
+            evidence.model_visible_toolset_artifacts
+        ),
+        trace_records=evidence.trace_events,
+        terminal_result=evidence.agent_results[0],
+    )
+
+
+@pytest.mark.parametrize(
+    "target_tool_name",
+    (Cycle2ToolName.GET_ORDER, Cycle2ToolName.GET_SHIPMENT),
+)
+def test_cycle2_unique_auto_target_graph_is_exact_and_canonical(
+    target_tool_name: Cycle2ToolName,
+) -> None:
+    evidence = _unique_auto_target_cycle2_evidence(
+        target_tool_name=target_tool_name
+    )
+    expectations = _minimal_cycle2_expectations()
+
+    result = cycle2_grader_registry()["SchemaGrader"].grade(
+        evidence,
+        expectations,
+    )
+    assert result.status is EvalGraderStatus.PASS
+
+    assert Cycle2EvalEvidence.model_validate_json(
+        evidence.model_dump_json(round_trip=True, warnings="error"),
+        strict=True,
+    ) == evidence
+
+    if target_tool_name is Cycle2ToolName.GET_ORDER:
+        closure = _unique_auto_target_cycle2_closure()
+        actual_mapping = RunResultMapper().observe_cycle2(
+            run_id=closure.run_record.run_id,
+            signal=Cycle2MapperSignal.SHIPMENT_ASSESSMENT_READY,
+            observed_outcome=AgentOutcome.COMPLETED,
+            stop_reason=StopReasonV2.GOAL_COMPLETED,
+            response_policy=ResponsePolicy.SHIPMENT_ASSESSMENT_DETERMINISTIC,
+            agent_result_emitted=True,
+        )
+        unbound = map_cycle2_exact_run_evidence_to_unbound(
+            closure=closure,
+            outcome_observation=actual_mapping,
+            pair_evidence=None,
+            http_status=200,
+        )
+        assert unbound.gate_decisions == closure.gate_decision_records
+        assert unbound.auto_targets == closure.auto_target_records
+
+
+@pytest.mark.parametrize(
+    "leak_kind",
+    ("owner_scoped_target", "verified_target_ref"),
+)
+def test_cycle2_auto_target_private_authority_cannot_reach_outbound_text(
+    leak_kind: str,
+) -> None:
+    evidence = _unique_auto_target_cycle2_evidence()
+    expectations = _minimal_cycle2_expectations()
+    grader = cycle2_grader_registry()["DisclosureGrader"]
+
+    assert grader.grade(evidence, expectations).status is EvalGraderStatus.PASS
+    target = evidence.auto_targets[0]
+    leaked_value = (
+        target.owner_scoped_order_target_ref
+        if leak_kind == "owner_scoped_target"
+        else str(target.verified_target_ref)
+    )
+    leaked = evidence.model_copy(
+        update={
+            "agent_results": (
+                evidence.agent_results[0].model_copy(
+                    update={"message": leaked_value}
+                ),
+            )
+        }
+    )
+
+    assert grader.grade(leaked, expectations).status is EvalGraderStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing",
+        "unused",
+        "wrong_owner",
+        "wrong_target_ref",
+    ),
+)
+def test_cycle2_auto_target_tampering_fails_closed(mutation: str) -> None:
+    evidence = _unique_auto_target_cycle2_evidence()
+    target = evidence.auto_targets[0]
+    updates: dict[str, object]
+    if mutation == "missing":
+        updates = {"auto_targets": ()}
+    elif mutation == "unused":
+        target_call = evidence.tool_calls[1].model_copy(
+            update={"verified_target_ref": None}
+        )
+        target_gate = evidence.gate_decisions[1].model_copy(
+            update={"verified_target_ref": None}
+        )
+        updates = {
+            "tool_calls": (evidence.tool_calls[0], target_call),
+            "gate_decisions": (evidence.gate_decisions[0], target_gate),
+        }
+    elif mutation == "wrong_owner":
+        updates = {
+            "auto_targets": (
+                target.model_copy(
+                    update={"private_owner_scope_ref": "customer-B"}
+                ),
+            )
+        }
+    else:
+        updates = {
+            "auto_targets": (
+                target.model_copy(
+                    update={
+                        "verified_target_ref": UUID(
+                            "93000000-0000-4000-8000-000000000099"
+                        )
+                    }
+                ),
+            )
+        }
+    tampered = evidence.model_copy(update=updates)
+    with pytest.raises(ValidationError):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing",
+        "duplicate",
+        "unused",
+        "wrong_common_field",
+        "wrong_trace_projection",
+    ),
+)
+def test_cycle2_exact_gate_family_tampering_fails_closed(mutation: str) -> None:
+    evidence = _binding_complete_cycle2_evidence()
+    gate = evidence.gate_decisions[0]
+    updates: dict[str, object]
+    if mutation == "missing":
+        updates = {"gate_decisions": ()}
+    elif mutation == "duplicate":
+        updates = {"gate_decisions": (gate, gate)}
+    elif mutation == "unused":
+        updates = {
+            "gate_decisions": (
+                gate,
+                gate.model_copy(update={"gate_decision_id": UUID(int=9867)}),
+            )
+        }
+    elif mutation == "wrong_common_field":
+        updates = {
+            "gate_decisions": (
+                gate.model_copy(update={"model_call_id": UUID(int=9868)}),
+            )
+        }
+    else:
+        updates = {
+            "trace_events": (
+                evidence.trace_events[0],
+                evidence.trace_events[1].model_copy(
+                    update={"model_call_id": UUID(int=9869)}
+                ),
+                evidence.trace_events[2],
+            )
+        }
+    tampered = evidence.model_copy(update=updates)
+
+    result = cycle2_grader_registry()["ToolCallGrader"].grade(
+        tampered,
+        _binding_cycle2_expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+
+
 def test_cycle2_exact_closure_adapter_maps_actual_result_mapper_and_pair() -> None:
     closure = _completed_cycle2_exact_closure()
     actual_mapping = RunResultMapper().observe_cycle2(
@@ -4072,7 +4540,30 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
     evidence = _binding_complete_cycle2_evidence()
     task = evidence.task_records[0]
     unit = evidence.request_units[0]
-    binding = evidence.input_bindings[0]
+    direct_message = MessageRecord(
+        schema_version="application-records-v1",
+        message_id=UUID(int=9838),
+        conversation_id=evidence.message_records[0].conversation_id,
+        direction=MessageDirection.USER,
+        content="查询订单 O-1001",
+        received_at=NOW,
+    )
+    binding = InputBindingV2(
+        binding_id=UUID(int=9839),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(direct_message.message_id,),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    unit = unit.model_copy(
+        update={
+            "input_binding_refs": (*unit.input_binding_refs, binding.binding_id),
+        }
+    )
     tool_call_id = UUID(int=9830)
     attempt = ToolAttemptRecordV2(
         tool_call_id=tool_call_id,
@@ -4105,7 +4596,7 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
         private_owner_scope_ref="customer-A",
         validated_task_state_version=task.state_version,
         argument_binding_refs=(binding.binding_id,),
-        verified_target_ref=UUID(int=9834),
+        verified_target_ref=None,
         effect=ToolEffect.READ,
         attempt_count=1,
         attempts=(attempt,),
@@ -4133,6 +4624,45 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
         recorded_at=NOW + timedelta(milliseconds=100),
         visibility=ObservationVisibility.AUDIT_ONLY,
     )
+    gate = GateDecisionV2(
+        gate_decision_id=supporting_call.gate_decision_id,
+        model_call_id=supporting_call.model_call_id,
+        context_manifest_id=supporting_call.context_manifest_id,
+        provider_tool_call_id=supporting_call.provider_tool_call_id,
+        requested_provider_tool_name=Cycle2ToolName.GET_ORDER.value,
+        resolved_canonical_tool_name=Cycle2ToolName.GET_ORDER,
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=supporting_call.argument_binding_refs,
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=task.state_version,
+        validated_task_state_version=task.state_version,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        decided_at=NOW,
+        verified_target_ref=None,
+        validated_arguments={"order_id": "O-1001"},
+    )
+    manifest = ContextManifest(
+        context_manifest_id=supporting_call.context_manifest_id,
+        run_id=OTHER_RUN_ID,
+        model_call_id=supporting_call.model_call_id,
+        tool_registry_version=supporting_call.tool_registry_version,
+        model_visible_toolset_hash=TOOLSET_HASH,
+        selected_message_refs=(direct_message.message_id,),
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=task.state_version,
+        ),
+        redaction_policy_version="redaction.p0.v1",
+        token_counts=TokenCounts(),
+        assembled_at=NOW,
+    )
     values = {
         field_name: getattr(evidence, field_name)
         for field_name in Cycle2EvalEvidence.model_fields
@@ -4140,6 +4670,9 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
     return Cycle2EvalEvidence(
         **{
             **values,
+            "message_records": (*evidence.message_records, direct_message),
+            "input_bindings": (*evidence.input_bindings, binding),
+            "request_units": (unit,),
             "supporting_run_records": (supporting_run,),
             "supporting_run_task_links": (
                 RunTaskLinkRecordV2(
@@ -4160,6 +4693,8 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
                 ),
             ),
             "supporting_tool_calls": (supporting_call,),
+            "gate_decisions": (*evidence.gate_decisions, gate),
+            "context_manifests": (*evidence.context_manifests, manifest),
         }
     )
 
@@ -4418,6 +4953,80 @@ def _binding_complete_cycle2_evidence(
         base_task_state_version=None,
         result_task_state_version=1,
     )
+    tool_call_id = UUID(int=9862)
+    model_call_id = UUID(int=9863)
+    manifest_id = UUID(int=9864)
+    gate_decision = GateDecisionV2(
+        gate_decision_id=UUID(int=9865),
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        provider_tool_call_id="binding-search-orders",
+        requested_provider_tool_name=Cycle2ToolName.SEARCH_ORDERS.value,
+        resolved_canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(binding_id,),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=1,
+        validated_task_state_version=1,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        reason_code=None,
+        decided_at=NOW + timedelta(milliseconds=500),
+        verified_target_ref=None,
+        validated_arguments={"product_description": "跑鞋"},
+    )
+    attempt = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        started_at=NOW + timedelta(milliseconds=500),
+        finished_at=NOW + timedelta(milliseconds=600),
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    tool_call = ToolCallRecordV2(
+        tool_call_id=tool_call_id,
+        run_id=evidence.run_record.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        gate_decision_id=gate_decision.gate_decision_id,
+        provider_tool_call_id=gate_decision.provider_tool_call_id,
+        canonical_tool_name=Cycle2ToolName.SEARCH_ORDERS,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref="customer-A",
+        validated_task_state_version=1,
+        argument_binding_refs=(binding_id,),
+        verified_target_ref=None,
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        attempts=(attempt,),
+        status=ToolCallStatus.SUCCEEDED,
+        started_at=NOW + timedelta(milliseconds=500),
+        finished_at=NOW + timedelta(milliseconds=600),
+        result_ref=UUID(int=9866),
+    )
+    manifest = ContextManifest(
+        context_manifest_id=manifest_id,
+        run_id=evidence.run_record.run_id,
+        model_call_id=model_call_id,
+        tool_registry_version=tool_call.tool_registry_version,
+        model_visible_toolset_hash=TOOLSET_HASH,
+        selected_message_refs=(message_id,),
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=1,
+        ),
+        redaction_policy_version="redaction.p0.v1",
+        token_counts=TokenCounts(),
+        assembled_at=NOW + timedelta(milliseconds=500),
+    )
     gate_event = TraceEventV2(
         trace_event_id=UUID(int=9857),
         event_type=TraceEventType.GATE_DECISION_RECORDED,
@@ -4425,6 +5034,9 @@ def _binding_complete_cycle2_evidence(
         run_id=evidence.run_record.run_id,
         task_id=task.task_id,
         request_unit_id=unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        requested_tool_name=Cycle2ToolName.SEARCH_ORDERS.value,
         validated_task_state_version=1,
         argument_binding_refs=(binding_id,),
         gate_decision=GateDecisionValue.ACCEPT,
@@ -4437,6 +5049,17 @@ def _binding_complete_cycle2_evidence(
             "accepted_task_deltas": (accepted,),
             "task_records": (task,),
             "request_units": (unit,),
+            "run_task_links": (
+                RunTaskLinkRecordV2(
+                    run_id=evidence.run_record.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=None,
+                    result_task_state_version=1,
+                ),
+            ),
+            "gate_decisions": (gate_decision,),
+            "tool_calls": (tool_call,),
+            "context_manifests": (manifest,),
             "trace_events": (
                 evidence.trace_events[0],
                 gate_event,
@@ -4476,8 +5099,30 @@ def test_cycle2_required_binding_matches_one_current_typed_record() -> None:
     assert outcome.status is EvalResultStatus.PASS
 
 
-def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
+def _dnr_binding_complete_cycle2_evidence(
+    *,
+    tool_name: Cycle2ToolName = Cycle2ToolName.GET_ORDER,
+) -> Cycle2EvalEvidence:
     evidence = _minimal_cycle2_evidence()
+    historical_message = MessageRecord(
+        schema_version="application-records-v1",
+        message_id=UUID(int=9891),
+        conversation_id=UUID(int=9871),
+        direction=MessageDirection.USER,
+        content="查询订单 O-1001",
+        received_at=NOW - timedelta(seconds=1),
+    )
+    historical_order_binding = InputBindingV2(
+        binding_id=UUID(int=9892),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(historical_message.message_id,),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=historical_message.received_at,
+        updated_at=historical_message.received_at,
+    )
     message = MessageRecord(
         schema_version="application-records-v1",
         message_id=UUID(int=9870),
@@ -4498,6 +5143,7 @@ def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
         confirmed_by_user=True,
         created_at=NOW,
         updated_at=NOW,
+        supersedes=historical_order_binding.binding_id,
     )
     claim_binding = InputBindingV2(
         binding_id=UUID(int=9873),
@@ -4599,6 +5245,80 @@ def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
         accepted_delta_refs=(accepted.accepted_delta_id,),
         created_at=NOW,
     )
+    model_call_id = UUID(int=9893)
+    manifest_id = UUID(int=9894)
+    tool_call_id = UUID(int=9895)
+    gate_decision = GateDecisionV2(
+        gate_decision_id=UUID(int=9896),
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        provider_tool_call_id=f"dnr-{tool_name.value}",
+        requested_provider_tool_name=tool_name.value,
+        resolved_canonical_tool_name=tool_name,
+        snapshot_match=True,
+        registration_valid=True,
+        schema_valid=True,
+        trusted_field_valid=True,
+        argument_binding_valid=True,
+        argument_binding_refs=(order_binding.binding_id,),
+        budget_valid=True,
+        progress_valid=True,
+        proposed_base_task_state_version=2,
+        validated_task_state_version=2,
+        state_version_valid=True,
+        action_boundary_valid=True,
+        decision=GateDecisionValue.ACCEPT,
+        reason_code=None,
+        decided_at=NOW + timedelta(milliseconds=500),
+        verified_target_ref=None,
+        validated_arguments={"order_id": "O-1001"},
+    )
+    attempt = ToolAttemptRecordV2(
+        tool_call_id=tool_call_id,
+        attempt_no=1,
+        started_at=NOW + timedelta(milliseconds=500),
+        finished_at=NOW + timedelta(milliseconds=600),
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    tool_call = ToolCallRecordV2(
+        tool_call_id=tool_call_id,
+        run_id=evidence.run_record.run_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        gate_decision_id=gate_decision.gate_decision_id,
+        provider_tool_call_id=gate_decision.provider_tool_call_id,
+        canonical_tool_name=tool_name,
+        tool_registry_version="e2e01-cycle2-tools.p0.v1",
+        private_owner_scope_ref="customer-A",
+        validated_task_state_version=2,
+        argument_binding_refs=(order_binding.binding_id,),
+        verified_target_ref=None,
+        effect=ToolEffect.READ,
+        attempt_count=1,
+        attempts=(attempt,),
+        status=ToolCallStatus.SUCCEEDED,
+        started_at=NOW + timedelta(milliseconds=500),
+        finished_at=NOW + timedelta(milliseconds=600),
+        result_ref=UUID(int=9897),
+    )
+    manifest = ContextManifest(
+        context_manifest_id=manifest_id,
+        run_id=evidence.run_record.run_id,
+        model_call_id=model_call_id,
+        tool_registry_version=tool_call.tool_registry_version,
+        model_visible_toolset_hash=TOOLSET_HASH,
+        selected_message_refs=(message.message_id,),
+        task_state_ref_and_version=TaskStateRefAndVersion(
+            task_id=task.task_id,
+            state_version=2,
+        ),
+        redaction_policy_version="redaction.p0.v1",
+        token_counts=TokenCounts(),
+        assembled_at=NOW + timedelta(milliseconds=500),
+    )
     gate = TraceEventV2(
         trace_event_id=UUID(int=9879),
         event_type=TraceEventType.GATE_DECISION_RECORDED,
@@ -4606,8 +5326,11 @@ def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
         run_id=evidence.run_record.run_id,
         task_id=task.task_id,
         request_unit_id=unit.request_unit_id,
+        model_call_id=model_call_id,
+        context_manifest_id=manifest_id,
+        requested_tool_name=tool_name.value,
         validated_task_state_version=2,
-        argument_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        argument_binding_refs=(order_binding.binding_id,),
         gate_decision=GateDecisionValue.ACCEPT,
     )
     values = {
@@ -4617,12 +5340,27 @@ def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
     return Cycle2EvalEvidence(
         **{
             **values,
-            "message_records": (message,),
-            "input_bindings": (order_binding, claim_binding),
+            "message_records": (historical_message, message),
+            "input_bindings": (
+                historical_order_binding,
+                order_binding,
+                claim_binding,
+            ),
             "request_understanding_records": (understanding,),
             "accepted_task_deltas": (accepted,),
             "task_records": (task,),
             "request_units": (unit,),
+            "run_task_links": (
+                RunTaskLinkRecordV2(
+                    run_id=evidence.run_record.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=1,
+                    result_task_state_version=2,
+                ),
+            ),
+            "gate_decisions": (gate_decision,),
+            "tool_calls": (tool_call,),
+            "context_manifests": (manifest,),
             "trace_events": (
                 evidence.trace_events[0],
                 gate,
@@ -4632,8 +5370,8 @@ def _dnr_binding_complete_cycle2_evidence() -> Cycle2EvalEvidence:
     )
 
 
-def test_cycle2_dnr_dual_claims_close_one_supply_input_child() -> None:
-    expectations = _minimal_cycle2_expectations().model_copy(
+def _dnr_binding_cycle2_expectations() -> Cycle2EvalExpectations:
+    return _minimal_cycle2_expectations().model_copy(
         update={
             "required_predicates": (
                 Cycle2Predicate(
@@ -4659,10 +5397,13 @@ def test_cycle2_dnr_dual_claims_close_one_supply_input_child() -> None:
             )
         }
     )
+
+
+def test_cycle2_dnr_dual_claims_close_one_supply_input_child() -> None:
     outcome = grade_cycle2_evidence(
         CYCLE2_GRADER_NAMES,
         _dnr_binding_complete_cycle2_evidence(),
-        expectations,
+        _dnr_binding_cycle2_expectations(),
     )
     results = {
         result.grader_name: result for result in outcome.grader_results
@@ -4671,6 +5412,69 @@ def test_cycle2_dnr_dual_claims_close_one_supply_input_child() -> None:
     assert results["SchemaGrader"].status is EvalGraderStatus.PASS
     assert results["RequestUnderstandingGrader"].status is EvalGraderStatus.PASS
     assert results["InputBindingGrader"].status is EvalGraderStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_supersession",
+        "wrong_predecessor_value",
+        "predecessor_not_user",
+        "fresh_child_superseded",
+    ),
+)
+def test_cycle2_order_claim_freshness_tampering_fails_closed(
+    mutation: str,
+) -> None:
+    evidence = _dnr_binding_complete_cycle2_evidence()
+    historical, current, claim = evidence.input_bindings
+    updates: dict[str, object]
+    if mutation == "missing_supersession":
+        updates = {
+            "input_bindings": (
+                historical,
+                current.model_copy(update={"supersedes": None}),
+                claim,
+            )
+        }
+    elif mutation == "wrong_predecessor_value":
+        updates = {
+            "input_bindings": (
+                historical.model_copy(update={"normalized_value": "O-1002"}),
+                current,
+                claim,
+            )
+        }
+    elif mutation == "predecessor_not_user":
+        updates = {
+            "message_records": (
+                evidence.message_records[0].model_copy(
+                    update={"direction": MessageDirection.ASSISTANT}
+                ),
+                evidence.message_records[1],
+            )
+        }
+    else:
+        successor = current.model_copy(
+            update={
+                "binding_id": UUID(int=9898),
+                "supersedes": current.binding_id,
+                "created_at": current.updated_at + timedelta(microseconds=1),
+                "updated_at": current.updated_at + timedelta(microseconds=1),
+            }
+        )
+        updates = {
+            "input_bindings": (historical, current, claim, successor),
+        }
+    tampered = evidence.model_copy(update=updates)
+
+    result = cycle2_grader_registry()["SchemaGrader"].grade(
+        tampered,
+        _dnr_binding_cycle2_expectations(),
+    )
+
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
 
 
 @pytest.mark.parametrize(
@@ -4758,6 +5562,220 @@ def test_cycle2_request_understanding_v3_tamper_fails_closed(
     )
 
     assert result.status is EvalGraderStatus.FAIL
+
+
+def test_cycle2_get_shipment_rejects_missing_target_authority() -> None:
+    evidence = _dnr_binding_complete_cycle2_evidence()
+    gate = evidence.gate_decisions[0].model_copy(
+        update={
+            "requested_provider_tool_name": Cycle2ToolName.GET_SHIPMENT.value,
+            "resolved_canonical_tool_name": Cycle2ToolName.GET_SHIPMENT,
+        }
+    )
+    call = evidence.tool_calls[0].model_copy(
+        update={"canonical_tool_name": Cycle2ToolName.GET_SHIPMENT}
+    )
+    trace = evidence.trace_events[1].model_copy(
+        update={"requested_tool_name": Cycle2ToolName.GET_SHIPMENT.value}
+    )
+    tampered = evidence.model_copy(
+        update={
+            "gate_decisions": (gate,),
+            "tool_calls": (call,),
+            "trace_events": (
+                evidence.trace_events[0],
+                trace,
+                evidence.trace_events[2],
+            ),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="target authority is missing"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+
+@pytest.mark.parametrize("authority_kind", ("direct_claim", "auto_target"))
+def test_cycle2_gate_arguments_must_match_exact_order_authority(
+    authority_kind: str,
+) -> None:
+    evidence = (
+        _dnr_binding_complete_cycle2_evidence()
+        if authority_kind == "direct_claim"
+        else _unique_auto_target_cycle2_evidence()
+    )
+    gate_index = 0 if authority_kind == "direct_claim" else 1
+    gate = evidence.gate_decisions[gate_index].model_copy(
+        update={"validated_arguments": {"order_id": "O-9999"}}
+    )
+    gates = list(evidence.gate_decisions)
+    gates[gate_index] = gate
+    tampered = evidence.model_copy(update={"gate_decisions": tuple(gates)})
+
+    with pytest.raises(ValidationError, match="Gate arguments mismatch"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+
+def test_cycle2_direct_get_order_rejects_superseded_claim_ref() -> None:
+    evidence = _dnr_binding_complete_cycle2_evidence()
+    historical, current, _claim = evidence.input_bindings
+    unit = evidence.request_units[0].model_copy(
+        update={
+            "input_binding_refs": (
+                historical.binding_id,
+                *evidence.request_units[0].input_binding_refs,
+            )
+        }
+    )
+    gate = evidence.gate_decisions[0].model_copy(
+        update={"argument_binding_refs": (historical.binding_id,)}
+    )
+    call = evidence.tool_calls[0].model_copy(
+        update={"argument_binding_refs": (historical.binding_id,)}
+    )
+    trace = evidence.trace_events[1].model_copy(
+        update={"argument_binding_refs": (historical.binding_id,)}
+    )
+    tampered = evidence.model_copy(
+        update={
+            "request_units": (unit,),
+            "gate_decisions": (gate,),
+            "tool_calls": (call,),
+            "trace_events": (
+                evidence.trace_events[0],
+                trace,
+                evidence.trace_events[2],
+            ),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="target authority is missing"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+    assert current.binding_id != historical.binding_id
+
+
+def test_cycle2_gate_and_tool_must_remain_inside_run_lifecycle() -> None:
+    evidence = _binding_complete_cycle2_evidence()
+    after_stop = evidence.run_record.completed_at + timedelta(seconds=1)
+    call = evidence.tool_calls[0]
+    attempt = call.attempts[0].model_copy(
+        update={"started_at": after_stop, "finished_at": after_stop}
+    )
+    call = call.model_copy(
+        update={
+            "started_at": after_stop,
+            "finished_at": after_stop,
+            "attempts": (attempt,),
+        }
+    )
+    gate = evidence.gate_decisions[0].model_copy(
+        update={"decided_at": after_stop}
+    )
+    tampered = evidence.model_copy(
+        update={"gate_decisions": (gate,), "tool_calls": (call,)}
+    )
+
+    with pytest.raises(ValidationError, match="Gate ToolCall graph mismatch"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+
+def test_cycle2_run_stopped_trace_must_equal_run_completion() -> None:
+    evidence = _binding_complete_cycle2_evidence()
+    stopped = evidence.trace_events[2].model_copy(
+        update={
+            "occurred_at": evidence.run_record.started_at
+            + timedelta(microseconds=1)
+        }
+    )
+    tampered = evidence.model_copy(
+        update={
+            "trace_events": (
+                evidence.trace_events[0],
+                stopped,
+                evidence.trace_events[1],
+            )
+        }
+    )
+
+    with pytest.raises(ValidationError, match="Trace must belong"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
+
+
+def test_cycle2_gate_trace_timestamp_must_equal_gate_decision() -> None:
+    evidence = _binding_complete_cycle2_evidence()
+    trace = evidence.trace_events[1].model_copy(
+        update={
+            "occurred_at": (
+                evidence.gate_decisions[0].decided_at
+                - timedelta(microseconds=1)
+            )
+        }
+    )
+    tampered = evidence.model_copy(
+        update={
+            "trace_events": (
+                evidence.trace_events[0],
+                trace,
+                evidence.trace_events[2],
+            )
+        }
+    )
+
+    result = cycle2_grader_registry()["ToolCallGrader"].grade(
+        tampered,
+        _binding_cycle2_expectations(),
+    )
+    assert result.status is EvalGraderStatus.FAIL
+    assert result.reason_code is EvalGraderReasonCode.MISSING_RECORD
+
+
+def test_cycle2_supporting_tool_requires_same_task_run_link() -> None:
+    evidence = _cycle2_evidence_with_supporting_order_source()
+    foreign_task = evidence.task_records[0].model_copy(
+        update={"task_id": UUID(int=9876)}
+    )
+    supporting_link = evidence.supporting_run_task_links[0].model_copy(
+        update={"task_id": foreign_task.task_id}
+    )
+    tampered = evidence.model_copy(
+        update={
+            "task_records": (*evidence.task_records, foreign_task),
+            "supporting_run_task_links": (supporting_link,),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="exact RunTaskLink"):
+        Cycle2EvalEvidence(
+            **{
+                field_name: getattr(tampered, field_name)
+                for field_name in Cycle2EvalEvidence.model_fields
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -4852,9 +5870,16 @@ def test_cycle2_required_binding_missing_or_ambiguous_fails_closed(
         _binding_cycle2_expectations(),
     )
     assert outcome.status is EvalResultStatus.FAIL
-    assert outcome.grader_results[0].reason_code is (
-        EvalGraderReasonCode.MISSING_RECORD
-    )
+    results = {result.grader_name: result for result in outcome.grader_results}
+    if mutation in {"wrong_gate_version", "foreign_existing_version"}:
+        assert results["SchemaGrader"].status is EvalGraderStatus.PASS
+        assert results["ToolCallGrader"].reason_code is (
+            EvalGraderReasonCode.MISSING_RECORD
+        )
+    else:
+        assert outcome.grader_results[0].reason_code is (
+            EvalGraderReasonCode.MISSING_RECORD
+        )
 
 
 def test_cycle2_required_pair_needs_typed_actual_execution_context() -> None:

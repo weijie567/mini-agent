@@ -2905,6 +2905,10 @@ def test_all_cycle2_executable_cases_reach_typed_sut_boundary_as_one_batch(
 def test_cycle2_unbound_actual_evidence_is_bound_graded_persisted_and_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert {
+        "gate_decisions",
+        "auto_targets",
+    } <= set(UnboundCycle2EvalEvidence.model_fields)
     artifacts = load_e2e01_cycle2_artifacts(
         REPO_ROOT,
         candidate_version="git:synthetic-cycle2-result-route",
@@ -2958,6 +2962,8 @@ def test_cycle2_unbound_actual_evidence_is_bound_graded_persisted_and_replayed(
                             message="确定性安全结果。",
                         ),
                     ),
+                    gate_decisions=(),
+                    auto_targets=(),
                     trace_events=(
                         TraceEventV2(
                             trace_event_id=UUID(
