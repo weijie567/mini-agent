@@ -38,6 +38,7 @@ from mini_agent.application.records import (
     ApplyTaskTransitionCommand,
     ConditionalWriteResult,
     Cycle2ControlPurpose,
+    Cycle2ExactRunEvidenceClosure,
     Cycle2ReadDispatchGrant,
     Cycle2WriteResult,
     ContinuationInputBindingReadClosure,
@@ -53,6 +54,7 @@ from mini_agent.application.records import (
     EvalExecutionFailureRecord,
     EvalResultRecord,
     ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     FinalizeRunCommand,
     FinalizeCycle2RunCommand,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
@@ -2213,6 +2215,74 @@ def test_exact_run_evidence_port_is_owner_scoped_snapshot_only_boundary() -> Non
         "build_eval_result",
     ):
         assert not hasattr(ExactRunEvidencePort, forbidden_method)
+
+
+def test_ru_v3_evidence_readers_and_readiness_are_exact_staging_surfaces() -> None:
+    _assert_signature(
+        ExactRunEvidencePort.load_exact_run_evidence_v3_for_owner,
+        parameters=("owner_scope", "run_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "run_id": UUID,
+            "return": ExactRunEvidenceV3Closure | None,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_cycle2_exact_run_evidence_v3_for_owner,
+        parameters=("owner_scope", "run_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "run_id": UUID,
+            "return": Cycle2ExactRunEvidenceClosure | None,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.assert_request_understanding_v3_ready,
+        parameters=(),
+        type_hints={"return": type(None)},
+    )
+    for protocol, method_name in (
+        (ExactRunEvidencePort, "load_exact_run_evidence_v3_for_owner"),
+        (
+            Cycle2RuntimeRecordPort,
+            "load_cycle2_exact_run_evidence_v3_for_owner",
+        ),
+    ):
+        signature = inspect.signature(getattr(protocol, method_name))
+        assert all(
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            for name, parameter in signature.parameters.items()
+            if name != "self"
+        )
+        assert tuple(signature.parameters) == ("self", "owner_scope", "run_id")
+        assert not {"expectation", "case_id", "customer_id"}.intersection(
+            signature.parameters
+        )
+    readiness = inspect.signature(
+        Cycle2RuntimeRecordPort.assert_request_understanding_v3_ready
+    )
+    assert tuple(readiness.parameters) == ("self",)
+    assert readiness.return_annotation == "None"
+    assert not hasattr(RuntimeRecordPort, "assert_request_understanding_v3_ready")
+
+    _assert_signature(
+        ExactRunEvidencePort.load_exact_run_evidence_for_owner,
+        parameters=("owner_scope", "run_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "run_id": UUID,
+            "return": ExactRunEvidenceClosure | None,
+        },
+    )
+    _assert_signature(
+        Cycle2RuntimeRecordPort.load_cycle2_exact_run_evidence_for_owner,
+        parameters=("owner_scope", "run_id"),
+        type_hints={
+            "owner_scope": TrustedOwnerScope,
+            "run_id": UUID,
+            "return": Cycle2ExactRunEvidenceClosure | None,
+        },
+    )
 
 
 def test_cycle2_runtime_record_port_is_independent_and_exactly_typed() -> None:
