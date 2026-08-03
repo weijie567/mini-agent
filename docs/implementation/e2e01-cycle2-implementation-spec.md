@@ -10,13 +10,14 @@
 > Coverage Matrix 与Agent Evaluation Strategy已reviewed记录四个logical Case
 > families / 27个physical artifacts的current effective lifecycle为`EXECUTABLE`。
 > 本Spec只消费该owner状态，不自行裁决lifecycle；Phase 2 lifecycle-valid Result仍为0，
-> 且没有`REGRESSION_GATE`。`AGENTS.md`与Intent的current-state prose仍待R14B/R14C
-> 独立consumer Packet对齐。本文同时包含已实现合同与 W12 待实现 correction，具体状态
+> 且没有`REGRESSION_GATE`。`AGENTS.md`与Intent的current-state prose已由reviewed
+> consumer alignment完成；本文同时包含已实现合同与 W12 待实现 correction，具体状态
 > 必须以源码、测试、reviewed barrier和第 9.2.3 节边界逐项判断，不能整体描述为
-> complete。
+> complete。W12 DNR 双 Binding correction 的 scoped contract 已在本文冻结；对应
+> Core、Application、Infrastructure、Eval artifact 与真实 Result 尚未实现或验证。
 
 - **Created:** 2026-07-31
-- **Review status:** `CONTRACT_ACTIVE / COVERAGE_STRATEGY_ALIGNED / PROJECT_INTENT_STATUS_PENDING / W12_CORRECTION_IN_PROGRESS`
+- **Review status:** `CONTRACT_ACTIVE / COVERAGE_STRATEGY_ALIGNED / PROJECT_INTENT_STATUS_ALIGNED / W12_CORRECTION_IN_PROGRESS`
 - **Target phase:** Phase 2｜Cycle 2｜完成 E2E-01
 - **Target cases:** `E2E01-02/03/05/06`
 - **Preliminary ambiguity score:** `0.12`（仅评价草案内部清晰度；不是 activation gate）
@@ -124,7 +125,7 @@ Plan 或实现以 scoped Spec 较新为由静默覆盖 canonical owner。
 - reviewed Eval bundle、15-grader profile、Harness route与 atomic lifecycle /
   manifest / loader sync 已存在，27 个 physical artifact 均序列化为
   `lifecycle_status = EXECUTABLE`；Coverage Matrix 与Agent Evaluation Strategy已
-  对齐current effective lifecycle，`AGENTS.md`与Intent consumer仍待R14B/R14C同步。
+  对齐current effective lifecycle，`AGENTS.md`与Intent consumer alignment也已reviewed完成。
 - W9 direct non-Harness seam与后续 OA-10 exact reader focused/integration evidence
   可复现，但不等于 14 个 longitudinal或13个mandatory trajectory Result。
 - W12 preflight确认现有 typed seed loader只能解析2/27 Case组合，Scripted Provider、
@@ -215,7 +216,7 @@ writer与执行顺序由独立 reviewed master execution Plan拥有；本文只�
    - Acceptance：四种 outcome 的 Task 状态、ToolCall 数、Observation 写入和用户结果均有 Component 与 Trajectory 断言，且不得把 `NO_MATCH` 伪装成已验证订单事实。
 
 8. **已验证订单到物流的关系绑定**：`get_shipment` 只接受当前有效的 verified order target。
-   - Current：Shipment Port / Tool / Gateway与verified target读取已存在；Scripted Provider尚不能把`order_id`作为受控Claim走真实continuation边界。
+   - Current：Shipment Port / Tool / Gateway、verified target读取与单 Claim continuation已存在；当前Model Port / reducer / writer仍不能把同一DNR消息的fresh `order_id`与`shipment_not_received=true`作为一个原子双Binding delta处理。
    - Target：Gateway 要求 `order_id` 精确绑定当前 verified target ref；Runtime 注入 owner scope，并在业务边界解析最多一个 active Package。
    - Acceptance：用户 Claim、旧 InputBinding、其他 Task target、模型替换的 `order_id` 或模型生成的 `package_id` 均在 ToolCall 前被拒绝。
 
@@ -395,6 +396,412 @@ identity、normalized string、authority、source refs、validation、confirmati
 supersedes；只把 envelope logical version 改为 v2。三个新增 name 没有 v1 source，
 只能在 exact-version atomic cutover 后由 v2 writer 创建。conversion 前全量验证、失败
 原子性、active reader/writer 同切、no fallback 与 rollback fence 服从第 7.13 节。
+
+#### 7.2.1.2 DNR continuation 双 Binding 原子合同
+
+Intent owner 要求模型输出开放目标 `TaskDeltaCandidate[]`，并按 Candidate 保存validation、
+accepted child与Task version effect；本节只为现有`MSG-NOT-RECEIVED` physical Case
+冻结一个 scoped、不可拆分的 `SUPPLY_INPUT` mapping，不新增业务Intent分类，也不以
+flat binding batch替代canonical envelope。Model Port的active continuation返回类型演进为：
+
+```text
+Cycle2ContinuationRequestUnderstandingOutputV2
+  schema_version = e2e01-cycle2-continuation.p0.v2
+  message_ref
+  contextualization
+  task_delta_candidates: tuple[Cycle2ContinuationTaskDeltaCandidateV2, ...]
+    # 本scoped mapping恰好1项
+
+Cycle2ContinuationTaskDeltaCandidateV2
+  candidate_id
+  operation: TaskDeltaOperation
+  target_task_alias
+  target_request_unit_alias
+  input_candidates: tuple[Cycle2InputCandidate, ...]  # 1..2
+  confidence
+```
+
+Core `TaskDeltaOperation`在该cutover必须精确实现Intent owner的closed stable set：
+`ADD_GOAL / AMEND_GOAL / SUPPLY_INPUT / CANCEL_GOAL / CONFIRMATION_CANDIDATE`。generic /
+Cycle 2 initial output schema仍只允许`ADD_GOAL`；continuation outer schema允许该known set，
+但本scoped reducer只接受`SUPPLY_INPUT`。unknown字符串是schema-invalid无record，known但
+非`SUPPLY_INPUT`才进入下述keyed `OPERATION_NOT_SUPPORTED`。
+
+`candidate_id`必须与Message、Task、RequestUnit、Binding、accepted delta等identity互不
+混用；两个target alias必须exact-copy本轮ModelVisible focused Task summary中的同一目标，
+不能输出真实owner、Task id或RequestUnit id。`contextualization`与`message_ref`继续服从
+Intent canonical envelope。缺字段、错误JSON、unknown enum/version、重复candidate id、
+额外TaskDeltaCandidate、inner name不在closed vocabulary、candidate value不满足对应strict
+type、`input_candidates`不在1..2 cardinality、trusted/private字段或next-move authority属于
+outer/inner schema-invalid：不创建canonical record，也不得降级为flat Candidate。
+
+schema通过后仍必须先完成aggregate-level safe provenance gate：`message_ref`及每个
+`Cycle2InputCandidate.source_ref`都必须精确等于本轮已保存authenticated USER Message；
+contextualization只能引用本轮ModelVisible input中owner批准的current / recent Message并
+形成其safe projection；每个bounded raw quote必须在对应authoritative Message中
+exact unique，产生合法half-open span/hash，并与对应candidate value形成exact relation。
+`Cycle2InputCandidate`指向foreign / recent / missing Message或跨Conversation ref、
+空/缺失/超长/non-unique quote、
+quote-value不闭合、caller span/hash或contextualization provenance不安全统一进入bounded
+`SOURCE_PROVENANCE_INVALID / INPUT_INVALID` aggregate failure：不创建RU parent、durable
+Candidate、validation、Binding、Trace effect或任何write command。不得为了保留REJECT而
+存不出安全span/hash的Candidate，也不得读取或复制不可信原文。
+
+Thin Slice owner已独立冻结generic Phase 1 whole-message quote prohibition；本文对Cycle 2
+initial与continuation同样absolute forbidden、无exception。当前artifact的ordinal safe quote使用更小的closed mapping：
+`candidate_ordinal=2 ↔ raw quote=第二 ↔ authoritative Message=第二个`，以及
+`candidate_ordinal=6 ↔ raw quote=第六 ↔ authoritative Message=第六个`；两者都必须exact
+unique、非整条Message，分别覆盖现有success / longitudinal selection与out-of-range
+trajectory。其他ordinal、措辞、name或whole Message不取得映射并按aggregate
+`INPUT_INVALID`无record。false quote若整条Message恰为`已经收到`同样被拒，必须在包含
+额外上下文的Message中作为唯一substring才可形成safe projection。Component / Provider
+tests必须覆盖两个exact ordinal positive与所有邻近whole-message / value-pair negative，
+不能把closed mapping泛化为任意中文序数或最小长度规则。
+
+本scoped boolean provenance mapping是closed且不做normalize / alias：
+`shipment_not_received=true`的raw quote必须精确为`没有收到`，false必须精确为
+`已经收到`，并分别在authoritative Message中exact unique；其他措辞不能安全证明该
+boolean value，按aggregate `INPUT_INVALID`无record。因而带合法`已经收到` quote的single
+false可作为Claim correction；同一个DNR dual Candidate中即使false quote合法安全，仍因
+pair要求true而进入keyed `INPUT_VALUE_INVALID` REJECT。其他input name继续服从各自既有
+deterministic quote-value mapping，不由本boolean规则扩展。
+
+只有schema与safe provenance全部通过、已经可以形成完整durable safe projection的
+Candidate才进入keyed deterministic validation，不能因业务不适用而抹掉：
+
+- `operation`是已知`TaskDeltaOperation`但不是`SUPPLY_INPUT`时，以既有
+  `OPERATION_NOT_SUPPORTED` REJECT。
+- `target_task_alias / target_request_unit_alias`是合法字符串但无法唯一解析到同一个
+  focused Task / RequestUnit时，分别用`REFERENCE_UNRESOLVED`或
+  `REFERENCE_AMBIGUOUS` REJECT；alias值不同于context不属于schema-invalid。
+- 已通过inner schema的normalized value仍不满足当前target / closed mapping、双候选反序或
+  重复name、dual false、DNR pair业务语义或supersession候选不满足本节
+  时，用稳定`INPUT_VALUE_INVALID`或`REFERENCE_UNRESOLVED` REJECT；这些业务校验不得
+  反向吞掉前述schema-invalid或provenance-invalid payload。
+
+上述REJECT仍保存parent、durable Candidate与exact-one keyed validation，但
+`accepted_delta_refs / accepted children / keyed inline Task effect / InputBinding`
+必须全空。只有`SUPPLY_INPUT`、aliases、source与全部inner候选同时通过才形成ACCEPT。
+
+唯一TaskDeltaCandidate内的`input_candidates`必须保持模型输出顺序且name唯一。单候选路径继续允许现有
+`product_description / candidate_ordinal / order_id / shipment_not_received` closed
+vocabulary；双候选唯一合法 shape 是按顺序：
+
+```text
+0: order_id = O-1001
+1: shipment_not_received = true
+```
+
+两项的 `source_ref` 必须精确等于同一个本轮 authenticated USER Message id；各自
+`source_quote` 必须在该消息中恰好出现一次，分别闭合 exact order id 与“没有收到”
+Claim，否则按前述aggregate provenance failure无record。双候选中的
+`shipment_not_received=false`、重复 / 反序name属于safe-projected Candidate的keyed
+business REJECT；字符串或数字伪boolean、第三项、缺字段以及任何owner、target、
+Observation、Task version或next-move字段属于schema-invalid无record。两类失败都不得只
+接受其中一项。单候选`shipment_not_received=false`仍是第7.2.1.1节允许的Claim correction，
+但不能作为DNR direct-shipment trigger。
+
+该scoped output必须形成Intent owner要求的durable exact closure，而不是只保存两个
+InputBinding。Memory owner不允许同一semantic record family存在initial-RU v2与
+continuation-RU v3两个active version，因此本cutover把既有`ADD_GOAL`与新的
+`SUPPLY_INPUT`一起纳入一个closed discriminated v3 union；Thin Slice owner已批准Phase 1
+initial RU的model input/output schema与用户结果不变，但其durable aggregate写v3。逻辑record shape以breaking
+version明确演进为：
+
+```text
+RequestUnderstandingRecordV3
+  request_understanding_record_id
+  run_id
+  message_ref
+  record_schema_version = request_understanding_record.p0.v3
+  model_input_schema_version = e2e01-thin-v1
+  model_output_schema_version =
+    e2e01-thin-v2 |
+    e2e01-cycle2-initial.p0.v1 |
+    e2e01-cycle2-continuation.p0.v2
+  contextualization: DurableQueryContextualizationCandidateV2
+  task_delta_candidates: tuple[DurableTaskDeltaCandidateV3, ...]
+  candidate_validation: tuple[CandidateValidationRecordV2, ...]
+  accepted_delta_refs: tuple[UUID, ...]
+  proposed_base_task_state_version?
+  validated_task_state_version?
+  next_move_candidate_ref?
+  created_at
+
+DurableTaskDeltaCandidateV3 =
+  DurablePhase1AddGoalTaskDeltaCandidateV3 |  # imported exact from Thin Slice owner
+  DurableCycle2AddGoalTaskDeltaCandidateV3 |
+  DurableCycle2ContinuationTaskDeltaCandidateV3
+
+DurablePhase1AddGoalTaskDeltaCandidateV3
+  # exact fields/order/closure are owned only by Thin Slice
+  # P0-RU-V3-ACTIVE-TARGET-MANIFEST; this Spec does not redefine them
+
+DurableCycle2AddGoalTaskDeltaCandidateV3
+  candidate_id
+  operation = ADD_GOAL
+  goal_patch
+  input_candidates: tuple[DurableCycle2InputCandidateV3, ...]  # exact one product_description
+  confidence
+
+DurableCycle2ContinuationTaskDeltaCandidateV3
+  candidate_id
+  operation: TaskDeltaOperation
+  target_task_alias
+  target_request_unit_alias
+  input_candidates: tuple[DurableCycle2InputCandidateV3, ...]
+  confidence
+
+DurableCycle2InputCandidateV3
+  name
+  normalized_candidate_value
+  authority = USER_CLAIM
+  source_kind = CURRENT_MESSAGE
+  source_ref
+  source_span_start
+  source_span_end_exclusive
+  source_quote_sha256
+  confidence
+
+AcceptedTaskDeltaV3 =
+  AcceptedAddGoalTaskDeltaV3 |  # imported exact from Thin Slice owner
+  AcceptedSupplyInputTaskDeltaV3
+
+AcceptedAddGoalTaskDeltaV3
+  # exact fields/order/inline Task effect are owned only by Thin Slice
+  # P0-RU-V3-ACTIVE-TARGET-MANIFEST; child has no independent version
+
+AcceptedSupplyInputTaskDeltaV3
+  accepted_delta_id
+  candidate_ref
+  message_ref
+  operation = SUPPLY_INPUT
+  task_id
+  target_request_unit_id
+  input_binding_refs[1..2]
+  accepted_at
+  base_task_state_version?
+  result_task_state_version
+
+reduce_cycle2_continuation_task_delta(...)
+  -> Cycle2ContinuationReductionV3
+
+Cycle2ContinuationReductionV3 =
+  Cycle2ContinuationDecisionV3 |
+  RejectedCycle2ContinuationDecisionV3
+
+Cycle2ContinuationDecisionV3
+  closure: RequestUnderstandingClosureV3
+  input_bindings: tuple[InputBindingV2, ...]  # 1..2，与inner候选同序
+  routing_trigger_binding_ref
+
+RejectedCycle2ContinuationDecisionV3
+  closure: RequestUnderstandingClosureV3
+
+RequestUnderstandingClosureV3
+  record: RequestUnderstandingRecordV3
+  accepted_task_deltas: tuple[AcceptedTaskDeltaV3, ...]
+```
+
+v3 outer parent、generic Phase 1 branch、parent-local accepted child、zero / multi / partial
+closure、source→target migration invariants与rollback matrix由
+[Thin Slice `P0-RU-V3-ACTIVE-TARGET-MANIFEST`](./e2e01-thin-slice-implementation-spec.md)
+唯一拥有；本文只批准该imported branch与下列两个Cycle 2 branch共享v3 family，不复制或改写
+generic字段、顺序、用户结果或model input/output axes。v3 Candidate union按parent
+`model_output_schema_version`与branch field set精确判别，
+accepted child再按`operation`精确判别；不允许一个Candidate或child同时携带两个branch的
+字段。continuation output中的known non-`SUPPLY_INPUT` operation仍保存为continuation
+durable Candidate并形成`OPERATION_NOT_SUPPORTED` REJECT，但绝不形成accepted child。
+Imported generic Phase 1 initial只能是Thin owner批准的`ADD_GOAL + e2e01-thin-v2` v3 branch。
+Cycle 2 initial RU必须是`ADD_GOAL +
+e2e01-cycle2-initial.p0.v1`、exact-one product-description Candidate与accepted child、
+`base=null, result=1`、non-null search NextMove ref、proposed base null、validated version 1；
+当前非durable Cycle 2 initial path必须在同一cutover开始形成该v3 closure。
+continuation RU必须是`SUPPLY_INPUT + e2e01-cycle2-continuation.p0.v2`，两个NextMove
+version字段与`next_move_candidate_ref`都必须为null；accepted child的inline `task_id /
+base / result`必须精确等于loaded existing Task与单次提交的`result=base+1`。output schema、operation、candidate /
+child branch与NextMove字段的任何cross-combination都使整个aggregate fail closed。全局
+closure cardinality继续服从Candidate / validation / accepted child / keyed inline Task effect exact
+set；只有本scoped continuation branch限制为exact-one Candidate、accepted children 0..1。
+
+`record_schema_version`、`model_input_schema_version`、
+`model_output_schema_version`与Task state version是四个独立版本轴；source DTO、
+`P0VersionedPayload`、`P0PersistenceEnvelope`与`p0_records` column的
+`record_schema_version`必须四者exact-equal，不能用通用`schema_version`字段或任一其他
+轴推断、覆盖。`request_understanding_record_id`由可信
+Runtime生成并与run/message/candidate/delta/binding identity互异；`run_id/message_ref`
+必须exact-copy本次root Run与已保存authenticated USER Message。continuation RU不拥有
+next move，因此`next_move_candidate_ref`必须是真实null，不能缺字段或写`NONE`。
+
+Durable projection不得保存model-visible raw `source_quote`。Runtime必须在已保存Message
+上重新验证唯一受控span，保存half-open start/end与该exact slice的SHA-256；name、
+normalized value、authority、source kind/ref、span/hash及confidence构成canonical replay
+bytes。raw Provider payload、完整Message、owner、target和未经批准的私有字段仍禁止进入
+parent或child。`DurableQueryContextualizationCandidateV2`只复用其已批准安全projection，
+不从最终Task或Binding反推。
+
+本W12 mapping恰好一个emitted Candidate；accepted branch恰好一条keyed final
+`ACCEPT`，validation的
+`candidate_ref`、`AcceptedTaskDeltaV3.candidate_ref`、parent的唯一accepted ref与
+accepted child identity必须形成exact set；child自身的`accepted_delta_id + task_id +
+base/result`是Intent keyed Task effect，不新增第二套binding identity。rejected branch恰好一条
+keyed final `REJECT`及上述稳定reason，`accepted_delta_refs`与closure children均为空，
+并且不得形成Binding、routing trigger或Task effect。parent `created_at`、accepted branch
+child `accepted_at`、全部
+Binding时间与Task effect使用同一次可信UTC sample。记录、validation、accepted child、
+keyed inline Task effect、InputBinding及Task/RequestUnit effect是一个逻辑原子闭包；不得用全局
+base/result字段代替accepted-delta关联，也不得先写ACCEPT再补child。
+
+`request_understanding_record_id`是唯一parent replay key，只能由可信Runtime为一次
+decision invocation分配并由其持久化重试原样复用；不得从run/message/candidate/Task
+组合推断。Accepted decision retry也必须复用已分配的accepted_delta_id、Binding ids与Trace
+ids；这里的Trace identity复用只适用于以`accepted_delta_ref`闭合的approved
+effect Trace。相同record id只有在parent、durable candidate、validation、accepted child及其inline
+Task effect、Binding、next Task/RequestUnit与accepted effect Trace bytes全部相等时返回原identity、
+`created_at/accepted_at`和原result version；不得刷新时间或UUID。结果precedence在同一
+transaction内固定为identity-first：先按`request_understanding_record_id`查existing
+persisted closure；若存在且上述完整bytes exact-equal，直接`ALREADY_APPLIED`，即使Task /
+RequestUnit已因该首次commit推进到result version；若same identity任一bytes不同，直接
+`PROJECTION_CONFLICT`。只有same-id closure不存在时才校验loaded current CAS / base，
+graph已变化返回`NOT_APPLICABLE`，仍current则首次原子提交并返回`APPLIED`。四个分支互斥
+且后三个non-APPLIED均零写。任一child缺失、extra、
+duplicate、wrong-ref或future/unknown version都fail closed，不进行read-time repair。
+同一run/message/target的显式重新理解或superseding invocation必须使用新的可信record id，
+即使model candidate bytes相同也不能误判为replay；`candidate_id`始终只是model proposal
+identity，不授予parent idempotency。
+
+单候选decision的trigger是该唯一Binding；DNR双候选decision的trigger必须是第二项
+`shipment_not_received=true`。两条Binding使用独立新UUID。fresh `order_id`必须
+exact-supersede当前唯一同名旧Claim且保留相同规范化值；DNR Claim在存在当前同名Binding
+时也必须exact-supersede，否则`supersedes=null`。任一inner candidate、source、alias或
+supersession不合法时，唯一TaskDeltaCandidate整体REJECT并且不得产生部分decision。
+
+Application active Model Port固定为
+`propose_cycle2_continuation() -> Cycle2ContinuationRequestUnderstandingOutputV2`；旧flat
+Candidate返回不得作为fallback。schema-valid Candidate的deterministic REJECT使用：
+
+```text
+SaveRejectedContinuationUnderstandingV3Command
+  loaded_closure: ContinuationInputBindingReadClosure
+  decision: RejectedCycle2ContinuationDecisionV3
+```
+
+`save_rejected_continuation_understanding_if_current()`只原子保存parent、durable Candidate
+与keyed REJECT validation；不得写accepted child / inline Task effect、InputBinding、Task /
+RequestUnit或Tool/target effect。Rejected `TaskDeltaValidated`若由Trace owner另行写入，只是以
+自身`trace_event_id / model_call_id`标识的operational event：shared Trace没有RU parent、
+candidate或reason correlation，故它不属于本command、不参与RU parent replay equivalence、
+不能成为parent authority，也不得借给同run/message下另一条rejected invocation。不能把raw
+Candidate、alias、quote或caller error塞入Trace payload，且本文不新增任何RU→Trace relation
+或shared Trace字段。outer/inner schema-invalid则不形成该command。accepted
+ordinary continuation的exact write command冻结为：
+
+```text
+ApplyContinuationTaskDeltaV3Command
+  loaded_closure: ContinuationInputBindingReadClosure
+  decision: Cycle2ContinuationDecisionV3
+  next_task_record: TaskRecord
+  next_request_unit_record: RequestUnitRecord
+  effect_trace_records: tuple[TraceEventV2, ...]
+  rejected_ordinal_selection: Cycle2AcceptedClaimRejectedSelection?
+```
+
+`decision`的Task / RequestUnit / Message / base/result必须exact-copy loaded closure与next
+records；`effect_trace_records`精确包含一条`TaskDeltaValidated`、一条
+`TaskDeltaAccepted`、按decision顺序每个Binding各一条`InputBindingRecorded`及一条
+`TaskStateChanged`，全部使用同一root Run、accepted delta、Task、RequestUnit和可信时间。
+非ordinal decision禁止携带`rejected_ordinal_selection`；schema-valid但authority-invalid
+的ordinal必须携带当前`Cycle2AcceptedClaimRejectedSelection` exact child，仍原子保存
+accepted Claim而不创建Selection / target。现有六条ordinal reject语义和Case不变。
+
+成功ordinal selection的active command同步演进为
+`ApplyOrderCandidateSelectionV3Command`：它在既有`ApplyOrderCandidateSelectionV2Command`
+字段基础上必增同一个`Cycle2ContinuationDecisionV3`与上述exact effect Trace，并在一次
+CAS中保存Request Understanding v3 closure、ordinal Binding、Selection、selected target、
+Task / RequestUnit effect；不得先调用普通command再做selection CAS。普通nonordinal与
+rejected ordinal使用`apply_continuation_task_delta_if_current()`，成功ordinal继续使用
+独立`apply_order_candidate_selection_if_current()`但只接受v3 command；两条writer互斥。
+上述三种write method都只返回既有closed `Cycle2WriteResult`：首次exact commit为`APPLIED`、exact
+幂等闭包为`ALREADY_APPLIED`、同identity异payload为`PROJECTION_CONFLICT`、CAS/current
+graph变化为`NOT_APPLICABLE`；后三者不得授权新的Tool dispatch，且所有non-APPLIED
+conflict路径零写。`save_rejected_continuation_understanding_if_current()`、
+`apply_continuation_task_delta_if_current()`与
+`apply_order_candidate_selection_if_current()`全部执行前述identity-first precedence；
+不得先因Task已推进返回`NOT_APPLICABLE`而跳过exact replay lookup。Component /
+PostgreSQL integration tests必须为三种writer覆盖“首次APPLIED后Task已推进，再送exact
+retry仍ALREADY_APPLIED”、same-id mutation conflict、absent-id stale base
+NOT_APPLICABLE与concurrent first-writer race。Application必须按重新读取的current closure
+决定后续安全映射，不能把enum当作accepted-delta或target authority。
+
+每次owner-scoped transaction必须同时写`RequestUnderstandingRecordV3`、validation、
+accepted child及其inline Task effect、全部新Binding，把RequestUnit中的被supersede ref逐项
+替换或append，并把Task / RequestUnit从同一个base只推进一次到`result=base+1`。普通
+Trace不能替代durable owner record。零 / 部分Binding、重复ref、两次version推进、
+partial commit与repair-on-read一律拒绝。
+
+物理数据库继续复用现有P0 record table、column及`input_binding_record.p0.v2`、Task /
+RequestUnit行，不新增table或column；但现有`ck_p0_records_code_version_closed`只允许
+Request Understanding v1/v2，因此Infrastructure single-writer必须新增一个Alembic
+migration，以一次constraint replacement把
+`(request_understanding_record, request_understanding_record.p0.v3)`加入closed
+physical pair，并同步`models.py`的static pair集合。Accepted Delta继续只是RU envelope
+内的logical child，不新增physical record code/version pair。
+
+该migration不是只扩constraint：它必须在同一数据库transaction先锁定`p0_records`，
+exact-decode并preflight全部`request_understanding_record.p0.v2` parent与
+该parent下继承v2语义的`accepted_task_delta` child，然后把每一条v2闭包原子转换为v3
+generic `ADD_GOAL` branch。Generic source→target field/order/identity/time/closure preservation、
+zero / multi / partial semantics、readiness与rollback可逆性只引用Thin Slice
+`P0-RU-V3-ACTIVE-TARGET-MANIFEST`，本文不维护第二份清单。本文拥有physical执行：Accepted
+Delta没有独立record version或physical pair，child shape由parent version唯一选择；任一v2
+parent/child/reference/version/closure或可逆性校验失败时整次upgrade零写；成功后必须证明
+v2 RU row为零、全部target通过v3 exact decode与owner closure validation，unknown physical
+pair仍由DB拒绝。v1 archival row不转换也不参与active选择。
+
+downgrade同样先锁表并按Thin owner的exact rollback matrix preflight；仅其可逆generic
+Phase 1 branch允许原子还原v2并恢复pre-v3 constraint。任一Cycle 2 initial、`SUPPLY_INPUT`、
+continuation output、unknown/future shape或不完整闭包都以稳定错误阻断且零写。只回滚代码、
+保留v3后忽略、read-time降级或用备选decoder猜测都不是rollback。
+
+Request Understanding是breaking logical `p0.v3` active family，Accepted Delta的v3
+Python shape严格继承该parent version而不是独立版本轴；
+Core initial / continuation reducer、Application initial / continuation writer、codec、
+PostgreSQL reader/writer、migration与readiness必须作为同一activation barrier切换。新Runtime
+在migration完成、v2→v3全量验证和v3 exact reader通过前不得ready；cutover后全部initial
+与continuation write都只写v3，active owner-scoped read只期望v3。既存v1只按旧合同留作
+archival evidence，不参与active选择；v2在成功migration后必须为零。不得让v2/v3 writer
+或reader同时active，不得fallback、read-time upgrade/downgrade或repair。migration test
+必须覆盖pre-upgrade v3 DB reject、全量v2→v3转换、失败原子性、unknown pair reject、
+v3 exact readiness、可逆ADD_GOAL clean downgrade及SUPPLY_INPUT blocked downgrade。
+
+该唯一active-version barrier也约束Eval actual evidence，不能只修改Provider artifact。
+Application / Infrastructure owner-scoped evidence reader必须只返回v3 parent与其继承parent
+version的accepted children；`src/mini_agent/evaluation/graders.py`的`EvalEvidence`与
+`src/mini_agent/evaluation/harness.py`必须把
+`request_understanding_records_v2 / accepted_task_deltas_v2`替换为无版本后缀、静态绑定
+v3类型的`request_understanding_records / accepted_task_deltas`，active reader、adapter、
+Harness和Grader都不得接受v2、union或alias。Phase 1 Grader继续验证原有ADD_GOAL、
+provenance、Candidate/decision/child/Task effect与NextMove语义，但实际证据必须是generic
+ADD_GOAL v3 branch；Cycle 2 initial与continuation Grader分别消费各自v3 branch，DNR必须
+证明同一accepted SUPPLY_INPUT child、同序fresh双Binding、current Task effect与query-origin
+Tool provenance。任何证据缺失、branch/version错配或v2 residual都fail closed，不能由
+Case、Fixture、Script或expectation补造。
+
+后续refrozen Eval single-writer Packet必须原子覆盖`evaluation/graders.py`、
+`evaluation/harness.py`、component grader / harness / artifact / provider tests与integration
+offline harness，并与`scripted_provider.py`、model-script payload、manifest digest及
+`artifacts.py`static pin同一activation barrier验证。最低回归证据是Phase 1全部16个
+authenticated variants继续通过、Phase 2全部已激活Gate与DNR exact branch通过，以及v2
+evidence field/version negative cases fail closed；字段不得继续命名`*_v2`形成第二套active
+语义。
+
+DNR decision只用`routing_trigger_binding_ref`选择direct `get_shipment`路径；它不授予
+订单target authority。Gateway仍从同一owner / Task / RequestUnit的current verified
+target closure取得`order_id`、`argument_binding_refs`与`verified_target_ref`。本Case
+的exact origin仍是`product_description` query binding与AutoTarget；fresh order Claim
+和DNR Claim都不得替换、追加或按值伪装该origin。Assessment只有在新的true Claim已与
+Task / RequestUnit同事务current、且fresh DELIVERED Shipment Observation闭合后，才可
+按第7.8节产生`DELIVERED_NOT_RECEIVED`。
 
 Runtime-private query：
 
@@ -1925,8 +2332,8 @@ non-`APPLIED` grant、零写、零 dispatch。
 
 ### 7.13 持久化和原子性
 
-Phase 2 至少需要六个新增逻辑记录 / projection，并演进现有 InputBinding、
-GateDecision 与 Tool attempt 记录：
+Phase 2 至少需要六个新增逻辑记录 / projection，并演进现有Request Understanding、
+InputBinding、GateDecision与Tool attempt记录：
 
 ```text
 order_search_observation_record.p0.v1
@@ -1939,15 +2346,19 @@ shipment_assessment_record.p0.v1
 tool_call_record.p0.v1 -> tool_call_record.p0.v2
   logical child tool_attempt_record gains timeout_phase + retry_decision
 
+request_understanding_record.p0.v2 -> request_understanding_record.p0.v3
+  parent-local accepted_task_delta child shape inherits parent version
 input_binding_record.p0.v1 -> input_binding_record.p0.v2
 gate_decision_record.p0.v1 -> gate_decision_record.p0.v2
 ```
 
-OA-07 / OA-10 演进原四个 records；Cycle 2 accepted binding 与 verified-target Gate
-closure 再演进两个 records。目标 active logical versions 固定为：
+OA-07 / OA-10演进原四个records；Cycle 2 accepted binding与verified-target Gate closure
+再演进两个records；第7.2.1.2节另把RU v2全量cutover到v3。目标active logical versions
+固定为：
 
-| Record | Current active version | Cycle 2 target version | v2 semantic delta |
+| Record | Pre-cutover migration source version | Cycle 2 sole active target version | Target semantic delta |
 |---|---|---|---|
+| `RequestUnderstandingRecord` + parent-local `AcceptedTaskDelta` | `request_understanding_record.p0.v2`（source-only；cutover后active residual必须为零） | `request_understanding_record.p0.v3` | generic Phase 1 branch与source→target保持/rollback只引用Thin Slice target manifest；本文拥有Cycle 2 initial / continuation与physical closed-pair migration；Accepted child无独立version；全体active writer/reader/Eval evidence同barrier切换 |
 | `InputBindingRecord` | `input_binding_record.p0.v1` | `input_binding_record.p0.v2` | 保留 v1 exact order-id shape并增加 scoped `product_description` string、`candidate_ordinal` strict int、`shipment_not_received` strict bool name/value matrix；不包含 business fact 或 verified target |
 | `GateDecisionRecord` | `gate_decision_record.p0.v1` | `gate_decision_record.p0.v2` | 增加独立 `verified_target_ref?`；`argument_binding_refs[]` 仍只指向 current RequestUnit InputBinding；accepted Gate、Authorized command 与 ToolCall exact-copy target ref |
 | `ToolCallRecord` + logical child `ToolAttemptRecord` | `tool_call_record.p0.v1` | `tool_call_record.p0.v2` | parent 增加独立 `verified_target_ref?` 并与 accepted Gate / Authorized command exact-copy；child 增加 `timeout_phase` / `retry_decision` 与 exact attempt closed matrix；attempt 仍不是独立 top-level record |
@@ -1960,16 +2371,23 @@ closure 再演进两个 records。目标 active logical versions 固定为：
 child、migration target 或可重放 command。持久化实现不得为了满足 Eval shape 新增
 隐藏 payload，也不得从其他 Run 或 trusted-time 猜测原 writer closure。
 
-P0 exact-version-only 规则不允许 runtime 同时把 v1 / v2 当作 active version。未来
-Task Packet 可以选择物理表 / codec 实现，但在 Activation 前必须先把以下 migration
-contract 冻结为可审阅输入：
+P0 exact-version-only规则不允许runtime同时把任一source / target version当作active。
+RU Packet必须使用第7.2.1.2节已冻结的现有P0 table/column与closed-pair migration；其他
+family的后续Task Packet可以在owner边界内选择物理实现，但在Activation前必须先把以下
+migration contract冻结为可审阅输入：
 
-- 明确 v1 source set、v2 target set、完整 record graph 和每种 terminal / active
+- 明确每个family的exact source / target set（包括RU v2→v3）、完整record graph和每种terminal / active
   record 的 deterministic conversion；不得把历史 `INCOMPLETE` 或 `FAILED` 改写成
   `SUPERSEDED`。
-- migration 在写入任何 v2 record 前必须证明全量转换可完成，并以失败原子的
-  cutover 使 runtime、decoder、recovery reader、Eval reader 和 writer 同时切换到
-  exact v2；禁止 request-time / recovery-time upgrade、fallback 或 mixed reads。
+- migration在写入任何target record前必须证明全量转换可完成，并以失败原子的
+  cutover使Runtime、decoder、request / recovery reader、Eval reader / Harness / Grader
+  和writer同时切换到各family唯一exact target version；禁止request-time /
+  recovery-time upgrade、fallback或mixed reads。
+- `RequestUnderstandingRecord` generic Phase 1 source→target field/order/closure、readiness与
+  rollback只服从[Thin Slice `P0-RU-V3-ACTIVE-TARGET-MANIFEST`](./e2e01-thin-slice-implementation-spec.md)，
+  本节不复制其语义。本文只要求physical transaction全量转换、成功后v2 row为零、active
+  owner/Eval只读写v3，并开始写Cycle 2 initial v3 closure；任一Cycle 2 initial、
+  `SUPPLY_INPUT`或其他v3-only shape都阻断downgrade且零写。
 - `InputBindingRecord` v1→v2 只允许前述 exact order-id identity conversion；
   `GateDecisionRecord` v1→v2 只允许完整 v1 graph 中把新增
   `verified_target_ref` 写为 `null`，因为 v1 没有 selected-target capability。unknown /
@@ -1992,14 +2410,17 @@ contract 冻结为可审阅输入：
   table 由 parent metadata、allowlisted code 和 exact RegistrySnapshot /
   ExecutionPolicy 唯一重建；无法唯一重建时整批 migration / readiness fail
   closed，不得补默认值。
-- rollback 必须在写入任何首条 v2-only record / field / evidence 前完成，包括新增
+- rollback必须在写入任何首条target-only record / field / evidence前完成，包括RU v3
+  Cycle 2 initial / SUPPLY_INPUT closure、新增
   InputBinding name、非空 Gate / ToolCall `verified_target_ref`、
   `SUPERSEDED + STATE_OR_BINDING_INVALIDATED` evidence 或带 v2-only attempt 字段的
   ToolCall aggregate；否则必须保留经 owner 批准、能够无损读取全部对应 v2 语义的
-  rollback runtime。任何不能表示 v2 binding / target / no-result / attempt semantics
-  的 v1 downgrade 都被禁止。
-- migration 命令、physical schema、备份 / 恢复、验证向量和实际 rollback 步骤仍
-  属于未来 Task Packet；本文不创建 migration，也不声称其可执行。
+  rollback runtime。该句的v2→v1只适用于非RU family；RU generic eligibility只服从Thin
+  target manifest，本文规定Cycle 2 initial / continuation / `SUPPLY_INPUT`与其他v3-only
+  branch一律阻断。任何不能表示v2 binding / target /
+  no-result / attempt semantics的v1 downgrade都被禁止。
+- migration命令、physical schema、备份 / 恢复、验证向量和实际rollback步骤仍属于
+  后续Task Packet；本文只冻结第7.2.1.2节和本节合同，不声称migration已经存在或可执行。
 
 强制事务 / CAS 边界：
 
@@ -2174,7 +2595,7 @@ W11 atomic consumer sync 已把 27 个 physical artifact 序列化为该值；Co
 Matrix与Agent Evaluation Strategy随后已reviewed对齐current effective lifecycle。
 因此本Spec只消费四个logical families / 27个physical artifacts为`EXECUTABLE`的
 owner状态，不自行裁决lifecycle；Phase 2 lifecycle-valid Result仍为0且无
-`REGRESSION_GATE`。`AGENTS.md`与Intent consumer仍待R14B/R14C对齐，bundle继续
+`REGRESSION_GATE`。`AGENTS.md`与Intent consumer current-state已对齐；bundle继续
 服从Eval owner的Dataset lifecycle、loader、manifest、SUT、Grader、Result和
 critical failure规则。
 
@@ -2807,13 +3228,29 @@ recovery script没有 control；`logistics-required-uses-shipment`有两个 cont
 | Script behavior | Real boundary | Deterministic authority |
 |---|---|---|
 | `PROPOSE_SEARCH_ORDERS` | 无 current Task 的 initial RU | Core只接受 product Claim并验证 search next move |
-| `PROPOSE_CANDIDATE_SELECTION` | current continuation RU | 只提出 ordinal Claim；binding与selection结果由 Core/Application closure决定 |
-| `PROPOSE_GET_ORDER` / `PROPOSE_GET_SHIPMENT`（RU） | current continuation RU | 只提出 strict `order_id` Claim；必须 exact-match current owner-scoped verified target，模型不创建target |
+| `PROPOSE_CANDIDATE_SELECTION` | current continuation RU | 返回一个exact `SUPPLY_INPUT` TaskDeltaCandidate，其inner只提出ordinal Claim；accepted binding与selection结果由Core/Application v3 closure决定 |
+| `PROPOSE_GET_ORDER` / 普通 `PROPOSE_GET_SHIPMENT`（RU） | current continuation RU | 返回一个exact `SUPPLY_INPUT` TaskDeltaCandidate，其inner只有strict `order_id` Claim；必须exact-match current owner-scoped verified target，模型不创建target |
+| `PROPOSE_GET_SHIPMENT`（`MSG-NOT-RECEIVED` RU） | current DNR continuation RU | 同一个exact `SUPPLY_INPUT` TaskDeltaCandidate内返回有序`order_id=O-1001, shipment_not_received=true`双input候选；两项只来自本轮authenticated USER Message，且必须由第7.2.1.2节一次CAS接受 |
 | `PROPOSE_GET_ORDER`（control） | UNIQUE search或成功 ordinal gate后 | Gateway对已验证target形成 candidate；script的空 arguments不得生成order id |
 | `PROPOSE_CANDIDATE_QUESTION` | MULTIPLE search state已原子保存后 | deterministic mapper/renderer拥有问题与minimum summary |
 | `PROPOSE_FIXED_RESPONSE` | no-match、selection reject、dependency/integrity/human terminal boundary | 只能接受/拒绝“结束”候选；exact policy/text来自 mapper/renderer |
 | `PROPOSE_ORDER_SUMMARY` / `PROPOSE_GET_SHIPMENT`（`PROPOSE_POST_ORDER` control的两个closed behavior） | successful get_order Observation已保存、same-current verified target仍闭合后 | 前者只能返回`FINISH`且不消费target argument；后者只能返回无参数`CALL_TOOL/get_shipment`，Gateway再从same-current verified target确定性注入`order_id` |
 | `PROPOSE_SHIPMENT_ASSESSMENT` | deterministic Assessment或freshness gate完成后 | 模型不提出primary result/reason/facts；renderer只消费实际Assessment |
+
+`PROPOSE_CANDIDATE_SELECTION`的Provider projection必须按第7.2.1.2节把
+`message=第二个 → raw quote=第二`、`message=第六个 → raw quote=第六`，不得继续复制
+整条Message；script的
+`candidate_arguments.candidate_ordinal`、Case bytes、step数量与provider call cardinality
+不变。任何value/Message/quote不属于这两个closed triple都在RU aggregate前fail closed。
+
+`script:T2-assessment-delivered-not-received-current-claim` 的既有唯一RU step不得拆分或
+增加调用；其 exact `candidate_arguments` 必须原子更新为
+`{"order_id":"O-1001","shipment_not_received":true}`。Provider从authenticated
+`original_query`分别提取唯一`O-1001`与`没有收到`作为source quote，形成第7.2.1.2节
+同一个`SUPPLY_INPUT` TaskDeltaCandidate的有序inner projection及完整outer envelope；
+不能从behavior名称、Case expectation或fixture补造任一候选。该artifact
+byte变更必须与model-script digest、manifest和loader consistency测试在后续Eval
+single-writer Packet同成同败，本Spec Packet不修改artifact。
 
 Application 在该边界只能请求一个private、非持久化的
 `Cycle2ControlPurpose.PROPOSE_POST_ORDER`，不得先用消息关键词、业务Intent label、
@@ -2833,12 +3270,15 @@ candidate不形成InputBinding、verified target、Observation、业务事实或
 `shipment_not_received`或current Shipment Observation触发的direct shipment
 continuation不消费本post-order control，语义保持不变。
 
-Core model contract新增 `order_id` 只作为 `USER_CLAIM`，strict pattern继续服从 P0 order
-identifier；`customer_id`、owner scope、verified target ref、source version、Task version
-仍禁止进入模型输出。现有 continuation proposal 中把 Claim 与 next move绑成一个对象的
-shape必须拆开：RU call只返回 Claim；每个实际 control boundary 再返回一个 typed
-control candidate。Provider protocol error只能进入既有安全 mapping，不得 fallback
-到 script expectation。
+Core model contract中的`order_id`与`shipment_not_received`都只作为独立
+`USER_CLAIM`；strict order pattern与boolean type继续服从第7.2.1.1节。
+`customer_id`、owner scope、verified target ref、source version、Task version仍禁止进入
+模型输出。continuation RU必须返回第7.2.1.2节的exact TaskDelta envelope而不是flat
+Candidate，也不能把Claim与next move
+绑定；每个实际control boundary再返回一个typed control candidate。只有DNR脚本的一次
+RU允许同一个TaskDeltaCandidate含两个input候选，provider call总数不变。Provider
+protocol error只能进入既有安全mapping，不得fallback到flat Candidate、fixture Claim或
+script expectation。
 
 一个 ordinary script只有在最后一个真实 boundary消费完最后一步后才允许
 `assert_exhausted()`；两个 no-result recovery script在 fault/recovery terminal 后直接
@@ -3206,7 +3646,7 @@ variant、使用不同 Registry、或 order-only 通过“不注册 `get_shipmen
 | `C2-RECOVERY-01` | restart at CREATED、unfinished attempt、finalized retry decision before second fence、after second fence、already terminal；唯一恢复者 CAS；restart 的新增 attempt evidence 不重新拥有 imported `P1-RM-PROCESS-RESTART` 的 Run / Task / RequestUnit / outbound mapping |
 | `C2-MAPPER-01` | imported `e2e01-thin-slice.result-mapper.p0.v1` 与第 7.10 节 Phase 2 `RM-* / RM-I*` delta 的并集 completeness / zero-overlap / no-unmapped；显式回归 `P1-RM-ORDER-SUCCESS`、`P1-RM-GATE-REJECTED`、`P1-RM-ORDER-SERVICE-UNAVAILABLE`、`P1-RM-PROCESS-RESTART`，并覆盖 Phase 2 allowlisted code / interruption reason / unknown 值、service unavailable、obsolete Run suppression、fixed response policy / forbidden metadata |
 | `C2-OA10-01` | 同一 owner-scoped snapshot 的 `SupersededRunFinalizationEvidenceV2` 只由 exact persisted Run / link / Trace terminal triplet组成；Run=`SUPERSEDED + STATE_OR_BINDING_INVALIDATED`、link result=`null`、audit-only `RunStopped(BLOCKED)`，且 no Agent result / Message / ResponseRendered / Task / RequestUnit write；不得重建 `FinalizeSupersededRunV2Command`、replacement Run 或 trusted time；unknown / contradictory 不进入 mapper、不猜测且不改变任何 Run/link/Task/RequestUnit/Tool state；`INCOMPLETE` restart-only |
-| `C2-PERSIST-01` | 五个新 record / projection，以及 ToolCall（含 attempt child）/ AgentRun / RunTaskLink / TraceEvent v1→v2 exact-version conversion / cutover / rollback vectors；unknown / mismatch version、mixed active version、dangling / half-write / wrong-owner fail closed |
+| `C2-PERSIST-01` | 六个新 record / projection，RequestUnderstanding（含parent-local accepted child）v2→v3，以及 ToolCall（含 attempt child）/ AgentRun / RunTaskLink / TraceEvent v1→v2 exact-version conversion / cutover / readiness / rollback vectors；RU zero/multi/partial closure、Eval evidence reader/writer同barrier、unknown / mismatch version、mixed active version、dangling / half-write / wrong-owner fail closed |
 
 其中 candidate invalid 条件、四种 Assessment、source hash mutation 和 crash points 由
 Component / Trajectory 承担，不要求为每个条件无限扩张 HTTP E2E variant；14 个
@@ -3457,7 +3897,7 @@ CONTRACT_DEFINED
 consumer sync 已把 27 个 physical artifact 序列化为该值。此后R13 correction起点
 仍存在Coverage Matrix与`AGENTS.md` current-state prose保留`CONTRACT_DEFINED`的
 冲突，且没有Phase 2 lifecycle-valid Result；该历史冲突现已由Coverage/Strategy
-owner alignment部分关闭，`AGENTS.md`与Intent consumer仍待R14B/R14C对齐。
+owner alignment以及后续`AGENTS.md`/Intent consumer alignment全部关闭。
 
 ### 10.3 Planning activation gate
 
@@ -3617,6 +4057,27 @@ exact-head review 与 merge 证据。
 | 23 | W12 CandidateSet ordinal mapping remediation | fixture序号是否服从已冻结排序与W9 exact dates | R17实现预检确认D1与production Core均固定`ordered_at DESC, order_number ASC`，W9冻结O-1002日期晚于O-1001，因此唯一合法映射为`1→O-1002、2→O-1001`；第9.2.3节原反向fixture行属于scoped Spec内部矛盾。本owner显式修正该行，不改变排序算法、种子日期、Case身份、期望结果或lifecycle；旧`02-18R17`控制包因消费错误Spec blob而失效，必须从本修正真实successor重冻结replacement R17 |
 | 24 | W12 E2E01-05 post-order control remediation | order-only与logistics-required能否在active argument-free control边界真实分流 | R17R1 neighbor审查确认旧integration harness首先引用已移除proposal wrapper；继续沿active flow证明普通logistics goal在`get_order`后受未授权先验`requires_shipment=false`阻断，无法消费已认证`PROPOSE_GET_SHIPMENT` script step。裁决以Application-private`PROPOSE_POST_ORDER`统一post-order purpose，只允许`FINISH`或无参数`get_shipment`两个closed behavior；verified target/order id仍仅由Gateway注入。不得新增Intent/InputBinding/关键词heuristic/Case expectation authority；Application、integration test、Eval adapter与Composition继续分离single-writer，Case/predicate/digest/lifecycle不变 |
 | 25 | W12 current order Claim / target-origin remediation | fresh `order_id` Claim是否必须与既有UNIQUE target origin使用同一binding identity | R19真实pair首先证明Core的UUID相等条件不可满足；随后cross-owner审查确认fresh order Claim仍须服从Intent accepted-delta / Task effect，而AutoTarget只能保留其Search query origin。裁决令fixture同时闭合历史source的current order Claim与product-description AutoTarget origin，并区分ordinary `base_records`中的exact-referenced历史USER Message和只对recovery开放的`historical_user_messages` auxiliary family；本轮order Claim继续fresh CAS并只supersede同名旧Claim，`get_order`使用fresh order/null target，`get_shipment`使用query origin/verified target。state-invalidated recovery另冻结原root已提交的v2旧Claim→v3 fresh child / Gate→v4 invalidated-current链，recovery不得补建binding或用旧Claim满足`REQ_BINDING`。该predicate只证明accepted Claim及Gateway版本，不替代Tool argument provenance；Core、Fixture、Eval继续分离single-writer，Case predicate bytes与lifecycle不变 |
+| 26 | W12 DNR dual-binding remediation | `MSG-NOT-RECEIVED`如何同时形成fresh order Claim与current DNR Claim而不伪造fixture事实或target authority | W12 composition preflight确认Case要求两个current Binding与`DELIVERED_NOT_RECEIVED`，但script、Model Port、Core reducer、Application writer只能提出和保存一个flat `order_id`，verified-target fixture也按合同不预置DNR Claim；当前exact script在`get_order`后进入`PROPOSE_POST_ORDER`时遇到下一步`PROPOSE_SHIPMENT_ASSESSMENT` purpose mismatch并安全fail closed，无法形成DNR，即使单order Claim独立进入Assessment也因无current true Claim而不能得到DNR。裁决以一次authenticated USER Message形成一个canonical `SUPPLY_INPUT` TaskDeltaCandidate，其inner为exact有序`order_id, shipment_not_received=true`；Core形成Request Understanding v3 accepted closure、同序双Binding及DNR trigger，Application/Infrastructure用一次owner-scoped CAS写完整record/child/version/Binding/Task effect并只推进一个Task version；Memory唯一active-version边界要求v3同时承载既有`ADD_GOAL`，全体active RU writer/reader同barrier切换。Thin Slice owner原子批准generic Phase 1 v3 branch与v2→v3保持/rollback matrix，本文只拥有Cycle 2 branches与physical closed-pair migration；任一Cycle 2 initial、SUPPLY_INPUT或其他v3-only shape阻断rollback。`get_shipment`仍使用product-query AutoTarget origin。Case、fixture和provider-call cardinality不变；Eval single-writer必须原子修改Provider/artifact pin与v3-only actual evidence，并验证Phase 1全部16 variants与Phase 2 Gate。双Spec barrier `B_C2_W12_RU_V3_OWNER_ALIGNMENT` 后只允许串行重冻结/合并 `02-18R19R4C` Core → `02-18R19R4D` Application → `02-18R19R4E` Infrastructure/Alembic → `02-18R19R4F` Eval/Provider → `02-18R19R5R` provenance refreeze → R19 Composition；任何前置barrier未合并都阻断下一包 |
+
+Decision 26 的 independent owner review 证明 `02-18R19R4B` execution Plan 中“无v3
+envelope”会违反Intent canonical durable closure，且把logical v3误写成“无Alembic
+migration”也会被physical closed version-pair CHECK阻断。作为active scoped owner，本文
+与Thin Slice owner原子对齐后共同裁决`request_understanding_record.p0.v3`为唯一active
+family；generic Phase 1 field/order/保持/rollback由Thin target manifest唯一拥有，本文拥有
+Cycle 2 branches。`accepted_task_delta` child shape严格继承parent version、没有独立record
+version字段或physical pair；Memory唯一active-version规则把既有`ADD_GOAL`与新
+`SUPPLY_INPUT`纳入同一个v3 union。physical
+P0 table/column不变，但授权一个扩
+`(request_understanding_record, request_understanding_record.p0.v3)` closed pair、全量
+原子转换v2→v3并执行Thin owner rollback matrix；任一Cycle 2 initial、SUPPLY_INPUT或其他
+v3-only shape都blocked downgrade；
+Accepted Delta仍是logical child，不取得独立physical
+pair。后续Task Packet必须以本exact reviewed successor重冻结，不能继续消费该Plan的旧
+no-v3 / no-migration文字或旧source/blob locks。
+
+本双Spec产品只关闭Thin Slice与Cycle 2两个active owner之间的合同冲突，不声称仓库级
+alignment完成。Core、Application、Infrastructure、Alembic、Eval、Composition与旧Plan
+消费者仍保持待重冻结；它们只能按上述精确顺序由各自single-writer Packet修改。
 
 ## 14. Review checklist
 
@@ -3674,11 +4135,13 @@ Reviewer 应重点判断：
 
 *Draft created: 2026-07-31*
 
-*Activated through an independent exact-head reviewed PR from base
-`9ee260f12a82b706269f8a62c460c781c64f1f47`.*
+*Historical Phase 2 activation was independently exact-head reviewed from base
+`9ee260f12a82b706269f8a62c460c781c64f1f47`; it does not prove this W12 correction or its
+downstream implementation.*
 
-*Next allowed step: master route、Coverage与Agent Evaluation Strategy alignment已
-reviewed合并；本R14E Spec current-state alignment通过independent exact-head review并
-合并后，只能从其真实successor冻结R14B `AGENTS.md` Packet，随后串行完成R14C Intent，
-再按Core、Application、Infrastructure、Eval、Composition推进。final lifecycle-valid
-dispatch在上述remaining barriers全部reviewed前保持禁止。*
+*Next allowed step after reviewed merge of `B_C2_W12_RU_V3_OWNER_ALIGNMENT`: refreeze and
+merge exactly `02-18R19R4C` Core → `02-18R19R4D` Application → `02-18R19R4E`
+Infrastructure/Alembic → `02-18R19R4F` Eval/Provider → `02-18R19R5R` provenance → R19
+Composition. This product aligns only the two changed Specs; repository-wide alignment、
+final lifecycle-valid dispatch与Result generation remain blocked until every listed barrier
+is independently reviewed and merged.*
