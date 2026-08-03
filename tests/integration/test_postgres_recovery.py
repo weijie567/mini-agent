@@ -23,8 +23,10 @@ from mini_agent.application.records import (
     ConditionalWriteResult,
     CreateRunCommand,
     CreateToolCallCommand,
+    Cycle2ExactRunEvidenceClosure,
     InterruptToolCallForRecoveryCommand,
     MarkRunIncompleteForRecoveryCommand,
+    MessageDirection,
     RecoveryWriteResult,
     TransitionRunCommand,
     TrustedOwnerScope,
@@ -117,6 +119,49 @@ def _recovery_command(closure):
             tool_call_transitions=tool_transitions,
         ),
     )
+
+
+def _assert_w12_recovery_message_closed_set(
+    closure: Cycle2ExactRunEvidenceClosure,
+) -> None:
+    messages_by_id = {
+        message.message_id: message for message in closure.message_records
+    }
+    assert len(messages_by_id) == len(closure.message_records)
+    referenced_message_ids = {
+        ref
+        for unit in closure.request_unit_records
+        for ref in unit.goal_source_refs
+    }
+    referenced_message_ids.update(
+        ref
+        for binding in closure.input_binding_records
+        for ref in binding.source_refs
+    )
+    referenced_message_ids.update(
+        record.source_message_ref
+        for record in closure.candidate_selection_records
+    )
+    referenced_message_ids.update(
+        ref
+        for manifest in closure.context_manifest_records
+        for ref in manifest.selected_message_refs
+    )
+    referenced_message_ids.update(
+        trace.message_ref
+        for trace in closure.trace_records
+        if trace.message_ref is not None
+    )
+    assert set(messages_by_id) == referenced_message_ids
+    assert all(
+        message.conversation_id == closure.conversation_record.conversation_id
+        and message.direction is MessageDirection.USER
+        for message in closure.message_records
+    )
+    assert sum(
+        message.content == "订单 O-1001 到哪了？"
+        for message in closure.message_records
+    ) == 1
 
 
 class _RecoverySetupTarget:
@@ -217,8 +262,47 @@ async def test_w12_recovery_setup_reads_exact_root_and_supporting_closure(
         assert closure.run_record.run_id == plan.runtime_state.recovery_subject_run_id
         assert closure.run_record.status.value == "RUNNING"
         assert closure.terminal_result is None
-        assert len(closure.message_records) == 1
-        assert closure.message_records[0].content == "订单 O-1001 到哪了？"
+        _assert_w12_recovery_message_closed_set(closure)
+        root_message = next(
+            message
+            for message in closure.message_records
+            if message.content == "订单 O-1001 到哪了？"
+        )
+        unreferenced = root_message.model_copy(
+            update={
+                "message_id": uuid4(),
+                "content": "这是一条未被任何记录引用的额外消息。",
+            }
+        )
+        for tampered_messages in (
+            (),
+            (*closure.message_records, unreferenced),
+            (root_message, root_message),
+            (
+                *tuple(
+                    message
+                    for message in closure.message_records
+                    if message.message_id != root_message.message_id
+                ),
+                root_message.model_copy(update={"conversation_id": uuid4()}),
+            ),
+            (
+                *tuple(
+                    message
+                    for message in closure.message_records
+                    if message.message_id != root_message.message_id
+                ),
+                root_message.model_copy(
+                    update={"direction": MessageDirection.ASSISTANT}
+                ),
+            ),
+        ):
+            with pytest.raises(AssertionError):
+                _assert_w12_recovery_message_closed_set(
+                    closure.model_copy(
+                        update={"message_records": tampered_messages}
+                    )
+                )
         assert len(closure.supporting_run_records) == 1
         root_tools = tuple(
             record
