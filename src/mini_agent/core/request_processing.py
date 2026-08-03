@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias
 from uuid import UUID
 
 from pydantic import Field, JsonValue, field_serializer, field_validator
@@ -25,6 +25,8 @@ from .order_search import normalize_product_description
 from .request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     InputAuthority,
@@ -167,9 +169,16 @@ from .request_understanding import (
     UncertaintyV2,
 )
 from .task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
+    AcceptedTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationRecordV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     DurableInputCandidateV2,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
@@ -177,6 +186,7 @@ from .task_state import (
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
     RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
 )
 
 
@@ -271,6 +281,130 @@ class RequestUnderstandingClosureV2(RuntimePrivateModel):
                 raise ValueError(
                     "v2 parent and children must share one trusted timestamp"
                 )
+        return self
+
+
+class RequestUnderstandingClosureV3(RuntimePrivateModel):
+    """Exact v3 parent and its parent-local accepted children."""
+
+    record: RequestUnderstandingRecordV3
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV3, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_values_are_exact_v3_models(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("v3 closure requires a mapping")
+        record = value.get("record")
+        children = value.get("accepted_task_deltas")
+        if (
+            type(record) is not RequestUnderstandingRecordV3
+            or type(children) is not tuple
+            or any(
+                type(child)
+                not in (AcceptedAddGoalTaskDeltaV3, AcceptedSupplyInputTaskDeltaV3)
+                for child in children
+            )
+        ):
+            raise ValueError("v3 closure requires exact owner models")
+        return value
+
+    @model_validator(mode="after")
+    def accepted_children_close_the_exact_candidate_effects(self) -> Self:
+        if not _is_exact_canonical_model_v2(
+            self.record,
+            RequestUnderstandingRecordV3,
+        ) or any(
+            not _is_exact_canonical_model_v2(child, type(child))
+            for child in self.accepted_task_deltas
+        ):
+            raise ValueError("v3 closure requires canonical records")
+
+        candidate_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in self.record.task_delta_candidates
+        }
+        accepted_candidate_sequence = tuple(
+            candidate.candidate_id
+            for candidate in self.record.task_delta_candidates
+            if next(
+                validation
+                for validation in self.record.candidate_validation
+                if validation.candidate_ref == candidate.candidate_id
+            ).decision
+            is CandidateValidationDecision.ACCEPT
+        )
+        child_candidate_sequence = tuple(
+            child.candidate_ref for child in self.accepted_task_deltas
+        )
+        child_ids = tuple(
+            child.accepted_delta_id for child in self.accepted_task_deltas
+        )
+        child_effect_keys = tuple(
+            (child.accepted_delta_id, child.task_id)
+            for child in self.accepted_task_deltas
+        )
+        if (
+            child_candidate_sequence != accepted_candidate_sequence
+            or len(child_ids) != len(set(child_ids))
+            or len(child_effect_keys) != len(set(child_effect_keys))
+            or set(child_ids) != set(self.record.accepted_delta_refs)
+        ):
+            raise ValueError("v3 closure children must match exact accepted set")
+        if self.record.model_output_schema_version == "e2e01-thin-v2" and (
+            self.record.next_move_candidate_ref is not None
+        ):
+            if (
+                len(self.record.task_delta_candidates) != 1
+                or len(self.accepted_task_deltas) != 1
+                or self.record.validated_task_state_version
+                != self.accepted_task_deltas[0].result_task_state_version
+            ):
+                raise ValueError(
+                    "generic NextMove audit must bind one accepted Task effect"
+                )
+
+        last_version_by_task: dict[UUID, int] = {}
+        for child in self.accepted_task_deltas:
+            candidate = candidate_by_id.get(child.candidate_ref)
+            if (
+                candidate is None
+                or child.message_ref != self.record.message_ref
+                or child.operation is not candidate.operation
+                or child.accepted_at != self.record.created_at
+                or len(child.input_binding_refs)
+                != len(candidate.input_candidates)
+            ):
+                raise ValueError("v3 child must preserve Candidate projection")
+            if type(child) is AcceptedAddGoalTaskDeltaV3:
+                if (
+                    type(candidate)
+                    not in (
+                        DurablePhase1AddGoalTaskDeltaCandidateV3,
+                        DurableCycle2AddGoalTaskDeltaCandidateV3,
+                    )
+                    or child.goal_text != candidate.goal_patch
+                ):
+                    raise ValueError("ADD_GOAL child branch mismatch")
+            elif (
+                type(candidate)
+                is not DurableCycle2ContinuationTaskDeltaCandidateV3
+            ):
+                raise ValueError("SUPPLY_INPUT child branch mismatch")
+
+            previous_version = last_version_by_task.get(child.task_id)
+            if previous_version is None:
+                if (
+                    type(child) is AcceptedAddGoalTaskDeltaV3
+                    and child.base_task_state_version is not None
+                ):
+                    raise ValueError("initial ADD_GOAL effect must have null base")
+            elif (
+                child.base_task_state_version != previous_version
+                or child.result_task_state_version != previous_version + 1
+            ):
+                raise ValueError("per-Task effects must form one exact chain")
+            last_version_by_task[child.task_id] = child.result_task_state_version
         return self
 
 
@@ -2762,6 +2896,907 @@ def validate_and_reduce_cycle2_initial_request_v2(
         raise _cycle2_routing_error() from error
 
 
+def _fail_request_understanding_v3(
+    reason_code: (
+        RequestUnderstandingAggregateFailureCodeV2
+        | RequestUnderstandingAtomicFailureCodeV2
+    ),
+) -> None:
+    raise RequestUnderstandingV2Error(reason_code)
+
+
+def _canonical_request_input_v3(value: object) -> RequestUnderstandingInput:
+    try:
+        return _canonical_request_input_v2(value)
+    except RequestUnderstandingV2Error as error:
+        _fail_request_understanding_v3(error.reason_code)
+
+
+def _canonical_cycle2_output_v3(
+    value: object,
+    expected_type: type[
+        Cycle2InitialRequestUnderstandingOutputV2
+        | Cycle2ContinuationRequestUnderstandingOutputV2
+    ],
+    *,
+    expected_schema_version: str,
+) -> Cycle2InitialRequestUnderstandingOutputV2 | Cycle2ContinuationRequestUnderstandingOutputV2:
+    if type(value) is not expected_type:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    if _has_trusted_or_private_undeclared_state_v2(value):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+        )
+    try:
+        schema_version = value.schema_version
+    except AttributeError:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    if schema_version != expected_schema_version:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_SCHEMA_VERSION_INVALID
+        )
+    if not _is_exact_canonical_model_v2(value, expected_type):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    try:
+        payload = value.model_dump(
+            mode="json",
+            round_trip=True,
+            exclude_unset=True,
+            warnings="error",
+        )
+    except (TypeError, ValueError, PydanticSerializationError):
+        payload = None
+    if payload is None:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    if find_trusted_argument_field(payload) is not None:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+        )
+    return value
+
+
+def _canonical_candidate_validation_v3(
+    values: object,
+) -> tuple[CandidateValidationRecordV2, ...]:
+    try:
+        return _canonical_candidate_validation_v2(values)
+    except RequestUnderstandingV2Error as error:
+        _fail_request_understanding_v3(error.reason_code)
+
+
+def _canonical_accepted_task_deltas_v3(
+    values: object,
+) -> tuple[AcceptedTaskDeltaV3, ...]:
+    if type(values) is not tuple:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    canonical: list[AcceptedTaskDeltaV3] = []
+    for value in values:
+        if type(value) not in (
+            AcceptedAddGoalTaskDeltaV3,
+            AcceptedSupplyInputTaskDeltaV3,
+        ):
+            _fail_request_understanding_v3(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        if _has_trusted_or_private_undeclared_state_v2(value):
+            _fail_request_understanding_v3(
+                RequestUnderstandingAggregateFailureCodeV2.TRUSTED_OR_PRIVATE_FIELD_PRESENT
+            )
+        if not _is_exact_canonical_model_v2(value, type(value)):
+            _fail_request_understanding_v3(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+        canonical.append(value)
+    return tuple(canonical)
+
+
+def _authoritative_message_v3(
+    authoritative_messages: Mapping[UUID, str],
+    source_ref: UUID,
+) -> str:
+    try:
+        message = authoritative_messages[source_ref]
+    except (KeyError, TypeError):
+        message = None
+    if type(message) is not str or not message:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    return message
+
+
+def _exact_unique_quote_span_v3(
+    *,
+    authoritative_message: str,
+    candidate: Cycle2InputCandidate,
+) -> tuple[object, int, int, str]:
+    quote = candidate.source_quote
+    if type(quote) is not str or not quote or quote == authoritative_message:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    start = authoritative_message.find(quote)
+    if start < 0 or authoritative_message.find(quote, start + 1) >= 0:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+
+    value = candidate.candidate_value
+    normalized_value: object = value
+    relation_is_exact = False
+    if candidate.name == "order_id":
+        try:
+            normalized_value = _normalize_order_id(value)
+        except RequestProcessingError:
+            normalized_value = None
+        relation_is_exact = (
+            type(value) is str
+            and normalized_value == value
+            and _source_quote_contains_exact_order_id(quote, value)
+        )
+    elif candidate.name == "product_description":
+        try:
+            normalized_value = normalize_product_description(value)
+            normalized_quote = normalize_product_description(quote)
+        except (TypeError, ValueError):
+            normalized_value = None
+            normalized_quote = ""
+        relation_is_exact = (
+            type(normalized_value) is str
+            and normalized_value in normalized_quote
+        )
+    elif candidate.name == "candidate_ordinal":
+        ordinal_mapping = {
+            2: ("第二", "第二个"),
+            6: ("第六", "第六个"),
+        }
+        expected = ordinal_mapping.get(value) if type(value) is int else None
+        relation_is_exact = (
+            expected is not None
+            and quote == expected[0]
+            and authoritative_message == expected[1]
+        )
+    else:
+        expected_quote = "没有收到" if value is True else "已经收到"
+        relation_is_exact = type(value) is bool and quote == expected_quote
+    if not relation_is_exact:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+
+    end = start + len(quote)
+    quote_hash = sha256(
+        authoritative_message[start:end].encode("utf-8")
+    ).hexdigest()
+    return normalized_value, start, end, quote_hash
+
+
+def _validate_cycle2_contextualization_scope_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: Cycle2InitialRequestUnderstandingOutputV2
+    | Cycle2ContinuationRequestUnderstandingOutputV2,
+) -> None:
+    current_ref = request_input.message_ref
+    recent_refs = set(request_input.recent_message_refs)
+    visible_refs = {current_ref, *recent_refs}
+    contextualization = output.contextualization
+    if (
+        current_ref not in contextualization.source_message_refs
+        or any(
+            source_ref not in visible_refs
+            for source_ref in contextualization.source_message_refs
+        )
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    for resolved in contextualization.resolved_reference_candidates:
+        if (
+            resolved.source_kind is ReferenceSourceKindV2.CURRENT_MESSAGE
+            and resolved.source_ref != current_ref
+        ) or (
+            resolved.source_kind is ReferenceSourceKindV2.RECENT_MESSAGE
+            and (
+                resolved.source_ref == current_ref
+                or resolved.source_ref not in recent_refs
+            )
+        ):
+            _fail_request_understanding_v3(
+                RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+            )
+
+
+def _project_cycle2_input_candidate_v3(
+    *,
+    candidate: Cycle2InputCandidate,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableCycle2InputCandidateV3:
+    message = _authoritative_message_v3(
+        authoritative_messages,
+        candidate.source_ref,
+    )
+    normalized, start, end, quote_hash = _exact_unique_quote_span_v3(
+        authoritative_message=message,
+        candidate=candidate,
+    )
+    try:
+        return DurableCycle2InputCandidateV3(
+            name=candidate.name,
+            normalized_candidate_value=normalized,
+            authority=InputAuthority.USER_CLAIM,
+            source_kind=InputSourceKind.CURRENT_MESSAGE,
+            source_ref=candidate.source_ref,
+            source_span_start=start,
+            source_span_end_exclusive=end,
+            source_quote_sha256=quote_hash,
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        ) from error
+
+
+def _project_cycle2_initial_candidate_v3(
+    *,
+    candidate: object,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableCycle2AddGoalTaskDeltaCandidateV3:
+    if (
+        not hasattr(candidate, "input_candidates")
+        or len(candidate.input_candidates) != 1
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+    projected_input = _project_cycle2_input_candidate_v3(
+        candidate=candidate.input_candidates[0],
+        authoritative_messages=authoritative_messages,
+    )
+    try:
+        return DurableCycle2AddGoalTaskDeltaCandidateV3(
+            candidate_id=candidate.candidate_id,
+            operation=candidate.operation,
+            goal_patch=candidate.goal_patch,
+            input_candidates=(projected_input,),
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        ) from error
+
+
+def _project_cycle2_continuation_candidate_v3(
+    *,
+    candidate: Cycle2ContinuationTaskDeltaCandidateV2,
+    authoritative_messages: Mapping[UUID, str],
+) -> DurableCycle2ContinuationTaskDeltaCandidateV3:
+    projected_inputs = tuple(
+        _project_cycle2_input_candidate_v3(
+            candidate=input_candidate,
+            authoritative_messages=authoritative_messages,
+        )
+        for input_candidate in candidate.input_candidates
+    )
+    try:
+        return DurableCycle2ContinuationTaskDeltaCandidateV3(
+            candidate_id=candidate.candidate_id,
+            operation=candidate.operation,
+            target_task_alias=candidate.target_task_alias,
+            target_request_unit_alias=candidate.target_request_unit_alias,
+            input_candidates=projected_inputs,
+            confidence=candidate.confidence,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        ) from error
+
+
+def _build_request_understanding_closure_from_safe_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    model_output_schema_version: Literal[
+        "e2e01-thin-v2",
+        "e2e01-cycle2-initial.p0.v1",
+        "e2e01-cycle2-continuation.p0.v2",
+    ],
+    message_ref: UUID,
+    contextualization: DurableQueryContextualizationCandidateV2,
+    projected_candidates: tuple[
+        DurablePhase1AddGoalTaskDeltaCandidateV3
+        | DurableCycle2AddGoalTaskDeltaCandidateV3
+        | DurableCycle2ContinuationTaskDeltaCandidateV3,
+        ...,
+    ],
+    request_understanding_record_id: UUID,
+    candidate_validation: tuple[CandidateValidationRecordV2, ...],
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV3, ...],
+    proposed_base_task_state_version: int | None,
+    validated_task_state_version: int | None,
+    next_move_candidate_ref: UUID | None,
+    now: datetime,
+) -> RequestUnderstandingClosureV3:
+    if type(request_understanding_record_id) is not UUID:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    if next_move_candidate_ref is not None:
+        if type(next_move_candidate_ref) is not UUID:
+            _fail_request_understanding_v3(
+                RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+            )
+
+    candidate_ids = tuple(
+        candidate.candidate_id for candidate in projected_candidates
+    )
+    accepted_delta_ids = tuple(
+        child.accepted_delta_id for child in accepted_task_deltas
+    )
+    binding_ids = tuple(
+        binding_ref
+        for child in accepted_task_deltas
+        for binding_ref in child.input_binding_refs
+    )
+    task_ids = frozenset(child.task_id for child in accepted_task_deltas)
+    request_unit_ids = frozenset(
+        child.target_request_unit_id
+        for child in accepted_task_deltas
+        if type(child) is AcceptedSupplyInputTaskDeltaV3
+    )
+    singleton_ids = {
+        request_input.run_id,
+        message_ref,
+        *(() if next_move_candidate_ref is None else (next_move_candidate_ref,)),
+    }
+    identity_groups = (
+        singleton_ids,
+        set(candidate_ids),
+        set(accepted_delta_ids),
+        set(binding_ids),
+        set(task_ids),
+        set(request_unit_ids),
+    )
+    has_cross_group_collision = any(
+        left.intersection(right)
+        for index, left in enumerate(identity_groups)
+        for right in identity_groups[index + 1 :]
+    )
+    if (
+        len(singleton_ids)
+        != 2 + (next_move_candidate_ref is not None)
+        or len(candidate_ids) != len(set(candidate_ids))
+        or len(accepted_delta_ids) != len(set(accepted_delta_ids))
+        or len(binding_ids) != len(set(binding_ids))
+        or has_cross_group_collision
+        or any(
+            request_understanding_record_id in identity_group
+            for identity_group in identity_groups
+        )
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    try:
+        record = RequestUnderstandingRecordV3(
+            request_understanding_record_id=request_understanding_record_id,
+            run_id=request_input.run_id,
+            message_ref=message_ref,
+            record_schema_version="request_understanding_record.p0.v3",
+            model_input_schema_version=request_input.schema_version,
+            model_output_schema_version=model_output_schema_version,
+            contextualization=contextualization,
+            task_delta_candidates=projected_candidates,
+            candidate_validation=candidate_validation,
+            accepted_delta_refs=tuple(
+                child.accepted_delta_id for child in accepted_task_deltas
+            ),
+            proposed_base_task_state_version=proposed_base_task_state_version,
+            validated_task_state_version=validated_task_state_version,
+            next_move_candidate_ref=next_move_candidate_ref,
+            created_at=now,
+        )
+        return RequestUnderstandingClosureV3(
+            record=record,
+            accepted_task_deltas=accepted_task_deltas,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise RequestUnderstandingV2Error(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        ) from error
+
+
+def build_request_understanding_closure_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: RequestUnderstandingOutputV2
+    | Cycle2InitialRequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    request_understanding_record_id: UUID,
+    candidate_validation: tuple[CandidateValidationRecordV2, ...],
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV3, ...],
+    proposed_base_task_state_version: PositiveStateVersion | None,
+    validated_task_state_version: PositiveStateVersion | None,
+    next_move_candidate_ref: UUID | None,
+    now: datetime,
+) -> RequestUnderstandingClosureV3:
+    """Build a generic Phase 1 or Cycle 2 initial quote-free v3 closure."""
+
+    canonical_input = _canonical_request_input_v3(request_input)
+    canonical_validation = _canonical_candidate_validation_v3(
+        candidate_validation
+    )
+    canonical_children = _canonical_accepted_task_deltas_v3(
+        accepted_task_deltas
+    )
+    if not isinstance(authoritative_messages, Mapping):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if type(now) is not datetime:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    try:
+        require_utc(now, field_name="now")
+    except (TypeError, ValueError):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    if type(output) is RequestUnderstandingOutputV2:
+        try:
+            canonical_output = _canonical_request_output_v2(output)
+        except RequestUnderstandingV2Error as error:
+            _fail_request_understanding_v3(error.reason_code)
+        try:
+            _validate_input_visible_source_scope_v2(
+                request_input=canonical_input,
+                output=canonical_output,
+            )
+            projected_contextualization = _project_contextualization_v2(
+                canonical_output.contextualization,
+                authoritative_messages,
+            )
+            projected_candidates = tuple(
+                DurablePhase1AddGoalTaskDeltaCandidateV3(
+                    candidate_id=candidate.candidate_id,
+                    operation=candidate.operation,
+                    goal_patch=candidate.goal_patch,
+                    input_candidates=tuple(
+                        _project_input_candidate_v2(
+                            input_candidate,
+                            authoritative_messages,
+                        )
+                        for input_candidate in candidate.input_candidates
+                    ),
+                    confidence=candidate.confidence,
+                )
+                for candidate in canonical_output.task_delta_candidates
+            )
+        except RequestUnderstandingV2Error as error:
+            _fail_request_understanding_v3(error.reason_code)
+        model_output_schema_version = canonical_output.schema_version
+    elif type(output) is Cycle2InitialRequestUnderstandingOutputV2:
+        canonical_output = _canonical_cycle2_output_v3(
+            output,
+            Cycle2InitialRequestUnderstandingOutputV2,
+            expected_schema_version="e2e01-cycle2-initial.p0.v1",
+        )
+        _validate_cycle2_contextualization_scope_v3(
+            request_input=canonical_input,
+            output=canonical_output,
+        )
+        try:
+            projected_contextualization = _project_contextualization_v2(
+                canonical_output.contextualization,
+                authoritative_messages,
+            )
+        except RequestUnderstandingV2Error as error:
+            _fail_request_understanding_v3(error.reason_code)
+        projected_candidates = (
+            _project_cycle2_initial_candidate_v3(
+                candidate=canonical_output.task_delta_candidates[0],
+                authoritative_messages=authoritative_messages,
+            ),
+        )
+        model_output_schema_version = canonical_output.schema_version
+    else:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.MODEL_OUTPUT_SCHEMA_INVALID
+        )
+
+    if canonical_input.message_ref != canonical_output.message_ref:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    current_message = _authoritative_message_v3(
+        authoritative_messages,
+        canonical_input.message_ref,
+    )
+    if current_message != canonical_input.original_query:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if (
+        proposed_base_task_state_version
+        != canonical_output.next_move_candidate.base_task_state_version
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+    if next_move_candidate_ref is None and (
+        proposed_base_task_state_version is not None
+        or validated_task_state_version is not None
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAtomicFailureCodeV2.DURABLE_CLOSURE_COMMIT_FAILED
+        )
+
+    return _build_request_understanding_closure_from_safe_v3(
+        request_input=canonical_input,
+        model_output_schema_version=model_output_schema_version,
+        message_ref=canonical_output.message_ref,
+        contextualization=projected_contextualization,
+        projected_candidates=projected_candidates,
+        request_understanding_record_id=request_understanding_record_id,
+        candidate_validation=canonical_validation,
+        accepted_task_deltas=canonical_children,
+        proposed_base_task_state_version=proposed_base_task_state_version,
+        validated_task_state_version=validated_task_state_version,
+        next_move_candidate_ref=next_move_candidate_ref,
+        now=now,
+    )
+
+
+class InitialTaskIdentityAllocationV3(RuntimePrivateModel):
+    """Trusted identities for one Cycle 2 initial v3 aggregate."""
+
+    request_understanding_record_id: UUID
+    accepted_delta_id: UUID
+    candidate_ref: UUID
+    task_id: UUID
+    request_unit_id: UUID
+    binding_id: UUID
+    next_move_candidate_ref: UUID
+
+    @model_validator(mode="after")
+    def all_allocation_identities_are_distinct(self) -> Self:
+        identities = tuple(
+            getattr(self, field_name) for field_name in type(self).model_fields
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("initial v3 identities must be unique")
+        return self
+
+
+class _Cycle2InitialAcceptedTaskGraphV3(RuntimePrivateModel):
+    accepted_delta: AcceptedAddGoalTaskDeltaV3
+    input_binding: InputBindingV2
+    task: TaskRecord
+    request_unit: RequestUnitRecord
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_values_are_exact_owner_models(cls, value: object) -> object:
+        if (
+            not isinstance(value, Mapping)
+            or type(value.get("accepted_delta"))
+            is not AcceptedAddGoalTaskDeltaV3
+            or type(value.get("input_binding")) is not InputBindingV2
+            or type(value.get("task")) is not TaskRecord
+            or type(value.get("request_unit")) is not RequestUnitRecord
+        ):
+            raise ValueError("Cycle 2 initial v3 graph requires exact models")
+        return value
+
+    @model_validator(mode="after")
+    def graph_is_one_clean_product_claim(self) -> Self:
+        child = self.accepted_delta
+        binding = self.input_binding
+        task = self.task
+        unit = self.request_unit
+        if any(
+            not _is_exact_canonical_model_v2(value, type(value))
+            for value in (child, binding, task, unit)
+        ):
+            raise ValueError("Cycle 2 initial v3 graph is not canonical")
+        identities = (
+            child.accepted_delta_id,
+            binding.binding_id,
+            task.task_id,
+            unit.request_unit_id,
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("Cycle 2 initial v3 graph identities must be unique")
+        if (
+            child.operation is not TaskDeltaOperation.ADD_GOAL
+            or child.task_id != task.task_id
+            or child.base_task_state_version is not None
+            or child.result_task_state_version != 1
+            or child.input_binding_refs != (binding.binding_id,)
+            or binding.name != "product_description"
+            or type(binding.normalized_value) is not str
+            or binding.source_refs != (child.message_ref,)
+            or binding.supersedes is not None
+        ):
+            raise ValueError("Cycle 2 initial v3 Claim projection mismatch")
+        if (
+            task.status is not TaskStatus.ACTIVE
+            or task.state_version != 1
+            or task.last_outcome_ref is not None
+            or unit.task_id != task.task_id
+            or unit.goal_text != child.goal_text
+            or unit.goal_source_refs != (child.message_ref,)
+            or unit.input_binding_refs != (binding.binding_id,)
+            or unit.status is not TaskStatus.ACTIVE
+            or unit.state_version != 1
+            or unit.contextualization_ref is not None
+            or unit.constraint_refs
+            or unit.dependency_refs
+            or unit.open_questions
+            or unit.observation_refs
+            or unit.evidence_binding_refs
+            or unit.pending_action_ref is not None
+            or unit.result_refs
+        ):
+            raise ValueError("Cycle 2 initial v3 Task graph must be clean")
+        if len(
+            {
+                child.accepted_at,
+                binding.created_at,
+                binding.updated_at,
+                task.created_at,
+                task.updated_at,
+                unit.created_at,
+                unit.updated_at,
+            }
+        ) != 1:
+            raise ValueError("Cycle 2 initial v3 graph requires one trusted time")
+        return self
+
+
+class Cycle2InitialRequestDecisionV3(RuntimePrivateModel):
+    closure: RequestUnderstandingClosureV3
+    task_graph: _Cycle2InitialAcceptedTaskGraphV3
+    next_move_candidate_ref: UUID
+    next_move_candidate: NextMove
+    argument_binding_refs: Annotated[tuple[UUID, ...], Field(min_length=1)]
+    proposed_base_task_state_version: Literal[None] = None
+    validated_task_state_version: Literal[1]
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_values_are_exact_owner_models(cls, value: object) -> object:
+        if (
+            not isinstance(value, Mapping)
+            or type(value.get("closure")) is not RequestUnderstandingClosureV3
+            or type(value.get("task_graph"))
+            is not _Cycle2InitialAcceptedTaskGraphV3
+            or type(value.get("next_move_candidate")) is not NextMove
+        ):
+            raise ValueError("Cycle 2 initial v3 decision requires exact models")
+        return value
+
+    @model_validator(mode="after")
+    def decision_closes_search_provenance(self) -> Self:
+        record = self.closure.record
+        graph = self.task_graph
+        move = self.next_move_candidate
+        binding = graph.input_binding
+        arguments = move.arguments
+        argument = (
+            arguments.get("product_description")
+            if arguments is not None
+            else None
+        )
+        if (
+            record.model_output_schema_version
+            != "e2e01-cycle2-initial.p0.v1"
+            or self.closure.accepted_task_deltas != (graph.accepted_delta,)
+            or record.next_move_candidate_ref != self.next_move_candidate_ref
+            or record.proposed_base_task_state_version is not None
+            or record.validated_task_state_version != 1
+            or move.kind is not NextMoveKind.CALL_TOOL
+            or move.requested_tool_name != "search_orders"
+            or arguments is None
+            or set(arguments) != {"product_description"}
+            or argument != binding.normalized_value
+            or move.base_task_state_version is not None
+            or self.argument_binding_refs != (binding.binding_id,)
+            or self.proposed_base_task_state_version is not None
+            or self.validated_task_state_version != 1
+        ):
+            raise ValueError("Cycle 2 initial v3 decision provenance mismatch")
+        return self
+
+
+def validate_and_reduce_cycle2_initial_request_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: Cycle2InitialRequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    customer_context: CustomerContext,
+    identity_allocation: InitialTaskIdentityAllocationV3,
+    now: datetime,
+) -> Cycle2InitialRequestDecisionV3:
+    """Build a clean Cycle 2 initial graph and its exact v3 RU closure."""
+
+    canonical_input = _canonical_request_input_v3(request_input)
+    canonical_output = _canonical_cycle2_output_v3(
+        output,
+        Cycle2InitialRequestUnderstandingOutputV2,
+        expected_schema_version="e2e01-cycle2-initial.p0.v1",
+    )
+    if not isinstance(authoritative_messages, Mapping):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if canonical_input.message_ref != canonical_output.message_ref:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if (
+        type(identity_allocation) is not InitialTaskIdentityAllocationV3
+        or not _is_exact_canonical_model_v2(
+            identity_allocation,
+            InitialTaskIdentityAllocationV3,
+        )
+        or type(customer_context) is not CustomerContext
+        or not _is_exact_canonical_model_v2(customer_context, CustomerContext)
+        or canonical_input.recent_message_refs
+        or canonical_input.pending_question is not None
+        or canonical_input.active_task_summaries
+        or canonical_input.focused_task_summary is not None
+        or canonical_input.pending_action_summaries
+    ):
+        raise _cycle2_routing_error()
+    if type(now) is not datetime:
+        raise _cycle2_routing_error()
+    try:
+        require_utc(now, field_name="now")
+    except (TypeError, ValueError) as error:
+        raise _cycle2_routing_error() from error
+    if customer_context.authenticated_at > now:
+        raise _cycle2_routing_error()
+
+    delta = canonical_output.task_delta_candidates[0]
+    candidate = delta.input_candidates[0]
+    allocation = identity_allocation
+    all_identities = (
+        canonical_input.run_id,
+        canonical_input.message_ref,
+        delta.candidate_id,
+        allocation.request_understanding_record_id,
+        allocation.accepted_delta_id,
+        allocation.task_id,
+        allocation.request_unit_id,
+        allocation.binding_id,
+        allocation.next_move_candidate_ref,
+    )
+    if (
+        allocation.candidate_ref != delta.candidate_id
+        or len(all_identities) != len(set(all_identities))
+    ):
+        raise _cycle2_routing_error()
+
+    try:
+        _validate_cycle2_contextualization_scope_v3(
+            request_input=canonical_input,
+            output=canonical_output,
+        )
+        projected_candidate = _project_cycle2_initial_candidate_v3(
+            candidate=delta,
+            authoritative_messages=authoritative_messages,
+        )
+        current_message = _authoritative_message_v3(
+            authoritative_messages,
+            canonical_input.message_ref,
+        )
+        if current_message != canonical_input.original_query:
+            _fail_request_understanding_v3(
+                RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+            )
+        normalized_product = (
+            projected_candidate.input_candidates[0].normalized_candidate_value
+        )
+        binding = InputBindingV2(
+            binding_id=allocation.binding_id,
+            name="product_description",
+            normalized_value=normalized_product,
+            authority=InputAuthority.USER_CLAIM,
+            source_refs=(canonical_input.message_ref,),
+            validation_status=InputValidationStatus.ACCEPTED,
+            confirmed_by_user=True,
+            created_at=now,
+            updated_at=now,
+        )
+        child = AcceptedAddGoalTaskDeltaV3(
+            accepted_delta_id=allocation.accepted_delta_id,
+            candidate_ref=delta.candidate_id,
+            message_ref=canonical_input.message_ref,
+            operation=TaskDeltaOperation.ADD_GOAL,
+            goal_text=delta.goal_patch,
+            input_binding_refs=(allocation.binding_id,),
+            accepted_at=now,
+            task_id=allocation.task_id,
+            base_task_state_version=None,
+            result_task_state_version=1,
+        )
+        graph = _Cycle2InitialAcceptedTaskGraphV3(
+            accepted_delta=child,
+            input_binding=binding,
+            task=TaskRecord(
+                task_id=allocation.task_id,
+                owner_customer_id=customer_context.customer_id,
+                status=TaskStatus.ACTIVE,
+                state_version=1,
+                created_at=now,
+                updated_at=now,
+            ),
+            request_unit=RequestUnitRecord(
+                request_unit_id=allocation.request_unit_id,
+                task_id=allocation.task_id,
+                goal_text=delta.goal_patch,
+                goal_source_refs=(canonical_input.message_ref,),
+                input_binding_refs=(allocation.binding_id,),
+                status=TaskStatus.ACTIVE,
+                state_version=1,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        closure = build_request_understanding_closure_v3(
+            request_input=canonical_input,
+            output=canonical_output,
+            authoritative_messages=authoritative_messages,
+            request_understanding_record_id=(
+                allocation.request_understanding_record_id
+            ),
+            candidate_validation=(
+                CandidateValidationRecordV2(
+                    candidate_ref=delta.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            accepted_task_deltas=(child,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=1,
+            next_move_candidate_ref=allocation.next_move_candidate_ref,
+            now=now,
+        )
+        return Cycle2InitialRequestDecisionV3(
+            closure=closure,
+            task_graph=graph,
+            next_move_candidate_ref=allocation.next_move_candidate_ref,
+            next_move_candidate=canonical_output.next_move_candidate,
+            argument_binding_refs=(binding.binding_id,),
+            proposed_base_task_state_version=None,
+            validated_task_state_version=1,
+        )
+    except RequestUnderstandingV2Error:
+        raise
+    except (
+        RequestProcessingError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ) as error:
+        raise _cycle2_routing_error() from error
+
+
 class Cycle2ContinuationBindingDecision(RuntimePrivateModel):
     """Inactive ordinary-continuation Claim proposed for the Application CAS."""
 
@@ -3072,6 +4107,430 @@ def _new_cycle2_claim_binding(
             updated_at=now,
             supersedes=(same_name[0].binding_id if same_name else None),
         )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise _cycle2_routing_error() from error
+
+
+class Cycle2ContinuationIdentityAllocationV3(RuntimePrivateModel):
+    """Trusted continuation identities; ACCEPT-only IDs stay inert on REJECT."""
+
+    request_understanding_record_id: UUID
+    accepted_delta_id: UUID
+    input_binding_ids: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=2),
+    ]
+
+
+class Cycle2ContinuationDecisionV3(RuntimePrivateModel):
+    closure: RequestUnderstandingClosureV3
+    input_bindings: Annotated[
+        tuple[InputBindingV2, ...],
+        Field(min_length=1, max_length=2),
+    ]
+    routing_trigger_binding_ref: UUID
+
+    @model_validator(mode="before")
+    @classmethod
+    def nested_values_are_exact_owner_models(cls, value: object) -> object:
+        if (
+            not isinstance(value, Mapping)
+            or type(value.get("closure")) is not RequestUnderstandingClosureV3
+            or type(value.get("input_bindings")) is not tuple
+            or any(
+                type(binding) is not InputBindingV2
+                for binding in value.get("input_bindings", ())
+            )
+        ):
+            raise ValueError("continuation ACCEPT requires exact owner models")
+        return value
+
+    @model_validator(mode="after")
+    def accepted_decision_is_one_exact_claim_effect(self) -> Self:
+        closure = self.closure
+        record = closure.record
+        if (
+            record.model_output_schema_version
+            != "e2e01-cycle2-continuation.p0.v2"
+            or len(record.task_delta_candidates) != 1
+            or len(record.candidate_validation) != 1
+            or record.candidate_validation[0].decision
+            is not CandidateValidationDecision.ACCEPT
+            or len(closure.accepted_task_deltas) != 1
+            or type(closure.accepted_task_deltas[0])
+            is not AcceptedSupplyInputTaskDeltaV3
+        ):
+            raise ValueError("continuation ACCEPT closure branch mismatch")
+        child = closure.accepted_task_deltas[0]
+        candidate = record.task_delta_candidates[0]
+        if (
+            type(candidate)
+            is not DurableCycle2ContinuationTaskDeltaCandidateV3
+            or tuple(binding.binding_id for binding in self.input_bindings)
+            != child.input_binding_refs
+            or len(self.input_bindings) != len(candidate.input_candidates)
+            or self.routing_trigger_binding_ref
+            not in child.input_binding_refs
+        ):
+            raise ValueError("continuation ACCEPT effect graph mismatch")
+        if len(candidate.input_candidates) == 2 and (
+            tuple(item.name for item in candidate.input_candidates)
+            != ("order_id", "shipment_not_received")
+            or candidate.input_candidates[0].normalized_candidate_value
+            != "O-1001"
+            or candidate.input_candidates[1].normalized_candidate_value
+            is not True
+        ):
+            raise ValueError("continuation dual ACCEPT must be exact DNR pair")
+        for binding, durable_input in zip(
+            self.input_bindings,
+            candidate.input_candidates,
+            strict=True,
+        ):
+            if (
+                not _is_exact_canonical_model_v2(binding, InputBindingV2)
+                or binding.name != durable_input.name
+                or binding.normalized_value
+                != durable_input.normalized_candidate_value
+                or binding.source_refs != (record.message_ref,)
+                or binding.created_at != record.created_at
+                or binding.updated_at != record.created_at
+            ):
+                raise ValueError("continuation Binding projection mismatch")
+        expected_trigger = (
+            self.input_bindings[1].binding_id
+            if len(self.input_bindings) == 2
+            else self.input_bindings[0].binding_id
+        )
+        if self.routing_trigger_binding_ref != expected_trigger:
+            raise ValueError("continuation routing trigger must be deterministic")
+        return self
+
+
+class RejectedCycle2ContinuationDecisionV3(RuntimePrivateModel):
+    closure: RequestUnderstandingClosureV3
+
+    @model_validator(mode="before")
+    @classmethod
+    def closure_is_exact_owner_model(cls, value: object) -> object:
+        if (
+            not isinstance(value, Mapping)
+            or type(value.get("closure")) is not RequestUnderstandingClosureV3
+        ):
+            raise ValueError("continuation REJECT requires exact v3 closure")
+        return value
+
+    @model_validator(mode="after")
+    def rejected_decision_has_no_authority_effect(self) -> Self:
+        record = self.closure.record
+        if (
+            record.model_output_schema_version
+            != "e2e01-cycle2-continuation.p0.v2"
+            or len(record.task_delta_candidates) != 1
+            or len(record.candidate_validation) != 1
+            or record.candidate_validation[0].decision
+            is not CandidateValidationDecision.REJECT
+            or record.candidate_validation[0].reason_code is None
+            or record.accepted_delta_refs
+            or self.closure.accepted_task_deltas
+        ):
+            raise ValueError("continuation REJECT cannot carry accepted authority")
+        return self
+
+
+Cycle2ContinuationReductionV3: TypeAlias = (
+    Cycle2ContinuationDecisionV3 | RejectedCycle2ContinuationDecisionV3
+)
+
+
+def _build_cycle2_continuation_closure_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: Cycle2ContinuationRequestUnderstandingOutputV2,
+    projected_contextualization: DurableQueryContextualizationCandidateV2,
+    projected_candidate: DurableCycle2ContinuationTaskDeltaCandidateV3,
+    request_understanding_record_id: UUID,
+    validation: CandidateValidationRecordV2,
+    accepted_task_deltas: tuple[AcceptedTaskDeltaV3, ...],
+    now: datetime,
+) -> RequestUnderstandingClosureV3:
+    return _build_request_understanding_closure_from_safe_v3(
+        request_input=request_input,
+        model_output_schema_version=output.schema_version,
+        message_ref=output.message_ref,
+        contextualization=projected_contextualization,
+        projected_candidates=(projected_candidate,),
+        request_understanding_record_id=request_understanding_record_id,
+        candidate_validation=(validation,),
+        accepted_task_deltas=accepted_task_deltas,
+        proposed_base_task_state_version=None,
+        validated_task_state_version=None,
+        next_move_candidate_ref=None,
+        now=now,
+    )
+
+
+def _continuation_alias_rejection_reason_v3(
+    *,
+    request_input: RequestUnderstandingInput,
+    candidate: Cycle2ContinuationTaskDeltaCandidateV2,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+) -> CandidateRejectionReasonCode | None:
+    focused = request_input.focused_task_summary
+    if focused is None:
+        return CandidateRejectionReasonCode.REFERENCE_UNRESOLVED
+    if (
+        candidate.target_task_alias != focused.task_alias
+        or focused.request_unit_alias is None
+        or candidate.target_request_unit_alias != focused.request_unit_alias
+    ):
+        return CandidateRejectionReasonCode.REFERENCE_UNRESOLVED
+
+    active_matches = tuple(
+        summary
+        for summary in request_input.active_task_summaries
+        if (
+            summary.task_alias == candidate.target_task_alias
+            or summary.request_unit_alias
+            == candidate.target_request_unit_alias
+        )
+    )
+    if len(active_matches) > 1 or (
+        len(active_matches) == 1 and active_matches[0] != focused
+    ):
+        return CandidateRejectionReasonCode.REFERENCE_AMBIGUOUS
+    if (
+        focused.goal_summary != current_request_unit.goal_text
+        or focused.status != current_task.status.value
+        or focused.open_questions != current_request_unit.open_questions
+        or current_request_unit.task_id != current_task.task_id
+    ):
+        return CandidateRejectionReasonCode.REFERENCE_UNRESOLVED
+    return None
+
+
+def reduce_cycle2_continuation_task_delta(
+    *,
+    request_input: RequestUnderstandingInput,
+    output: Cycle2ContinuationRequestUnderstandingOutputV2,
+    authoritative_messages: Mapping[UUID, str],
+    customer_context: CustomerContext,
+    current_task: TaskRecord,
+    current_request_unit: RequestUnitRecord,
+    current_input_bindings: tuple[InputBindingV2, ...],
+    identity_allocation: Cycle2ContinuationIdentityAllocationV3,
+    now: datetime,
+) -> Cycle2ContinuationReductionV3:
+    """Reduce one continuation envelope after safe provenance, without writes."""
+
+    canonical_input = _canonical_request_input_v3(request_input)
+    canonical_output = _canonical_cycle2_output_v3(
+        output,
+        Cycle2ContinuationRequestUnderstandingOutputV2,
+        expected_schema_version="e2e01-cycle2-continuation.p0.v2",
+    )
+    if (
+        type(identity_allocation)
+        is not Cycle2ContinuationIdentityAllocationV3
+        or not _is_exact_canonical_model_v2(
+            identity_allocation,
+            Cycle2ContinuationIdentityAllocationV3,
+        )
+    ):
+        raise _cycle2_routing_error()
+    if not isinstance(authoritative_messages, Mapping):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if canonical_input.message_ref != canonical_output.message_ref:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    if type(now) is not datetime:
+        raise _cycle2_routing_error()
+    try:
+        require_utc(now, field_name="now")
+    except (TypeError, ValueError) as error:
+        raise _cycle2_routing_error() from error
+
+    _validate_cycle2_contextualization_scope_v3(
+        request_input=canonical_input,
+        output=canonical_output,
+    )
+    current_message = _authoritative_message_v3(
+        authoritative_messages,
+        canonical_input.message_ref,
+    )
+    if current_message != canonical_input.original_query:
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+    model_candidate = canonical_output.task_delta_candidates[0]
+    if any(
+        input_candidate.source_ref != canonical_input.message_ref
+        for input_candidate in model_candidate.input_candidates
+    ):
+        _fail_request_understanding_v3(
+            RequestUnderstandingAggregateFailureCodeV2.SOURCE_PROVENANCE_INVALID
+        )
+
+    try:
+        projected_contextualization = _project_contextualization_v2(
+            canonical_output.contextualization,
+            authoritative_messages,
+        )
+    except RequestUnderstandingV2Error as error:
+        _fail_request_understanding_v3(error.reason_code)
+    projected_candidate = _project_cycle2_continuation_candidate_v3(
+        candidate=model_candidate,
+        authoritative_messages=authoritative_messages,
+    )
+
+    _context, task, unit, current_bindings = _require_cycle2_current_task_graph(
+        customer_context=customer_context,
+        current_task=current_task,
+        current_request_unit=current_request_unit,
+        current_input_bindings=current_input_bindings,
+        trusted_now=now,
+    )
+    allocation = identity_allocation
+    trusted_graph_identities = (
+        canonical_input.run_id,
+        canonical_input.message_ref,
+        model_candidate.candidate_id,
+        task.task_id,
+        unit.request_unit_id,
+        *(binding.binding_id for binding in current_bindings),
+    )
+    if len(trusted_graph_identities) != len(set(trusted_graph_identities)):
+        raise _cycle2_routing_error()
+    always_reserved_ids = {
+        *trusted_graph_identities,
+    }
+    if (
+        type(allocation.request_understanding_record_id) is not UUID
+        or allocation.request_understanding_record_id in always_reserved_ids
+    ):
+        raise _cycle2_routing_error()
+
+    def reject(
+        reason: CandidateRejectionReasonCode,
+    ) -> RejectedCycle2ContinuationDecisionV3:
+        closure = _build_cycle2_continuation_closure_v3(
+            request_input=canonical_input,
+            output=canonical_output,
+            projected_contextualization=projected_contextualization,
+            projected_candidate=projected_candidate,
+            request_understanding_record_id=(
+                allocation.request_understanding_record_id
+            ),
+            validation=CandidateValidationRecordV2(
+                candidate_ref=model_candidate.candidate_id,
+                decision=CandidateValidationDecision.REJECT,
+                reason_code=reason,
+            ),
+            accepted_task_deltas=(),
+            now=now,
+        )
+        return RejectedCycle2ContinuationDecisionV3(closure=closure)
+
+    if model_candidate.operation is not TaskDeltaOperation.SUPPLY_INPUT:
+        return reject(CandidateRejectionReasonCode.OPERATION_NOT_SUPPORTED)
+
+    alias_rejection = _continuation_alias_rejection_reason_v3(
+        request_input=canonical_input,
+        candidate=model_candidate,
+        current_task=task,
+        current_request_unit=unit,
+    )
+    if alias_rejection is not None:
+        return reject(alias_rejection)
+
+    input_candidates = model_candidate.input_candidates
+    names = tuple(candidate.name for candidate in input_candidates)
+    if len(names) != len(set(names)):
+        return reject(CandidateRejectionReasonCode.INPUT_VALUE_INVALID)
+    if len(input_candidates) == 2:
+        first, second = input_candidates
+        if (
+            names != ("order_id", "shipment_not_received")
+            or first.candidate_value != "O-1001"
+            or second.candidate_value is not True
+        ):
+            return reject(CandidateRejectionReasonCode.INPUT_VALUE_INVALID)
+        current_order_bindings = tuple(
+            binding for binding in current_bindings if binding.name == "order_id"
+        )
+        if not current_order_bindings:
+            return reject(CandidateRejectionReasonCode.REFERENCE_UNRESOLVED)
+        if (
+            len(current_order_bindings) != 1
+            or current_order_bindings[0].normalized_value != "O-1001"
+        ):
+            return reject(CandidateRejectionReasonCode.INPUT_VALUE_INVALID)
+
+    used_ids = (
+        allocation.accepted_delta_id,
+        *allocation.input_binding_ids,
+    )
+    if (
+        len(allocation.input_binding_ids) != len(input_candidates)
+        or len(used_ids) != len(set(used_ids))
+        or any(used_id in always_reserved_ids for used_id in used_ids)
+        or allocation.request_understanding_record_id in used_ids
+    ):
+        raise _cycle2_routing_error()
+
+    try:
+        bindings = tuple(
+            _new_cycle2_claim_binding(
+                candidate=candidate,
+                current_bindings=current_bindings,
+                binding_id=binding_id,
+                now=now,
+            )
+            for candidate, binding_id in zip(
+                input_candidates,
+                allocation.input_binding_ids,
+                strict=True,
+            )
+        )
+        child = AcceptedSupplyInputTaskDeltaV3(
+            accepted_delta_id=allocation.accepted_delta_id,
+            candidate_ref=model_candidate.candidate_id,
+            message_ref=canonical_input.message_ref,
+            operation=TaskDeltaOperation.SUPPLY_INPUT,
+            task_id=task.task_id,
+            target_request_unit_id=unit.request_unit_id,
+            input_binding_refs=tuple(binding.binding_id for binding in bindings),
+            accepted_at=now,
+            base_task_state_version=task.state_version,
+            result_task_state_version=task.state_version + 1,
+        )
+        closure = _build_cycle2_continuation_closure_v3(
+            request_input=canonical_input,
+            output=canonical_output,
+            projected_contextualization=projected_contextualization,
+            projected_candidate=projected_candidate,
+            request_understanding_record_id=(
+                allocation.request_understanding_record_id
+            ),
+            validation=CandidateValidationRecordV2(
+                candidate_ref=model_candidate.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+            accepted_task_deltas=(child,),
+            now=now,
+        )
+        trigger = bindings[1] if len(bindings) == 2 else bindings[0]
+        return Cycle2ContinuationDecisionV3(
+            closure=closure,
+            input_bindings=bindings,
+            routing_trigger_binding_ref=trigger.binding_id,
+        )
+    except RequestUnderstandingV2Error:
+        raise
     except (TypeError, ValueError, ValidationError) as error:
         raise _cycle2_routing_error() from error
 

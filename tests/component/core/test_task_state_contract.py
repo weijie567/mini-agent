@@ -16,11 +16,17 @@ from mini_agent.core.request_understanding import (
     UncertaintyV2,
 )
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
     DurableInputCandidateV2,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
@@ -30,6 +36,7 @@ from mini_agent.core.task_state import (
     RequestUnderstandingAggregateFailureCodeV2,
     RequestUnderstandingAtomicFailureCodeV2,
     RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -684,5 +691,186 @@ def test_v2_request_understanding_record_has_exact_versioned_parent_shape() -> N
                 **record.model_dump(),
                 "next_move_candidate_ref": None,
                 "validated_task_state_version": 1,
+            }
+        )
+
+
+def test_v3_request_understanding_models_have_exact_breaking_shapes() -> None:
+    assert tuple(RequestUnderstandingRecordV3.model_fields) == (
+        "request_understanding_record_id",
+        "run_id",
+        "message_ref",
+        "record_schema_version",
+        "model_input_schema_version",
+        "model_output_schema_version",
+        "contextualization",
+        "task_delta_candidates",
+        "candidate_validation",
+        "accepted_delta_refs",
+        "proposed_base_task_state_version",
+        "validated_task_state_version",
+        "next_move_candidate_ref",
+        "created_at",
+    )
+    assert "schema_version" not in RequestUnderstandingRecordV3.model_fields
+    assert tuple(AcceptedAddGoalTaskDeltaV3.model_fields) == (
+        "accepted_delta_id",
+        "candidate_ref",
+        "message_ref",
+        "operation",
+        "goal_text",
+        "input_binding_refs",
+        "accepted_at",
+        "task_id",
+        "base_task_state_version",
+        "result_task_state_version",
+    )
+    assert tuple(AcceptedSupplyInputTaskDeltaV3.model_fields) == (
+        "accepted_delta_id",
+        "candidate_ref",
+        "message_ref",
+        "operation",
+        "task_id",
+        "target_request_unit_id",
+        "input_binding_refs",
+        "accepted_at",
+        "base_task_state_version",
+        "result_task_state_version",
+    )
+
+    message_ref = uuid4()
+    candidate_ref = uuid4()
+    durable_input = DurableCycle2InputCandidateV3(
+        name="shipment_not_received",
+        normalized_candidate_value=True,
+        authority=InputAuthority.USER_CLAIM,
+        source_kind=InputSourceKind.CURRENT_MESSAGE,
+        source_ref=message_ref,
+        source_span_start=8,
+        source_span_end_exclusive=12,
+        source_quote_sha256="a" * 64,
+        confidence=0.99,
+    )
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=candidate_ref,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="task-1",
+        target_request_unit_alias="unit-1",
+        input_candidates=(durable_input,),
+        confidence=0.98,
+    )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=uuid4(),
+        message_ref=message_ref,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+        contextualization=_durable_context_v2(message_ref=message_ref),
+        task_delta_candidates=(candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate_ref,
+                decision=CandidateValidationDecision.REJECT,
+                reason_code=CandidateRejectionReasonCode.INPUT_VALUE_INVALID,
+            ),
+        ),
+        accepted_delta_refs=(),
+        created_at=NOW,
+    )
+    assert '"source_quote":' not in record.model_dump_json()
+
+    phase1 = DurablePhase1AddGoalTaskDeltaCandidateV3(
+        candidate_id=candidate_ref,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查询订单状态",
+        input_candidates=(
+            _durable_candidate_v2(
+                candidate_id=candidate_ref,
+                message_ref=message_ref,
+            ).input_candidates[0],
+        ),
+        confidence=0.98,
+    )
+    with pytest.raises(ValidationError, match="continuation"):
+        RequestUnderstandingRecordV3.model_validate(
+            {**record.model_dump(), "task_delta_candidates": (phase1,)}
+        )
+
+    product_input = DurableCycle2InputCandidateV3(
+        name="product_description",
+        normalized_candidate_value="轻量 跑鞋",
+        authority=InputAuthority.USER_CLAIM,
+        source_kind=InputSourceKind.CURRENT_MESSAGE,
+        source_ref=message_ref,
+        source_span_start=2,
+        source_span_end_exclusive=7,
+        source_quote_sha256="b" * 64,
+        confidence=0.99,
+    )
+    initial_candidate = DurableCycle2AddGoalTaskDeltaCandidateV3(
+        candidate_id=candidate_ref,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查找轻量跑鞋订单",
+        input_candidates=(product_input,),
+        confidence=0.98,
+    )
+    initial_delta_ref = uuid4()
+    initial_record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=uuid4(),
+        message_ref=message_ref,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-initial.p0.v1",
+        contextualization=_durable_context_v2(message_ref=message_ref),
+        task_delta_candidates=(initial_candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate_ref,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(initial_delta_ref,),
+        proposed_base_task_state_version=None,
+        validated_task_state_version=1,
+        next_move_candidate_ref=uuid4(),
+        created_at=NOW,
+    )
+    assert initial_record.model_output_schema_version == (
+        "e2e01-cycle2-initial.p0.v1"
+    )
+
+    with pytest.raises(ValidationError, match="accepted Candidate"):
+        RequestUnderstandingRecordV3.model_validate(
+            {
+                **initial_record.model_dump(),
+                "candidate_validation": (
+                    CandidateValidationRecordV2(
+                        candidate_ref=candidate_ref,
+                        decision=CandidateValidationDecision.REJECT,
+                        reason_code=CandidateRejectionReasonCode.INPUT_VALUE_INVALID,
+                    ),
+                ),
+                "accepted_delta_refs": (),
+            }
+        )
+    with pytest.raises(ValidationError, match="Phase 1"):
+        RequestUnderstandingRecordV3.model_validate(
+            {
+                **initial_record.model_dump(),
+                "model_output_schema_version": "e2e01-thin-v2",
+            }
+        )
+    with pytest.raises(ValidationError, match="continuation"):
+        RequestUnderstandingRecordV3.model_validate(
+            {
+                **initial_record.model_dump(),
+                "model_output_schema_version": (
+                    "e2e01-cycle2-continuation.p0.v2"
+                ),
+                "proposed_base_task_state_version": None,
+                "validated_task_state_version": None,
+                "next_move_candidate_ref": None,
             }
         )

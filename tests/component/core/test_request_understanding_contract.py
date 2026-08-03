@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -41,6 +43,72 @@ def _candidate(*, message_ref: UUID, order_id: str = "O-4242") -> InputCandidate
         source_quote=f"订单 {order_id}",
         confidence=0.99,
     )
+
+
+def test_cycle2_continuation_v2_keeps_business_invalid_shapes_schema_valid() -> None:
+    assert tuple(TaskDeltaOperation) == (
+        TaskDeltaOperation.ADD_GOAL,
+        TaskDeltaOperation.AMEND_GOAL,
+        TaskDeltaOperation.SUPPLY_INPUT,
+        TaskDeltaOperation.CANCEL_GOAL,
+        TaskDeltaOperation.CONFIRMATION_CANDIDATE,
+    )
+    assert tuple(Cycle2ContinuationTaskDeltaCandidateV2.model_fields) == (
+        "candidate_id",
+        "operation",
+        "target_task_alias",
+        "target_request_unit_alias",
+        "input_candidates",
+        "confidence",
+    )
+    assert tuple(Cycle2ContinuationRequestUnderstandingOutputV2.model_fields) == (
+        "schema_version",
+        "message_ref",
+        "contextualization",
+        "task_delta_candidates",
+    )
+
+    message_ref = uuid4()
+    duplicated = Cycle2InputCandidate(
+        name="order_id",
+        candidate_value="O-1001",
+        source_ref=message_ref,
+        source_quote="O-1001",
+        confidence=0.99,
+    )
+    output = Cycle2ContinuationRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-continuation.p0.v2",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="继续当前配送任务",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=(
+            Cycle2ContinuationTaskDeltaCandidateV2(
+                candidate_id=uuid4(),
+                operation=TaskDeltaOperation.SUPPLY_INPUT,
+                target_task_alias="task-1",
+                target_request_unit_alias="unit-1",
+                input_candidates=(duplicated, duplicated),
+                confidence=0.98,
+            ),
+        ),
+    )
+    assert len(output.task_delta_candidates[0].input_candidates) == 2
+
+    with pytest.raises(ValidationError):
+        Cycle2ContinuationTaskDeltaCandidateV2.model_validate(
+            {
+                **output.task_delta_candidates[0].model_dump(),
+                "operation": "UNKNOWN_OPERATION",
+            }
+        )
+    with pytest.raises(ValidationError, match="extra"):
+        Cycle2ContinuationRequestUnderstandingOutputV2.model_validate(
+            {**output.model_dump(), "task_id": str(uuid4())}
+        )
 
 
 def test_request_input_binds_model_to_the_exact_toolset_projection() -> None:
