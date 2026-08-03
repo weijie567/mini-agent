@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from enum import Enum
@@ -12,7 +13,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 from pydantic_core import to_jsonable_python
-from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -36,6 +37,8 @@ from mini_agent.application.records import (
     AppendRecoveredToolAttemptV2Command,
     AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
+    ApplyContinuationTaskDeltaV3Command,
+    ApplyOrderCandidateSelectionV3Command,
     ApplyOrderCandidateSelectionV2Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyTaskTransitionCommand,
@@ -45,8 +48,10 @@ from mini_agent.application.records import (
     ConversationRecord,
     ConversationTaskLinkRecord,
     CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2InitialTaskGraphV3Command,
     CreateCycle2RunRootCommand,
     CreateInitialTaskGraphV2Command,
+    CreateInitialTaskGraphV3Command,
     CreateRunCommand,
     CreateToolCallCommand,
     CreateToolCallV2Command,
@@ -61,6 +66,7 @@ from mini_agent.application.records import (
     EvalExecutionFailureRecord,
     EvalResultRecord,
     ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
     FinalizeCreatedToolRecoveryV2Command,
     FinalizeRunCommand,
@@ -83,6 +89,8 @@ from mini_agent.application.records import (
     SaveShipmentObservationV2Command,
     SaveObservationCommand,
     SaveRequestUnderstandingV2NoTaskCommand,
+    SaveRequestUnderstandingV3NoTaskCommand,
+    SaveRejectedContinuationUnderstandingV3Command,
     ToolDispatchFenceWriteResult,
     ToolRetryRecoveryDecisionRecordV2,
     ToolRetryRecoveryReadClosureV2,
@@ -104,6 +112,8 @@ from mini_agent.core.memory import (
 )
 from mini_agent.core.shipment import ShipmentAssessment
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     InputBinding,
     InputBindingV2,
@@ -112,12 +122,15 @@ from mini_agent.core.task_state import (
     OrderCandidateSelectionRequest,
     OrderCandidateSetRecord,
     RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
+    TaskStatus,
 )
 from mini_agent.core.request_processing import (
     Cycle2OrdinalSelectionRejectionReason,
+    RequestUnderstandingClosureV3,
 )
 from mini_agent.core.tool_system import (
     GateDecision,
@@ -145,6 +158,7 @@ from mini_agent.core.trace import (
     TraceEventType,
 )
 from mini_agent.infrastructure.persistence.models import (
+    _PHYSICAL_CODE_VERSION_PAIRS,
     P0RecordModel,
     P0RecordReferenceModel,
     P0RecordStateHistoryModel,
@@ -193,6 +207,9 @@ _CYCLE2_VERSION_BY_CODE = MappingProxyType(
         P0RecordCode.AGENT_RUN_RECORD: "agent_run_record.p0.v2",
         P0RecordCode.RUN_TASK_LINK_RECORD: "run_task_link_record.p0.v2",
         P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v2",
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+            "request_understanding_record.p0.v3"
+        ),
         P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD: (
             "order_search_observation_record.p0.v1"
         ),
@@ -213,6 +230,36 @@ _CYCLE2_VERSION_BY_CODE = MappingProxyType(
 _CYCLE2_INPUT_BINDING_VERSIONS = frozenset(
     {"input_binding_record.p0.v1", "input_binding_record.p0.v2"}
 )
+_PHYSICAL_PAIR_CONSTRAINT_PATTERN = re.compile(
+    r"\(\(record_code\)\:\:text = '([^']+)'\:\:text\) AND "
+    r"\(\(record_schema_version\)\:\:text = '([^']+)'\:\:text\)"
+)
+
+
+def _constraint_closes_exact_physical_pairs(definition: object) -> bool:
+    if type(definition) is not str or not definition.startswith("CHECK"):
+        return False
+    pairs = tuple(_PHYSICAL_PAIR_CONSTRAINT_PATTERN.findall(definition))
+    if (
+        len(pairs) != len(_PHYSICAL_CODE_VERSION_PAIRS)
+        or set(pairs) != set(_PHYSICAL_CODE_VERSION_PAIRS)
+        or len(set(pairs)) != len(pairs)
+        or len(re.findall(r"\bOR\b", definition)) != len(pairs) - 1
+    ):
+        return False
+    residual = _PHYSICAL_PAIR_CONSTRAINT_PATTERN.sub("", definition)
+    residual = re.sub(r"\b(?:CHECK|OR)\b", "", residual)
+    if re.sub(r"[()\s]", "", residual):
+        return False
+    depth = 0
+    for character in definition:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 _PHYSICAL_OBSERVATION_RECORD_CODES = (
     P0RecordCode.OBSERVATION_RECORD,
     P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
@@ -244,6 +291,10 @@ _CYCLE2_MODEL_BY_PAIR = MappingProxyType(
         (P0RecordCode.AGENT_RUN_RECORD, "agent_run_record.p0.v2"): AgentRunRecordV2,
         (P0RecordCode.RUN_TASK_LINK_RECORD, "run_task_link_record.p0.v2"): RunTaskLinkRecordV2,
         (P0RecordCode.TRACE_EVENT_RECORD, "trace_event_record.p0.v2"): TraceEventV2,
+        (
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            "request_understanding_record.p0.v3",
+        ): RequestUnderstandingRecordV3,
         (P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD, "order_search_observation_record.p0.v1"): SearchOrdersObservation,
         (P0RecordCode.ORDER_CANDIDATE_SET_RECORD, "order_candidate_set_record.p0.v1"): OrderCandidateSetRecord,
         (P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD, "order_candidate_selection_record.p0.v1"): OrderCandidateSelectionRecord,
@@ -286,6 +337,12 @@ _EXACT_RUN_VERSION_BY_CODE = {
     P0RecordCode.OBSERVATION_RECORD: "observation_record.p0.v1",
     P0RecordCode.CONTEXT_MANIFEST_RECORD: "context_manifest_record.p0.v1",
     P0RecordCode.TRACE_EVENT_RECORD: "trace_event_record.p0.v1",
+}
+_EXACT_RUN_V3_VERSION_BY_CODE = {
+    **_EXACT_RUN_VERSION_BY_CODE,
+    P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
+        "request_understanding_record.p0.v3"
+    ),
 }
 _RU_V2_WRITE_VERSION_BY_CODE = MappingProxyType(
     {
@@ -913,6 +970,8 @@ def _exact_run_reorder_json_like(
 def _exact_run_versioned_decode_input(
     row: P0RecordModel,
     record_code: P0RecordCode,
+    *,
+    expected_version: str = "request_understanding_record.p0.v2",
 ) -> dict[str, Any]:
     if record_code is not P0RecordCode.REQUEST_UNDERSTANDING_RECORD:
         return row.envelope
@@ -933,11 +992,19 @@ def _exact_run_versioned_decode_input(
         list,
     ):
         return row.envelope
-    source: RequestUnderstandingRecordV2 | None = None
-    children: tuple[AcceptedTaskDeltaV2, ...] | None = None
+    source: RequestUnderstandingRecordV2 | RequestUnderstandingRecordV3 | None = None
+    children: tuple[
+        AcceptedTaskDeltaV2 | AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3,
+        ...,
+    ] | None = None
     validation_failed = False
     try:
-        source = RequestUnderstandingRecordV2.model_validate_json(
+        source_type = (
+            RequestUnderstandingRecordV3
+            if expected_version == "request_understanding_record.p0.v3"
+            else RequestUnderstandingRecordV2
+        )
+        source = source_type.model_validate_json(
             json.dumps(
                 source_data,
                 ensure_ascii=False,
@@ -945,18 +1012,35 @@ def _exact_run_versioned_decode_input(
             ),
             strict=True,
         )
-        children = tuple(
-            AcceptedTaskDeltaV2.model_validate_json(
-                json.dumps(
-                    child["data"],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                strict=True,
+        parsed_children = []
+        for child in child_payloads:
+            if not isinstance(child, dict) or not isinstance(
+                child.get("data"), dict
+            ):
+                validation_failed = True
+                break
+            child_type: type[BaseModel]
+            if expected_version == "request_understanding_record.p0.v3":
+                child_type = {
+                    "ADD_GOAL": AcceptedAddGoalTaskDeltaV3,
+                    "SUPPLY_INPUT": AcceptedSupplyInputTaskDeltaV3,
+                }.get(child["data"].get("operation"), BaseModel)
+                if child_type is BaseModel:
+                    validation_failed = True
+                    break
+            else:
+                child_type = AcceptedTaskDeltaV2
+            parsed_children.append(
+                child_type.model_validate_json(
+                    json.dumps(
+                        child["data"],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    strict=True,
+                )
             )
-            for child in child_payloads
-            if isinstance(child, dict) and isinstance(child.get("data"), dict)
-        )
+        children = tuple(parsed_children)
         if len(children) != len(child_payloads):
             validation_failed = True
     except (TypeError, ValueError, ValidationError, RecursionError):
@@ -981,6 +1065,7 @@ def _exact_run_projection_values(
     envelope: P0PersistenceEnvelope,
     decoded: DecodedP0PersistenceRecord,
     scope_owner_customer_id: str | None,
+    version_by_code: Mapping[P0RecordCode, str] = _EXACT_RUN_VERSION_BY_CODE,
 ) -> dict[str, object]:
     record = decoded.source_record
 
@@ -998,7 +1083,7 @@ def _exact_run_projection_values(
     )
     return {
         "record_code": record_code.value,
-        "record_schema_version": _EXACT_RUN_VERSION_BY_CODE[record_code],
+        "record_schema_version": version_by_code[record_code],
         "logical_identity": _json_identity(envelope.logical_identity),
         "direct_owner_customer_id": envelope.direct_owner_customer_id,
         "scope_owner_customer_id": scope_owner_customer_id,
@@ -1023,13 +1108,15 @@ def _exact_run_projection_values(
 
 def _exact_run_decode_spec(
     row: P0RecordModel,
+    *,
+    version_by_code: Mapping[P0RecordCode, str] = _EXACT_RUN_VERSION_BY_CODE,
 ) -> tuple[P0RecordCode, str]:
     record_code = _RECORD_CODE_BY_VALUE.get(row.record_code)
     if record_code is None:
         raise _integrity(
             P0PersistenceIntegrityCategory.UNKNOWN_RECORD_CODE
         )
-    expected_version = _EXACT_RUN_VERSION_BY_CODE.get(record_code)
+    expected_version = version_by_code.get(record_code)
     if expected_version is None:
         raise _integrity(
             P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
@@ -1058,6 +1145,7 @@ def _exact_run_validate_decoded_row(
     record_code: P0RecordCode,
     decoded: DecodedP0PersistenceRecord,
     trusted_owner_customer_id: str,
+    version_by_code: Mapping[P0RecordCode, str] = _EXACT_RUN_VERSION_BY_CODE,
 ) -> tuple[
     P0PersistenceEnvelope,
     tuple[P0RecordReference, ...],
@@ -1089,6 +1177,7 @@ def _exact_run_validate_decoded_row(
         envelope=envelope,
         decoded=decoded,
         scope_owner_customer_id=expected_scope_owner,
+        version_by_code=version_by_code,
     )
     for field_name, expected_value in expected_projection.items():
         if getattr(row, field_name) != expected_value:
@@ -1300,6 +1389,16 @@ class PostgresRecordAdapter:
                             ToolRetryRecoveryDecisionRecordV2
                         ),
                     }.get(child.get("child_code"))
+                    if (
+                        record_code
+                        is P0RecordCode.REQUEST_UNDERSTANDING_RECORD
+                        and child.get("child_code") == "accepted_task_delta"
+                    ):
+                        operation = child["data"].get("operation")
+                        child_type = {
+                            "ADD_GOAL": AcceptedAddGoalTaskDeltaV3,
+                            "SUPPLY_INPUT": AcceptedSupplyInputTaskDeltaV3,
+                        }.get(operation)
                     if child_type is not None:
                         child_record = child_type.model_validate_json(
                             json.dumps(child["data"], ensure_ascii=False, separators=(",", ":")),
@@ -1951,19 +2050,51 @@ class PostgresRecordAdapter:
             )
         return trusted_now
 
-    @_bounded_database_failures
     async def load_exact_run_evidence_for_owner(
         self,
         *,
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
     ) -> ExactRunEvidenceClosure | None:
+        result = await self._load_exact_run_evidence_for_owner_version(
+            owner_scope=owner_scope,
+            run_id=run_id,
+            v3=False,
+        )
+        return cast(ExactRunEvidenceClosure | None, result)
+
+    async def load_exact_run_evidence_v3_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> ExactRunEvidenceV3Closure | None:
+        result = await self._load_exact_run_evidence_for_owner_version(
+            owner_scope=owner_scope,
+            run_id=run_id,
+            v3=True,
+        )
+        return cast(ExactRunEvidenceV3Closure | None, result)
+
+    @_bounded_database_failures
+    async def _load_exact_run_evidence_for_owner_version(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+        v3: bool,
+    ) -> ExactRunEvidenceClosure | ExactRunEvidenceV3Closure | None:
         if type(owner_scope) is not TrustedOwnerScope:
             raise TypeError("owner_scope must be exact TrustedOwnerScope")
         if type(run_id) is not UUID:
             raise TypeError("run_id must be exact UUID")
 
         trusted_owner = owner_scope.customer_id
+        version_by_code = (
+            _EXACT_RUN_V3_VERSION_BY_CODE
+            if v3
+            else _EXACT_RUN_VERSION_BY_CODE
+        )
         with self.session_factory() as session:
             with session.begin():
                 session.execute(
@@ -2020,7 +2151,7 @@ class PostgresRecordAdapter:
                     record_code: P0RecordCode,
                     logical_identity: list[list[object]],
                 ) -> bool:
-                    if record_code not in _EXACT_RUN_VERSION_BY_CODE:
+                    if record_code not in version_by_code:
                         raise _integrity(
                             P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
                         )
@@ -2064,12 +2195,16 @@ class PostgresRecordAdapter:
                     return True
 
                 root_record_code, root_expected_version = (
-                    _exact_run_decode_spec(root)
+                    _exact_run_decode_spec(
+                        root,
+                        version_by_code=version_by_code,
+                    )
                 )
                 root_decoded = decode_persistence_record_versioned(
                     _exact_run_versioned_decode_input(
                         root,
                         root_record_code,
+                        expected_version=root_expected_version,
                     ),
                     expected_record_code=root_record_code,
                     expected_schema_version=root_expected_version,
@@ -2082,6 +2217,7 @@ class PostgresRecordAdapter:
                         record_code=root_record_code,
                         decoded=root_decoded,
                         trusted_owner_customer_id=trusted_owner,
+                        version_by_code=version_by_code,
                     )
                 )
                 references_by_key[root_key] = root_references
@@ -2263,10 +2399,15 @@ class PostgresRecordAdapter:
                     key=lambda item: (item[0][0].value, item[0][1]),
                 ):
                     record_code, expected_version = _exact_run_decode_spec(
-                        row
+                        row,
+                        version_by_code=version_by_code,
                     )
                     decoded = decode_persistence_record_versioned(
-                        _exact_run_versioned_decode_input(row, record_code),
+                        _exact_run_versioned_decode_input(
+                            row,
+                            record_code,
+                            expected_version=expected_version,
+                        ),
                         expected_record_code=record_code,
                         expected_schema_version=expected_version,
                         correlation_ref=uuid4(),
@@ -2278,6 +2419,7 @@ class PostgresRecordAdapter:
                             record_code=record_code,
                             decoded=decoded,
                             trusted_owner_customer_id=trusted_owner,
+                            version_by_code=version_by_code,
                         )
                     )
                     initial_references = references_by_key.get(key)
@@ -2294,7 +2436,9 @@ class PostgresRecordAdapter:
                     P0RecordCode.CONVERSATION_RECORD: ConversationRecord,
                     P0RecordCode.MESSAGE_RECORD: MessageRecord,
                     P0RecordCode.REQUEST_UNDERSTANDING_RECORD: (
-                        RequestUnderstandingRecordV2
+                        RequestUnderstandingRecordV3
+                        if v3
+                        else RequestUnderstandingRecordV2
                     ),
                     P0RecordCode.TASK_RECORD: TaskRecord,
                     P0RecordCode.REQUEST_UNIT_RECORD: RequestUnitRecord,
@@ -2339,15 +2483,12 @@ class PostgresRecordAdapter:
                         P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
                     )
                 request_understanding = (
-                    cast(
-                        RequestUnderstandingRecordV2,
-                        request_understanding_rows[0].source_record,
-                    )
+                    request_understanding_rows[0].source_record
                     if request_understanding_rows
                     else None
                 )
                 accepted_task_deltas = tuple(
-                    cast(AcceptedTaskDeltaV2, child)
+                    child
                     for decoded in request_understanding_rows
                     for child in decoded.logical_children
                 )
@@ -2365,7 +2506,15 @@ class PostgresRecordAdapter:
                 )
                 if (
                     any(
-                        type(child) is not AcceptedTaskDeltaV2
+                        type(child)
+                        not in (
+                            (
+                                AcceptedAddGoalTaskDeltaV3,
+                                AcceptedSupplyInputTaskDeltaV3,
+                            )
+                            if v3
+                            else (AcceptedTaskDeltaV2,)
+                        )
                         for child in accepted_task_deltas
                     )
                     or any(
@@ -2394,106 +2543,154 @@ class PostgresRecordAdapter:
                     sources(P0RecordCode.MESSAGE_RECORD),
                 )
                 if request_understanding is not None:
-                    message_by_id = {
-                        message.message_id: message for message in messages
-                    }
-                    provenance_candidates = (
-                        *request_understanding.contextualization
-                        .resolved_reference_candidates,
-                        *(
-                            candidate
-                            for task_delta in (
-                                request_understanding.task_delta_candidates
-                            )
-                            for candidate in task_delta.input_candidates
-                        ),
-                    )
-                    for candidate in provenance_candidates:
-                        message = message_by_id.get(candidate.source_ref)
-                        if message is None:
-                            raise _integrity(
-                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
-                            )
-                        start = candidate.source_span_start
-                        end = candidate.source_span_end_exclusive
-                        if not 0 <= start < end <= len(message.content):
-                            raise _integrity(
-                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
-                            )
-                        digest = sha256(
-                            message.content[start:end].encode("utf-8")
-                        ).hexdigest()
-                        if digest != candidate.source_quote_sha256:
-                            raise _integrity(
-                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
-                            )
+                    if v3:
+                        self._ru_v3_validate_authoritative_provenance(
+                            cast(
+                                RequestUnderstandingRecordV3,
+                                request_understanding,
+                            ),
+                            messages,
+                            expected_conversation_id=cast(
+                                AgentRunRecord,
+                                runs[0].source_record,
+                            ).conversation_id,
+                        )
+                    else:
+                        message_by_id = {
+                            message.message_id: message for message in messages
+                        }
+                        provenance_candidates = (
+                            *request_understanding.contextualization
+                            .resolved_reference_candidates,
+                            *(
+                                candidate
+                                for task_delta in (
+                                    request_understanding.task_delta_candidates
+                                )
+                                for candidate in task_delta.input_candidates
+                            ),
+                        )
+                        for candidate in provenance_candidates:
+                            message = message_by_id.get(candidate.source_ref)
+                            if message is None:
+                                raise _integrity(
+                                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                                )
+                            start = candidate.source_span_start
+                            end = candidate.source_span_end_exclusive
+                            if not 0 <= start < end <= len(message.content):
+                                raise _integrity(
+                                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                                )
+                            digest = sha256(
+                                message.content[start:end].encode("utf-8")
+                            ).hexdigest()
+                            if digest != candidate.source_quote_sha256:
+                                raise _integrity(
+                                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                                )
 
-                closure: ExactRunEvidenceClosure | None = None
+                closure: (
+                    ExactRunEvidenceClosure | ExactRunEvidenceV3Closure | None
+                ) = None
                 closure_failed = False
                 try:
-                    closure = ExactRunEvidenceClosure(
-                        conversation_record=cast(
+                    common_kwargs = {
+                        "conversation_record": cast(
                             ConversationRecord,
                             conversations[0].source_record,
                         ),
-                        run_record=cast(
+                        "run_record": cast(
                             AgentRunRecord,
                             runs[0].source_record,
                         ),
-                        message_records=messages,
-                        request_understanding_record=request_understanding,
-                        accepted_task_deltas=accepted_task_deltas,
-                        input_binding_records=cast(
+                        "message_records": messages,
+                        "input_binding_records": cast(
                             tuple[InputBinding, ...],
                             sources(P0RecordCode.INPUT_BINDING_RECORD),
                         ),
-                        task_records=cast(
+                        "task_records": cast(
                             tuple[TaskRecord, ...],
                             sources(P0RecordCode.TASK_RECORD),
                         ),
-                        task_state_transitions=task_state_transitions,
-                        request_unit_records=cast(
+                        "task_state_transitions": task_state_transitions,
+                        "request_unit_records": cast(
                             tuple[RequestUnitRecord, ...],
                             sources(P0RecordCode.REQUEST_UNIT_RECORD),
                         ),
-                        conversation_task_links=cast(
+                        "conversation_task_links": cast(
                             tuple[ConversationTaskLinkRecord, ...],
                             sources(
                                 P0RecordCode.CONVERSATION_TASK_LINK_RECORD
                             ),
                         ),
-                        run_task_links=cast(
+                        "run_task_links": cast(
                             tuple[RunTaskLinkRecord, ...],
                             sources(P0RecordCode.RUN_TASK_LINK_RECORD),
                         ),
-                        gate_decisions=cast(
+                        "gate_decisions": cast(
                             tuple[GateDecision, ...],
                             sources(P0RecordCode.GATE_DECISION_RECORD),
                         ),
-                        tool_calls=cast(
+                        "tool_calls": cast(
                             tuple[ToolCallRecord, ...],
                             sources(P0RecordCode.TOOL_CALL_RECORD),
                         ),
-                        tool_attempts=tool_attempts,
-                        observation_records=cast(
+                        "tool_attempts": tool_attempts,
+                        "observation_records": cast(
                             tuple[OrderObservation, ...],
                             sources(P0RecordCode.OBSERVATION_RECORD),
                         ),
-                        context_manifests=cast(
+                        "context_manifests": cast(
                             tuple[ContextManifest, ...],
                             sources(P0RecordCode.CONTEXT_MANIFEST_RECORD),
                         ),
-                        model_visible_toolset_artifacts=cast(
+                        "model_visible_toolset_artifacts": cast(
                             tuple[ModelVisibleToolsetArtifact, ...],
                             sources(
                                 P0RecordCode.MODEL_VISIBLE_TOOLSET_ARTIFACT
                             ),
                         ),
-                        trace_events=cast(
+                        "trace_events": cast(
                             tuple[TraceEvent, ...],
                             sources(P0RecordCode.TRACE_EVENT_RECORD),
                         ),
-                    )
+                    }
+                    if v3:
+                        ru_closure = (
+                            None
+                            if request_understanding is None
+                            else RequestUnderstandingClosureV3(
+                                record=cast(
+                                    RequestUnderstandingRecordV3,
+                                    request_understanding,
+                                ),
+                                accepted_task_deltas=cast(
+                                    tuple[
+                                        AcceptedAddGoalTaskDeltaV3
+                                        | AcceptedSupplyInputTaskDeltaV3,
+                                        ...,
+                                    ],
+                                    accepted_task_deltas,
+                                ),
+                            )
+                        )
+                        closure = ExactRunEvidenceV3Closure(
+                            request_understanding_closure=ru_closure,
+                            **common_kwargs,
+                        )
+                    else:
+                        closure = ExactRunEvidenceClosure(
+                            request_understanding_record=cast(
+                                RequestUnderstandingRecordV2 | None,
+                                request_understanding,
+                            ),
+                            accepted_task_deltas=cast(
+                                tuple[AcceptedTaskDeltaV2, ...],
+                                accepted_task_deltas,
+                            ),
+                            **common_kwargs,
+                        )
                 except (
                     TypeError,
                     ValueError,
@@ -4270,6 +4467,668 @@ class PostgresRecordAdapter:
             return ConditionalWriteResult.PROJECTION_CONFLICT
         return ConditionalWriteResult.APPLIED
 
+    @classmethod
+    def _ru_v3_encode(
+        cls,
+        record: RequestUnderstandingRecordV3,
+        *,
+        logical_children: tuple[
+            AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3,
+            ...,
+        ],
+    ) -> P0PersistenceEnvelope:
+        return cls._ru_v2_write_encode(
+            P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            record,
+            schema_version="request_understanding_record.p0.v3",
+            logical_children=cast(tuple[BaseModel, ...], logical_children),
+        )
+
+    @staticmethod
+    def _ru_v3_validate_authoritative_provenance(
+        record: RequestUnderstandingRecordV3,
+        messages: tuple[MessageRecord, ...],
+        *,
+        expected_conversation_id: UUID,
+    ) -> None:
+        message_by_id = {message.message_id: message for message in messages}
+        if len(message_by_id) != len(messages):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        direct_source_refs = {
+            record.message_ref,
+            *record.contextualization.source_message_refs,
+            *(
+                source_ref
+                for uncertainty in record.contextualization.uncertainties
+                for source_ref in uncertainty.source_message_refs
+            ),
+        }
+        if any(
+            source_ref not in message_by_id
+            or message_by_id[source_ref].conversation_id
+            != expected_conversation_id
+            for source_ref in direct_source_refs
+        ) or message_by_id[record.message_ref].direction is not MessageDirection.USER:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        projections = (
+            *record.contextualization.resolved_reference_candidates,
+            *(
+                candidate_input
+                for candidate in record.task_delta_candidates
+                for candidate_input in candidate.input_candidates
+            ),
+        )
+        for projection in projections:
+            message = message_by_id.get(projection.source_ref)
+            start = projection.source_span_start
+            end = projection.source_span_end_exclusive
+            if (
+                message is None
+                or message.direction is not MessageDirection.USER
+                or message.conversation_id != expected_conversation_id
+                or not 0 <= start < end <= len(message.content)
+                or sha256(
+                    message.content[start:end].encode("utf-8")
+                ).hexdigest()
+                != projection.source_quote_sha256
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+
+    @classmethod
+    def _ru_v3_validate_persisted_authoritative_provenance(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        record: RequestUnderstandingRecordV3,
+    ) -> None:
+        run_loaded = cls._cycle2_row(
+            session,
+            owner_customer_id=owner_customer_id,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", record.run_id),),
+            expected_versions=frozenset(
+                {"agent_run_record.p0.v1", "agent_run_record.p0.v2"}
+            ),
+            for_update=True,
+        )
+        if run_loaded is None or type(run_loaded[1].source_record) not in (
+            AgentRunRecord,
+            AgentRunRecordV2,
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        run = cast(
+            AgentRunRecord | AgentRunRecordV2,
+            run_loaded[1].source_record,
+        )
+        source_refs = {
+            record.message_ref,
+            *record.contextualization.source_message_refs,
+            *(
+                source_ref
+                for uncertainty in record.contextualization.uncertainties
+                for source_ref in uncertainty.source_message_refs
+            ),
+            *(
+                candidate.source_ref
+                for candidate in (
+                    *record.contextualization.resolved_reference_candidates,
+                    *(
+                        candidate_input
+                        for task_delta in record.task_delta_candidates
+                        for candidate_input in task_delta.input_candidates
+                    ),
+                )
+            ),
+        }
+        messages: list[MessageRecord] = []
+        for message_id in sorted(source_refs, key=str):
+            loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner_customer_id,
+                record_code=P0RecordCode.MESSAGE_RECORD,
+                logical_identity=(("message_id", message_id),),
+                for_update=True,
+            )
+            if (
+                loaded is None
+                or type(loaded[1].source_record) is not MessageRecord
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            messages.append(cast(MessageRecord, loaded[1].source_record))
+        cls._ru_v3_validate_authoritative_provenance(
+            record,
+            tuple(messages),
+            expected_conversation_id=run.conversation_id,
+        )
+
+    @classmethod
+    def _ru_v3_envelope_is_exact(
+        cls,
+        session: Session,
+        row: P0RecordModel,
+        desired: P0PersistenceEnvelope,
+        *,
+        owner_customer_id: str,
+    ) -> bool:
+        if (
+            row.record_code != desired.record_code.value
+            or row.record_schema_version != desired.record_schema_version
+            or row.logical_identity != _json_identity(desired.logical_identity)
+            or row.scope_owner_customer_id != owner_customer_id
+        ):
+            return False
+        persisted = _exact_run_parse_envelope(row.envelope)
+        if (
+            persisted.model_dump(mode="json")
+            != desired.model_dump(mode="json")
+            or _exact_run_normalized_references(session, row)
+            != desired.record_references
+        ):
+            return False
+        try:
+            persisted_decoded = decode_persistence_record_versioned(
+                cls._cycle2_versioned_decode_input(
+                    row,
+                    desired.record_code,
+                ),
+                expected_record_code=desired.record_code,
+                expected_schema_version=desired.record_schema_version,
+                correlation_ref=uuid4(),
+            )
+            desired_decoded = decode_persistence_record_versioned(
+                desired,
+                expected_record_code=desired.record_code,
+                expected_schema_version=desired.record_schema_version,
+                correlation_ref=uuid4(),
+            )
+        except P0PersistenceIntegrityError:
+            return False
+        return persisted_decoded == desired_decoded
+
+    @classmethod
+    def _ru_v3_lock_identity(
+        cls,
+        session: Session,
+        request_understanding: P0PersistenceEnvelope,
+    ) -> None:
+        session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(:identity_key, 0))"
+            ),
+            {
+                "identity_key": "|".join(
+                    cls._envelope_key(request_understanding)
+                )
+            },
+        )
+
+    @classmethod
+    def _ru_v3_effect_is_exact(
+        cls,
+        session: Session,
+        desired: P0PersistenceEnvelope,
+        *,
+        owner_customer_id: str,
+    ) -> bool:
+        rows = tuple(
+            session.scalars(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code == desired.record_code.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(desired.logical_identity),
+                    P0RecordModel.scope_owner_customer_id
+                    == owner_customer_id,
+                )
+                .limit(2)
+                .with_for_update()
+            )
+        )
+        if len(rows) != 1:
+            return False
+        if cls._ru_v3_envelope_is_exact(
+            session,
+            rows[0],
+            desired,
+            owner_customer_id=owner_customer_id,
+        ):
+            return True
+        if desired.record_code not in {
+            P0RecordCode.TASK_RECORD,
+            P0RecordCode.REQUEST_UNIT_RECORD,
+        }:
+            return False
+        desired_decoded = cls._ru_v2_write_decode_cycle2(
+            desired,
+            record_code=desired.record_code,
+            schema_version=desired.record_schema_version,
+        )
+        state_version = getattr(desired_decoded.source_record, "state_version", None)
+        if type(state_version) is not int:
+            return False
+        current_decoded = cls._cycle2_decode_row(
+            session,
+            rows[0],
+            owner_customer_id=owner_customer_id,
+            expected_code=desired.record_code,
+        )
+        if desired.record_code is P0RecordCode.TASK_RECORD:
+            current_task = current_decoded.source_record
+            if type(current_task) is not TaskRecord:
+                return False
+            try:
+                unit_rows = cls._cycle2_rows(
+                    session,
+                    owner_customer_id=owner_customer_id,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    predicates=(P0RecordModel.task_id == current_task.task_id,),
+                )
+                if (
+                    len(unit_rows) != 1
+                    or type(unit_rows[0][1].source_record)
+                    is not RequestUnitRecord
+                ):
+                    return False
+                accepted_effects = tuple(
+                    cast(
+                        AcceptedAddGoalTaskDeltaV3
+                        | AcceptedSupplyInputTaskDeltaV3,
+                        child,
+                    )
+                    for _row, decoded in cls._cycle2_rows(
+                        session,
+                        owner_customer_id=owner_customer_id,
+                        record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                        expected_versions=frozenset(
+                            {"request_understanding_record.p0.v3"}
+                        ),
+                    )
+                    for child in decoded.logical_children
+                    if type(child)
+                    in (
+                        AcceptedAddGoalTaskDeltaV3,
+                        AcceptedSupplyInputTaskDeltaV3,
+                    )
+                    and child.task_id == current_task.task_id
+                )
+                cls._ru_v3_validate_task_transition_chain(
+                    session=session,
+                    owner_customer_id=owner_customer_id,
+                    task=current_task,
+                    request_unit=cast(
+                        RequestUnitRecord,
+                        unit_rows[0][1].source_record,
+                    ),
+                    children=cast(
+                        tuple[BaseModel, ...],
+                        current_decoded.logical_children,
+                    ),
+                    accepted_effects=accepted_effects,
+                )
+            except P0PersistenceIntegrityError:
+                return False
+        if (
+            current_decoded.source_record == desired_decoded.source_record
+            and (
+                (
+                    desired.record_code is P0RecordCode.TASK_RECORD
+                    and current_decoded.logical_children
+                    == desired_decoded.logical_children
+                )
+                or (
+                    desired.record_code
+                    is P0RecordCode.REQUEST_UNIT_RECORD
+                    and not current_decoded.logical_children
+                )
+            )
+        ):
+            return True
+        historical = cls._cycle2_historical_row(
+            session,
+            owner_customer_id=owner_customer_id,
+            record_code=desired.record_code,
+            logical_identity=desired.logical_identity,
+            state_version=state_version,
+        )
+        return (
+            historical is not None
+            and historical.source_record == desired_decoded.source_record
+            and (
+                (
+                    desired.record_code is P0RecordCode.TASK_RECORD
+                    and historical.logical_children
+                    == desired_decoded.logical_children
+                )
+                or (
+                    desired.record_code
+                    is P0RecordCode.REQUEST_UNIT_RECORD
+                    and not historical.logical_children
+                )
+            )
+        )
+
+    @classmethod
+    def _ru_v3_generated_rows_state(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        request_understanding: P0PersistenceEnvelope,
+        immutable_envelopes: tuple[P0PersistenceEnvelope, ...],
+        effect_envelopes: tuple[P0PersistenceEnvelope, ...] = (),
+    ) -> Cycle2WriteResult | None:
+        ru_rows = tuple(
+            session.scalars(
+                select(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
+                    P0RecordModel.logical_identity
+                    == _json_identity(request_understanding.logical_identity),
+                )
+                .limit(2)
+                .with_for_update()
+            )
+        )
+        if not ru_rows:
+            for envelope in immutable_envelopes:
+                collision = session.scalar(
+                    select(P0RecordModel.record_id)
+                    .where(
+                        P0RecordModel.record_code
+                        == envelope.record_code.value,
+                        P0RecordModel.logical_identity
+                        == _json_identity(envelope.logical_identity),
+                    )
+                    .limit(1)
+                )
+                if collision is not None:
+                    return Cycle2WriteResult.PROJECTION_CONFLICT
+            return None
+        if len(ru_rows) != 1:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        ru_row = ru_rows[0]
+        if ru_row.scope_owner_customer_id != owner_customer_id:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        if not cls._ru_v3_envelope_is_exact(
+            session,
+            ru_row,
+            request_understanding,
+            owner_customer_id=owner_customer_id,
+        ):
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        for envelope in immutable_envelopes:
+            rows = tuple(
+                session.scalars(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == envelope.record_code.value,
+                        P0RecordModel.logical_identity
+                        == _json_identity(envelope.logical_identity),
+                    )
+                    .limit(2)
+                    .with_for_update()
+                )
+            )
+            if (
+                len(rows) != 1
+                or not cls._ru_v3_envelope_is_exact(
+                    session,
+                    rows[0],
+                    envelope,
+                    owner_customer_id=owner_customer_id,
+                )
+            ):
+                return Cycle2WriteResult.PROJECTION_CONFLICT
+        if any(
+            not cls._ru_v3_effect_is_exact(
+                session,
+                envelope,
+                owner_customer_id=owner_customer_id,
+            )
+            for envelope in effect_envelopes
+        ):
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        desired_decoded = decode_persistence_record_versioned(
+            request_understanding,
+            expected_record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+            expected_schema_version="request_understanding_record.p0.v3",
+            correlation_ref=uuid4(),
+        )
+        if type(desired_decoded.source_record) is not RequestUnderstandingRecordV3:
+            raise _integrity(P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH)
+        cls._ru_v3_validate_persisted_authoritative_provenance(
+            session,
+            owner_customer_id=owner_customer_id,
+            record=cast(
+                RequestUnderstandingRecordV3,
+                desired_decoded.source_record,
+            ),
+        )
+        return Cycle2WriteResult.ALREADY_APPLIED
+
+    @classmethod
+    def _ru_v3_insert_phase1_envelopes(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        root_rows: tuple[P0RecordModel, ...],
+        envelopes: tuple[P0PersistenceEnvelope, ...],
+    ) -> None:
+        pending = {
+            cls._envelope_key(envelope): envelope for envelope in envelopes
+        }
+        root_keys = {
+            cls._row_key(row): row for row in root_rows
+        }
+        closed_keys = frozenset({*pending, *root_keys})
+        for envelope in envelopes:
+            for reference in envelope.record_references:
+                key = (
+                    reference.target_record_code.value,
+                    _canonical_identity_text(
+                        _json_identity(reference.target_logical_identity)
+                    ),
+                )
+                if key not in closed_keys:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+        for envelope in sorted(envelopes, key=cls._envelope_key):
+            decoded = decode_persistence_record_versioned(
+                envelope,
+                expected_record_code=envelope.record_code,
+                expected_schema_version=envelope.record_schema_version,
+                correlation_ref=uuid4(),
+            )
+            values = cls._cycle2_projection_values(
+                envelope,
+                decoded,
+                owner_customer_id=owner_customer_id,
+            )
+            inserted = session.scalar(
+                postgresql_insert(P0RecordModel)
+                .values(record_id=uuid4(), **values)
+                .on_conflict_do_nothing(
+                    index_elements=(
+                        P0RecordModel.record_code,
+                        P0RecordModel.logical_identity,
+                    )
+                )
+                .returning(P0RecordModel.record_id)
+            )
+            if inserted is None:
+                raise _Cycle2ProjectionConflict() from None
+        session.flush()
+        for envelope in envelopes:
+            session.add_all(
+                cls._reference_model(
+                    envelope,
+                    ordinal=ordinal,
+                    reference=reference,
+                )
+                for ordinal, reference in enumerate(
+                    envelope.record_references
+                )
+            )
+        session.flush()
+
+    @_bounded_database_failures
+    async def save_request_understanding_v3_no_task_if_current(
+        self,
+        command: SaveRequestUnderstandingV3NoTaskCommand,
+    ) -> Cycle2WriteResult:
+        ru = self._ru_v3_encode(
+            command.request_understanding.record,
+            logical_children=command.request_understanding.accepted_task_deltas,
+        )
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=(),
+                )
+                if replay is not None:
+                    return replay
+                roots = self._ru_v2_write_lock_roots(
+                    session,
+                    owner_scope=command.owner_scope,
+                    conversation=command.expected_conversation_record,
+                    messages=command.expected_message_records,
+                    run=command.expected_active_run_record,
+                )
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.request_understanding.record,
+                )
+                self._ru_v3_insert_phase1_envelopes(
+                    session,
+                    owner_customer_id=owner,
+                    root_rows=roots,
+                    envelopes=(ru,),
+                )
+        except _RuV2WriteNotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except (_RuV2WriteProjectionConflict, _Cycle2ProjectionConflict):
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def create_initial_task_graph_v3_if_current(
+        self,
+        command: CreateInitialTaskGraphV3Command,
+    ) -> Cycle2WriteResult:
+        ru = self._ru_v3_encode(
+            command.request_understanding.record,
+            logical_children=command.request_understanding.accepted_task_deltas,
+        )
+        generated: list[P0PersistenceEnvelope] = []
+        for graph in command.accepted_task_graphs:
+            unit = graph.initial_request_unit.initial_record
+            generated.extend(
+                (
+                    self._ru_v2_write_encode(
+                        P0RecordCode.TASK_RECORD,
+                        graph.initial_task.initial_record,
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        unit,
+                    ),
+                    *(
+                        self._ru_v2_write_encode(
+                            P0RecordCode.INPUT_BINDING_RECORD,
+                            binding.record,
+                            external_references=(
+                                _external_reference(
+                                    "request_unit_id",
+                                    P0RecordCode.REQUEST_UNIT_RECORD,
+                                    "request_unit_id",
+                                    binding.request_unit_id,
+                                ),
+                            ),
+                        )
+                        for binding in graph.input_bindings
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                        graph.conversation_task_link,
+                    ),
+                    self._ru_v2_write_encode(
+                        P0RecordCode.RUN_TASK_LINK_RECORD,
+                        graph.run_task_link.active_record,
+                    ),
+                )
+            )
+        immutable = tuple(
+            envelope
+            for envelope in generated
+            if envelope.record_code
+            not in {
+                P0RecordCode.TASK_RECORD,
+                P0RecordCode.REQUEST_UNIT_RECORD,
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+            }
+        )
+        effects = tuple(
+            envelope for envelope in generated if envelope not in immutable
+        )
+        owner = command.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=immutable,
+                    effect_envelopes=effects,
+                )
+                if replay is not None:
+                    return replay
+                roots = self._ru_v2_write_lock_roots(
+                    session,
+                    owner_scope=command.owner_scope,
+                    conversation=command.expected_conversation_record,
+                    messages=command.expected_message_records,
+                    run=command.expected_active_run_record,
+                )
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.request_understanding.record,
+                )
+                self._ru_v3_insert_phase1_envelopes(
+                    session,
+                    owner_customer_id=owner,
+                    root_rows=roots,
+                    envelopes=(ru, *generated),
+                )
+        except _RuV2WriteNotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except (_RuV2WriteProjectionConflict, _Cycle2ProjectionConflict):
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
     async def apply_task_transition_if_current(
         self,
         command: ApplyTaskTransitionCommand,
@@ -5758,6 +6617,112 @@ class PostgresRecordAdapter:
         return Cycle2WriteResult.APPLIED
 
     @_bounded_database_failures
+    async def create_cycle2_initial_task_graph_v3_if_current(
+        self,
+        command: CreateCycle2InitialTaskGraphV3Command,
+    ) -> Cycle2WriteResult:
+        owner = command.owner_scope.customer_id
+        graph = command.reducer_decision.task_graph
+        ru = self._ru_v3_encode(
+            command.reducer_decision.closure.record,
+            logical_children=(graph.accepted_delta,),
+        )
+        binding = self._cycle2_encode_input_binding(
+            graph.input_binding,
+            request_unit_id=graph.request_unit.request_unit_id,
+        )
+        traces = tuple(
+            self._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, trace)
+            for trace in (
+                *command.ordinary_trace_records,
+                *command.effect_trace_records,
+            )
+        )
+        task = self._cycle2_encode(P0RecordCode.TASK_RECORD, graph.task)
+        unit = self._cycle2_encode(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            graph.request_unit,
+        )
+        conversation_link = self._cycle2_encode(
+            P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+            command.conversation_task_link_record,
+        )
+        run_link = self._cycle2_encode(
+            P0RecordCode.RUN_TASK_LINK_RECORD,
+            command.active_run_task_link_record,
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=(binding, *traces),
+                    effect_envelopes=(task, unit, conversation_link, run_link),
+                )
+                if replay is not None:
+                    return replay
+                for code, identity, expected in (
+                    (
+                        P0RecordCode.CONVERSATION_RECORD,
+                        ((
+                            "conversation_id",
+                            command.expected_conversation_record.conversation_id,
+                        ),),
+                        command.expected_conversation_record,
+                    ),
+                    (
+                        P0RecordCode.MESSAGE_RECORD,
+                        ((
+                            "message_id",
+                            command.expected_user_message_record.message_id,
+                        ),),
+                        command.expected_user_message_record,
+                    ),
+                    (
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        ((
+                            "run_id",
+                            command.expected_running_run_record.run_id,
+                        ),),
+                        command.expected_running_run_record,
+                    ),
+                ):
+                    loaded = self._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=code,
+                        logical_identity=identity,
+                        for_update=True,
+                    )
+                    if loaded is None or loaded[1].source_record != expected:
+                        raise _Cycle2NotApplicable() from None
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.reducer_decision.closure.record,
+                )
+                self._cycle2_insert(
+                    session,
+                    (
+                        task,
+                        unit,
+                        binding,
+                        ru,
+                        conversation_link,
+                        run_link,
+                        *traces,
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
     async def finalize_cycle2_run_if_current(
         self,
         command: FinalizeCycle2RunCommand,
@@ -5857,12 +6822,977 @@ class PostgresRecordAdapter:
             return Cycle2WriteResult.PROJECTION_CONFLICT
         return Cycle2WriteResult.APPLIED
 
+    @classmethod
+    def _cycle2_v3_request_understanding_closures(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        run_ids: frozenset[UUID],
+        authoritative_messages: tuple[MessageRecord, ...],
+        readiness: bool = False,
+    ) -> tuple[RequestUnderstandingClosureV3, ...]:
+        owner = owner_customer_id
+        if not run_ids:
+            return ()
+        if readiness:
+            physical_rows = tuple(
+                session.scalars(
+                    select(P0RecordModel)
+                    .where(
+                        P0RecordModel.scope_owner_customer_id == owner,
+                        P0RecordModel.record_code
+                        == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
+                        P0RecordModel.record_schema_version
+                        == "request_understanding_record.p0.v3",
+                        P0RecordModel.run_id.in_(tuple(run_ids)),
+                    )
+                    .order_by(P0RecordModel.logical_identity)
+                )
+            )
+            readiness_rows = []
+            for row in physical_rows:
+                decoded = cls._cycle2_decode_row(
+                    session,
+                    row,
+                    owner_customer_id=owner,
+                    expected_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                    expected_versions=frozenset(
+                        {"request_understanding_record.p0.v3"}
+                    ),
+                )
+                source = decoded.source_record
+                if type(source) is not RequestUnderstandingRecordV3:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                    )
+                version_by_code = (
+                    _EXACT_RUN_V3_VERSION_BY_CODE
+                    if source.model_output_schema_version == "e2e01-thin-v2"
+                    else _CYCLE2_VERSION_BY_CODE
+                )
+                envelope = _exact_run_parse_envelope(row.envelope)
+                for reference in envelope.record_references:
+                    if reference.target_record_code not in _PRIVATE_RECORD_CODES:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    expected_version = version_by_code.get(
+                        reference.target_record_code
+                    )
+                    if expected_version is None:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    target_rows = tuple(
+                        session.scalars(
+                            select(P0RecordModel)
+                            .where(
+                                P0RecordModel.record_code
+                                == reference.target_record_code.value,
+                                P0RecordModel.logical_identity
+                                == _json_identity(
+                                    reference.target_logical_identity
+                                ),
+                                P0RecordModel.scope_owner_customer_id == owner,
+                            )
+                            .limit(2)
+                        )
+                    )
+                    if len(target_rows) != 1:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        )
+                    cls._cycle2_decode_row(
+                        session,
+                        target_rows[0],
+                        owner_customer_id=owner,
+                        expected_code=reference.target_record_code,
+                        expected_versions=frozenset({expected_version}),
+                    )
+                readiness_rows.append((row, decoded))
+            rows = tuple(readiness_rows)
+        else:
+            rows = cls._cycle2_rows(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+                predicates=(P0RecordModel.run_id.in_(tuple(run_ids)),),
+                expected_versions=frozenset(
+                    {"request_understanding_record.p0.v3"}
+                ),
+            )
+        message_by_id = {
+            message.message_id: message for message in authoritative_messages
+        }
+        result: list[RequestUnderstandingClosureV3] = []
+        for _row, decoded in rows:
+            record = decoded.source_record
+            children = decoded.logical_children
+            if (
+                type(record) is not RequestUnderstandingRecordV3
+                or record.run_id not in run_ids
+                or any(
+                    type(child)
+                    not in (
+                        AcceptedAddGoalTaskDeltaV3,
+                        AcceptedSupplyInputTaskDeltaV3,
+                    )
+                    for child in children
+                )
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            run_loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=(("run_id", record.run_id),),
+                expected_versions=frozenset(
+                    {"agent_run_record.p0.v1", "agent_run_record.p0.v2"}
+                ),
+            )
+            if run_loaded is None or type(run_loaded[1].source_record) not in (
+                AgentRunRecord,
+                AgentRunRecordV2,
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            cls._ru_v3_validate_authoritative_provenance(
+                record,
+                tuple(message_by_id.values()),
+                expected_conversation_id=cast(
+                    AgentRunRecord | AgentRunRecordV2,
+                    run_loaded[1].source_record,
+                ).conversation_id,
+            )
+            try:
+                result.append(
+                    RequestUnderstandingClosureV3(
+                        record=record,
+                        accepted_task_deltas=cast(
+                            tuple[
+                                AcceptedAddGoalTaskDeltaV3
+                                | AcceptedSupplyInputTaskDeltaV3,
+                                ...,
+                            ],
+                            children,
+                        ),
+                    )
+                )
+            except (TypeError, ValueError, ValidationError, RecursionError):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                ) from None
+        return tuple(
+            sorted(
+                result,
+                key=lambda closure: (
+                    closure.record.created_at,
+                    str(closure.record.request_understanding_record_id),
+                ),
+            )
+        )
+
+    @classmethod
+    def _ru_v3_validate_task_transition_chain(
+        cls,
+        *,
+        session: Session,
+        owner_customer_id: str,
+        task: TaskRecord,
+        request_unit: RequestUnitRecord,
+        children: tuple[BaseModel, ...],
+        accepted_effects: tuple[
+            AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3,
+            ...,
+        ],
+    ) -> None:
+        if (
+            task.task_id != request_unit.task_id
+            or task.state_version != request_unit.state_version
+            or task.status is not request_unit.status
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        transition_by_version: dict[int, TaskStateTransition] = {}
+        for child in children:
+            if (
+                type(child) is not TaskStateTransition
+                or child.task_id != task.task_id
+                or child.request_unit_id != request_unit.request_unit_id
+                or child.result_state_version > task.state_version
+                or child.result_state_version in transition_by_version
+                or child.changed_at > task.updated_at
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            transition_by_version[child.result_state_version] = child
+        if tuple(transition_by_version) != tuple(sorted(transition_by_version)):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        relevant_effects = tuple(
+            effect
+            for effect in accepted_effects
+            if effect.result_task_state_version <= task.state_version
+        )
+        if len(relevant_effects) != len(accepted_effects):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        effect_by_version = {
+            effect.result_task_state_version: effect
+            for effect in relevant_effects
+        }
+        if len(effect_by_version) != len(relevant_effects):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        add_goal_effects = tuple(
+            effect
+            for effect in relevant_effects
+            if type(effect) is AcceptedAddGoalTaskDeltaV3
+        )
+        if add_goal_effects:
+            if (
+                len(add_goal_effects) != 1
+                or add_goal_effects[0].base_task_state_version is not None
+                or add_goal_effects[0].result_task_state_version != 1
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            first_base_version = 0
+        elif relevant_effects:
+            first_base_version = min(
+                effect.base_task_state_version
+                for effect in relevant_effects
+                if type(effect) is AcceptedSupplyInputTaskDeltaV3
+            )
+        else:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+        relevant_transition_by_version = {
+            version: transition
+            for version, transition in transition_by_version.items()
+            if version > first_base_version
+        }
+        causal_versions = set(effect_by_version) | set(
+            relevant_transition_by_version
+        )
+        if (
+            set(effect_by_version) & set(relevant_transition_by_version)
+            or causal_versions
+            != set(range(first_base_version + 1, task.state_version + 1))
+        ):
+            raise _integrity(
+                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+            )
+
+        def state_at(
+            *,
+            record_code: P0RecordCode,
+            logical_identity: tuple[tuple[str, object], ...],
+            current_record: TaskRecord | RequestUnitRecord,
+            version: int,
+        ) -> TaskRecord | RequestUnitRecord:
+            if current_record.state_version == version:
+                return current_record
+            historical = cls._cycle2_historical_row(
+                session,
+                owner_customer_id=owner_customer_id,
+                record_code=record_code,
+                logical_identity=logical_identity,
+                state_version=version,
+            )
+            if historical is None or type(historical.source_record) not in (
+                TaskRecord,
+                RequestUnitRecord,
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            return cast(
+                TaskRecord | RequestUnitRecord,
+                historical.source_record,
+            )
+
+        task_identity = (("task_id", task.task_id),)
+        unit_identity = (("request_unit_id", request_unit.request_unit_id),)
+        for version in range(first_base_version + 1, task.state_version + 1):
+            after_task = state_at(
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=task_identity,
+                current_record=task,
+                version=version,
+            )
+            after_unit = state_at(
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=unit_identity,
+                current_record=request_unit,
+                version=version,
+            )
+            if (
+                type(after_task) is not TaskRecord
+                or type(after_unit) is not RequestUnitRecord
+                or after_task.state_version != version
+                or after_unit.state_version != version
+                or after_task.status is not after_unit.status
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            effect = effect_by_version.get(version)
+            transition = relevant_transition_by_version.get(version)
+            if version == 1:
+                if (
+                    type(effect) is not AcceptedAddGoalTaskDeltaV3
+                    or after_task.status is not TaskStatus.ACTIVE
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                continue
+            before_task = state_at(
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=task_identity,
+                current_record=task,
+                version=version - 1,
+            )
+            before_unit = state_at(
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=unit_identity,
+                current_record=request_unit,
+                version=version - 1,
+            )
+            if (
+                type(before_task) is not TaskRecord
+                or type(before_unit) is not RequestUnitRecord
+                or before_task.status is not before_unit.status
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            if effect is not None:
+                if (
+                    type(effect) is not AcceptedSupplyInputTaskDeltaV3
+                    or effect.base_task_state_version != version - 1
+                    or effect.task_id != task.task_id
+                    or effect.target_request_unit_id
+                    != request_unit.request_unit_id
+                    or effect.accepted_at < before_task.updated_at
+                    or effect.accepted_at < before_unit.updated_at
+                    or after_task.updated_at != effect.accepted_at
+                    or after_unit.updated_at != effect.accepted_at
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                continue
+            if transition is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            expected_task = before_task.model_copy(
+                update={
+                    "status": transition.to_status,
+                    "state_version": version,
+                    "updated_at": transition.changed_at,
+                }
+            )
+            expected_unit = before_unit.model_copy(
+                update={
+                    "status": transition.to_status,
+                    "state_version": version,
+                    "updated_at": transition.changed_at,
+                }
+            )
+            if (
+                transition.base_state_version != version - 1
+                or transition.from_status is not before_task.status
+                or transition.to_status is not after_task.status
+                or transition.changed_at < before_task.updated_at
+                or transition.changed_at < before_unit.updated_at
+                or after_task != expected_task
+                or after_unit != expected_unit
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+
+    @classmethod
+    def _ru_v3_validate_readiness_effect_closures(
+        cls,
+        session: Session,
+        *,
+        owner_customer_id: str,
+        closures: tuple[RequestUnderstandingClosureV3, ...],
+    ) -> None:
+        owner = owner_customer_id
+        accepted_effects_by_task: dict[
+            UUID,
+            list[AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
+        ] = {}
+        accepted_effects_by_run_task: dict[
+            tuple[UUID, UUID],
+            list[AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
+        ] = {}
+        for closure in closures:
+            for child in closure.accepted_task_deltas:
+                accepted_effects_by_task.setdefault(child.task_id, []).append(child)
+                accepted_effects_by_run_task.setdefault(
+                    (closure.record.run_id, child.task_id),
+                    [],
+                ).append(child)
+
+        def state_decoded_at_effect(
+            *,
+            record_code: P0RecordCode,
+            logical_identity: tuple[tuple[str, object], ...],
+            current_decoded: DecodedP0PersistenceRecord,
+            result_state_version: int,
+        ) -> DecodedP0PersistenceRecord:
+            current_record = current_decoded.source_record
+            if type(current_record) not in (TaskRecord, RequestUnitRecord):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            if current_record.state_version < result_state_version:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            if current_record.state_version == result_state_version:
+                return current_decoded
+            historical = cls._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=record_code,
+                logical_identity=logical_identity,
+                state_version=result_state_version,
+            )
+            if historical is None:
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            if type(historical.source_record) not in (
+                TaskRecord,
+                RequestUnitRecord,
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                )
+            return historical
+
+        for closure in closures:
+            record = closure.record
+            run_loaded = cls._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=(("run_id", record.run_id),),
+                expected_versions=frozenset(
+                    {"agent_run_record.p0.v1", "agent_run_record.p0.v2"}
+                ),
+            )
+            if run_loaded is None or type(run_loaded[1].source_record) not in (
+                AgentRunRecord,
+                AgentRunRecordV2,
+            ):
+                raise _integrity(
+                    P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                )
+            run = cast(
+                AgentRunRecord | AgentRunRecordV2,
+                run_loaded[1].source_record,
+            )
+            message_refs = {
+                record.message_ref,
+                *record.contextualization.source_message_refs,
+                *(
+                    source_ref
+                    for uncertainty in record.contextualization.uncertainties
+                    for source_ref in uncertainty.source_message_refs
+                ),
+                *(
+                    candidate.source_ref
+                    for candidate in (
+                        *record.contextualization.resolved_reference_candidates,
+                        *(
+                            candidate_input
+                            for task_delta in record.task_delta_candidates
+                            for candidate_input in task_delta.input_candidates
+                        ),
+                    )
+                ),
+            }
+            for message_id in message_refs:
+                message_loaded = cls._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.MESSAGE_RECORD,
+                    logical_identity=(("message_id", message_id),),
+                )
+                if (
+                    message_loaded is None
+                    or type(message_loaded[1].source_record) is not MessageRecord
+                    or cast(
+                        MessageRecord,
+                        message_loaded[1].source_record,
+                    ).conversation_id
+                    != run.conversation_id
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+            candidate_by_id = {
+                candidate.candidate_id: candidate
+                for candidate in record.task_delta_candidates
+            }
+            for child in closure.accepted_task_deltas:
+                task_identity = (("task_id", child.task_id),)
+                task_loaded = cls._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=task_identity,
+                )
+                if (
+                    task_loaded is None
+                    or type(task_loaded[1].source_record) is not TaskRecord
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                current_task = cast(TaskRecord, task_loaded[1].source_record)
+
+                if type(child) is AcceptedAddGoalTaskDeltaV3:
+                    unit_rows = cls._cycle2_rows(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                        predicates=(P0RecordModel.task_id == child.task_id,),
+                    )
+                    if len(unit_rows) != 1:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                        )
+                    unit_loaded = unit_rows[0]
+                else:
+                    unit_loaded = cls._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                        logical_identity=((
+                            "request_unit_id",
+                            child.target_request_unit_id,
+                        ),),
+                    )
+                    if unit_loaded is None:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                if type(unit_loaded[1].source_record) is not RequestUnitRecord:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                    )
+                current_unit = cast(
+                    RequestUnitRecord,
+                    unit_loaded[1].source_record,
+                )
+                unit_identity = ((
+                    "request_unit_id",
+                    current_unit.request_unit_id,
+                ),)
+                if (
+                    current_unit.task_id != child.task_id
+                    or current_task.state_version != current_unit.state_version
+                    or current_task.status is not current_unit.status
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+
+                cls._ru_v3_validate_task_transition_chain(
+                    session=session,
+                    owner_customer_id=owner,
+                    task=current_task,
+                    request_unit=current_unit,
+                    children=cast(
+                        tuple[BaseModel, ...],
+                        task_loaded[1].logical_children,
+                    ),
+                    accepted_effects=tuple(
+                        accepted_effects_by_task.get(child.task_id, ())
+                    ),
+                )
+
+                task_effect_decoded = state_decoded_at_effect(
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=task_identity,
+                    current_decoded=task_loaded[1],
+                    result_state_version=child.result_task_state_version,
+                )
+                unit_effect_decoded = state_decoded_at_effect(
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=unit_identity,
+                    current_decoded=unit_loaded[1],
+                    result_state_version=child.result_task_state_version,
+                )
+                task_at_effect = task_effect_decoded.source_record
+                unit_at_effect = unit_effect_decoded.source_record
+                if (
+                    type(task_at_effect) is not TaskRecord
+                    or type(unit_at_effect) is not RequestUnitRecord
+                    or task_at_effect.task_id != child.task_id
+                    or unit_at_effect.task_id != child.task_id
+                    or task_at_effect.state_version
+                    != child.result_task_state_version
+                    or unit_at_effect.state_version
+                    != child.result_task_state_version
+                    or task_at_effect.status is not unit_at_effect.status
+                    or task_at_effect.owner_customer_id != owner
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                if type(child) is AcceptedAddGoalTaskDeltaV3:
+                    expected_task = TaskRecord(
+                        task_id=child.task_id,
+                        owner_customer_id=owner,
+                        status=TaskStatus.ACTIVE,
+                        state_version=child.result_task_state_version,
+                        created_at=child.accepted_at,
+                        updated_at=child.accepted_at,
+                        last_outcome_ref=None,
+                    )
+                    expected_unit = RequestUnitRecord(
+                        request_unit_id=unit_at_effect.request_unit_id,
+                        task_id=child.task_id,
+                        goal_text=child.goal_text,
+                        goal_source_refs=(child.message_ref,),
+                        input_binding_refs=child.input_binding_refs,
+                        status=TaskStatus.ACTIVE,
+                        state_version=child.result_task_state_version,
+                        created_at=child.accepted_at,
+                        updated_at=child.accepted_at,
+                    )
+                    if (
+                        task_at_effect != expected_task
+                        or unit_at_effect != expected_unit
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                elif (
+                    task_at_effect.updated_at != child.accepted_at
+                    or unit_at_effect.updated_at != child.accepted_at
+                    or child.target_request_unit_id
+                    != unit_at_effect.request_unit_id
+                    or any(
+                        binding_ref not in unit_at_effect.input_binding_refs
+                        for binding_ref in child.input_binding_refs
+                    )
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+
+                candidate = candidate_by_id.get(child.candidate_ref)
+                if candidate is None or len(candidate.input_candidates) != len(
+                    child.input_binding_refs
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+                effect_bindings: list[InputBinding | InputBindingV2] = []
+                for candidate_input, binding_ref in zip(
+                    candidate.input_candidates,
+                    child.input_binding_refs,
+                    strict=True,
+                ):
+                    binding_loaded = cls._cycle2_row(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                        logical_identity=(("binding_id", binding_ref),),
+                        expected_versions=frozenset(
+                            {
+                                "input_binding_record.p0.v1",
+                                "input_binding_record.p0.v2",
+                            }
+                        ),
+                    )
+                    if binding_loaded is None or type(
+                        binding_loaded[1].source_record
+                    ) not in (InputBinding, InputBindingV2):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    binding = cast(
+                        InputBinding | InputBindingV2,
+                        binding_loaded[1].source_record,
+                    )
+                    effect_bindings.append(binding)
+                    candidate_value = (
+                        candidate_input.normalized_candidate_value
+                        if hasattr(
+                            candidate_input,
+                            "normalized_candidate_value",
+                        )
+                        else candidate_input.candidate_value
+                    )
+                    if (
+                        not hasattr(candidate_input, "normalized_candidate_value")
+                        and candidate_input.name == "order_id"
+                    ):
+                        candidate_value = candidate_value.strip()
+                        if candidate_value[:2].casefold() == "o-":
+                            candidate_value = f"O-{candidate_value[2:]}"
+                    if (
+                        binding.binding_id != binding_ref
+                        or binding.name != candidate_input.name
+                        or binding.normalized_value != candidate_value
+                        or binding.authority is not candidate_input.authority
+                        or binding.source_refs != (candidate_input.source_ref,)
+                        or binding.created_at != child.accepted_at
+                        or binding.updated_at != child.accepted_at
+                        or (
+                            type(child) is AcceptedAddGoalTaskDeltaV3
+                            and binding.supersedes is not None
+                        )
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+
+                if type(child) is AcceptedSupplyInputTaskDeltaV3:
+                    base_task_decoded = state_decoded_at_effect(
+                        record_code=P0RecordCode.TASK_RECORD,
+                        logical_identity=task_identity,
+                        current_decoded=task_loaded[1],
+                        result_state_version=child.base_task_state_version,
+                    )
+                    base_unit_decoded = state_decoded_at_effect(
+                        record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                        logical_identity=unit_identity,
+                        current_decoded=unit_loaded[1],
+                        result_state_version=child.base_task_state_version,
+                    )
+                    base_task = base_task_decoded.source_record
+                    base_unit = base_unit_decoded.source_record
+                    if (
+                        type(base_task) is not TaskRecord
+                        or type(base_unit) is not RequestUnitRecord
+                        or base_task.status is not base_unit.status
+                        or base_task.state_version
+                        != child.base_task_state_version
+                        or base_unit.state_version
+                        != child.base_task_state_version
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    expected_binding_refs = list(base_unit.input_binding_refs)
+                    for binding in effect_bindings:
+                        if binding.supersedes is None:
+                            expected_binding_refs.append(binding.binding_id)
+                            continue
+                        if expected_binding_refs.count(binding.supersedes) != 1:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                            )
+                        binding_index = expected_binding_refs.index(
+                            binding.supersedes
+                        )
+                        expected_binding_refs[binding_index] = binding.binding_id
+                    ordinal_selection = any(
+                        binding.name == "candidate_ordinal"
+                        for binding in effect_bindings
+                    )
+                    expected_task = base_task.model_copy(
+                        update={
+                            "status": (
+                                TaskStatus.ACTIVE
+                                if ordinal_selection
+                                else base_task.status
+                            ),
+                            "state_version": child.result_task_state_version,
+                            "updated_at": child.accepted_at,
+                        }
+                    )
+                    expected_unit = base_unit.model_copy(
+                        update={
+                            "input_binding_refs": tuple(expected_binding_refs),
+                            "open_questions": (
+                                ()
+                                if ordinal_selection
+                                else base_unit.open_questions
+                            ),
+                            "status": (
+                                TaskStatus.ACTIVE
+                                if ordinal_selection
+                                else base_unit.status
+                            ),
+                            "state_version": child.result_task_state_version,
+                            "updated_at": child.accepted_at,
+                        }
+                    )
+                    if (
+                        task_at_effect != expected_task
+                        or unit_at_effect != expected_unit
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+
+                if type(child) is AcceptedAddGoalTaskDeltaV3:
+                    conversation_link_rows = cls._cycle2_rows(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                        predicates=(P0RecordModel.task_id == child.task_id,),
+                        expected_versions=frozenset(
+                            {"conversation_task_link_record.p0.v1"}
+                        ),
+                    )
+                    expected_conversation_link = ConversationTaskLinkRecord(
+                        schema_version="conversation_task_link_record.p0.v1",
+                        conversation_id=run.conversation_id,
+                        task_id=child.task_id,
+                        link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+                        linked_at=child.accepted_at,
+                        ended_at=None,
+                    )
+                    if (
+                        len(conversation_link_rows) != 1
+                        or conversation_link_rows[0][1].source_record
+                        != expected_conversation_link
+                    ):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+
+                run_link_rows = tuple(
+                    session.scalars(
+                        select(P0RecordModel)
+                        .where(
+                            P0RecordModel.scope_owner_customer_id == owner,
+                            P0RecordModel.record_code
+                            == P0RecordCode.RUN_TASK_LINK_RECORD.value,
+                            P0RecordModel.run_id == record.run_id,
+                            P0RecordModel.task_id == child.task_id,
+                        )
+                        .limit(2)
+                    )
+                )
+                run_links = tuple(
+                    cls._cycle2_decode_row(
+                        session,
+                        row,
+                        owner_customer_id=owner,
+                        expected_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                        expected_versions=frozenset(
+                            {
+                                "run_task_link_record.p0.v1",
+                                "run_task_link_record.p0.v2",
+                            }
+                        ),
+                    )
+                    for row in run_link_rows
+                )
+                if len(run_links) != 1 or type(
+                    run_links[0].source_record
+                ) not in (RunTaskLinkRecord, RunTaskLinkRecordV2):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                    )
+                run_link = cast(
+                    RunTaskLinkRecord | RunTaskLinkRecordV2,
+                    run_links[0].source_record,
+                )
+                run_task_effects = accepted_effects_by_run_task.get(
+                    (record.run_id, child.task_id),
+                    [],
+                )
+                if not run_task_effects:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                base_version = run_task_effects[0].base_task_state_version
+                last_result_version = run_task_effects[
+                    -1
+                ].result_task_state_version
+                active_run = run.status in (
+                    AgentRunStatus.CREATED,
+                    AgentRunStatus.RUNNING,
+                    AgentRunStatusV2.CREATED,
+                    AgentRunStatusV2.RUNNING,
+                )
+                superseded_no_result = (
+                    type(run) is AgentRunRecordV2
+                    and run.status is AgentRunStatusV2.SUPERSEDED
+                )
+                requires_terminal_result = (
+                    not active_run and not superseded_no_result
+                )
+                expected_terminal_result: int | None = None
+                if requires_terminal_result:
+                    if run.completed_at is None:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    eligible_versions = []
+                    for version in range(
+                        last_result_version,
+                        current_task.state_version + 1,
+                    ):
+                        state = state_decoded_at_effect(
+                            record_code=P0RecordCode.TASK_RECORD,
+                            logical_identity=task_identity,
+                            current_decoded=task_loaded[1],
+                            result_state_version=version,
+                        ).source_record
+                        if (
+                            type(state) is TaskRecord
+                            and state.updated_at <= run.completed_at
+                        ):
+                            eligible_versions.append(version)
+                    if not eligible_versions:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                        )
+                    expected_terminal_result = max(eligible_versions)
+                if (
+                    run_link.run_id != record.run_id
+                    or run_link.task_id != child.task_id
+                    or run_link.base_task_state_version != base_version
+                    or (
+                        requires_terminal_result
+                        and run_link.result_task_state_version
+                        != expected_terminal_result
+                    )
+                    or (
+                        (active_run or superseded_no_result)
+                        and run_link.result_task_state_version is not None
+                    )
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+
     def _cycle2_exact_run_evidence(
         self,
         session: Session,
         *,
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
+        include_v3_request_understanding: bool = False,
     ) -> Cycle2ExactRunEvidenceClosure | None:
         owner = owner_scope.customer_id
         run_loaded = self._cycle2_row(
@@ -6361,6 +8291,16 @@ class PostgresRecordAdapter:
                 loaded[1].source_record,
             )
         supporting_links = tuple(supporting_links_by_key.values())
+        request_understanding_closures = (
+            self._cycle2_v3_request_understanding_closures(
+                session,
+                owner_customer_id=owner_scope.customer_id,
+                run_ids=frozenset({run_id, *supporting_run_ids}),
+                authoritative_messages=all_messages,
+            )
+            if include_v3_request_understanding
+            else ()
+        )
 
         traces = tuple(
             cast(TraceEventV2, decoded.source_record)
@@ -6467,6 +8407,14 @@ class PostgresRecordAdapter:
             ref
             for manifest in manifests
             for ref in manifest.selected_message_refs
+        )
+        referenced_message_ids.update(
+            ref
+            for closure in request_understanding_closures
+            for ref in (
+                closure.record.message_ref,
+                *closure.record.contextualization.source_message_refs,
+            )
         )
         if run.status is AgentRunStatusV2.COMPLETED:
             terminal_assistants = tuple(
@@ -6582,6 +8530,9 @@ class PostgresRecordAdapter:
                 task_records=tuple(tasks),
                 request_unit_records=tuple(units),
                 input_binding_records=tuple(bindings),
+                request_understanding_closures=(
+                    request_understanding_closures
+                ),
                 task_state_transition_records=tuple(
                     sorted(
                         transitions,
@@ -6651,6 +8602,156 @@ class PostgresRecordAdapter:
                     owner_scope=owner_scope,
                     run_id=run_id,
                 )
+
+    @_bounded_database_failures
+    async def load_cycle2_exact_run_evidence_v3_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure | None:
+        if type(owner_scope) is not TrustedOwnerScope:
+            raise TypeError("owner_scope must be exact TrustedOwnerScope")
+        if type(run_id) is not UUID:
+            raise TypeError("run_id must be exact UUID")
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL "
+                        "REPEATABLE READ, READ ONLY"
+                    )
+                )
+                return self._cycle2_exact_run_evidence(
+                    session,
+                    owner_scope=owner_scope,
+                    run_id=run_id,
+                    include_v3_request_understanding=True,
+                )
+
+    @_bounded_database_failures
+    async def assert_request_understanding_v3_ready(self) -> None:
+        with self.session_factory() as session:
+            with session.begin():
+                session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL "
+                        "REPEATABLE READ, READ ONLY"
+                    )
+                )
+                installed_revision = session.scalar(
+                    text("SELECT version_num FROM alembic_version")
+                )
+                constraint_definition = session.scalar(
+                    text(
+                        """
+                        SELECT pg_get_constraintdef(oid)
+                        FROM pg_constraint
+                        WHERE conrelid = 'p0_records'::regclass
+                          AND conname =
+                              'ck_p0_records_code_version_closed'
+                        """
+                    )
+                )
+                if (
+                    installed_revision != "20260803_0007"
+                    or not _constraint_closes_exact_physical_pairs(
+                        constraint_definition
+                    )
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+                    )
+                residual_v2 = session.scalar(
+                    select(func.count())
+                    .select_from(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_code
+                        == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
+                        P0RecordModel.record_schema_version
+                        == "request_understanding_record.p0.v2",
+                    )
+                )
+                if residual_v2 != 0:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+                    )
+                owner_rows = tuple(
+                    session.execute(
+                        select(
+                            P0RecordModel.scope_owner_customer_id,
+                            P0RecordModel.run_id,
+                        )
+                        .where(
+                            P0RecordModel.record_code
+                            == P0RecordCode.REQUEST_UNDERSTANDING_RECORD.value,
+                            P0RecordModel.record_schema_version
+                            == "request_understanding_record.p0.v3",
+                        )
+                        .order_by(P0RecordModel.record_id)
+                    )
+                )
+                owners: dict[str, set[UUID]] = {}
+                for owner, run_id in owner_rows:
+                    if type(owner) is not str or type(run_id) is not UUID:
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.OWNER_PROJECTION_MISMATCH
+                        )
+                    owners.setdefault(owner, set()).add(run_id)
+                for owner, run_ids in owners.items():
+                    message_rows = self._cycle2_rows(
+                        session,
+                        owner_customer_id=owner,
+                        record_code=P0RecordCode.MESSAGE_RECORD,
+                    )
+                    messages = tuple(
+                        cast(MessageRecord, decoded.source_record)
+                        for _row, decoded in message_rows
+                        if type(decoded.source_record) is MessageRecord
+                    )
+                    if len(messages) != len(message_rows):
+                        raise _integrity(
+                            P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                        )
+                    closures = self._cycle2_v3_request_understanding_closures(
+                        session,
+                        owner_customer_id=owner,
+                        run_ids=frozenset(run_ids),
+                        authoritative_messages=messages,
+                        readiness=True,
+                    )
+                    self._ru_v3_validate_readiness_effect_closures(
+                        session,
+                        owner_customer_id=owner,
+                        closures=closures,
+                    )
+                    for run_id in run_ids:
+                        run_rows = tuple(
+                            session.scalars(
+                                select(P0RecordModel)
+                                .where(
+                                    P0RecordModel.record_code
+                                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                                    P0RecordModel.run_id == run_id,
+                                    P0RecordModel.scope_owner_customer_id
+                                    == owner,
+                                )
+                                .limit(2)
+                            )
+                        )
+                        if len(run_rows) != 1:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
+                            )
+                        run_row = run_rows[0]
+                        if run_row.record_schema_version not in {
+                            "agent_run_record.p0.v1",
+                            "agent_run_record.p0.v2",
+                        }:
+                            raise _integrity(
+                                P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH
+                            )
+        return None
 
     @classmethod
     def _cycle2_continuation_closure(
@@ -6815,6 +8916,196 @@ class PostgresRecordAdapter:
                     owner_customer_id=owner,
                     expected_record=closure.current_request_unit_record,
                     next_envelope=self._cycle2_encode(P0RecordCode.REQUEST_UNIT_RECORD, command.next_request_unit_record),
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def save_rejected_continuation_understanding_if_current(
+        self,
+        command: SaveRejectedContinuationUnderstandingV3Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        ru = self._ru_v3_encode(
+            command.decision.closure.record,
+            logical_children=(),
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=(),
+                )
+                if replay is not None:
+                    return replay
+                current = self._cycle2_continuation_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    conversation_id=(
+                        closure.trusted_conversation_record.conversation_id
+                    ),
+                    message_id=closure.saved_user_message_record.message_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    trusted_now=closure.trusted_now,
+                    for_update=True,
+                )
+                if current != closure:
+                    raise _Cycle2NotApplicable() from None
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.decision.closure.record,
+                )
+                self._cycle2_insert(
+                    session,
+                    (ru,),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def apply_continuation_task_delta_if_current(
+        self,
+        command: ApplyContinuationTaskDeltaV3Command,
+    ) -> Cycle2WriteResult:
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        child = command.decision.closure.accepted_task_deltas[0]
+        if type(child) is not AcceptedSupplyInputTaskDeltaV3:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+            )
+        ru = self._ru_v3_encode(
+            command.decision.closure.record,
+            logical_children=(child,),
+        )
+        binding_envelopes = tuple(
+            self._cycle2_encode_input_binding(
+                binding,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+            )
+            for binding in command.decision.input_bindings
+        )
+        trace_envelopes = tuple(
+            self._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, trace)
+            for trace in command.effect_trace_records
+        )
+        next_task = self._cycle2_encode(
+            P0RecordCode.TASK_RECORD,
+            command.next_task_record,
+        )
+        next_unit = self._cycle2_encode(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            command.next_request_unit_record,
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=(
+                        *binding_envelopes,
+                        *trace_envelopes,
+                    ),
+                    effect_envelopes=(next_task, next_unit),
+                )
+                if replay is not None:
+                    return replay
+                current = self._cycle2_continuation_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    conversation_id=(
+                        closure.trusted_conversation_record.conversation_id
+                    ),
+                    message_id=closure.saved_user_message_record.message_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    trusted_now=closure.trusted_now,
+                    for_update=True,
+                )
+                if current != closure:
+                    raise _Cycle2NotApplicable() from None
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.decision.closure.record,
+                )
+                task_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=((
+                        "task_id",
+                        closure.current_task_record.task_id,
+                    ),),
+                    for_update=True,
+                )
+                unit_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=((
+                        "request_unit_id",
+                        closure.current_request_unit_record.request_unit_id,
+                    ),),
+                    for_update=True,
+                )
+                if task_loaded is None or unit_loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                existing_transitions = task_loaded[1].logical_children
+                if any(
+                    type(item) is not TaskStateTransition
+                    for item in existing_transitions
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+                self._cycle2_insert(
+                    session,
+                    (ru, *binding_envelopes, *trace_envelopes),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(
+                    session,
+                    task_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_task_record,
+                    expected_children=existing_transitions,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.next_task_record,
+                        logical_children=existing_transitions,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_request_unit_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        command.next_request_unit_record,
+                    ),
                 )
         except _Cycle2NotApplicable:
             return Cycle2WriteResult.NOT_APPLICABLE
@@ -8400,6 +10691,140 @@ class PostgresRecordAdapter:
                 )
                 self._cycle2_replace(session, task[0], owner_customer_id=owner, expected_record=closure.current_task_record, next_envelope=self._cycle2_encode(P0RecordCode.TASK_RECORD, command.next_task_record))
                 self._cycle2_replace(session, unit[0], owner_customer_id=owner, expected_record=closure.current_request_unit_record, next_envelope=self._cycle2_encode(P0RecordCode.REQUEST_UNIT_RECORD, command.next_request_unit_record))
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        return Cycle2WriteResult.APPLIED
+
+    @_bounded_database_failures
+    async def apply_order_candidate_selection_v3_if_current(
+        self,
+        command: ApplyOrderCandidateSelectionV3Command,
+    ) -> Cycle2WriteResult:
+        try:
+            command.require_live_target_issuance()
+        except ValueError:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        child = command.decision.closure.accepted_task_deltas[0]
+        if type(child) is not AcceptedSupplyInputTaskDeltaV3:
+            raise _integrity(
+                P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+            )
+        ru = self._ru_v3_encode(
+            command.decision.closure.record,
+            logical_children=(child,),
+        )
+        binding = self._cycle2_encode_input_binding(
+            command.ordinal_input_binding_record,
+            request_unit_id=closure.current_request_unit_record.request_unit_id,
+        )
+        selection = self._cycle2_encode(
+            P0RecordCode.ORDER_CANDIDATE_SELECTION_RECORD,
+            command.selection_record,
+        )
+        traces = tuple(
+            self._cycle2_encode(P0RecordCode.TRACE_EVENT_RECORD, trace)
+            for trace in command.effect_trace_records
+        )
+        next_task = self._cycle2_encode(
+            P0RecordCode.TASK_RECORD,
+            command.next_task_record,
+        )
+        next_unit = self._cycle2_encode(
+            P0RecordCode.REQUEST_UNIT_RECORD,
+            command.next_request_unit_record,
+        )
+        try:
+            with self.session_factory.begin() as session:
+                self._ru_v3_lock_identity(session, ru)
+                replay = self._ru_v3_generated_rows_state(
+                    session,
+                    owner_customer_id=owner,
+                    request_understanding=ru,
+                    immutable_envelopes=(binding, selection, *traces),
+                    effect_envelopes=(next_task, next_unit),
+                )
+                if replay is not None:
+                    return replay
+                current = self._cycle2_selection_closure(
+                    session,
+                    owner_scope=closure.owner_scope,
+                    conversation_id=closure.conversation_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    selection_request=closure.selection_request,
+                    trusted_now=closure.trusted_now,
+                    for_update=True,
+                )
+                if current != closure:
+                    raise _Cycle2NotApplicable() from None
+                self._ru_v3_validate_persisted_authoritative_provenance(
+                    session,
+                    owner_customer_id=owner,
+                    record=command.decision.closure.record,
+                )
+                task_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=((
+                        "task_id",
+                        closure.current_task_record.task_id,
+                    ),),
+                    for_update=True,
+                )
+                unit_loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=((
+                        "request_unit_id",
+                        closure.current_request_unit_record.request_unit_id,
+                    ),),
+                    for_update=True,
+                )
+                if task_loaded is None or unit_loaded is None:
+                    raise _Cycle2NotApplicable() from None
+                existing_transitions = task_loaded[1].logical_children
+                if any(
+                    type(item) is not TaskStateTransition
+                    for item in existing_transitions
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+                self._cycle2_insert(
+                    session,
+                    (ru, binding, selection, *traces),
+                    owner_customer_id=owner,
+                )
+                self._cycle2_replace(
+                    session,
+                    task_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_task_record,
+                    expected_children=existing_transitions,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.next_task_record,
+                        logical_children=existing_transitions,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_request_unit_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        command.next_request_unit_record,
+                    ),
+                )
         except _Cycle2NotApplicable:
             return Cycle2WriteResult.NOT_APPLICABLE
         except _Cycle2ProjectionConflict:
