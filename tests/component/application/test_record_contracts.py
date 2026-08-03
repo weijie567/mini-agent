@@ -447,6 +447,8 @@ def test_cycle2_exact_run_evidence_exposes_complete_expectation_free_families() 
         "shipment_observation_records",
         "observation_source_edges",
         "shipment_assessment_records",
+        "gate_decision_records",
+        "auto_target_records",
         "tool_call_records",
         "recovery_decision_records",
         "superseded_run_finalizations",
@@ -2273,8 +2275,15 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
         normalized_value=1,
         source_refs=(message.message_id,),
     )
+    task = _c2_project(
+        task,
+        state_version=candidate_set.result_task_state_version,
+        updated_at=candidate_set.created_at,
+    )
     rooted_unit = _c2_project(
         unit,
+        state_version=candidate_set.result_task_state_version,
+        updated_at=candidate_set.created_at,
         input_binding_refs=(query_ref, ordinal_ref),
         observation_refs=(observation.observation_id,),
     )
@@ -2290,7 +2299,9 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
         candidate_set_ref=candidate_set.candidate_set_id,
         candidate_set_version=candidate_set.candidate_set_version,
         search_observation_ref=observation.observation_id,
-        search_observation_record_schema_version=observation.record_schema_version,
+        search_observation_record_schema_version=(
+            observation.record_schema_version
+        ),
         observation_candidate_ref=selected.observation_candidate_ref,
         candidate_source_version=selected.candidate_source_version,
         owner_scoped_order_target_ref=(
@@ -2351,6 +2362,7 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
         "input_binding_records": (query_binding, ordinal_binding),
         "search_observation_records": (observation,),
         "observation_source_edges": (source_edge,),
+        "gate_decision_records": (_c2_gate_for_tool_call(source),),
         "tool_call_records": (source,),
         "context_manifest_records": (source_manifest,),
         "model_visible_toolset_artifacts": (artifact,),
@@ -2372,6 +2384,36 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
     )
     assert historical.supporting_run_records == (supporting_run,)
 
+    dangling_candidate_set = _c2_rebuild_candidate_set(
+        candidate_set,
+        supersedes_candidate_set_ref=uuid4(),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet supersession mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **common,
+                "candidate_set_records": (dangling_candidate_set,),
+            }
+        )
+
+    second_root = _c2_rebuild_candidate_set(
+        candidate_set,
+        candidate_set_id=uuid4(),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet supersession mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **common,
+                "candidate_set_records": (candidate_set, second_root),
+            }
+        )
+
     with pytest.raises(ValidationError, match="CandidateSet ToolCall mismatch"):
         Cycle2ExactRunEvidenceClosure(
             **{
@@ -2380,6 +2422,7 @@ def test_cycle2_exact_run_evidence_rejects_unresolved_candidate_graphs() -> None
                 "run_task_link_records": common["run_task_link_records"][:1],
                 "candidate_set_records": (candidate_set,),
                 "observation_source_edges": (),
+                "gate_decision_records": (),
                 "tool_call_records": (),
                 "context_manifest_records": (),
                 "model_visible_toolset_artifacts": (),
@@ -10093,6 +10136,1131 @@ def _c2_tool_call(
     )
 
 
+def _c2_gate_for_tool_call(
+    tool_call: ToolCallRecordV2,
+    **updates: object,
+) -> GateDecisionV2:
+    values: dict[str, object] = {
+        "gate_decision_id": tool_call.gate_decision_id,
+        "model_call_id": tool_call.model_call_id,
+        "context_manifest_id": tool_call.context_manifest_id,
+        "provider_tool_call_id": tool_call.provider_tool_call_id,
+        "requested_provider_tool_name": tool_call.canonical_tool_name.value,
+        "resolved_canonical_tool_name": tool_call.canonical_tool_name.value,
+        "snapshot_match": True,
+        "registration_valid": True,
+        "schema_valid": True,
+        "trusted_field_valid": True,
+        "argument_binding_valid": True,
+        "argument_binding_refs": tool_call.argument_binding_refs,
+        "budget_valid": True,
+        "progress_valid": True,
+        "proposed_base_task_state_version": (
+            tool_call.validated_task_state_version
+        ),
+        "validated_task_state_version": (
+            tool_call.validated_task_state_version
+        ),
+        "state_version_valid": True,
+        "action_boundary_valid": True,
+        "decision": GateDecisionValue.ACCEPT,
+        "decided_at": tool_call.started_at,
+        "verified_target_ref": tool_call.verified_target_ref,
+        "validated_arguments": (
+            None
+            if tool_call.verified_target_ref is None
+            else {"order_id": "O-1001"}
+        ),
+    }
+    values.update(updates)
+    gate = GateDecisionV2.model_validate(values, strict=True)
+    return GateDecisionV2.model_validate_json(
+        gate.model_dump_json(round_trip=True, warnings="error"),
+        strict=True,
+    )
+
+
+def _c2_unique_auto_target_exact_run_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    command = _c2_unique_search_command()
+    owner = command.owner_scope
+    conversation = command.trusted_conversation_record
+    run = command.source_run_record
+    message = command.current_query_binding.source_message_record
+    observation = command.search_observation_record
+    candidate_set = command.candidate_set_record
+    auto_target = command.auto_target_record
+    assert auto_target is not None
+    query_binding = _input_binding_v2(
+        binding_id=command.current_query_binding.binding_ref,
+        name=command.current_query_binding.binding_name,
+        normalized_value=command.current_query_binding.normalized_query,
+        authority=command.current_query_binding.authority,
+        source_refs=(message.message_id,),
+        validation_status=command.current_query_binding.validation_status,
+        confirmed_by_user=True,
+        created_at=command.current_query_binding.accepted_at,
+        updated_at=command.current_query_binding.accepted_at,
+    )
+    task = command.next_task_record
+    unit = _c2_project(
+        command.next_request_unit_record,
+        goal_source_refs=(message.message_id,),
+        input_binding_refs=(query_binding.binding_id,),
+    )
+    source = command.source_tool_call_record
+    target_call = _c2_tool_call(
+        name=Cycle2ToolName.GET_SHIPMENT,
+        owner=owner.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(query_binding.binding_id,),
+        verified_target_ref=auto_target.verified_target_ref,
+        run_id=run.run_id,
+        started_at=observation.recorded_at,
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+
+    def manifest(tool_call: ToolCallRecordV2) -> ContextManifest:
+        return ContextManifest(
+            context_manifest_id=tool_call.context_manifest_id,
+            run_id=tool_call.run_id,
+            model_call_id=tool_call.model_call_id,
+            tool_registry_version=tool_call.tool_registry_version,
+            model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+            selected_message_refs=(message.message_id,),
+            redaction_policy_version="redaction-v1",
+            token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+            assembled_at=tool_call.started_at,
+        )
+
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=owner,
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(message,),
+        run_task_link_records=(
+            RunTaskLinkRecordV2(run_id=run.run_id, task_id=task.task_id),
+        ),
+        task_records=(task,),
+        request_unit_records=(unit,),
+        input_binding_records=(query_binding,),
+        candidate_set_records=(candidate_set,),
+        search_observation_records=(observation,),
+        observation_source_edges=(
+            Cycle2ObservationSourceEdge(
+                observation_ref=observation.observation_id,
+                source_tool_call_id=source.tool_call_id,
+                source_run_id=source.run_id,
+                task_id=source.task_id,
+                request_unit_id=source.request_unit_id,
+            ),
+        ),
+        gate_decision_records=(
+            _c2_gate_for_tool_call(source),
+            _c2_gate_for_tool_call(target_call),
+        ),
+        auto_target_records=(auto_target,),
+        tool_call_records=(source, target_call),
+        context_manifest_records=(manifest(source), manifest(target_call)),
+        model_visible_toolset_artifacts=(artifact,),
+        trace_records=(
+            TraceEventV2(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=run.started_at,
+                run_id=run.run_id,
+            ),
+        ),
+    )
+
+
+def _c2_ordinal_target_exact_run_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    command = _c2_multiple_search_command()
+    owner = command.owner_scope
+    conversation = command.trusted_conversation_record
+    run = command.source_run_record
+    message = command.current_query_binding.source_message_record
+    observation = command.search_observation_record
+    candidate_set = command.candidate_set_record
+    source = command.source_tool_call_record
+    query_binding = _input_binding_v2(
+        binding_id=command.current_query_binding.binding_ref,
+        name=command.current_query_binding.binding_name,
+        normalized_value=command.current_query_binding.normalized_query,
+        authority=command.current_query_binding.authority,
+        source_refs=(message.message_id,),
+        validation_status=command.current_query_binding.validation_status,
+        confirmed_by_user=True,
+        created_at=command.current_query_binding.accepted_at,
+        updated_at=command.current_query_binding.accepted_at,
+    )
+    selected_at = observation.recorded_at + timedelta(seconds=1)
+    ordinal_binding = _input_binding_v2(
+        name="candidate_ordinal",
+        normalized_value=1,
+        source_refs=(message.message_id,),
+        created_at=selected_at,
+        updated_at=selected_at,
+    )
+    selected = candidate_set.ordered_candidates[0]
+    target_mapping = observation.candidate_target_bindings[0]
+    selected_target_ref = uuid4()
+    selection = OrderCandidateSelectionRecord(
+        selection_id=uuid4(),
+        private_owner_scope_ref=owner.customer_id,
+        conversation_id=conversation.conversation_id,
+        task_id=candidate_set.task_id,
+        request_unit_id=candidate_set.request_unit_id,
+        source_message_ref=message.message_id,
+        ordinal_input_binding_ref=ordinal_binding.binding_id,
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        search_observation_ref=observation.observation_id,
+        search_observation_record_schema_version=observation.record_schema_version,
+        observation_candidate_ref=selected.observation_candidate_ref,
+        candidate_source_version=selected.candidate_source_version,
+        owner_scoped_order_target_ref=target_mapping.owner_scoped_order_ref,
+        selected_target_ref=str(selected_target_ref),
+        base_task_state_version=candidate_set.result_task_state_version,
+        result_task_state_version=candidate_set.result_task_state_version + 1,
+        selected_at=selected_at,
+    )
+    task = _c2_project(
+        command.next_task_record,
+        status=TaskStatus.ACTIVE,
+        state_version=selection.result_task_state_version,
+        updated_at=selected_at,
+    )
+    unit = _c2_project(
+        command.next_request_unit_record,
+        status=TaskStatus.ACTIVE,
+        state_version=selection.result_task_state_version,
+        updated_at=selected_at,
+        goal_source_refs=(message.message_id,),
+        input_binding_refs=(
+            query_binding.binding_id,
+            ordinal_binding.binding_id,
+        ),
+        open_questions=(),
+    )
+    target_call = _c2_tool_call(
+        name=Cycle2ToolName.GET_ORDER,
+        owner=owner.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=task.state_version,
+        argument_binding_refs=(ordinal_binding.binding_id,),
+        verified_target_ref=selected_target_ref,
+        run_id=run.run_id,
+        started_at=selected_at,
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+
+    def manifest(tool_call: ToolCallRecordV2) -> ContextManifest:
+        return ContextManifest(
+            context_manifest_id=tool_call.context_manifest_id,
+            run_id=tool_call.run_id,
+            model_call_id=tool_call.model_call_id,
+            tool_registry_version=tool_call.tool_registry_version,
+            model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+            selected_message_refs=(message.message_id,),
+            redaction_policy_version="redaction-v1",
+            token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+            assembled_at=tool_call.started_at,
+        )
+
+    return Cycle2ExactRunEvidenceClosure(
+        owner_scope=owner,
+        conversation_record=conversation,
+        run_record=run,
+        message_records=(message,),
+        run_task_link_records=(
+            RunTaskLinkRecordV2(run_id=run.run_id, task_id=task.task_id),
+        ),
+        task_records=(task,),
+        request_unit_records=(unit,),
+        input_binding_records=(query_binding, ordinal_binding),
+        candidate_set_records=(candidate_set,),
+        candidate_selection_records=(selection,),
+        search_observation_records=(observation,),
+        observation_source_edges=(
+            Cycle2ObservationSourceEdge(
+                observation_ref=observation.observation_id,
+                source_tool_call_id=source.tool_call_id,
+                source_run_id=source.run_id,
+                task_id=source.task_id,
+                request_unit_id=source.request_unit_id,
+            ),
+        ),
+        gate_decision_records=(
+            _c2_gate_for_tool_call(source),
+            _c2_gate_for_tool_call(target_call),
+        ),
+        tool_call_records=(source, target_call),
+        context_manifest_records=(manifest(source), manifest(target_call)),
+        model_visible_toolset_artifacts=(artifact,),
+        trace_records=(
+            TraceEventV2(
+                trace_event_id=uuid4(),
+                event_type=TraceEventType.RUN_STARTED,
+                occurred_at=run.started_at,
+                run_id=run.run_id,
+            ),
+        ),
+    )
+
+
+def test_cycle2_exact_run_evidence_closes_gate_and_unique_auto_target() -> None:
+    closure = _c2_unique_auto_target_exact_run_evidence()
+    auto_target = closure.auto_target_records[0]
+    source, target_call = closure.tool_call_records
+    source_gate, target_gate = closure.gate_decision_records
+
+    assert source_gate.gate_decision_id == source.gate_decision_id
+    assert target_gate.gate_decision_id == target_call.gate_decision_id
+    assert target_gate.verified_target_ref == auto_target.verified_target_ref
+    assert target_call.verified_target_ref == auto_target.verified_target_ref
+    assert source.argument_binding_refs == (
+        auto_target.query_input_binding_ref,
+    )
+    assert closure.candidate_selection_records == ()
+
+
+def test_cycle2_exact_run_evidence_closes_ordinal_target_authority() -> None:
+    closure = _c2_ordinal_target_exact_run_evidence()
+    selection = closure.candidate_selection_records[0]
+    source, target_call = closure.tool_call_records
+    source_gate, target_gate = closure.gate_decision_records
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    assert source_gate.gate_decision_id == source.gate_decision_id
+    assert target_gate.verified_target_ref == UUID(selection.selected_target_ref)
+    assert target_call.argument_binding_refs == (
+        selection.ordinal_input_binding_ref,
+    )
+
+    unit_without_ordinal = _c2_project(
+        closure.request_unit_records[0],
+        input_binding_refs=(closure.input_binding_records[0].binding_id,),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolCall target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "request_unit_records": (unit_without_ordinal,)}
+        )
+
+    drifted_selection = _c2_project(
+        selection,
+        base_task_state_version=1,
+        result_task_state_version=2,
+    )
+    with pytest.raises(ValidationError, match="Selection graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "candidate_selection_records": (drifted_selection,),
+            }
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="Selection target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "candidate_selection_records": (
+                    _c2_project(
+                        selection,
+                        selected_target_ref=str(closure.run_record.run_id),
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_closes_multiple_candidate_query_graph() -> None:
+    closure = _c2_ordinal_target_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    candidate_set = closure.candidate_set_records[0]
+    source, target_call = closure.tool_call_records
+    source_gate, target_gate = closure.gate_decision_records
+    query_binding, ordinal_binding = closure.input_binding_records
+
+    invalid_query_sets = (
+        _c2_rebuild_candidate_set(
+            candidate_set,
+            query_binding_refs=(ordinal_binding.binding_id,),
+        ),
+        _c2_rebuild_candidate_set(
+            candidate_set,
+            query_binding_refs=(
+                query_binding.binding_id,
+                ordinal_binding.binding_id,
+            ),
+        ),
+    )
+    for invalid_candidate_set in invalid_query_sets:
+        with pytest.raises(ValidationError, match="CandidateSet .*mismatch"):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "candidate_set_records": (invalid_candidate_set,),
+                }
+            )
+
+    source_with_wrong_refs = _c2_project(
+        source,
+        argument_binding_refs=(ordinal_binding.binding_id,),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet ToolCall mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    _c2_gate_for_tool_call(source_with_wrong_refs),
+                    target_gate,
+                ),
+                "tool_call_records": (source_with_wrong_refs, target_call),
+            }
+        )
+
+    source_with_wrong_version = _c2_project(
+        source,
+        validated_task_state_version=(
+            candidate_set.base_task_state_version + 1
+        ),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet ToolCall mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    _c2_gate_for_tool_call(source_with_wrong_version),
+                    target_gate,
+                ),
+                "tool_call_records": (source_with_wrong_version, target_call),
+            }
+        )
+
+    unit_without_query = _c2_project(
+        closure.request_unit_records[0],
+        input_binding_refs=(ordinal_binding.binding_id,),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet current query mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "request_unit_records": (unit_without_query,)}
+        )
+
+    result_after_task = _c2_rebuild_candidate_set(
+        candidate_set,
+        base_task_state_version=closure.task_records[0].state_version,
+        result_task_state_version=closure.task_records[0].state_version + 1,
+        selection_expected_task_state_version=(
+            closure.task_records[0].state_version + 1
+        ),
+    )
+    source_at_new_base = _c2_project(
+        source,
+        validated_task_state_version=closure.task_records[0].state_version,
+    )
+    with pytest.raises(ValidationError, match="CandidateSet graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "candidate_set_records": (result_after_task,),
+                "candidate_selection_records": (),
+                "gate_decision_records": (
+                    _c2_gate_for_tool_call(source_at_new_base),
+                ),
+                "tool_call_records": (source_at_new_base,),
+                "context_manifest_records": (
+                    closure.context_manifest_records[0],
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_closes_query_and_selection_user_sources() -> None:
+    unique = _c2_unique_auto_target_exact_run_evidence()
+    unique_values = {
+        field_name: getattr(unique, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    query_binding = unique.input_binding_records[0]
+    with pytest.raises(ValidationError, match="CandidateSet graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **unique_values,
+                "input_binding_records": (
+                    _c2_project(query_binding, source_refs=(uuid4(),)),
+                ),
+            }
+        )
+
+    ordinal = _c2_ordinal_target_exact_run_evidence()
+    ordinal_values = {
+        field_name: getattr(ordinal, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    assistant_source = _message(
+        message_id=uuid4(),
+        conversation_id=ordinal.conversation_record.conversation_id,
+        direction=MessageDirection.ASSISTANT,
+        received_at=ordinal.candidate_selection_records[0].selected_at,
+    )
+    selection = _c2_project(
+        ordinal.candidate_selection_records[0],
+        source_message_ref=assistant_source.message_id,
+    )
+    query_binding, ordinal_binding = ordinal.input_binding_records
+    ordinal_binding = _c2_project(
+        ordinal_binding,
+        source_refs=(assistant_source.message_id,),
+    )
+    with pytest.raises(ValidationError, match="Selection graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **ordinal_values,
+                "message_records": (
+                    *ordinal.message_records,
+                    assistant_source,
+                ),
+                "input_binding_records": (query_binding, ordinal_binding),
+                "candidate_selection_records": (selection,),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_closes_gate_target_order_argument() -> None:
+    closure = _c2_unique_auto_target_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    source_gate, target_gate = closure.gate_decision_records
+
+    with pytest.raises(
+        ValidationError,
+        match="Gate target argument mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    source_gate,
+                    _c2_project(
+                        target_gate,
+                        validated_arguments={"order_id": "O-9999"},
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_keeps_target_and_candidate_ids_disjoint() -> None:
+    ordinal = _c2_ordinal_target_exact_run_evidence()
+    ordinal_values = {
+        field_name: getattr(ordinal, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    ordinal_source, ordinal_target_call = ordinal.tool_call_records
+    ordinal_source_gate, _ = ordinal.gate_decision_records
+    candidate_ref = ordinal.candidate_set_records[0].ordered_candidates[
+        0
+    ].observation_candidate_ref
+    collided_selection = _c2_project(
+        ordinal.candidate_selection_records[0],
+        selected_target_ref=str(candidate_ref),
+    )
+    collided_target_call = _c2_project(
+        ordinal_target_call,
+        verified_target_ref=candidate_ref,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="Selection target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **ordinal_values,
+                "candidate_selection_records": (collided_selection,),
+                "gate_decision_records": (
+                    ordinal_source_gate,
+                    _c2_gate_for_tool_call(collided_target_call),
+                ),
+                "tool_call_records": (
+                    ordinal_source,
+                    collided_target_call,
+                ),
+            }
+        )
+
+def test_cycle2_exact_run_evidence_closes_target_state_timestamps() -> None:
+    unique = _c2_unique_auto_target_exact_run_evidence()
+    unique_values = {
+        field_name: getattr(unique, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    stale_time = unique.task_records[0].created_at
+    with pytest.raises(ValidationError, match="CandidateSet graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **unique_values,
+                "task_records": (
+                    _c2_project(unique.task_records[0], updated_at=stale_time),
+                ),
+                "request_unit_records": (
+                    _c2_project(
+                        unique.request_unit_records[0],
+                        updated_at=stale_time,
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_closes_search_and_target_authority_time() -> None:
+    unique = _c2_unique_auto_target_exact_run_evidence()
+    unique_values = {
+        field_name: getattr(unique, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    source, target_call = unique.tool_call_records
+    source_gate, target_gate = unique.gate_decision_records
+    observation = unique.search_observation_records[0]
+    late_finished_at = observation.recorded_at + timedelta(microseconds=1)
+    late_attempt = _c2_project(
+        source.attempts[-1],
+        finished_at=late_finished_at,
+    )
+    late_source = _c2_project(
+        source,
+        attempts=(*source.attempts[:-1], late_attempt),
+        finished_at=late_finished_at,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet ToolCall mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **unique_values,
+                "gate_decision_records": (
+                    _c2_gate_for_tool_call(late_source),
+                    target_gate,
+                ),
+                "tool_call_records": (late_source, target_call),
+            }
+        )
+
+    query_binding = unique.input_binding_records[0]
+    post_dispatch_query = _c2_project(
+        query_binding,
+        updated_at=source.started_at + timedelta(microseconds=1),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet ToolCall mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **unique_values,
+                "input_binding_records": (post_dispatch_query,),
+            }
+        )
+
+    before_unique_target = (
+        unique.auto_target_records[0].verified_at
+        - timedelta(microseconds=1)
+    )
+    early_unique_call = _c2_project(
+        target_call,
+        started_at=before_unique_target,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolCall target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **unique_values,
+                "gate_decision_records": (
+                    source_gate,
+                    _c2_gate_for_tool_call(early_unique_call),
+                ),
+                "tool_call_records": (source, early_unique_call),
+            }
+        )
+
+    ordinal = _c2_ordinal_target_exact_run_evidence()
+    ordinal_values = {
+        field_name: getattr(ordinal, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    ordinal_source, ordinal_target_call = ordinal.tool_call_records
+    ordinal_source_gate, _ = ordinal.gate_decision_records
+    before_selection = (
+        ordinal.candidate_selection_records[0].selected_at
+        - timedelta(microseconds=1)
+    )
+    early_ordinal_call = _c2_project(
+        ordinal_target_call,
+        started_at=before_selection,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="ToolCall target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **ordinal_values,
+                "gate_decision_records": (
+                    ordinal_source_gate,
+                    _c2_gate_for_tool_call(early_ordinal_call),
+                ),
+                "tool_call_records": (
+                    ordinal_source,
+                    early_ordinal_call,
+                ),
+            }
+        )
+
+    ordinal = _c2_ordinal_target_exact_run_evidence()
+    ordinal_values = {
+        field_name: getattr(ordinal, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    pre_selection_time = ordinal.candidate_set_records[0].created_at
+    with pytest.raises(ValidationError, match="Selection graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **ordinal_values,
+                "task_records": (
+                    _c2_project(
+                        ordinal.task_records[0],
+                        updated_at=pre_selection_time,
+                    ),
+                ),
+                "request_unit_records": (
+                    _c2_project(
+                        ordinal.request_unit_records[0],
+                        updated_at=pre_selection_time,
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_gate_family_fails_closed() -> None:
+    closure = _c2_unique_auto_target_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    source, target_call = closure.tool_call_records
+    source_gate, target_gate = closure.gate_decision_records
+
+    class GateDecisionV2Sidecar(GateDecisionV2):
+        sidecar: str = "forbidden"
+
+    sidecar_gate = GateDecisionV2Sidecar.model_validate(
+        target_gate.model_dump(mode="python"),
+        strict=True,
+    )
+    for invalid_gate in (target_gate.model_dump(mode="python"), sidecar_gate):
+        with pytest.raises(ValidationError, match="recursively canonical"):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "gate_decision_records": (source_gate, invalid_gate),
+                }
+            )
+
+    with pytest.raises(ValidationError, match="Gate owner family mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "gate_decision_records": (source_gate,)}
+        )
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    source_gate,
+                    target_gate,
+                    target_gate,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="Gate owner family mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    source_gate,
+                    target_gate,
+                    _c2_project(target_gate, gate_decision_id=uuid4()),
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="Gate owner family mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "tool_call_records": (
+                    source,
+                    _c2_project(target_call, gate_decision_id=uuid4()),
+                ),
+            }
+        )
+
+    rejected = _c2_gate_for_tool_call(
+        target_call,
+        action_boundary_valid=False,
+        decision=GateDecisionValue.REJECT,
+        reason_code=GateReasonCode.ACTION_REQUIRES_PROPOSAL,
+        verified_target_ref=None,
+        validated_arguments=None,
+    )
+    with pytest.raises(ValidationError, match="Gate ToolCall mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (source_gate, rejected),
+            }
+        )
+
+    for updates in (
+        {"model_call_id": uuid4()},
+        {"context_manifest_id": uuid4()},
+        {"provider_tool_call_id": "provider-call-drift"},
+        {"resolved_canonical_tool_name": Cycle2ToolName.GET_ORDER.value},
+        {
+            "validated_task_state_version": (
+                target_call.validated_task_state_version - 1
+            )
+        },
+        {"verified_target_ref": uuid4()},
+        {"decided_at": target_call.started_at + timedelta(microseconds=1)},
+    ):
+        with pytest.raises(ValidationError, match="Gate ToolCall mismatch"):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "gate_decision_records": (
+                        source_gate,
+                        _c2_project(target_gate, **updates),
+                    ),
+                }
+            )
+
+    unknown_target_ref = uuid4()
+    with pytest.raises(
+        ValidationError,
+        match="ToolCall target authority mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    source_gate,
+                    _c2_project(
+                        target_gate,
+                        verified_target_ref=unknown_target_ref,
+                    ),
+                ),
+                "tool_call_records": (
+                    source,
+                    _c2_project(
+                        target_call,
+                        verified_target_ref=unknown_target_ref,
+                    ),
+                ),
+            }
+        )
+
+    extra_binding = _input_binding_v2(
+        name="order_id",
+        source_refs=(closure.message_records[0].message_id,),
+    )
+    query_ref = closure.input_binding_records[0].binding_id
+    two_binding_call = _c2_tool_call(
+        name=Cycle2ToolName.GET_ORDER,
+        owner=closure.owner_scope.customer_id,
+        task_id=target_call.task_id,
+        request_unit_id=target_call.request_unit_id,
+        validated_task_state_version=target_call.validated_task_state_version,
+        argument_binding_refs=(query_ref, extra_binding.binding_id),
+        run_id=closure.run_record.run_id,
+        started_at=target_call.started_at,
+    )
+    reversed_gate = _c2_project(
+        _c2_gate_for_tool_call(two_binding_call),
+        argument_binding_refs=(extra_binding.binding_id, query_ref),
+    )
+    with pytest.raises(ValidationError, match="Gate ToolCall mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (
+                    _c2_project(
+                        closure.request_unit_records[0],
+                        input_binding_refs=(query_ref, extra_binding.binding_id),
+                    ),
+                ),
+                "input_binding_records": (
+                    *closure.input_binding_records,
+                    extra_binding,
+                ),
+                "gate_decision_records": (
+                    source_gate,
+                    target_gate,
+                    reversed_gate,
+                ),
+                "tool_call_records": (source, target_call, two_binding_call),
+                "context_manifest_records": (
+                    *closure.context_manifest_records,
+                    _c2_project(
+                        closure.context_manifest_records[-1],
+                        context_manifest_id=(
+                            two_binding_call.context_manifest_id
+                        ),
+                        model_call_id=two_binding_call.model_call_id,
+                    ),
+                ),
+            }
+        )
+
+    dirty_gate = GateDecisionV2.model_validate_json(
+        target_gate.model_dump_json(round_trip=True, warnings="error"),
+        strict=True,
+    )
+    dirty_gate.__pydantic_private__["_authorization_seal"] = object()
+    with pytest.raises(ValidationError, match="recursively canonical"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (source_gate, dirty_gate),
+            }
+        )
+    with pytest.raises(ValidationError, match="exact tuple"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": [source_gate, target_gate],
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_unique_auto_target_fails_closed() -> None:
+    closure = _c2_unique_auto_target_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    auto_target = closure.auto_target_records[0]
+
+    class OrderCandidateAutoTargetSidecar(OrderCandidateAutoTargetRecord):
+        sidecar: str = "forbidden"
+
+    sidecar_target = OrderCandidateAutoTargetSidecar.model_validate(
+        auto_target.model_dump(mode="python"),
+        strict=True,
+    )
+    for invalid_target in (
+        auto_target.model_dump(mode="python"),
+        sidecar_target,
+    ):
+        with pytest.raises(ValidationError, match="auto_target_records"):
+            Cycle2ExactRunEvidenceClosure(
+                **{**values, "auto_target_records": (invalid_target,)}
+            )
+
+    with pytest.raises(ValidationError, match="AutoTarget owner family mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "auto_target_records": ()}
+        )
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "auto_target_records": (auto_target, auto_target)}
+        )
+    with pytest.raises(ValidationError, match="AutoTarget owner family mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "auto_target_records": (
+                    auto_target,
+                    _c2_project(auto_target, verified_target_ref=uuid4()),
+                ),
+            }
+        )
+
+    extra_query_binding = _input_binding_v2(
+        name="product_description",
+        normalized_value="另一个查询",
+        source_refs=(closure.message_records[0].message_id,),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="CandidateSet current query mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (
+                    _c2_project(
+                        closure.request_unit_records[0],
+                        input_binding_refs=(
+                            *closure.request_unit_records[0].input_binding_refs,
+                            extra_query_binding.binding_id,
+                        ),
+                    ),
+                ),
+                "input_binding_records": (
+                    *closure.input_binding_records,
+                    extra_query_binding,
+                ),
+            }
+        )
+
+    alternate_candidate_set_version = (
+        "order-candidate-set.p0.v1:sha256:" + "f" * 64
+    )
+    alternate_search_version = (
+        "mock-order-search-snapshot-source-version.p0.v1:sha256:" + "e" * 64
+    )
+    alternate_candidate_version = (
+        "mock-order-search-candidate-source-version.p0.v1:sha256:" + "e" * 64
+    )
+    for updates in (
+        {"private_owner_scope_ref": "customer-B"},
+        {"conversation_id": uuid4()},
+        {"query_input_binding_ref": uuid4()},
+        {"candidate_set_ref": uuid4()},
+        {"candidate_set_version": alternate_candidate_set_version},
+        {"source_tool_call_id": uuid4()},
+        {"search_observation_ref": uuid4()},
+        {"search_observation_source_version": alternate_search_version},
+        {"observation_candidate_ref": uuid4()},
+        {"candidate_source_version": alternate_candidate_version},
+        {"owner_scoped_order_target_ref": "owner-order:wrong"},
+        {"order_id": "O-9999"},
+        {"base_task_state_version": 2, "result_task_state_version": 3},
+        {"verified_at": auto_target.verified_at + timedelta(microseconds=1)},
+        {"supersedes_verified_target_ref": uuid4()},
+    ):
+        with pytest.raises(ValidationError):
+            Cycle2ExactRunEvidenceClosure(
+                **{
+                    **values,
+                    "auto_target_records": (
+                        _c2_project(auto_target, **updates),
+                    ),
+                }
+            )
+
+    with pytest.raises(ValidationError, match="AutoTarget identity mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "auto_target_records": (
+                    _c2_project(
+                        auto_target,
+                        verified_target_ref=closure.run_record.run_id,
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_exact_run_evidence_keeps_target_families_disjoint() -> None:
+    closure = _c2_unique_auto_target_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    auto_target = closure.auto_target_records[0]
+    candidate_set = closure.candidate_set_records[0]
+    observation = closure.search_observation_records[0]
+    selected = candidate_set.ordered_candidates[0]
+    ordinal_binding = _input_binding_v2(
+        name="candidate_ordinal",
+        normalized_value=1,
+        source_refs=(closure.message_records[0].message_id,),
+    )
+    selection = OrderCandidateSelectionRecord(
+        selection_id=uuid4(),
+        private_owner_scope_ref=closure.owner_scope.customer_id,
+        conversation_id=closure.conversation_record.conversation_id,
+        task_id=closure.task_records[0].task_id,
+        request_unit_id=closure.request_unit_records[0].request_unit_id,
+        source_message_ref=closure.message_records[0].message_id,
+        ordinal_input_binding_ref=ordinal_binding.binding_id,
+        candidate_set_ref=candidate_set.candidate_set_id,
+        candidate_set_version=candidate_set.candidate_set_version,
+        search_observation_ref=observation.observation_id,
+        search_observation_record_schema_version=observation.record_schema_version,
+        observation_candidate_ref=selected.observation_candidate_ref,
+        candidate_source_version=selected.candidate_source_version,
+        owner_scoped_order_target_ref=(
+            observation.candidate_target_bindings[0].owner_scoped_order_ref
+        ),
+        selected_target_ref=str(uuid4()),
+        base_task_state_version=4,
+        result_task_state_version=5,
+        selected_at=auto_target.verified_at,
+    )
+
+    with pytest.raises(ValidationError, match="target families must be disjoint"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (
+                    _c2_project(
+                        closure.request_unit_records[0],
+                        input_binding_refs=(
+                            *closure.request_unit_records[0].input_binding_refs,
+                            ordinal_binding.binding_id,
+                        ),
+                    ),
+                ),
+                "input_binding_records": (
+                    *closure.input_binding_records,
+                    ordinal_binding,
+                ),
+                "candidate_selection_records": (selection,),
+            }
+        )
+
+
 def _c2_exact_run_evidence_with_recovered_attempt(
 ) -> tuple[
     Cycle2ExactRunEvidenceClosure,
@@ -10167,6 +11335,9 @@ def _c2_exact_run_evidence_with_recovered_attempt(
                     for field_name in Cycle2ExactRunEvidenceClosure.model_fields
                 },
                 "run_record": run,
+                "gate_decision_records": (
+                    _c2_gate_for_tool_call(tool_call),
+                ),
                 "tool_call_records": (tool_call,),
                 "recovery_decision_records": (decision,),
                 "context_manifest_records": (manifest,),
@@ -10175,6 +11346,33 @@ def _c2_exact_run_evidence_with_recovered_attempt(
         ),
         decision,
     )
+
+
+def test_cycle2_exact_run_evidence_rejects_noncurrent_tool_arguments() -> None:
+    closure, _ = _c2_exact_run_evidence_with_recovered_attempt()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    current_binding = closure.input_binding_records[0]
+    replacement = _c2_project(
+        current_binding,
+        binding_id=uuid4(),
+        supersedes=current_binding.binding_id,
+    )
+    replaced_unit = _c2_project(
+        closure.request_unit_records[0],
+        input_binding_refs=(replacement.binding_id,),
+    )
+
+    with pytest.raises(ValidationError, match="ToolCall root mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (replaced_unit,),
+                "input_binding_records": (current_binding, replacement),
+            }
+        )
 
 
 def test_cycle2_exact_run_evidence_closes_successful_recovery_append_without_parent_ref() -> None:
@@ -10280,6 +11478,9 @@ def _c2_exact_run_evidence_with_terminal_recovery() -> tuple[
                 for field_name in Cycle2ExactRunEvidenceClosure.model_fields
             },
             "run_record": run,
+            "gate_decision_records": (
+                _c2_gate_for_tool_call(terminal),
+            ),
             "tool_call_records": (terminal,),
             "recovery_decision_records": (decision,),
             "context_manifest_records": (manifest,),
@@ -10411,6 +11612,7 @@ def test_cycle2_exact_run_evidence_rejects_cross_tool_terminal_recovery_ref() ->
     other_terminal = _c2_project(
         terminal,
         tool_call_id=other_tool_call_id,
+        gate_decision_id=uuid4(),
         attempts=(other_attempt,),
     )
     values = {
@@ -10422,6 +11624,10 @@ def test_cycle2_exact_run_evidence_rejects_cross_tool_terminal_recovery_ref() ->
         Cycle2ExactRunEvidenceClosure(
             **{
                 **values,
+                "gate_decision_records": (
+                    *closure.gate_decision_records,
+                    _c2_gate_for_tool_call(other_terminal),
+                ),
                 "tool_call_records": (terminal, other_terminal),
                 "recovery_decision_records": (decision,),
             }

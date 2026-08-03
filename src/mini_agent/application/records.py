@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticSerializationError
 
 from mini_agent.core.common import (
     AuditOnlyModel,
@@ -93,6 +94,7 @@ from mini_agent.core.task_state import (
     TaskRecord,
     TaskStateTransition,
     TaskStatus,
+    validate_candidate_set_supersession,
 )
 from mini_agent.core.tool_system import (
     AuthorizedToolCommandV2,
@@ -2791,6 +2793,53 @@ def _require_exact_cycle2_model(
     return rebuilt
 
 
+def _require_exact_persisted_gate_decision_v2(
+    value: object,
+    *,
+    field_name: str,
+) -> GateDecisionV2:
+    """Accept only one inert, canonical Gate record as read from storage."""
+
+    error_message = f"{field_name} must be recursively canonical"
+    if type(value) is not GateDecisionV2:
+        raise ValueError(error_message)
+    declared_fields = set(GateDecisionV2.model_fields)
+    try:
+        state = value.__dict__
+        fields_set = value.__pydantic_fields_set__
+        extra = value.__pydantic_extra__
+        private = value.__pydantic_private__
+        if (
+            type(state) is not dict
+            or set(state) != declared_fields
+            or any(type(field_name) is not str for field_name in state)
+            or type(fields_set) is not set
+            or fields_set != declared_fields
+            or any(type(field_name) is not str for field_name in fields_set)
+            or extra is not None
+            or type(private) is not dict
+            or private
+        ):
+            raise ValueError(error_message)
+        rebuilt = GateDecisionV2.model_validate_json(
+            value.model_dump_json(round_trip=True, warnings="error"),
+            strict=True,
+        )
+    except (
+        AttributeError,
+        PydanticSerializationError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ):
+        raise ValueError(error_message) from None
+    return _require_exact_write_contract_projection(
+        value,
+        rebuilt,
+        error_message=error_message,
+    )
+
+
 def _require_exact_cycle2_inputs(
     value: object,
     *,
@@ -4175,6 +4224,8 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     shipment_observation_records: tuple[ShipmentObservation, ...] = ()
     observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...] = ()
     shipment_assessment_records: tuple[ShipmentAssessment, ...] = ()
+    gate_decision_records: tuple[GateDecisionV2, ...] = ()
+    auto_target_records: tuple[OrderCandidateAutoTargetRecord, ...] = ()
     tool_call_records: tuple[ToolCallRecordV2, ...] = ()
     recovery_decision_records: tuple[ToolRetryRecoveryDecisionRecordV2, ...] = ()
     superseded_run_finalizations: tuple[
@@ -4213,6 +4264,7 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 "shipment_observation_records": ShipmentObservation,
                 "observation_source_edges": Cycle2ObservationSourceEdge,
                 "shipment_assessment_records": ShipmentAssessment,
+                "auto_target_records": OrderCandidateAutoTargetRecord,
                 "tool_call_records": ToolCallRecordV2,
                 "superseded_run_finalizations": (
                     SupersededRunFinalizationEvidenceV2
@@ -4221,6 +4273,23 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 "model_visible_toolset_artifacts": ModelVisibleToolsetArtifact,
                 "trace_records": TraceEventV2,
             },
+        )
+
+    @field_validator("gate_decision_records", mode="before")
+    @classmethod
+    def persisted_gate_children_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> tuple[GateDecisionV2, ...]:
+        if type(value) is not tuple:
+            raise ValueError(f"{info.field_name} must be an exact tuple")
+        return tuple(
+            _require_exact_persisted_gate_decision_v2(
+                item,
+                field_name=info.field_name,
+            )
+            for item in value
         )
 
     @field_validator("recovery_decision_records", mode="before")
@@ -4332,6 +4401,12 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             tuple(
                 record.assessment_id for record in self.shipment_assessment_records
             ),
+            tuple(
+                record.gate_decision_id for record in self.gate_decision_records
+            ),
+            tuple(
+                record.verified_target_ref for record in self.auto_target_records
+            ),
             tuple(record.tool_call_id for record in self.tool_call_records),
             tuple(
                 record.recovery_decision_id
@@ -4413,6 +4488,7 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         task_unit_children = (
             *self.candidate_set_records,
             *self.candidate_selection_records,
+            *self.auto_target_records,
             *self.shipment_observation_records,
             *self.shipment_assessment_records,
         )
@@ -4429,6 +4505,9 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
         ) or any(
             record.private_owner_scope_ref != owner
             for record in self.candidate_selection_records
+        ) or any(
+            record.private_owner_scope_ref != owner
+            for record in self.auto_target_records
         ) or any(
             record.private_owner_scope != owner
             for record in self.search_observation_records
@@ -4497,13 +4576,125 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 previous=previous,
             )
 
+        candidate_sets = {
+            record.candidate_set_id: record
+            for record in self.candidate_set_records
+        }
+        candidate_set_predecessor_counts = Counter(
+            record.supersedes_candidate_set_ref
+            for record in self.candidate_set_records
+            if record.supersedes_candidate_set_ref is not None
+        )
+        if any(
+            count != 1 for count in candidate_set_predecessor_counts.values()
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence CandidateSet supersession mismatch"
+            )
+        candidate_set_successors = {
+            record.supersedes_candidate_set_ref: record
+            for record in self.candidate_set_records
+            if record.supersedes_candidate_set_ref is not None
+        }
+        candidate_set_groups: dict[
+            tuple[UUID, UUID, UUID],
+            list[OrderCandidateSetRecord],
+        ] = {}
+        for record in self.candidate_set_records:
+            candidate_set_groups.setdefault(
+                (
+                    record.conversation_id,
+                    record.task_id,
+                    record.request_unit_id,
+                ),
+                [],
+            ).append(record)
+        for records in candidate_set_groups.values():
+            record_ids = {record.candidate_set_id for record in records}
+            roots = tuple(
+                record
+                for record in records
+                if record.supersedes_candidate_set_ref is None
+            )
+            leaves = tuple(
+                record
+                for record in records
+                if record.candidate_set_id not in candidate_set_successors
+            )
+            if (
+                len(roots) != 1
+                or len(leaves) != 1
+                or any(
+                    record.supersedes_candidate_set_ref is not None
+                    and record.supersedes_candidate_set_ref not in record_ids
+                    for record in records
+                )
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence CandidateSet supersession mismatch"
+                )
+            current_unit = unit_by_id[records[0].request_unit_id]
+            current_product_bindings = tuple(
+                bindings[binding_ref]
+                for binding_ref in current_unit.input_binding_refs
+                if bindings[binding_ref].name == "product_description"
+            )
+            if (
+                len(current_product_bindings) != 1
+                or leaves[0].query_binding_refs
+                != (current_product_bindings[0].binding_id,)
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence CandidateSet current query mismatch"
+                )
         for candidate_set in self.candidate_set_records:
             observation = search_observations.get(
                 candidate_set.search_observation_ref
             )
+            query_binding = (
+                None
+                if len(candidate_set.query_binding_refs) != 1
+                else bindings.get(candidate_set.query_binding_refs[0])
+            )
+            query_source_message = (
+                None
+                if query_binding is None or len(query_binding.source_refs) != 1
+                else messages.get(query_binding.source_refs[0])
+            )
+            task = tasks[candidate_set.task_id]
             if (
                 candidate_set.conversation_id != conversation.conversation_id
-                or not set(candidate_set.query_binding_refs).issubset(bindings)
+                or query_binding is None
+                or query_binding.name != "product_description"
+                or query_binding.validation_status
+                is not InputValidationStatus.ACCEPTED
+                or query_source_message is None
+                or query_source_message.direction is not MessageDirection.USER
+                or query_source_message.conversation_id
+                != candidate_set.conversation_id
+                or query_binding.created_at < query_source_message.received_at
+                or query_binding.updated_at > candidate_set.created_at
+                or candidate_set.result_task_state_version > task.state_version
+                or (
+                    candidate_set.result_task_state_version
+                    == task.state_version
+                    and (
+                        task.updated_at != candidate_set.created_at
+                        or unit_by_id[
+                            candidate_set.request_unit_id
+                        ].updated_at != candidate_set.created_at
+                    )
+                )
+                or (
+                    candidate_set.result_task_state_version
+                    < task.state_version
+                    and (
+                        task.updated_at < candidate_set.created_at
+                        or unit_by_id[
+                            candidate_set.request_unit_id
+                        ].updated_at < candidate_set.created_at
+                    )
+                )
                 or observation is None
             ):
                 raise ValueError("Cycle 2 exact evidence CandidateSet graph mismatch")
@@ -4516,33 +4707,364 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 source_call.canonical_tool_name.value != "search_orders"
                 or source_call.task_id != candidate_set.task_id
                 or source_call.request_unit_id != candidate_set.request_unit_id
+                or source_call.argument_binding_refs
+                != candidate_set.query_binding_refs
+                or source_call.validated_task_state_version
+                != candidate_set.base_task_state_version
+                or source_call.status is not ToolCallStatus.SUCCEEDED
+                or source_call.finished_at is None
+                or source_call.finished_at > observation.recorded_at
+                or query_binding.updated_at > source_call.started_at
             ):
                 raise ValueError("Cycle 2 exact evidence CandidateSet ToolCall mismatch")
-
-        candidate_sets = {
-            record.candidate_set_id: record
-            for record in self.candidate_set_records
+            if candidate_set.supersedes_candidate_set_ref is not None:
+                previous_candidate_set = candidate_sets.get(
+                    candidate_set.supersedes_candidate_set_ref
+                )
+                if previous_candidate_set is None:
+                    raise ValueError(
+                        "Cycle 2 exact evidence CandidateSet supersession mismatch"
+                    )
+                try:
+                    validate_candidate_set_supersession(
+                        current=candidate_set,
+                        previous=previous_candidate_set,
+                    )
+                except ValueError:
+                    raise ValueError(
+                        "Cycle 2 exact evidence CandidateSet supersession mismatch"
+                    ) from None
+        auto_targets = {
+            record.verified_target_ref: record
+            for record in self.auto_target_records
         }
+        auto_targets_by_candidate_set: dict[
+            UUID, list[OrderCandidateAutoTargetRecord]
+        ] = {}
+        for record in self.auto_target_records:
+            auto_targets_by_candidate_set.setdefault(
+                record.candidate_set_ref,
+                [],
+            ).append(record)
+        if any(
+            (
+                candidate_set.outcome is OrderCandidateSetOutcome.UNIQUE
+                and len(
+                    auto_targets_by_candidate_set.get(
+                        candidate_set.candidate_set_id,
+                        (),
+                    )
+                )
+                != 1
+            )
+            or (
+                candidate_set.outcome is OrderCandidateSetOutcome.MULTIPLE
+                and candidate_set.candidate_set_id
+                in auto_targets_by_candidate_set
+            )
+            for candidate_set in self.candidate_set_records
+        ) or any(
+            candidate_set_ref not in candidate_sets
+            for candidate_set_ref in auto_targets_by_candidate_set
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence AutoTarget owner family mismatch"
+            )
+        ordinal_target_refs = {
+            record.selected_target_ref
+            for record in self.candidate_selection_records
+        }
+        auto_target_candidate_set_refs = {
+            record.candidate_set_ref for record in self.auto_target_records
+        }
+        selection_candidate_set_refs = {
+            record.candidate_set_ref
+            for record in self.candidate_selection_records
+        }
+        if auto_target_candidate_set_refs.intersection(
+            selection_candidate_set_refs
+        ) or any(
+            str(record.verified_target_ref) in ordinal_target_refs
+            for record in self.auto_target_records
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence target families must be disjoint"
+            )
+        superseded_target_counts = Counter(
+            record.supersedes_verified_target_ref
+            for record in self.auto_target_records
+            if record.supersedes_verified_target_ref is not None
+        )
+        if any(count != 1 for count in superseded_target_counts.values()):
+            raise ValueError(
+                "Cycle 2 exact evidence AutoTarget supersession mismatch"
+            )
+        non_target_entity_ids = {
+            conversation.conversation_id,
+            *(record.run_id for record in run_by_id.values()),
+            *(record.message_id for record in self.message_records),
+            *(record.task_id for record in self.task_records),
+            *(record.request_unit_id for record in self.request_unit_records),
+            *(record.binding_id for record in self.input_binding_records),
+            *(record.candidate_set_id for record in self.candidate_set_records),
+            *(record.selection_id for record in self.candidate_selection_records),
+            *(
+                candidate.observation_candidate_ref
+                for record in self.candidate_set_records
+                for candidate in record.ordered_candidates
+            ),
+            *(
+                candidate.observation_candidate_ref
+                for record in self.search_observation_records
+                for candidate in record.normalized_value.ordered_candidates
+            ),
+            *observation_ids,
+            *(record.gate_decision_id for record in self.gate_decision_records),
+            *(record.tool_call_id for record in self.tool_call_records),
+            *(
+                record.context_manifest_id
+                for record in self.context_manifest_records
+            ),
+            *(record.trace_event_id for record in self.trace_records),
+        }
+        if any(
+            record.verified_target_ref in non_target_entity_ids
+            for record in self.auto_target_records
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence AutoTarget identity mismatch"
+            )
+        for auto_target in self.auto_target_records:
+            task = tasks[auto_target.task_id]
+            unit = unit_by_id[auto_target.request_unit_id]
+            query_binding = bindings.get(auto_target.query_input_binding_ref)
+            candidate_set = candidate_sets.get(auto_target.candidate_set_ref)
+            observation = search_observations.get(
+                auto_target.search_observation_ref
+            )
+            source_call = tool_calls.get(auto_target.source_tool_call_id)
+            current_query_bindings = tuple(
+                binding
+                for binding_ref in unit.input_binding_refs
+                for binding in (bindings[binding_ref],)
+                if binding.name == "product_description"
+            )
+            selected_entries = (
+                ()
+                if candidate_set is None
+                else tuple(
+                    entry
+                    for entry in candidate_set.ordered_candidates
+                    if entry.observation_candidate_ref
+                    == auto_target.observation_candidate_ref
+                    and entry.candidate_source_version
+                    == auto_target.candidate_source_version
+                )
+            )
+            safe_candidates = (
+                ()
+                if observation is None
+                else tuple(
+                    candidate
+                    for candidate in observation.normalized_value.ordered_candidates
+                    if candidate.observation_candidate_ref
+                    == auto_target.observation_candidate_ref
+                    and candidate.candidate_source_version
+                    == auto_target.candidate_source_version
+                )
+            )
+            private_targets = (
+                ()
+                if observation is None
+                else tuple(
+                    target
+                    for target in observation.candidate_target_bindings
+                    if target.observation_candidate_ref
+                    == auto_target.observation_candidate_ref
+                    and target.candidate_source_version
+                    == auto_target.candidate_source_version
+                )
+            )
+            if (
+                auto_target.conversation_id != conversation.conversation_id
+                or len(current_query_bindings) != 1
+                or query_binding is None
+                or current_query_bindings[0].binding_id
+                != auto_target.query_input_binding_ref
+                or current_query_bindings[0].validation_status
+                is not InputValidationStatus.ACCEPTED
+                or candidate_set is None
+                or candidate_set.outcome is not OrderCandidateSetOutcome.UNIQUE
+                or candidate_set.conversation_id
+                != auto_target.conversation_id
+                or candidate_set.task_id != auto_target.task_id
+                or candidate_set.request_unit_id
+                != auto_target.request_unit_id
+                or candidate_set.query_binding_refs
+                != (auto_target.query_input_binding_ref,)
+                or candidate_set.candidate_set_version
+                != auto_target.candidate_set_version
+                or candidate_set.source_tool_call_id
+                != auto_target.source_tool_call_id
+                or candidate_set.search_observation_ref
+                != auto_target.search_observation_ref
+                or candidate_set.search_observation_record_schema_version
+                != auto_target.search_observation_record_schema_version
+                or candidate_set.search_observation_source_version
+                != auto_target.search_observation_source_version
+                or candidate_set.base_task_state_version
+                != auto_target.base_task_state_version
+                or candidate_set.result_task_state_version
+                != auto_target.result_task_state_version
+                or auto_target.result_task_state_version > task.state_version
+                or source_call is None
+                or source_call.canonical_tool_name.value != "search_orders"
+                or source_call.argument_binding_refs
+                != (auto_target.query_input_binding_ref,)
+                or source_call.validated_task_state_version
+                != auto_target.base_task_state_version
+                or observation is None
+                or observation.record_schema_version
+                != auto_target.search_observation_record_schema_version
+                or observation.source_version
+                != auto_target.search_observation_source_version
+                or observation.source_tool_call_id
+                != auto_target.source_tool_call_id
+                or len(selected_entries) != 1
+                or len(safe_candidates) != 1
+                or len(private_targets) != 1
+                or safe_candidates[0].public_summary.order_number
+                != auto_target.order_id
+                or private_targets[0].owner_scoped_order_ref
+                != auto_target.owner_scoped_order_target_ref
+                or auto_target.verified_at != candidate_set.created_at
+                or auto_target.verified_at != observation.recorded_at
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence AutoTarget graph mismatch"
+                )
+            previous_candidate_set = (
+                None
+                if candidate_set.supersedes_candidate_set_ref is None
+                else candidate_sets.get(
+                    candidate_set.supersedes_candidate_set_ref
+                )
+            )
+            previous_candidate_targets = (
+                ()
+                if previous_candidate_set is None
+                else tuple(
+                    auto_targets_by_candidate_set.get(
+                        previous_candidate_set.candidate_set_id,
+                        (),
+                    )
+                )
+            )
+            if (
+                candidate_set.supersedes_candidate_set_ref is not None
+                and previous_candidate_set is None
+            ) or (
+                previous_candidate_set is None
+                and auto_target.supersedes_verified_target_ref is not None
+            ) or (
+                previous_candidate_set is not None
+                and previous_candidate_set.outcome
+                is OrderCandidateSetOutcome.UNIQUE
+                and (
+                    len(previous_candidate_targets) != 1
+                    or auto_target.supersedes_verified_target_ref
+                    != previous_candidate_targets[0].verified_target_ref
+                )
+            ) or (
+                previous_candidate_set is not None
+                and previous_candidate_set.outcome
+                is OrderCandidateSetOutcome.MULTIPLE
+                and auto_target.supersedes_verified_target_ref is not None
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence AutoTarget supersession mismatch"
+                )
+            if auto_target.supersedes_verified_target_ref is not None:
+                previous = auto_targets.get(
+                    auto_target.supersedes_verified_target_ref
+                )
+                if (
+                    previous is None
+                    or candidate_set.supersedes_candidate_set_ref
+                    != previous.candidate_set_ref
+                    or previous.private_owner_scope_ref
+                    != auto_target.private_owner_scope_ref
+                    or previous.conversation_id != auto_target.conversation_id
+                    or previous.task_id != auto_target.task_id
+                    or previous.request_unit_id
+                    != auto_target.request_unit_id
+                    or previous.result_task_state_version
+                    > auto_target.base_task_state_version
+                    or previous.verified_at > auto_target.verified_at
+                ):
+                    raise ValueError(
+                        "Cycle 2 exact evidence AutoTarget supersession mismatch"
+                    )
         for selection in self.candidate_selection_records:
             candidate_set = candidate_sets.get(selection.candidate_set_ref)
             observation = search_observations.get(
                 selection.search_observation_ref
             )
             ordinal_binding = bindings.get(selection.ordinal_input_binding_ref)
+            task = tasks[selection.task_id]
+            source_message = messages.get(selection.source_message_ref)
             if (
                 selection.conversation_id != conversation.conversation_id
-                or selection.source_message_ref not in messages
+                or source_message is None
+                or source_message.direction is not MessageDirection.USER
                 or candidate_set is None
+                or candidate_set.outcome
+                is not OrderCandidateSetOutcome.MULTIPLE
+                or candidate_set.conversation_id != selection.conversation_id
+                or candidate_set.task_id != selection.task_id
+                or candidate_set.request_unit_id
+                != selection.request_unit_id
                 or observation is None
                 or ordinal_binding is None
                 or ordinal_binding.name != "candidate_ordinal"
                 or type(ordinal_binding.normalized_value) is not int
+                or ordinal_binding.source_refs
+                != (selection.source_message_ref,)
+                or ordinal_binding.created_at != selection.selected_at
+                or ordinal_binding.updated_at != selection.selected_at
+                or ordinal_binding.supersedes is not None
                 or selection.candidate_set_version
                 != candidate_set.candidate_set_version
                 or selection.search_observation_ref
                 != candidate_set.search_observation_ref
                 or selection.search_observation_record_schema_version
                 != observation.record_schema_version
+                or selection.base_task_state_version
+                != candidate_set.selection_expected_task_state_version
+                or selection.result_task_state_version
+                != selection.base_task_state_version + 1
+                or selection.result_task_state_version > task.state_version
+                or (
+                    selection.result_task_state_version == task.state_version
+                    and (
+                        task.updated_at != selection.selected_at
+                        or unit_by_id[
+                            selection.request_unit_id
+                        ].updated_at != selection.selected_at
+                    )
+                )
+                or (
+                    selection.result_task_state_version < task.state_version
+                    and (
+                        task.updated_at < selection.selected_at
+                        or unit_by_id[
+                            selection.request_unit_id
+                        ].updated_at < selection.selected_at
+                    )
+                )
+                or selection.selected_at < candidate_set.created_at
+                or selection.selected_at >= candidate_set.valid_until
+                or source_message.received_at > selection.selected_at
             ):
                 raise ValueError("Cycle 2 exact evidence Selection graph mismatch")
             ordinal = ordinal_binding.normalized_value
@@ -4571,11 +5093,96 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 != selection.observation_candidate_ref
                 or selected.candidate_source_version
                 != selection.candidate_source_version
+                or ordinal_binding.normalized_value != selected.ordinal
                 or target is None
                 or target.owner_scoped_order_ref
                 != selection.owner_scoped_order_target_ref
             ):
                 raise ValueError("Cycle 2 exact evidence Selection target mismatch")
+
+        selection_targets: dict[UUID, OrderCandidateSelectionRecord] = {}
+        target_order_ids: dict[UUID, str] = {
+            target_ref: record.order_id
+            for target_ref, record in auto_targets.items()
+        }
+        target_issued_at: dict[UUID, datetime] = {
+            target_ref: record.verified_at
+            for target_ref, record in auto_targets.items()
+        }
+        for selection in self.candidate_selection_records:
+            if not _is_canonical_uuid_text(selection.selected_target_ref):
+                raise ValueError(
+                    "Cycle 2 exact evidence Selection target authority mismatch"
+                )
+            selected_target_ref = UUID(selection.selected_target_ref)
+            if (
+                selected_target_ref.version != 4
+                or selected_target_ref in selection_targets
+                or selected_target_ref in auto_targets
+                or selected_target_ref in non_target_entity_ids
+                or selection.selected_target_ref
+                == selection.owner_scoped_order_target_ref
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Selection target authority mismatch"
+                )
+            selection_targets[selected_target_ref] = selection
+            target_issued_at[selected_target_ref] = selection.selected_at
+        for tool_call in self.tool_call_records:
+            target_ref = tool_call.verified_target_ref
+            if target_ref is None:
+                continue
+            auto_target = auto_targets.get(target_ref)
+            selection = selection_targets.get(target_ref)
+            if (auto_target is None) == (selection is None):
+                raise ValueError(
+                    "Cycle 2 exact evidence ToolCall target authority mismatch"
+                )
+            authority = auto_target if auto_target is not None else selection
+            if authority is None:
+                raise ValueError(
+                    "Cycle 2 exact evidence ToolCall target authority mismatch"
+                )
+            origin_binding_ref = (
+                authority.query_input_binding_ref
+                if type(authority) is OrderCandidateAutoTargetRecord
+                else authority.ordinal_input_binding_ref
+            )
+            origin_binding_name = (
+                "product_description"
+                if type(authority) is OrderCandidateAutoTargetRecord
+                else "candidate_ordinal"
+            )
+            authority_unit = unit_by_id[authority.request_unit_id]
+            current_origin_bindings = tuple(
+                bindings[binding_ref]
+                for binding_ref in authority_unit.input_binding_refs
+                if bindings[binding_ref].name == origin_binding_name
+            )
+            successor_candidate_set = candidate_set_successors.get(
+                authority.candidate_set_ref
+            )
+            if (
+                tool_call.private_owner_scope_ref
+                != authority.private_owner_scope_ref
+                or tool_call.task_id != authority.task_id
+                or tool_call.request_unit_id != authority.request_unit_id
+                or tool_call.argument_binding_refs != (origin_binding_ref,)
+                or len(current_origin_bindings) != 1
+                or current_origin_bindings[0].binding_id
+                != origin_binding_ref
+                or tool_call.started_at < target_issued_at[target_ref]
+                or tool_call.validated_task_state_version
+                < authority.result_task_state_version
+                or (
+                    successor_candidate_set is not None
+                    and tool_call.validated_task_state_version
+                    >= successor_candidate_set.result_task_state_version
+                )
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence ToolCall target authority mismatch"
+                )
 
         for assessment in self.shipment_assessment_records:
             observation = shipment_observations.get(
@@ -4602,9 +5209,72 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             or unit_by_id[record.request_unit_id].task_id != record.task_id
             or record.private_owner_scope_ref != owner
             or any(ref not in bindings for ref in record.argument_binding_refs)
+            or any(
+                ref
+                not in unit_by_id[
+                    record.request_unit_id
+                ].input_binding_refs
+                for ref in record.argument_binding_refs
+            )
             for record in self.tool_call_records
         ):
             raise ValueError("Cycle 2 exact evidence ToolCall root mismatch")
+        gate_decisions = {
+            record.gate_decision_id: record
+            for record in self.gate_decision_records
+        }
+        gate_ref_counts = Counter(
+            record.gate_decision_id for record in self.tool_call_records
+        )
+        if (
+            set(gate_decisions) != set(gate_ref_counts)
+            or any(count != 1 for count in gate_ref_counts.values())
+        ):
+            raise ValueError(
+                "Cycle 2 exact evidence Gate owner family mismatch"
+            )
+        for tool_call in self.tool_call_records:
+            gate = gate_decisions[tool_call.gate_decision_id]
+            expected_target_order_id = (
+                None
+                if tool_call.verified_target_ref is None
+                else target_order_ids.get(tool_call.verified_target_ref)
+            )
+            issued_at = (
+                None
+                if tool_call.verified_target_ref is None
+                else target_issued_at.get(tool_call.verified_target_ref)
+            )
+            if (
+                gate.decision is not GateDecisionValue.ACCEPT
+                or gate.model_call_id != tool_call.model_call_id
+                or gate.context_manifest_id != tool_call.context_manifest_id
+                or gate.provider_tool_call_id
+                != tool_call.provider_tool_call_id
+                or gate.resolved_canonical_tool_name
+                != tool_call.canonical_tool_name.value
+                or gate.argument_binding_refs
+                != tool_call.argument_binding_refs
+                or gate.validated_task_state_version
+                != tool_call.validated_task_state_version
+                or gate.verified_target_ref
+                != tool_call.verified_target_ref
+                or (
+                    issued_at is not None
+                    and gate.decided_at < issued_at
+                )
+                or gate.decided_at > tool_call.started_at
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Gate ToolCall mismatch"
+                )
+            if expected_target_order_id is not None and (
+                dict(gate.validated_arguments or {})
+                != {"order_id": expected_target_order_id}
+            ):
+                raise ValueError(
+                    "Cycle 2 exact evidence Gate target argument mismatch"
+                )
         supporting_tool_calls = tuple(
             record
             for record in self.tool_call_records
@@ -4690,6 +5360,9 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             elif (
                 source_call.canonical_tool_name.value != "get_shipment"
                 or observation.source_tool_call_id != source_call.tool_call_id
+                or source_call.verified_target_ref is None
+                or observation.verified_order_target_ref
+                != str(source_call.verified_target_ref)
                 or observation.raw_result_ref != str(source_call.result_ref)
             ):
                 raise ValueError(
