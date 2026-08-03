@@ -1,7 +1,7 @@
 import asyncio
 import ast
 import inspect
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -39,12 +39,19 @@ from mini_agent.application.records import (
     AgentRunCommand,
     AgentRunResult,
     ApplyTaskTransitionCommand,
+    ApplyContinuationTaskDeltaV3Command,
+    ApplyOrderCandidateSelectionV3Command,
     ConditionalWriteResult,
+    ConversationRecord,
+    ConversationTaskLinkRecord,
     ContinuationInputBindingReadClosure,
     Cycle2ControlPurpose,
     Cycle2CurrentSessionTaskClosure,
     Cycle2ExactRunEvidenceClosure,
     Cycle2WriteResult,
+    CreateInitialTaskGraphV3Command,
+    CreateRequestUnitCommand,
+    InitialAcceptedTaskGraphV3CommandItem,
     FinalizeRunCommand,
     InsertOnlyWriteResult,
     InitialToolCallV2ReadClosure,
@@ -54,7 +61,12 @@ from mini_agent.application.records import (
     OrderCandidateSelectionReadClosure,
     ProviderProtocolError,
     RequestUnderstandingCandidateInvalidError,
+    SaveRequestUnderstandingV3NoTaskCommand,
+    SaveRejectedContinuationUnderstandingV3Command,
+    SaveInputBindingCommand,
+    RunTaskLinkRecordV2,
     ToolDispatchFenceWriteResult,
+    TrustedOwnerScope,
 )
 from mini_agent.core.control_gateway import (
     Cycle2TargetObservationFacts,
@@ -91,23 +103,33 @@ from mini_agent.core.presentation import (
     PresentationTone,
 )
 from mini_agent.core.request_processing import (
+    Cycle2ContinuationDecisionV3,
+    Cycle2ContinuationIdentityAllocationV3,
     Cycle2OrdinalSelectionRejectionReason,
     RequestUnderstandingV2Error,
+    RejectedCycle2ContinuationDecisionV3,
+    RequestUnderstandingClosureV3,
+    InitialTaskIdentityAllocationV2,
+    reduce_cycle2_continuation_task_delta,
 )
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InputCandidate,
     InputAuthority,
     InputCandidate,
     InputSourceKind,
+    ModelVisibleTaskSummary,
     NextMove,
     NextMoveKind,
     QueryContextualizationCandidateV2,
     ReferenceSourceKindV2,
     RequestUnderstandingOutputV2,
+    RequestUnderstandingInput,
     ResolvedReferenceCandidateV2,
     TaskDeltaCandidate,
     TaskDeltaOperation,
@@ -115,6 +137,11 @@ from mini_agent.core.request_understanding import (
     UncertaintyV2,
 )
 from mini_agent.core.task_state import (
+    CandidateValidationDecision,
+    CandidateRejectionReasonCode,
+    CandidateValidationRecordV2,
+    InputBindingV2,
+    InputValidationStatus,
     RequestUnderstandingAtomicFailureCodeV2,
     RequestUnitRecord,
     TaskRecord,
@@ -149,8 +176,11 @@ from mini_agent.core.shipment import (
     ShipmentSummaryProjection,
 )
 from mini_agent.core.trace import (
+    AgentRunRecord,
+    AgentRunRecordV2,
     AgentOutcome,
     AgentRunStatus,
+    AgentRunStatusV2,
     StopReason,
     StopReasonV2,
     TraceEvent,
@@ -2675,6 +2705,41 @@ class _Cycle2ProviderHarness:
             confidence=0.99,
         )
 
+    async def propose_cycle2_continuation_v3(
+        self,
+        request: object,
+    ) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+        return Cycle2ContinuationRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-continuation.p0.v2",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text="选择当前订单候选",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2ContinuationTaskDeltaCandidateV2(
+                    candidate_id=uuid4(),
+                    operation=TaskDeltaOperation.SUPPLY_INPUT,
+                    target_task_alias="current-task",
+                    target_request_unit_alias="current-request",
+                    input_candidates=(
+                        Cycle2InputCandidate(
+                            name="candidate_ordinal",
+                            candidate_value=self.ordinal,
+                            source_ref=request.message_ref,
+                            source_quote=(
+                                "第六" if self.ordinal == 6 else "第二"
+                            ),
+                            confidence=0.99,
+                        ),
+                    ),
+                    confidence=0.99,
+                ),
+            ),
+        )
+
     async def propose_cycle2_control(
         self,
         _request: object,
@@ -2755,6 +2820,15 @@ class _Cycle2RuntimeHarness:
         self.root_commands: list[object] = []
         self.running_records: list[object] = []
         self.initial_graph_command: object | None = None
+        self.v3_initial_write_result = Cycle2WriteResult.APPLIED
+        self.v3_initial_commands: list[object] = []
+        self.v3_continuation_write_result = Cycle2WriteResult.APPLIED
+        self.v3_continuation_commands: list[object] = []
+        self.v3_saved_user_message: MessageRecord | None = None
+        self.v3_running_run: AgentRunRecordV2 | None = None
+        self.v3_active_link: RunTaskLinkRecordV2 | None = None
+        self.v3_selection_write_result = Cycle2WriteResult.APPLIED
+        self.v3_selection_commands: list[object] = []
         self.search_write_result = Cycle2WriteResult.APPLIED
         self.search_commands: list[object] = []
         self.selection_commands: list[object] = []
@@ -2783,6 +2857,13 @@ class _Cycle2RuntimeHarness:
         self.events.append("create-initial-graph")
         self.initial_graph_command = command
         return Cycle2WriteResult.APPLIED
+
+    async def create_cycle2_initial_task_graph_v3_if_current(
+        self,
+        command: object,
+    ):
+        self.v3_initial_commands.append(command)
+        return self.v3_initial_write_result
 
     async def load_order_search_current_closure_for_owner(
         self,
@@ -2845,9 +2926,12 @@ class _Cycle2RuntimeHarness:
         return OrderCandidateSelectionReadClosure(
             owner_scope=session.owner_scope,
             trusted_conversation_record=session.conversation_record,
-            current_run_record=self.running_records[-1],
+            current_run_record=(
+                self.v3_running_run or self.running_records[-1]
+            ),
             current_run_task_link_record=(
-                self.root_commands[-1].active_run_task_link_record
+                self.v3_active_link
+                or self.root_commands[-1].active_run_task_link_record
             ),
             current_task_record=session.current_task_record,
             current_request_unit_record=session.current_request_unit_record,
@@ -2855,7 +2939,8 @@ class _Cycle2RuntimeHarness:
             search_observation_record=observation,
             selection_request=request,
             saved_selection_message_record=(
-                self.root_commands[-1].user_message_record
+                self.v3_saved_user_message
+                or self.root_commands[-1].user_message_record
             ),
             current_query_binding=AcceptedOrderSearchQueryBindingReadClosure(
                 binding_ref=binding.binding_id,
@@ -2879,6 +2964,13 @@ class _Cycle2RuntimeHarness:
         self.selection_commands.append(command)
         return Cycle2WriteResult.APPLIED
 
+    async def apply_order_candidate_selection_v3_if_current(
+        self,
+        command: object,
+    ):
+        self.v3_selection_commands.append(command)
+        return self.v3_selection_write_result
+
     async def load_continuation_input_binding_closure_for_owner(
         self,
         **kwargs: object,
@@ -2891,7 +2983,10 @@ class _Cycle2RuntimeHarness:
             current_conversation_task_link_record=(
                 session.current_conversation_task_link_record
             ),
-            saved_user_message_record=self.root_commands[-1].user_message_record,
+            saved_user_message_record=(
+                self.v3_saved_user_message
+                or self.root_commands[-1].user_message_record
+            ),
             current_task_record=session.current_task_record,
             current_request_unit_record=session.current_request_unit_record,
             current_input_binding_records=session.current_input_binding_records,
@@ -2901,6 +2996,10 @@ class _Cycle2RuntimeHarness:
     async def apply_continuation_input_binding_if_current(self, command: object):
         self.binding_commands.append(command)
         return Cycle2WriteResult.APPLIED
+
+    async def apply_continuation_task_delta_if_current(self, command: object):
+        self.v3_continuation_commands.append(command)
+        return self.v3_continuation_write_result
 
     async def finalize_cycle2_run_if_current(self, command: object):
         self.finalize_commands.append(command)
@@ -4377,3 +4476,672 @@ def test_cycle2_control_candidate_remains_argument_free_at_application_boundary(
         Cycle2ControlPurpose.PROPOSE_POST_ORDER,
         Cycle2ControlPurpose.PROPOSE_SHIPMENT_ASSESSMENT,
     }
+
+
+def _generic_v3_staging_command(
+    candidate_values: tuple[str, ...],
+) -> SaveRequestUnderstandingV3NoTaskCommand | CreateInitialTaskGraphV3Command:
+    customer_context = _context()
+    owner_scope = TrustedOwnerScope.from_customer_context(customer_context)
+    conversation = ConversationRecord(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=uuid4(),
+        owner_customer_id=customer_context.customer_id,
+        created_at=NOW - timedelta(seconds=2),
+    )
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        direction=MessageDirection.USER,
+        content="查询 O-1001、O-1002 和 BAD",
+        received_at=NOW - timedelta(seconds=1),
+    )
+    running_run = AgentRunRecord(
+        run_id=uuid4(),
+        conversation_id=conversation.conversation_id,
+        status=AgentRunStatus.RUNNING,
+        provider_lane="scripted",
+        started_at=message.received_at,
+    )
+    visible_specs = (get_order_tool_spec(),)
+    request = RequestUnderstandingInput(
+        schema_version="e2e01-thin-v1",
+        run_id=running_run.run_id,
+        message_ref=message.message_id,
+        original_query=message.content,
+        provider_visible_tool_specs=visible_specs,
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            visible_specs
+        ),
+    )
+    candidates = tuple(
+        TaskDeltaCandidate(
+            candidate_id=uuid4(),
+            operation=TaskDeltaOperation.ADD_GOAL,
+            goal_patch=f"查询订单 {candidate_value}",
+            input_candidates=(
+                InputCandidate(
+                    name="order_id",
+                    candidate_value=candidate_value,
+                    semantic_role="TARGET_RESOURCE_IDENTIFIER",
+                    authority=InputAuthority.USER_CLAIM,
+                    source_kind=InputSourceKind.CURRENT_MESSAGE,
+                    source_ref=message.message_id,
+                    source_quote=candidate_value,
+                    confidence=0.99,
+                ),
+            ),
+            confidence=0.99,
+        )
+        for candidate_value in candidate_values
+    )
+    output = RequestUnderstandingOutputV2(
+        schema_version="e2e01-thin-v2",
+        message_ref=message.message_id,
+        contextualization=QueryContextualizationCandidateV2(
+            text=message.content,
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=candidates,
+        next_move_candidate=NextMove(
+            kind=NextMoveKind.CALL_TOOL,
+            requested_tool_name="get_order",
+            arguments={"order_id": "O-1001"},
+            base_task_state_version=None,
+        ),
+    )
+    allocations = tuple(
+        InitialTaskIdentityAllocationV2(
+            candidate_ref=candidate.candidate_id,
+            accepted_delta_id=uuid4(),
+            task_id=uuid4(),
+            request_unit_id=uuid4(),
+            binding_id=uuid4(),
+        )
+        for candidate in candidates
+    )
+    staged, _decision = (
+        agent_run_service_module._reduce_and_build_generic_initial_v3_command(
+            owner_scope=owner_scope,
+            conversation=conversation,
+            messages=(message,),
+            running_run=running_run,
+            request_input=request,
+            output=output,
+            customer_context=customer_context,
+            request_understanding_record_id=uuid4(),
+            candidate_identity_allocations=allocations,
+            next_move_candidate_ref=uuid4(),
+            now=NOW,
+        )
+    )
+    return staged
+
+
+@pytest.mark.parametrize(
+    ("candidate_values", "accepted_values"),
+    (
+        ((), ()),
+        (("BAD",), ()),
+        (("O-1001", "BAD"), ("O-1001",)),
+        (("O-1001", "O-1002"), ("O-1001", "O-1002")),
+    ),
+)
+def test_generic_v3_staging_preserves_zero_partial_and_multi_accept_order(
+    candidate_values: tuple[str, ...],
+    accepted_values: tuple[str, ...],
+) -> None:
+    staged = _generic_v3_staging_command(candidate_values)
+
+    if not accepted_values:
+        assert type(staged) is SaveRequestUnderstandingV3NoTaskCommand
+        assert staged.request_understanding.accepted_task_deltas == ()
+        assert staged.request_understanding.record.accepted_delta_refs == ()
+        return
+
+    assert type(staged) is CreateInitialTaskGraphV3Command
+    graphs = staged.accepted_task_graphs
+    assert tuple(
+        graph.input_bindings[0].record.normalized_value for graph in graphs
+    ) == accepted_values
+    accepted_candidate_refs = tuple(
+        candidate.candidate_id
+        for candidate in staged.request_understanding.record.task_delta_candidates
+        if next(
+            validation
+            for validation in staged.request_understanding.record.candidate_validation
+            if validation.candidate_ref == candidate.candidate_id
+        ).decision
+        is CandidateValidationDecision.ACCEPT
+    )
+    assert tuple(graph.accepted_delta.candidate_ref for graph in graphs) == (
+        accepted_candidate_refs
+    )
+    assert all(
+        graph.initial_request_unit.initial_record.observation_refs == ()
+        and graph.initial_request_unit.initial_record.evidence_binding_refs == ()
+        and graph.initial_request_unit.initial_record.pending_action_ref is None
+        for graph in graphs
+    )
+
+
+def test_generic_v3_command_rejects_dirty_unit_and_candidate_binding_drift() -> None:
+    staged = _generic_v3_staging_command(("O-1001", "O-1002"))
+    assert type(staged) is CreateInitialTaskGraphV3Command
+    first = staged.accepted_task_graphs[0]
+    dirty_unit = first.initial_request_unit.initial_record.model_copy(
+        update={"observation_refs": (uuid4(),)}
+    )
+    dirty_item = InitialAcceptedTaskGraphV3CommandItem(
+        accepted_delta=first.accepted_delta,
+        initial_task=first.initial_task,
+        initial_request_unit=CreateRequestUnitCommand(
+            initial_record=dirty_unit
+        ),
+        input_bindings=first.input_bindings,
+        conversation_task_link=first.conversation_task_link,
+        run_task_link=first.run_task_link,
+    )
+    values = {
+        field_name: getattr(staged, field_name)
+        for field_name in type(staged).model_fields
+    }
+    with pytest.raises(ValueError, match="clean initial RequestUnit"):
+        CreateInitialTaskGraphV3Command(
+            **{
+                **values,
+                "accepted_task_graphs": (
+                    dirty_item,
+                    *staged.accepted_task_graphs[1:],
+                ),
+            }
+        )
+
+    drifted_binding = first.input_bindings[0].record.model_copy(
+        update={"normalized_value": "O-9999"}
+    )
+    drifted_item = InitialAcceptedTaskGraphV3CommandItem(
+        accepted_delta=first.accepted_delta,
+        initial_task=first.initial_task,
+        initial_request_unit=first.initial_request_unit,
+        input_bindings=(
+            SaveInputBindingCommand(
+                record=drifted_binding,
+                request_unit_id=(
+                    first.initial_request_unit.initial_record.request_unit_id
+                ),
+            ),
+        ),
+        conversation_task_link=first.conversation_task_link,
+        run_task_link=first.run_task_link,
+    )
+    with pytest.raises(ValueError, match="does not match Candidate"):
+        CreateInitialTaskGraphV3Command(
+            **{
+                **values,
+                "accepted_task_graphs": (
+                    drifted_item,
+                    *staged.accepted_task_graphs[1:],
+                ),
+            }
+        )
+
+
+def _dnr_v3_staging_command(
+    *,
+    with_current_dnr: bool = False,
+) -> ApplyContinuationTaskDeltaV3Command:
+    customer_context = _context()
+    owner_scope = TrustedOwnerScope.from_customer_context(customer_context)
+    message_ref = uuid4()
+    message_text = "订单 O-1001 显示已送达，但我没有收到"
+    conversation = ConversationRecord(
+        schema_version="conversation_record.p0.v1",
+        conversation_id=uuid4(),
+        owner_customer_id=customer_context.customer_id,
+        created_at=NOW - timedelta(hours=2),
+    )
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=message_ref,
+        conversation_id=conversation.conversation_id,
+        direction=MessageDirection.USER,
+        content=message_text,
+        received_at=NOW - timedelta(seconds=1),
+    )
+    old_order = InputBindingV2(
+        binding_id=uuid4(),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(uuid4(),),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW - timedelta(hours=1),
+        updated_at=NOW - timedelta(hours=1),
+    )
+    current_bindings = (old_order,)
+    if with_current_dnr:
+        current_bindings = (
+            old_order,
+            InputBindingV2(
+                binding_id=uuid4(),
+                name="shipment_not_received",
+                normalized_value=False,
+                authority=InputAuthority.USER_CLAIM,
+                source_refs=(uuid4(),),
+                validation_status=InputValidationStatus.ACCEPTED,
+                confirmed_by_user=True,
+                created_at=NOW - timedelta(minutes=30),
+                updated_at=NOW - timedelta(minutes=30),
+            ),
+        )
+    task = TaskRecord(
+        task_id=uuid4(),
+        owner_customer_id=customer_context.customer_id,
+        status=TaskStatus.ACTIVE,
+        state_version=4,
+        created_at=NOW - timedelta(hours=2),
+        updated_at=NOW - timedelta(minutes=10),
+    )
+    unit = RequestUnitRecord(
+        request_unit_id=uuid4(),
+        task_id=task.task_id,
+        goal_text="处理订单配送问题",
+        goal_source_refs=(uuid4(),),
+        input_binding_refs=tuple(
+            binding.binding_id for binding in current_bindings
+        ),
+        status=TaskStatus.ACTIVE,
+        state_version=4,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+    visible_specs = (get_order_tool_spec(),)
+    focused = ModelVisibleTaskSummary(
+        task_alias="task-1",
+        request_unit_alias="unit-1",
+        goal_summary=unit.goal_text,
+        status=task.status.value,
+        open_questions=unit.open_questions,
+    )
+    request = RequestUnderstandingInput(
+        schema_version="e2e01-thin-v1",
+        run_id=uuid4(),
+        message_ref=message_ref,
+        original_query=message_text,
+        active_task_summaries=(focused,),
+        focused_task_summary=focused,
+        provider_visible_tool_specs=visible_specs,
+        model_visible_toolset_hash=compute_model_visible_toolset_hash(
+            visible_specs
+        ),
+    )
+    output = Cycle2ContinuationRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-continuation.p0.v2",
+        message_ref=message_ref,
+        contextualization=QueryContextualizationCandidateV2(
+            text="继续当前配送售后任务",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message_ref,),
+        ),
+        task_delta_candidates=(
+            Cycle2ContinuationTaskDeltaCandidateV2(
+                candidate_id=uuid4(),
+                operation=TaskDeltaOperation.SUPPLY_INPUT,
+                target_task_alias="task-1",
+                target_request_unit_alias="unit-1",
+                input_candidates=(
+                    Cycle2InputCandidate(
+                        name="order_id",
+                        candidate_value="O-1001",
+                        source_ref=message_ref,
+                        source_quote="O-1001",
+                        confidence=0.99,
+                    ),
+                    Cycle2InputCandidate(
+                        name="shipment_not_received",
+                        candidate_value=True,
+                        source_ref=message_ref,
+                        source_quote="没有收到",
+                        confidence=0.99,
+                    ),
+                ),
+                confidence=0.99,
+            ),
+        ),
+    )
+    decision = reduce_cycle2_continuation_task_delta(
+        request_input=request,
+        output=output,
+        authoritative_messages={message_ref: message_text},
+        customer_context=customer_context,
+        current_task=task,
+        current_request_unit=unit,
+        current_input_bindings=current_bindings,
+        identity_allocation=Cycle2ContinuationIdentityAllocationV3(
+            request_understanding_record_id=uuid4(),
+            accepted_delta_id=uuid4(),
+            input_binding_ids=(uuid4(), uuid4()),
+        ),
+        now=NOW,
+    )
+    assert type(decision) is Cycle2ContinuationDecisionV3
+    loaded = ContinuationInputBindingReadClosure(
+        owner_scope=owner_scope,
+        trusted_conversation_record=conversation,
+        current_conversation_task_link_record=ConversationTaskLinkRecord(
+            schema_version="conversation_task_link_record.p0.v1",
+            conversation_id=conversation.conversation_id,
+            task_id=task.task_id,
+            link_reason="CURRENT_MESSAGE_ACCEPTED_DELTA",
+            linked_at=task.created_at,
+        ),
+        saved_user_message_record=message,
+        current_task_record=task,
+        current_request_unit_record=unit,
+        current_input_binding_records=current_bindings,
+        trusted_now=NOW,
+    )
+    return agent_run_service_module._build_continuation_v3_command(
+        loaded_closure=loaded,
+        decision=decision,
+        trace_event_ids=tuple(uuid4() for _index in range(5)),
+    )
+
+
+@pytest.mark.parametrize("with_current_dnr", (False, True))
+def test_dnr_v3_staging_is_two_bindings_one_task_advance_and_second_trigger(
+    with_current_dnr: bool,
+) -> None:
+    command = _dnr_v3_staging_command(with_current_dnr=with_current_dnr)
+    decision = command.decision
+    current = command.loaded_closure
+
+    assert tuple(binding.name for binding in decision.input_bindings) == (
+        "order_id",
+        "shipment_not_received",
+    )
+    assert decision.routing_trigger_binding_ref == (
+        decision.input_bindings[1].binding_id
+    )
+    assert agent_run_service_module._routing_trigger_binding_v3(decision) == (
+        decision.input_bindings[1]
+    )
+    assert command.next_task_record.state_version == (
+        current.current_task_record.state_version + 1
+    )
+    assert command.next_request_unit_record.state_version == (
+        current.current_request_unit_record.state_version + 1
+    )
+    assert tuple(trace.event_type for trace in command.effect_trace_records) == (
+        TraceEventType.TASK_DELTA_VALIDATED,
+        TraceEventType.TASK_DELTA_ACCEPTED,
+        TraceEventType.INPUT_BINDING_RECORDED,
+        TraceEventType.INPUT_BINDING_RECORDED,
+        TraceEventType.TASK_STATE_CHANGED,
+    )
+    assert tuple(
+        binding.supersedes for binding in decision.input_bindings
+    ) == (
+        current.current_input_binding_records[0].binding_id,
+        (
+            current.current_input_binding_records[1].binding_id
+            if with_current_dnr
+            else None
+        ),
+    )
+
+    values = {
+        field_name: getattr(command, field_name)
+        for field_name in type(command).model_fields
+    }
+    with pytest.raises(ValueError, match="Trace order/cardinality mismatch"):
+        ApplyContinuationTaskDeltaV3Command(
+            **{
+                **values,
+                "effect_trace_records": (
+                    command.effect_trace_records[1],
+                    command.effect_trace_records[0],
+                    *command.effect_trace_records[2:],
+                ),
+            }
+        )
+
+
+def test_rejected_v3_continuation_command_has_no_effect_surface() -> None:
+    accepted = _dnr_v3_staging_command()
+    accepted_record = accepted.decision.closure.record
+    candidate = accepted_record.task_delta_candidates[0]
+    rejected_record = type(accepted_record)(
+        **{
+            field_name: getattr(accepted_record, field_name)
+            for field_name in type(accepted_record).model_fields
+            if field_name
+            not in {"candidate_validation", "accepted_delta_refs"}
+        },
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate.candidate_id,
+                decision=CandidateValidationDecision.REJECT,
+                reason_code=CandidateRejectionReasonCode.INPUT_VALUE_INVALID,
+            ),
+        ),
+        accepted_delta_refs=(),
+    )
+    rejected = RejectedCycle2ContinuationDecisionV3(
+        closure=RequestUnderstandingClosureV3(
+            record=rejected_record,
+            accepted_task_deltas=(),
+        )
+    )
+    command = SaveRejectedContinuationUnderstandingV3Command(
+        loaded_closure=accepted.loaded_closure,
+        decision=rejected,
+    )
+
+    assert tuple(type(command).model_fields) == (
+        "loaded_closure",
+        "decision",
+    )
+    assert command.decision.closure.accepted_task_deltas == ()
+    assert not {
+        "effect_trace_records",
+        "next_task_record",
+        "next_request_unit_record",
+        "selection_record",
+    }.intersection(type(command).model_fields)
+
+
+@pytest.mark.parametrize("write_result", tuple(Cycle2WriteResult))
+def test_cycle2_initial_v3_staging_exposes_decision_only_for_applied(
+    write_result: Cycle2WriteResult,
+) -> None:
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2ProviderHarness()
+    handler = _cycle2_handler(runtime, provider)
+    _sentinel, captured = _capture_cycle2_initial_turn(handler)
+    runtime.v3_initial_write_result = write_result
+    run_command = AgentRunCommand(
+        customer_context=_context(),
+        message="customer-B 让我查最近买的轻量跑鞋",
+    )
+
+    result, decision = asyncio.run(
+        handler._stage_initial_turn_v3(
+            command=run_command,
+            turn=captured["turn"],
+        )
+    )
+
+    assert result is write_result
+    assert len(runtime.v3_initial_commands) == 1
+    assert (decision is not None) is (
+        write_result is Cycle2WriteResult.APPLIED
+    )
+
+
+@pytest.mark.parametrize("write_result", tuple(Cycle2WriteResult))
+def test_cycle2_v3_out_of_range_ordinal_is_atomic_rejected_claim(
+    write_result: Cycle2WriteResult,
+) -> None:
+    provider = _Cycle2ProviderHarness(ordinal=6)
+    handler, runtime, _sentinel, _search_command = (
+        _prepare_cycle2_waiting_session(provider=provider)
+    )
+    session = runtime.current_session
+    assert session is not None
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        direction=MessageDirection.USER,
+        content="第六个",
+        received_at=NOW,
+    )
+    running_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted-cycle2",
+        started_at=NOW,
+    )
+    active_link = RunTaskLinkRecordV2(
+        run_id=running_run.run_id,
+        task_id=session.current_task_record.task_id,
+        base_task_state_version=session.current_task_record.state_version,
+    )
+    turn = agent_run_service_module._Cycle2Turn(
+        owner_scope=session.owner_scope,
+        conversation=session.conversation_record,
+        user_message=message,
+        running_run=running_run,
+        active_link=active_link,
+        request_input=handler._request_input(
+            run=running_run,
+            message=message,
+            current_session=session,
+        ),
+        tool_progress=[],
+    )
+    runtime.v3_saved_user_message = message
+    runtime.v3_continuation_write_result = write_result
+
+    result, trigger = asyncio.run(
+        handler._stage_continuation_turn_v3(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message=message.content,
+            ),
+            turn=turn,
+            current_session=session,
+        )
+    )
+
+    assert result is write_result
+    assert trigger is None
+    assert len(runtime.v3_continuation_commands) == 1
+    staged = runtime.v3_continuation_commands[0]
+    assert type(staged) is ApplyContinuationTaskDeltaV3Command
+    assert staged.rejected_ordinal_selection is not None
+    assert staged.rejected_ordinal_selection.rejection_reason is (
+        Cycle2OrdinalSelectionRejectionReason.OUT_OF_RANGE
+    )
+    assert staged.decision.input_bindings == (
+        staged.rejected_ordinal_selection.ordinal_input_binding,
+    )
+    assert staged.next_task_record.state_version == (
+        session.current_task_record.state_version + 1
+    )
+    assert staged.next_request_unit_record.state_version == (
+        session.current_request_unit_record.state_version + 1
+    )
+    assert tuple(
+        trace.event_type for trace in staged.effect_trace_records
+    ) == (
+        TraceEventType.TASK_DELTA_VALIDATED,
+        TraceEventType.TASK_DELTA_ACCEPTED,
+        TraceEventType.INPUT_BINDING_RECORDED,
+        TraceEventType.TASK_STATE_CHANGED,
+    )
+
+
+@pytest.mark.parametrize("write_result", tuple(Cycle2WriteResult))
+def test_cycle2_v3_successful_ordinal_preserves_applied_live_authority_only(
+    write_result: Cycle2WriteResult,
+) -> None:
+    provider = _Cycle2ProviderHarness(ordinal=2)
+    handler, runtime, _sentinel, _search_command = (
+        _prepare_cycle2_waiting_session(provider=provider)
+    )
+    session = runtime.current_session
+    assert session is not None
+    message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        direction=MessageDirection.USER,
+        content="第二个",
+        received_at=NOW,
+    )
+    running_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=session.conversation_record.conversation_id,
+        status=AgentRunStatusV2.RUNNING,
+        provider_lane="scripted-cycle2",
+        started_at=NOW,
+    )
+    active_link = RunTaskLinkRecordV2(
+        run_id=running_run.run_id,
+        task_id=session.current_task_record.task_id,
+        base_task_state_version=session.current_task_record.state_version,
+    )
+    turn = agent_run_service_module._Cycle2Turn(
+        owner_scope=session.owner_scope,
+        conversation=session.conversation_record,
+        user_message=message,
+        running_run=running_run,
+        active_link=active_link,
+        request_input=handler._request_input(
+            run=running_run,
+            message=message,
+            current_session=session,
+        ),
+        tool_progress=[],
+    )
+    runtime.v3_saved_user_message = message
+    runtime.v3_running_run = running_run
+    runtime.v3_active_link = active_link
+    runtime.v3_selection_write_result = write_result
+
+    result, authority = asyncio.run(
+        handler._stage_continuation_turn_v3(
+            command=AgentRunCommand(
+                customer_context=_context(),
+                message=message.content,
+            ),
+            turn=turn,
+            current_session=session,
+        )
+    )
+
+    assert result is write_result
+    assert len(runtime.v3_selection_commands) == 1
+    staged = runtime.v3_selection_commands[0]
+    assert type(staged) is ApplyOrderCandidateSelectionV3Command
+    assert runtime.v3_continuation_commands == []
+    if write_result is Cycle2WriteResult.APPLIED:
+        assert authority is staged
+        authority.require_live_target_issuance()
+        assert authority.selected_target_ref == UUID(
+            authority.selection_record.selected_target_ref
+        )
+        assert authority.ordinal_input_binding_record.name == (
+            "candidate_ordinal"
+        )
+    else:
+        assert authority is None

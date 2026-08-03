@@ -18,6 +18,7 @@ from mini_agent.application.records import (
     AppendToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
     ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderCandidateSelectionV3Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
@@ -96,6 +97,7 @@ from mini_agent.application.records import (
     TransitionRunCommand,
     TrustedOwnerScope,
     build_order_candidate_selection_v2_command,
+    build_order_candidate_selection_v3_command,
 )
 from mini_agent.core.common import ContractVisibility
 from mini_agent.core.control_gateway import (
@@ -135,14 +137,23 @@ from mini_agent.core.order_search import (
     OrderCandidatePublicSummary,
 )
 from mini_agent.core.request_understanding import (
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
+    Cycle2InputCandidate,
     InputAuthority,
     InputSourceKind,
+    ModelVisibleTaskSummary,
+    QueryContextualizationCandidateV2,
+    RequestUnderstandingInput,
     TaskDeltaOperation,
 )
 from mini_agent.core.request_processing import (
+    Cycle2ContinuationDecisionV3,
+    Cycle2ContinuationIdentityAllocationV3,
     Cycle2OrdinalClaimPreparation,
     Cycle2OrdinalSelectionRejectionReason,
     reject_cycle2_ordinal_selection,
+    reduce_cycle2_continuation_task_delta,
 )
 from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
@@ -10183,6 +10194,137 @@ def test_cycle2_candidate_selection_requires_exact_current_closure_and_cas() -> 
     assert command.selection_record.selected_target_ref == str(selected_target_ref)
     assert UUID(command.selection_record.selected_target_ref) == selected_target_ref
     command.require_live_target_issuance()
+
+    snapshot = build_cycle2_registry_snapshot()
+    focused = ModelVisibleTaskSummary(
+        task_alias="task-1",
+        request_unit_alias="unit-1",
+        goal_summary=current_unit.goal_text,
+        status=current_task.status.value,
+        open_questions=current_unit.open_questions,
+    )
+    request_input_v3 = RequestUnderstandingInput(
+        schema_version="e2e01-thin-v1",
+        run_id=current_run.run_id,
+        message_ref=source_message.message_id,
+        original_query=source_message.content,
+        active_task_summaries=(focused,),
+        focused_task_summary=focused,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+    )
+    output_v3 = Cycle2ContinuationRequestUnderstandingOutputV2(
+        schema_version="e2e01-cycle2-continuation.p0.v2",
+        message_ref=source_message.message_id,
+        contextualization=QueryContextualizationCandidateV2(
+            text="选择当前订单候选",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(source_message.message_id,),
+        ),
+        task_delta_candidates=(
+            Cycle2ContinuationTaskDeltaCandidateV2(
+                candidate_id=uuid4(),
+                operation=TaskDeltaOperation.SUPPLY_INPUT,
+                target_task_alias="task-1",
+                target_request_unit_alias="unit-1",
+                input_candidates=(
+                    Cycle2InputCandidate(
+                        name="candidate_ordinal",
+                        candidate_value=2,
+                        source_ref=source_message.message_id,
+                        source_quote="第二",
+                        confidence=0.99,
+                    ),
+                ),
+                confidence=0.99,
+            ),
+        ),
+    )
+    current_query_binding = InputBindingV2(
+        binding_id=query_ref,
+        name="product_description",
+        normalized_value=query_binding.normalized_query,
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(query_binding.source_message_record.message_id,),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=query_binding.accepted_at,
+        updated_at=query_binding.accepted_at,
+    )
+    decision_v3 = reduce_cycle2_continuation_task_delta(
+        request_input=request_input_v3,
+        output=output_v3,
+        authoritative_messages={
+            source_message.message_id: source_message.content
+        },
+        customer_context=_customer_context(),
+        current_task=current_task,
+        current_request_unit=current_unit,
+        current_input_bindings=(current_query_binding,),
+        identity_allocation=Cycle2ContinuationIdentityAllocationV3(
+            request_understanding_record_id=uuid4(),
+            accepted_delta_id=uuid4(),
+            input_binding_ids=(ordinal_ref,),
+        ),
+        now=selected_at,
+    )
+    assert type(decision_v3) is Cycle2ContinuationDecisionV3
+    issued_v3 = IssuedSelectedTargetRef.fresh_v3()
+    selection_v3 = _c2_project(
+        selection,
+        selected_target_ref=str(issued_v3.selected_target_ref),
+    )
+    child_v3 = decision_v3.closure.accepted_task_deltas[0]
+    effect_trace_records = tuple(
+        TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=event_type,
+            occurred_at=selected_at,
+            run_id=current_run.run_id,
+            message_ref=source_message.message_id,
+            accepted_delta_ref=child_v3.accepted_delta_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            input_binding_ref=(
+                ordinal_ref
+                if event_type is TraceEventType.INPUT_BINDING_RECORDED
+                else None
+            ),
+        )
+        for event_type in (
+            TraceEventType.TASK_DELTA_VALIDATED,
+            TraceEventType.TASK_DELTA_ACCEPTED,
+            TraceEventType.INPUT_BINDING_RECORDED,
+            TraceEventType.TASK_STATE_CHANGED,
+        )
+    )
+    command_v3 = build_order_candidate_selection_v3_command(
+        loaded_closure=closure,
+        ordinal_input_binding_record=decision_v3.input_bindings[0],
+        issued_selected_target=issued_v3,
+        next_task_record=command.next_task_record,
+        next_request_unit_record=command.next_request_unit_record,
+        selection_record=selection_v3,
+        closed_pending_candidate_set_ref=candidate_set.candidate_set_id,
+        decision=decision_v3,
+        effect_trace_records=effect_trace_records,
+    )
+    assert type(command_v3) is ApplyOrderCandidateSelectionV3Command
+    assert not isinstance(command_v3, ApplyOrderCandidateSelectionV2Command)
+    command_v3.require_live_target_issuance()
+    with pytest.raises(ValidationError, match="fresh v3 Application issuance"):
+        build_order_candidate_selection_v3_command(
+            loaded_closure=closure,
+            ordinal_input_binding_record=decision_v3.input_bindings[0],
+            issued_selected_target=issued_selected_target,
+            next_task_record=command.next_task_record,
+            next_request_unit_record=command.next_request_unit_record,
+            selection_record=selection,
+            closed_pending_candidate_set_ref=candidate_set.candidate_set_id,
+            decision=decision_v3,
+            effect_trace_records=effect_trace_records,
+        )
 
     closure_values = {
         field_name: getattr(closure, field_name)

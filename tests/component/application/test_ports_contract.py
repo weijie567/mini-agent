@@ -30,7 +30,9 @@ from mini_agent.application.records import (
     AppendInitialToolAttemptV2Command,
     AppendRecoveredToolAttemptV2Command,
     ApplyContinuationInputBindingV2Command,
+    ApplyContinuationTaskDeltaV3Command,
     ApplyOrderCandidateSelectionV2Command,
+    ApplyOrderCandidateSelectionV3Command,
     ApplyOrderSearchOutcomeV2Command,
     ApplyRestartRecoveryCommand,
     ApplyTaskTransitionCommand,
@@ -40,8 +42,10 @@ from mini_agent.application.records import (
     Cycle2WriteResult,
     ContinuationInputBindingReadClosure,
     CreateCycle2InitialTaskGraphCommand,
+    CreateCycle2InitialTaskGraphV3Command,
     CreateCycle2RunRootCommand,
     CreateInitialTaskGraphV2Command,
+    CreateInitialTaskGraphV3Command,
     CreateRunCommand,
     CreateToolCallCommand,
     CreateToolCallV2Command,
@@ -70,6 +74,8 @@ from mini_agent.application.records import (
     RecoveryWriteResult,
     RestartRecoveryClosure,
     SaveRequestUnderstandingV2NoTaskCommand,
+    SaveRejectedContinuationUnderstandingV3Command,
+    SaveRequestUnderstandingV3NoTaskCommand,
     SaveOrderObservationV2Command,
     SaveObservationCommand,
     SaveShipmentAssessmentV2Command,
@@ -86,6 +92,7 @@ from mini_agent.core.order_search import SearchOrdersQuery, SearchOrdersResult
 from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
@@ -117,6 +124,71 @@ class BusinessReadAdapterShape:
         query: GetShipmentQuery,
     ) -> GetShipmentResult:
         raise NotImplementedError
+
+
+def test_ru_v3_staging_port_surface_is_exact_and_v2_remains_unchanged() -> None:
+    runtime_v3 = {
+        "save_request_understanding_v3_no_task_if_current": (
+            SaveRequestUnderstandingV3NoTaskCommand,
+            Cycle2WriteResult,
+        ),
+        "create_initial_task_graph_v3_if_current": (
+            CreateInitialTaskGraphV3Command,
+            Cycle2WriteResult,
+        ),
+    }
+    cycle2_v3 = {
+        "create_cycle2_initial_task_graph_v3_if_current": (
+            CreateCycle2InitialTaskGraphV3Command,
+            Cycle2WriteResult,
+        ),
+        "save_rejected_continuation_understanding_if_current": (
+            SaveRejectedContinuationUnderstandingV3Command,
+            Cycle2WriteResult,
+        ),
+        "apply_continuation_task_delta_if_current": (
+            ApplyContinuationTaskDeltaV3Command,
+            Cycle2WriteResult,
+        ),
+        "apply_order_candidate_selection_v3_if_current": (
+            ApplyOrderCandidateSelectionV3Command,
+            Cycle2WriteResult,
+        ),
+    }
+    for protocol, expected in (
+        (RuntimeRecordPort, runtime_v3),
+        (Cycle2RuntimeRecordPort, cycle2_v3),
+    ):
+        for method_name, (command_type, result_type) in expected.items():
+            assert tuple(
+                inspect.signature(getattr(protocol, method_name)).parameters
+            ) == ("self", "command")
+            hints = get_type_hints(getattr(protocol, method_name))
+            assert hints == {"command": command_type, "return": result_type}
+
+    provider_hints = get_type_hints(
+        Cycle2RequestUnderstandingProvider.propose_cycle2_continuation_v3
+    )
+    assert provider_hints["return"] is (
+        Cycle2ContinuationRequestUnderstandingOutputV2
+    )
+    assert get_type_hints(
+        Cycle2RequestUnderstandingProvider.propose_cycle2_continuation
+    )["return"] is Cycle2InputCandidate
+    assert get_type_hints(
+        Cycle2RuntimeRecordPort.apply_order_candidate_selection_if_current
+    )["command"] is ApplyOrderCandidateSelectionV2Command
+    for forbidden_name in (
+        "save_request_understanding_latest_if_current",
+        "create_initial_task_graph_latest_if_current",
+        "create_cycle2_initial_task_graph_latest_if_current",
+        "apply_continuation_task_delta",
+        "apply_order_candidate_selection_latest_if_current",
+        "propose_cycle2_continuation_latest",
+    ):
+        assert not hasattr(RuntimeRecordPort, forbidden_name)
+        assert not hasattr(Cycle2RuntimeRecordPort, forbidden_name)
+        assert not hasattr(Cycle2RequestUnderstandingProvider, forbidden_name)
 
 
 _LEGACY_APPLICATION_RU_V1_IDENTIFIERS = frozenset(
