@@ -3615,6 +3615,28 @@ def _validate_cycle2_request_understanding_evidence(
                 "Cycle 2 v3 RequestUnderstanding current Binding names "
                 "must be unique"
             )
+    rooted_binding_ids: set[UUID] = set()
+    for unit in units.values():
+        for current_ref in unit.input_binding_refs:
+            lineage: set[UUID] = set()
+            binding_ref: UUID | None = current_ref
+            while binding_ref is not None:
+                if binding_ref in lineage:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding lineage cycle"
+                    )
+                lineage.add(binding_ref)
+                binding = bindings.get(binding_ref)
+                if binding is None:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding root mismatch"
+                    )
+                rooted_binding_ids.add(binding_ref)
+                binding_ref = binding.supersedes
+    if rooted_binding_ids != set(bindings):
+        raise ValueError(
+            "Cycle 2 v3 RequestUnderstanding Binding closed set mismatch"
+        )
 
     links_by_key = {
         (link.run_id, link.task_id): link for link in run_task_links
@@ -3776,17 +3798,17 @@ def _validate_cycle2_request_understanding_evidence(
             )
             if (
                 any(binding is None for binding in child_bindings)
-                or not set(child.input_binding_refs).issubset(
-                    unit.input_binding_refs
-                )
                 or len(child_bindings) != len(candidate.input_candidates)
             ):
                 raise ValueError(
                     "Cycle 2 v3 RequestUnderstanding Binding root mismatch"
                 )
-            for candidate_input, binding in zip(
-                candidate.input_candidates,
-                child_bindings,
+            for input_index, (candidate_input, binding) in enumerate(
+                zip(
+                    candidate.input_candidates,
+                    child_bindings,
+                    strict=True,
+                )
             ):
                 if binding is None:
                     raise AssertionError("unreachable missing Binding")
@@ -3832,6 +3854,30 @@ def _validate_cycle2_request_understanding_evidence(
                         raise ValueError(
                             "Cycle 2 v3 SUPPLY_INPUT Binding supersession mismatch"
                         )
+                if (
+                    branch == "e2e01-cycle2-continuation.p0.v2"
+                    and len(candidate.input_candidates) == 2
+                    and input_index == 0
+                ):
+                    superseded = (
+                        None
+                        if binding.supersedes is None
+                        else bindings.get(binding.supersedes)
+                    )
+                    if (
+                        superseded is None
+                        or superseded.normalized_value
+                        != binding.normalized_value
+                        or superseded.authority is not InputAuthority.USER_CLAIM
+                        or any(
+                            source_ref not in messages
+                            for source_ref in superseded.source_refs
+                        )
+                    ):
+                        raise ValueError(
+                            "Cycle 2 v3 DNR order Binding must exact-supersede "
+                            "the current Claim"
+                        )
 
             base_version = child.base_task_state_version or 0
             edge = (base_version, child.result_task_state_version)
@@ -3853,7 +3899,13 @@ def _validate_cycle2_request_understanding_evidence(
         if (
             link.base_task_state_version != first_base
             or (
-                link.result_task_state_version is not None
+                run_id != root_run_id
+                and run_by_id[run_id].status is AgentRunStatusV2.COMPLETED
+                and link.result_task_state_version != last_result
+            )
+            or (
+                run_id != root_run_id
+                and link.result_task_state_version is not None
                 and link.result_task_state_version != last_result
             )
             or (
@@ -3911,8 +3963,6 @@ def _validate_cycle2_request_understanding_evidence(
             )
         current_status: TaskStatus | None = None
         last_effect_at: datetime | None = None
-        current_binding_ref_by_name: dict[str, UUID] = {}
-        expected_current_binding_refs: list[UUID] = []
         for edge in edge_keys:
             accepted = accepted_edges.get(edge)
             transition = task_transitions.get(edge)
@@ -3944,67 +3994,64 @@ def _validate_cycle2_request_understanding_evidence(
                 effect_at = transition.changed_at
             else:
                 raise AssertionError("unreachable empty Cycle 2 Task edge")
-            if accepted is not None:
-                accepted_bindings = tuple(
-                    bindings[binding_ref]
-                    for binding_ref in accepted.input_binding_refs
-                )
-                if type(accepted) is AcceptedAddGoalTaskDeltaV3:
-                    if (
-                        expected_current_binding_refs
-                        or len(accepted_bindings)
-                        != len({binding.name for binding in accepted_bindings})
-                    ):
-                        raise ValueError(
-                            "Cycle 2 v3 RequestUnderstanding Binding timeline "
-                            "mismatch"
-                        )
-                    expected_current_binding_refs.extend(
-                        accepted.input_binding_refs
-                    )
-                    current_binding_ref_by_name.update(
-                        {
-                            binding.name: binding.binding_id
-                            for binding in accepted_bindings
-                        }
-                    )
-                else:
-                    for binding in accepted_bindings:
-                        previous_ref = current_binding_ref_by_name.get(
-                            binding.name
-                        )
-                        if binding.supersedes != previous_ref:
-                            raise ValueError(
-                                "Cycle 2 v3 RequestUnderstanding Binding "
-                                "supersession mismatch"
-                            )
-                        if previous_ref is None:
-                            expected_current_binding_refs.append(
-                                binding.binding_id
-                            )
-                        else:
-                            try:
-                                binding_index = (
-                                    expected_current_binding_refs.index(
-                                        previous_ref
-                                    )
-                                )
-                            except ValueError:
-                                raise ValueError(
-                                    "Cycle 2 v3 RequestUnderstanding Binding "
-                                    "timeline mismatch"
-                                ) from None
-                            expected_current_binding_refs[binding_index] = (
-                                binding.binding_id
-                            )
-                        current_binding_ref_by_name[binding.name] = (
-                            binding.binding_id
-                        )
             if last_effect_at is not None and effect_at < last_effect_at:
                 raise ValueError(
                     "Cycle 2 v3 RequestUnderstanding effect timestamps regress"
                 )
             last_effect_at = effect_at
+
+        expected_current_binding_refs = list(unit.input_binding_refs)
+        current_binding_ref_by_name = {
+            bindings[binding_ref].name: binding_ref
+            for binding_ref in expected_current_binding_refs
+        }
+        for edge in reversed(edge_keys):
+            accepted = accepted_edges.get(edge)
+            if accepted is None:
+                continue
+            for binding_ref in reversed(accepted.input_binding_refs):
+                binding = bindings[binding_ref]
+                if current_binding_ref_by_name.get(binding.name) != binding_ref:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding timeline mismatch"
+                    )
+                try:
+                    binding_index = expected_current_binding_refs.index(
+                        binding_ref
+                    )
+                except ValueError:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding timeline mismatch"
+                    ) from None
+                if binding.supersedes is None:
+                    if binding_index != len(expected_current_binding_refs) - 1:
+                        raise ValueError(
+                            "Cycle 2 v3 RequestUnderstanding Binding timeline "
+                            "mismatch"
+                        )
+                    expected_current_binding_refs.pop()
+                    del current_binding_ref_by_name[binding.name]
+                else:
+                    previous = bindings.get(binding.supersedes)
+                    if (
+                        previous is None
+                        or previous.name != binding.name
+                        or binding.supersedes in expected_current_binding_refs
+                    ):
+                        raise ValueError(
+                            "Cycle 2 v3 RequestUnderstanding Binding "
+                            "supersession mismatch"
+                        )
+                    expected_current_binding_refs[binding_index] = (
+                        previous.binding_id
+                    )
+                    current_binding_ref_by_name[binding.name] = (
+                        previous.binding_id
+                    )
+        if min(link_bases) == 0 and expected_current_binding_refs:
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding Binding timeline mismatch"
+            )
 
         if current_status is None:
             current_status = task.status
@@ -4012,8 +4059,6 @@ def _validate_cycle2_request_understanding_evidence(
             current_status is not task.status
             or last_effect_at != task.updated_at
             or last_effect_at != unit.updated_at
-            or tuple(expected_current_binding_refs)
-            != unit.input_binding_refs
         ):
             raise ValueError(
                 "Cycle 2 v3 RequestUnderstanding Task terminal mismatch"

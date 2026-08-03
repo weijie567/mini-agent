@@ -503,7 +503,31 @@ def test_cycle2_v3_evidence_closes_initial_and_dual_continuation_timeline() -> N
     )
     assert tuple(
         binding.name for binding in closure.input_binding_records
-    ) == ("product_description", "order_id", "shipment_not_received")
+    ) == ("product_description", "order_id")
+    dnr = _cycle2_dnr_v3_exact_run_evidence()
+    dnr_parent = dnr.request_understanding_closures[0]
+    dnr_child = dnr_parent.accepted_task_deltas[0]
+    assert tuple(binding.name for binding in dnr.input_binding_records) == (
+        "product_description",
+        "order_id",
+        "order_id",
+        "shipment_not_received",
+    )
+    old_order_ref = dnr.input_binding_records[1].binding_id
+    fresh_order_ref = dnr_child.input_binding_refs[0]
+    binding_by_id = {
+        binding.binding_id: binding for binding in dnr.input_binding_records
+    }
+    assert binding_by_id[fresh_order_ref].supersedes == old_order_ref
+    assert dnr.request_unit_records[0].input_binding_refs == (
+        dnr.input_binding_records[0].binding_id,
+        fresh_order_ref,
+        dnr_child.input_binding_refs[1],
+    )
+    assert (dnr_child.base_task_state_version, dnr_child.result_task_state_version) == (
+        2,
+        3,
+    )
     assert tuple(
         child.result_task_state_version
         for parent in closure.request_understanding_closures
@@ -564,6 +588,62 @@ def test_cycle2_v3_evidence_closes_later_independent_status_transition() -> None
     )
     assert terminal.task_records[0].state_version == 3
     assert terminal.task_state_transition_records == (transition,)
+
+    completed_at = changed_at + timedelta(milliseconds=1)
+    completed_run = AgentRunRecordV2(
+        **{
+            **closure.run_record.model_dump(mode="python"),
+            "status": AgentRunStatusV2.COMPLETED,
+            "completed_at": completed_at,
+            "stop_reason": StopReasonV2.GOAL_COMPLETED,
+        }
+    )
+    terminal_result = AgentRunResult(
+        run_id=completed_run.run_id,
+        outcome=AgentOutcome.COMPLETED,
+        message="已完成。",
+    )
+    assistant_message = MessageRecord(
+        schema_version="message_record.p0.v1",
+        message_id=uuid4(),
+        conversation_id=closure.conversation_record.conversation_id,
+        direction=MessageDirection.ASSISTANT,
+        content=terminal_result.message,
+        received_at=completed_at,
+    )
+    root_link = RunTaskLinkRecordV2(
+        **{
+            **closure.run_task_link_records[1].model_dump(mode="python"),
+            "result_task_state_version": 3,
+        }
+    )
+    stopped = TraceEventV2(
+        trace_event_id=uuid4(),
+        event_type=TraceEventType.RUN_STOPPED,
+        occurred_at=completed_at,
+        run_id=completed_run.run_id,
+        task_id=terminal_task.task_id,
+        request_unit_id=terminal_unit.request_unit_id,
+        user_outcome=terminal_result.outcome,
+        stop_reason=completed_run.stop_reason,
+    )
+    completed = Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "run_record": completed_run,
+            "message_records": (*closure.message_records, assistant_message),
+            "run_task_link_records": (
+                closure.run_task_link_records[0],
+                root_link,
+            ),
+            "task_records": (terminal_task,),
+            "request_unit_records": (terminal_unit,),
+            "task_state_transition_records": (transition,),
+            "trace_records": (*closure.trace_records, stopped),
+            "terminal_result": terminal_result,
+        }
+    )
+    assert completed.run_task_link_records[1].result_task_state_version == 3
 
     wrong_from = TaskStateTransition(
         **{
@@ -949,6 +1029,23 @@ def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
             }
         )
 
+    missing_supporting_result = RunTaskLinkRecordV2(
+        **{
+            **closure.run_task_link_records[0].model_dump(mode="python"),
+            "result_task_state_version": None,
+        }
+    )
+    with pytest.raises(ValidationError, match="RunTaskLink mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    missing_supporting_result,
+                    closure.run_task_link_records[1],
+                ),
+            }
+        )
+
     task = closure.task_records[0]
     unit = closure.request_unit_records[0]
     wrong_task = TaskRecord(
@@ -986,7 +1083,32 @@ def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
                 "input_binding_records": (
                     closure.input_binding_records[0],
                     wrong_binding,
-                    closure.input_binding_records[2],
+                ),
+            }
+        )
+
+    dnr = _cycle2_dnr_v3_exact_run_evidence()
+    dnr_values = {
+        field_name: getattr(dnr, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    missing_supersession_order = InputBindingV2(
+        **{
+            **dnr.input_binding_records[2].model_dump(mode="python"),
+            "supersedes": None,
+        }
+    )
+    with pytest.raises(
+        ValidationError,
+        match="DNR order Binding must exact-supersede",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **dnr_values,
+                "input_binding_records": (
+                    dnr.input_binding_records[0],
+                    missing_supersession_order,
+                    dnr.input_binding_records[3],
                 ),
             }
         )
@@ -1021,7 +1143,7 @@ def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
 
     unrooted_previous_binding = InputBindingV2(
         **{
-            **closure.input_binding_records[1].model_dump(mode="python"),
+            **dnr.input_binding_records[2].model_dump(mode="python"),
             "binding_id": uuid4(),
             "created_at": UTC_NOW,
             "updated_at": UTC_NOW,
@@ -1030,19 +1152,20 @@ def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
     )
     unrooted_superseding_binding = InputBindingV2(
         **{
-            **closure.input_binding_records[1].model_dump(mode="python"),
+            **dnr.input_binding_records[2].model_dump(mode="python"),
             "supersedes": unrooted_previous_binding.binding_id,
         }
     )
-    with pytest.raises(ValidationError, match="Binding supersession mismatch"):
+    with pytest.raises(ValidationError, match="Binding closed set mismatch"):
         Cycle2ExactRunEvidenceClosure(
             **{
-                **values,
+                **dnr_values,
                 "input_binding_records": (
-                    closure.input_binding_records[0],
+                    dnr.input_binding_records[0],
+                    dnr.input_binding_records[1],
                     unrooted_previous_binding,
                     unrooted_superseding_binding,
-                    closure.input_binding_records[2],
+                    dnr.input_binding_records[3],
                 ),
             }
         )
@@ -1105,8 +1228,8 @@ def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
 
 
 def test_cycle2_v3_evidence_rejects_impossible_dual_order_claim_branch() -> None:
-    closure = _cycle2_dual_parent_v3_exact_run_evidence()
-    initial, continuation = closure.request_understanding_closures
+    closure = _cycle2_dnr_v3_exact_run_evidence()
+    continuation = closure.request_understanding_closures[0]
     candidate = continuation.record.task_delta_candidates[0]
     duplicate_order_input = DurableCycle2InputCandidateV3(
         **{
@@ -1143,7 +1266,7 @@ def test_cycle2_v3_evidence_rejects_impossible_dual_order_claim_branch() -> None
         Cycle2ExactRunEvidenceClosure(
             **{
                 **values,
-                "request_understanding_closures": (initial, impossible_parent),
+                "request_understanding_closures": (impossible_parent,),
             }
         )
 
@@ -1399,13 +1522,6 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
         created_at=continuation_at,
         updated_at=continuation_at,
     )
-    claim_binding = _input_binding_v2(
-        name="shipment_not_received",
-        normalized_value=True,
-        source_refs=(continuation_message.message_id,),
-        created_at=continuation_at,
-        updated_at=continuation_at,
-    )
     task = _task(
         status=TaskStatus.ACTIVE,
         state_version=2,
@@ -1418,7 +1534,6 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
         input_binding_refs=(
             product_binding.binding_id,
             order_binding.binding_id,
-            claim_binding.binding_id,
         ),
         status=TaskStatus.ACTIVE,
         state_version=2,
@@ -1485,11 +1600,6 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
                 value="O-1001",
                 message=continuation_message,
             ),
-            _cycle2_v3_input(
-                name="shipment_not_received",
-                value=True,
-                message=continuation_message,
-            ),
         ),
         confidence=0.99,
     )
@@ -1500,7 +1610,7 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
         operation=TaskDeltaOperation.SUPPLY_INPUT,
         task_id=task.task_id,
         target_request_unit_id=unit.request_unit_id,
-        input_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        input_binding_refs=(order_binding.binding_id,),
         accepted_at=continuation_at,
         base_task_state_version=1,
         result_task_state_version=2,
@@ -1563,7 +1673,6 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
             "input_binding_records": (
                 product_binding,
                 order_binding,
-                claim_binding,
             ),
             "request_understanding_closures": (
                 RequestUnderstandingClosureV3(
@@ -1577,6 +1686,156 @@ def _cycle2_dual_parent_v3_exact_run_evidence() -> (
             ),
             "task_state_transition_records": (),
             "trace_records": (root_trace,),
+        }
+    )
+
+
+def _cycle2_dnr_v3_exact_run_evidence() -> Cycle2ExactRunEvidenceClosure:
+    base = _minimal_cycle2_exact_run_evidence()
+    history_at = UTC_NOW - timedelta(milliseconds=1)
+    historical_message = _message(
+        conversation_id=base.conversation_record.conversation_id,
+        content="wireless earphones O-1001",
+        received_at=history_at,
+    )
+    current_message = _message(
+        message_id=base.message_records[0].message_id,
+        conversation_id=base.conversation_record.conversation_id,
+        content="O-1001 还没收到",
+        received_at=UTC_NOW,
+    )
+    product_binding = _input_binding_v2(
+        name="product_description",
+        normalized_value="wireless earphones",
+        source_refs=(historical_message.message_id,),
+        created_at=history_at,
+        updated_at=history_at,
+    )
+    old_order_binding = _input_binding_v2(
+        name="order_id",
+        normalized_value="O-1001",
+        source_refs=(historical_message.message_id,),
+        created_at=history_at,
+        updated_at=history_at,
+    )
+    fresh_order_binding = _input_binding_v2(
+        name="order_id",
+        normalized_value="O-1001",
+        source_refs=(current_message.message_id,),
+        supersedes=old_order_binding.binding_id,
+    )
+    claim_binding = _input_binding_v2(
+        name="shipment_not_received",
+        normalized_value=True,
+        source_refs=(current_message.message_id,),
+    )
+    task = _task(
+        status=TaskStatus.ACTIVE,
+        state_version=3,
+        created_at=history_at,
+        updated_at=UTC_NOW,
+    )
+    unit = _request_unit(
+        task_id=task.task_id,
+        goal_text="查找 wireless earphones 的订单",
+        goal_source_refs=(historical_message.message_id,),
+        input_binding_refs=(
+            product_binding.binding_id,
+            fresh_order_binding.binding_id,
+            claim_binding.binding_id,
+        ),
+        status=TaskStatus.ACTIVE,
+        state_version=3,
+        created_at=history_at,
+        updated_at=UTC_NOW,
+    )
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="current-task",
+        target_request_unit_alias="current-unit",
+        input_candidates=(
+            _cycle2_v3_input(
+                name="order_id",
+                value="O-1001",
+                message=current_message,
+            ),
+            _cycle2_v3_input(
+                name="shipment_not_received",
+                value=True,
+                message=current_message,
+            ),
+        ),
+        confidence=0.99,
+    )
+    child = AcceptedSupplyInputTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=candidate.candidate_id,
+        message_ref=current_message.message_id,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        task_id=task.task_id,
+        target_request_unit_id=unit.request_unit_id,
+        input_binding_refs=(
+            fresh_order_binding.binding_id,
+            claim_binding.binding_id,
+        ),
+        accepted_at=UTC_NOW,
+        base_task_state_version=2,
+        result_task_state_version=3,
+    )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=base.run_record.run_id,
+        message_ref=current_message.message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text="补充当前任务输入",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(current_message.message_id,),
+        ),
+        task_delta_candidates=(candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=candidate.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(child.accepted_delta_id,),
+        created_at=UTC_NOW,
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "message_records": (historical_message, current_message),
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=base.run_record.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=2,
+                    result_task_state_version=None,
+                ),
+            ),
+            "task_records": (task,),
+            "request_unit_records": (unit,),
+            "input_binding_records": (
+                product_binding,
+                old_order_binding,
+                fresh_order_binding,
+                claim_binding,
+            ),
+            "request_understanding_closures": (
+                RequestUnderstandingClosureV3(
+                    record=record,
+                    accepted_task_deltas=(child,),
+                ),
+            ),
         }
     )
 
