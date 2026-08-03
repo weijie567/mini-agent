@@ -161,6 +161,10 @@ _PHYSICAL_CODE_VERSION_PAIRS = (
         "request_understanding_record",
         "request_understanding_record.p0.v2",
     ),
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v3",
+    ),
     ("order_search_observation_record", "order_search_observation_record.p0.v1"),
     ("order_candidate_set_record", "order_candidate_set_record.p0.v1"),
     (

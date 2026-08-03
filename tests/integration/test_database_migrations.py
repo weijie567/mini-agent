@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
+import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -12,22 +14,42 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, func, inspect, select, text
+from sqlalchemy import Engine, func, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 
 from mini_agent.application.persistence import (
     P0_RECORD_SCHEMA_VERSION_CATALOG,
     P0RecordCode,
     encode_persistence_record,
+    encode_persistence_record_versioned,
+)
+from mini_agent.application.records import (
+    ApplyTaskTransitionCommand,
+    ConditionalWriteResult,
+    MessageDirection,
 )
 from mini_agent.core.order import OrderStatus
-from mini_agent.core.task_state import RequestUnitRecord, TaskRecord, TaskStatus
-from mini_agent.core.trace import AgentRunRecord, AgentRunStatus, AgentRunRecordV2
+from mini_agent.core.task_state import (
+    AcceptedTaskDeltaV2,
+    DurableTaskDeltaCandidateV2,
+    RequestUnderstandingRecordV2,
+    RequestUnitRecord,
+    TaskRecord,
+    TaskStateTransition,
+    TaskStatus,
+)
+from mini_agent.core.trace import (
+    AgentRunRecord,
+    AgentRunRecordV2,
+    AgentRunStatus,
+    StopReason,
+)
 from mini_agent.infrastructure.persistence import models as persistence_models
 from mini_agent.infrastructure.persistence.database import (
     DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_LOCAL_TEST_DATABASE_URL,
     build_engine,
+    build_session_factory,
     build_test_engine,
     database_url_from_environment,
     validate_test_database_url,
@@ -45,6 +67,24 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordReferenceModel,
     P0RecordStateHistoryModel,
+)
+from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+
+_COMPONENT_APPLICATION_TESTS = (
+    Path(__file__).parents[1] / "component" / "application"
+)
+sys.path.append(str(_COMPONENT_APPLICATION_TESTS))
+from test_agent_run_service import (  # noqa: E402
+    _dnr_v3_staging_command,
+    _generic_v3_staging_command,
+)
+from test_record_contracts import _initial_v2_graph  # noqa: E402
+
+_INTEGRATION_TESTS = Path(__file__).parent
+sys.path.append(str(_INTEGRATION_TESTS))
+from test_postgres_v3_request_understanding_writes import (  # noqa: E402
+    _seed_continuation_roots,
+    _seed_phase1_roots,
 )
 
 _LIBPQ_ROUTING_ENVIRONMENT_CASES = [
@@ -69,6 +109,12 @@ _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION = _CYCLE2_MIGRATION_REVISION
 _RECORD_HISTORY_MIGRATION_REVISION = "20260802_0006"
 _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION = (
     _SEARCH_AUTHORITY_MIGRATION_REVISION
+)
+_RU_V3_MIGRATION_REVISION = "20260803_0007"
+_RU_V3_PREVIOUS_MIGRATION_REVISION = _RECORD_HISTORY_MIGRATION_REVISION
+_RU_V3_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic/versions/20260803_0007_request_understanding_v3_cutover.py"
 )
 _RECORD_HISTORY_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
@@ -106,6 +152,12 @@ _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE = (
     "cannot downgrade record state history while durable evidence exists"
 )
 _RECORD_HISTORY_APPEND_ONLY_MESSAGE = "record state history is append-only"
+_RU_V3_UPGRADE_BLOCKED_MESSAGE = (
+    "request understanding v3 cutover graph is not exactly convertible"
+)
+_RU_V3_DOWNGRADE_BLOCKED_MESSAGE = (
+    "request understanding v3 downgrade graph is not exactly reversible"
+)
 _RECORD_HISTORY_APPEND_ONLY_FUNCTION = (
     "p0_record_state_history_reject_mutation"
 )
@@ -157,6 +209,10 @@ _EXPANDED_CODE_VERSION_PAIRS = (
 )
 _CYCLE2_CODE_VERSION_PAIRS = (
     *_EXPANDED_CODE_VERSION_PAIRS,
+    (
+        "request_understanding_record",
+        "request_understanding_record.p0.v3",
+    ),
     ("order_search_observation_record", "order_search_observation_record.p0.v1"),
     ("order_candidate_set_record", "order_candidate_set_record.p0.v1"),
     (
@@ -181,6 +237,101 @@ _ACTIVE_CODE_VERSION_PAIRS = tuple(
     for pair in _CYCLE2_CODE_VERSION_PAIRS
     if pair != _REQUEST_UNDERSTANDING_V1_PAIR
 )
+
+
+async def _insert_generic_v2_source_from_v3_command(
+    adapter: PostgresRecordAdapter,
+    staged,
+) -> dict[str, object]:
+    await _seed_phase1_roots(adapter, staged)
+    source = staged.request_understanding.record
+    source_children = staged.request_understanding.accepted_task_deltas
+    record = RequestUnderstandingRecordV2(
+        request_understanding_record_id=(
+            source.request_understanding_record_id
+        ),
+        run_id=source.run_id,
+        message_ref=source.message_ref,
+        schema_version="request_understanding_record.p0.v2",
+        model_input_schema_version=source.model_input_schema_version,
+        model_output_schema_version=source.model_output_schema_version,
+        contextualization=source.contextualization,
+        task_delta_candidates=tuple(
+            DurableTaskDeltaCandidateV2(**candidate.model_dump())
+            for candidate in source.task_delta_candidates
+        ),
+        candidate_validation=source.candidate_validation,
+        accepted_delta_refs=source.accepted_delta_refs,
+        proposed_base_task_state_version=(
+            source.proposed_base_task_state_version
+        ),
+        validated_task_state_version=source.validated_task_state_version,
+        next_move_candidate_ref=source.next_move_candidate_ref,
+        created_at=source.created_at,
+    )
+    children = tuple(
+        AcceptedTaskDeltaV2(**child.model_dump())
+        for child in source_children
+    )
+    ru = encode_persistence_record_versioned(
+        P0RecordCode.REQUEST_UNDERSTANDING_RECORD,
+        "request_understanding_record.p0.v2",
+        record,
+        logical_children=children,
+    )
+    generated = []
+    for graph in getattr(staged, "accepted_task_graphs", ()):
+        unit = graph.initial_request_unit.initial_record
+        generated.extend(
+            (
+                adapter._ru_v2_write_encode(
+                    P0RecordCode.TASK_RECORD,
+                    graph.initial_task.initial_record,
+                ),
+                adapter._ru_v2_write_encode(
+                    P0RecordCode.REQUEST_UNIT_RECORD,
+                    unit,
+                ),
+                *(
+                    adapter._ru_v2_write_encode(
+                        P0RecordCode.INPUT_BINDING_RECORD,
+                        binding.record,
+                        external_references=tuple(
+                            reference
+                            for reference in adapter._cycle2_encode_input_binding(
+                                binding.record,
+                                request_unit_id=binding.request_unit_id,
+                            ).record_references
+                            if reference.relation == "request_unit_id"
+                        ),
+                    )
+                    for binding in graph.input_bindings
+                ),
+                adapter._ru_v2_write_encode(
+                    P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                    graph.conversation_task_link,
+                ),
+                adapter._ru_v2_write_encode(
+                    P0RecordCode.RUN_TASK_LINK_RECORD,
+                    graph.run_task_link.active_record,
+                ),
+            )
+        )
+    with adapter.session_factory.begin() as session:
+        roots = adapter._ru_v2_write_lock_roots(
+            session,
+            owner_scope=staged.owner_scope,
+            conversation=staged.expected_conversation_record,
+            messages=staged.expected_message_records,
+            run=staged.expected_active_run_record,
+        )
+        adapter._ru_v3_insert_phase1_envelopes(
+            session,
+            owner_customer_id=staged.owner_scope.customer_id,
+            root_rows=roots,
+            envelopes=(ru, *generated),
+        )
+    return ru.model_dump(mode="json")
 
 
 def _search_snapshot_payload(
@@ -593,7 +744,7 @@ def _wait_for_real_downgrade_lock(
     )
     deadline = monotonic() + timeout_seconds
     while monotonic() < deadline:
-        with engine.connect() as connection:
+        with engine.begin() as connection:
             if (
                 connection.scalar(
                     lock_observed,
@@ -783,7 +934,7 @@ def test_request_understanding_v2_expand_is_single_linear_alembic_head() -> None
         )
     )
 
-    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RU_V3_MIGRATION_REVISION,)
     revision = script.get_revision(_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREVIOUS_MIGRATION_REVISION
@@ -798,7 +949,7 @@ def test_cycle2_physical_revision_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_CYCLE2_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _CYCLE2_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RU_V3_MIGRATION_REVISION,)
 
 
 def test_search_authority_correction_is_single_linear_alembic_head() -> None:
@@ -810,7 +961,7 @@ def test_search_authority_correction_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_SEARCH_AUTHORITY_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _SEARCH_AUTHORITY_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RU_V3_MIGRATION_REVISION,)
 
 
 def test_record_history_correction_is_single_linear_alembic_head() -> None:
@@ -822,7 +973,864 @@ def test_record_history_correction_is_single_linear_alembic_head() -> None:
     revision = script.get_revision(_RECORD_HISTORY_MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == _RECORD_HISTORY_PREVIOUS_MIGRATION_REVISION
-    assert tuple(script.get_heads()) == (_RECORD_HISTORY_MIGRATION_REVISION,)
+    assert tuple(script.get_heads()) == (_RU_V3_MIGRATION_REVISION,)
+
+
+def test_request_understanding_v3_cutover_is_single_linear_alembic_head() -> None:
+    assert _RU_V3_MIGRATION_PATH.is_file()
+    script = ScriptDirectory.from_config(
+        alembic_config(DEFAULT_LOCAL_TEST_DATABASE_URL, testing=True)
+    )
+
+    revision = script.get_revision(_RU_V3_MIGRATION_REVISION)
+    assert revision is not None
+    assert revision.down_revision == _RU_V3_PREVIOUS_MIGRATION_REVISION
+    assert tuple(script.get_heads()) == (_RU_V3_MIGRATION_REVISION,)
+
+
+def test_pre_v3_revision_rejects_v3_physical_pair(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-pre-head-reject")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                _insert_physical_probe(
+                    connection,
+                    "request_understanding_record",
+                    "request_understanding_record.p0.v3",
+                )
+        assert _migration_revision(engine) == _RU_V3_PREVIOUS_MIGRATION_REVISION
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_ru_v3_upgrade_and_downgrade_preserve_exact_phase1_closure(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-round-trip")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        with engine.begin() as connection:
+            source_row = connection.execute(
+                text(
+                    """
+                    SELECT * FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                      AND record_schema_version =
+                          'request_understanding_record.p0.v2'
+                    """
+                )
+            ).mappings().one()
+            record_id = source_row["record_id"]
+            source_envelope = json.loads(json.dumps(source_row["envelope"]))
+            source_references = tuple(
+                tuple(reference.values())
+                for reference in connection.execute(
+                    text(
+                        """
+                        SELECT ordinal, relation, target_record_code,
+                               target_logical_identity
+                        FROM p0_record_references
+                        WHERE source_record_code =
+                                  'request_understanding_record'
+                          AND source_logical_identity =
+                              CAST(:identity AS jsonb)
+                        ORDER BY ordinal
+                        """
+                    ),
+                    {
+                        "identity": json.dumps(
+                            source_row["logical_identity"],
+                            separators=(",", ":"),
+                        )
+                    },
+                ).mappings()
+            )
+            archival_id = _insert_physical_probe(
+                connection,
+                "request_understanding_record",
+                "request_understanding_record.p0.v1",
+                marker="archival-v1-must-remain",
+            )
+        command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        converted = _record_row(engine, record_id)
+        assert converted["record_schema_version"] == (
+            "request_understanding_record.p0.v3"
+        )
+        evidence = asyncio.run(
+            adapter.load_exact_run_evidence_v3_for_owner(
+                owner_scope=graph.owner_scope,
+                run_id=graph.expected_active_run_record.run_id,
+            )
+        )
+        assert evidence is not None
+        closure = evidence.request_understanding_closure
+        assert closure is not None
+        assert closure.record.request_understanding_record_id == (
+            graph.request_understanding.record.request_understanding_record_id
+        )
+        assert tuple(
+            child.accepted_delta_id for child in closure.accepted_task_deltas
+        ) == (graph.request_understanding.accepted_delta.accepted_delta_id,)
+        assert _record_row(engine, archival_id)["envelope"][
+            "physical_probe"
+        ] == "archival-v1-must-remain"
+
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        restored = _record_row(engine, record_id)
+        assert restored["record_schema_version"] == (
+            "request_understanding_record.p0.v2"
+        )
+        assert restored["envelope"] == source_envelope
+        with engine.connect() as connection:
+            restored_references = tuple(
+                tuple(reference.values())
+                for reference in connection.execute(
+                    text(
+                        """
+                        SELECT ordinal, relation, target_record_code,
+                               target_logical_identity
+                        FROM p0_record_references
+                        WHERE source_record_code =
+                                  'request_understanding_record'
+                          AND source_logical_identity =
+                              CAST(:identity AS jsonb)
+                        ORDER BY ordinal
+                        """
+                    ),
+                    {
+                        "identity": json.dumps(
+                            restored["logical_identity"],
+                            separators=(",", ":"),
+                        )
+                    },
+                ).mappings()
+            )
+        assert restored_references == source_references
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    "candidate_values",
+    (
+        (),
+        ("BAD",),
+        ("O-1001", "BAD"),
+        ("O-1001", "O-1002"),
+    ),
+)
+def test_ru_v3_cutover_preserves_zero_reject_partial_and_multi_order(
+    postgres_namespace_factory,
+    candidate_values: tuple[str, ...],
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"ru-v3-shape-{len(candidate_values)}-{uuid4().hex[:6]}"
+    )
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    staged = _generic_v3_staging_command(candidate_values)
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        source_envelope = asyncio.run(
+            _insert_generic_v2_source_from_v3_command(adapter, staged)
+        )
+        command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        evidence = asyncio.run(
+            adapter.load_exact_run_evidence_v3_for_owner(
+                owner_scope=staged.owner_scope,
+                run_id=staged.expected_active_run_record.run_id,
+            )
+        )
+        assert evidence is not None
+        assert evidence.request_understanding_closure == (
+            staged.request_understanding
+        )
+        assert {task.task_id for task in evidence.task_records} == {
+            graph.initial_task.initial_record.task_id
+            for graph in getattr(staged, "accepted_task_graphs", ())
+        }
+
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        with engine.connect() as connection:
+            restored = connection.execute(
+                text(
+                    """
+                    SELECT envelope FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                    """
+                )
+            ).mappings().one()["envelope"]
+        assert restored == source_envelope
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_ru_v3_upgrade_bad_provenance_is_atomic_and_bounded(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-bad-provenance")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        with engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT record_id, envelope FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                    """
+                )
+            ).mappings().one()
+            record_id = row["record_id"]
+            envelope = json.loads(json.dumps(row["envelope"]))
+            envelope["payload"]["data"]["task_delta_candidates"][0][
+                "input_candidates"
+            ][0]["source_quote_sha256"] = "0" * 64
+            connection.execute(
+                text(
+                    """
+                    UPDATE p0_records
+                    SET envelope = CAST(:envelope AS jsonb)
+                    WHERE record_id = :record_id
+                    """
+                ),
+                {
+                    "record_id": record_id,
+                    "envelope": json.dumps(envelope, separators=(",", ":")),
+                },
+            )
+        before = _record_row(engine, record_id)
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        assert str(captured.value) == _RU_V3_UPGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == _RU_V3_PREVIOUS_MIGRATION_REVISION
+        assert _record_row(engine, record_id) == before
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    """
+                    SELECT count(*) FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                      AND record_schema_version =
+                          'request_understanding_record.p0.v3'
+                    """
+                )
+            ) == 0
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_ru_v3_upgrade_rejects_direct_assistant_message_atomically(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-assistant-message")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    staged = _generic_v3_staging_command(())
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_insert_generic_v2_source_from_v3_command(adapter, staged))
+        current_message = next(
+            message
+            for message in staged.expected_message_records
+            if message.message_id == staged.request_understanding.record.message_ref
+        )
+        with adapter.session_factory.begin() as session:
+            loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=staged.owner_scope.customer_id,
+                record_code=P0RecordCode.MESSAGE_RECORD,
+                logical_identity=(("message_id", current_message.message_id),),
+                for_update=True,
+            )
+            assert loaded is not None
+            adapter._cycle2_replace(
+                session,
+                loaded[0],
+                owner_customer_id=staged.owner_scope.customer_id,
+                expected_record=current_message,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.MESSAGE_RECORD,
+                    current_message.model_copy(
+                        update={"direction": MessageDirection.ASSISTANT}
+                    ),
+                ),
+            )
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        assert str(captured.value) == _RU_V3_UPGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == _RU_V3_PREVIOUS_MIGRATION_REVISION
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    """
+                    SELECT count(*) FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                      AND record_schema_version =
+                          'request_understanding_record.p0.v2'
+                    """
+                )
+            ) == 1
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_ru_v3_upgrade_rejects_canonical_initial_effect_drift_atomically(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-effect-drift")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        task = graph.initial_task.initial_record
+        with adapter.session_factory.begin() as session:
+            loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=graph.owner_scope.customer_id,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", task.task_id),),
+                for_update=True,
+            )
+            assert loaded is not None
+            adapter._cycle2_replace(
+                session,
+                loaded[0],
+                owner_customer_id=graph.owner_scope.customer_id,
+                expected_record=task,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.TASK_RECORD,
+                    task.model_copy(update={"status": TaskStatus.WAITING_USER}),
+                ),
+            )
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        assert str(captured.value) == _RU_V3_UPGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == _RU_V3_PREVIOUS_MIGRATION_REVISION
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize("direction", ("upgrade", "downgrade"))
+def test_ru_v3_cutover_rejects_ended_initial_conversation_link_atomically(
+    postgres_namespace_factory,
+    direction: str,
+) -> None:
+    namespace = postgres_namespace_factory.create(f"ru-v3-ended-link-{direction}")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        if direction == "downgrade":
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        link = graph.conversation_task_link
+        with adapter.session_factory.begin() as session:
+            loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=graph.owner_scope.customer_id,
+                record_code=P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                logical_identity=adapter._cycle2_encode(
+                    P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                    link,
+                ).logical_identity,
+                for_update=True,
+            )
+            assert loaded is not None
+            adapter._cycle2_replace(
+                session,
+                loaded[0],
+                owner_customer_id=graph.owner_scope.customer_id,
+                expected_record=link,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.CONVERSATION_TASK_LINK_RECORD,
+                    link.model_copy(
+                        update={
+                            "ended_at": link.linked_at + timedelta(milliseconds=1)
+                        }
+                    ),
+                ),
+            )
+        with pytest.raises(RuntimeError) as captured:
+            if direction == "upgrade":
+                command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+            else:
+                command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        assert str(captured.value) == (
+            _RU_V3_UPGRADE_BLOCKED_MESSAGE
+            if direction == "upgrade"
+            else _RU_V3_DOWNGRADE_BLOCKED_MESSAGE
+        )
+        assert _migration_revision(engine) == (
+            _RU_V3_PREVIOUS_MIGRATION_REVISION
+            if direction == "upgrade"
+            else _RU_V3_MIGRATION_REVISION
+        )
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize("drift_non_transition_field", (False, True))
+def test_ru_v3_upgrade_validates_closed_phase1_transition_history(
+    postgres_namespace_factory,
+    drift_non_transition_field: bool,
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"ru-v3-advanced-effect-{drift_non_transition_field}"
+    )
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        task = graph.initial_task.initial_record
+        unit = graph.initial_request_unit.initial_record
+        changed_at = task.updated_at + timedelta(milliseconds=1)
+        next_task = task.model_copy(
+            update={
+                "status": TaskStatus.WAITING_USER,
+                "state_version": 2,
+                "updated_at": changed_at,
+            }
+        )
+        next_unit = unit.model_copy(
+            update={
+                "status": TaskStatus.WAITING_USER,
+                "state_version": 2,
+                "updated_at": changed_at,
+            }
+        )
+        transition = ApplyTaskTransitionCommand(
+            expected_task_record=task,
+            next_task_record=next_task,
+            expected_request_unit_record=unit,
+            next_request_unit_record=next_unit,
+            task_state_transition=TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.ACTIVE,
+                to_status=TaskStatus.WAITING_USER,
+                base_state_version=1,
+                result_state_version=2,
+                reason_ref=graph.request_understanding.record.run_id,
+                changed_at=changed_at,
+            ),
+        )
+        assert asyncio.run(
+            adapter.apply_task_transition_if_current(transition)
+        ) is ConditionalWriteResult.APPLIED
+        active_link = graph.run_task_link.active_record
+        active_run = graph.expected_active_run_record
+        with adapter.session_factory.begin() as session:
+            link_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.RUN_TASK_LINK_RECORD.value,
+                    P0RecordModel.run_id == active_link.run_id,
+                    P0RecordModel.task_id == active_link.task_id,
+                )
+            )
+            run_row = session.scalar(
+                select(P0RecordModel).where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.AGENT_RUN_RECORD.value,
+                    P0RecordModel.run_id == active_run.run_id,
+                )
+            )
+            assert link_row is not None and run_row is not None
+            terminal_link = active_link.model_copy(
+                update={"result_task_state_version": 2}
+            )
+            terminal_run = active_run.model_copy(
+                update={
+                    "status": AgentRunStatus.COMPLETED,
+                    "completed_at": changed_at,
+                    "stop_reason": StopReason.GOAL_COMPLETED,
+                }
+            )
+            link_envelope = encode_persistence_record_versioned(
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                "run_task_link_record.p0.v1",
+                terminal_link,
+            )
+            run_envelope = encode_persistence_record_versioned(
+                P0RecordCode.AGENT_RUN_RECORD,
+                "agent_run_record.p0.v1",
+                terminal_run,
+            )
+            session.execute(
+                update(P0RecordModel)
+                .where(P0RecordModel.record_id == link_row.record_id)
+                .values(envelope=link_envelope.model_dump(mode="json"))
+            )
+            session.execute(
+                update(P0RecordModel)
+                .where(P0RecordModel.record_id == run_row.record_id)
+                .values(
+                    envelope=run_envelope.model_dump(mode="json"),
+                    lifecycle_status=AgentRunStatus.COMPLETED.value,
+                )
+            )
+        later_changed_at = changed_at + timedelta(milliseconds=1)
+        final_task = next_task.model_copy(
+            update={
+                "status": TaskStatus.BLOCKED,
+                "state_version": 3,
+                "updated_at": later_changed_at,
+            }
+        )
+        final_unit = next_unit.model_copy(
+            update={
+                "status": TaskStatus.BLOCKED,
+                "state_version": 3,
+                "updated_at": later_changed_at,
+            }
+        )
+        later_transition = ApplyTaskTransitionCommand(
+            expected_task_record=next_task,
+            next_task_record=final_task,
+            expected_request_unit_record=next_unit,
+            next_request_unit_record=final_unit,
+            task_state_transition=TaskStateTransition(
+                task_id=task.task_id,
+                request_unit_id=unit.request_unit_id,
+                from_status=TaskStatus.WAITING_USER,
+                to_status=TaskStatus.BLOCKED,
+                base_state_version=2,
+                result_state_version=3,
+                reason_ref=uuid4(),
+                changed_at=later_changed_at,
+            ),
+        )
+        assert asyncio.run(
+            adapter.apply_task_transition_if_current(later_transition)
+        ) is ConditionalWriteResult.APPLIED
+        if drift_non_transition_field:
+            with adapter.session_factory.begin() as session:
+                loaded = adapter._cycle2_row(
+                    session,
+                    owner_customer_id=graph.owner_scope.customer_id,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=(("task_id", task.task_id),),
+                    for_update=True,
+                )
+                assert loaded is not None
+                adapter._cycle2_replace(
+                    session,
+                    loaded[0],
+                    owner_customer_id=graph.owner_scope.customer_id,
+                    expected_record=final_task,
+                    expected_children=(
+                        transition.task_state_transition,
+                        later_transition.task_state_transition,
+                    ),
+                    next_envelope=adapter._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        final_task.model_copy(
+                            update={
+                                "created_at": final_task.created_at
+                                + timedelta(milliseconds=1)
+                            }
+                        ),
+                        logical_children=(
+                            transition.task_state_transition,
+                            later_transition.task_state_transition,
+                        ),
+                    ),
+                )
+            with pytest.raises(RuntimeError) as captured:
+                command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+            assert str(captured.value) == _RU_V3_UPGRADE_BLOCKED_MESSAGE
+            assert _migration_revision(engine) == (
+                _RU_V3_PREVIOUS_MIGRATION_REVISION
+            )
+        else:
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+            assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
+            assert asyncio.run(
+                adapter.assert_request_understanding_v3_ready()
+            ) is None
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    "target_record_code",
+    ("task_record", "request_unit_record"),
+)
+def test_ru_v3_upgrade_rejects_malformed_referenced_closure_atomically(
+    postgres_namespace_factory,
+    target_record_code: str,
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"ru-v3-bad-{target_record_code}"
+    )
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    graph = _initial_v2_graph()
+    try:
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        asyncio.run(_seed_phase1_roots(adapter, graph))
+        assert asyncio.run(
+            adapter.create_initial_task_graph_v2_if_current(graph)
+        ) is ConditionalWriteResult.APPLIED
+        with engine.begin() as connection:
+            target_row = connection.execute(
+                text(
+                    """
+                    SELECT record_id FROM p0_records
+                    WHERE record_code = :record_code
+                    """
+                ),
+                {"record_code": target_record_code},
+            ).mappings().one()
+            connection.execute(
+                text(
+                    """
+                    UPDATE p0_records
+                    SET envelope = CAST('{}' AS jsonb)
+                    WHERE record_id = :record_id
+                    """
+                ),
+                {"record_id": target_row["record_id"]},
+            )
+        before = _record_row(engine, target_row["record_id"])
+
+        with pytest.raises(RuntimeError) as captured:
+            command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+
+        assert str(captured.value) == _RU_V3_UPGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == _RU_V3_PREVIOUS_MIGRATION_REVISION
+        assert _record_row(engine, target_row["record_id"]) == before
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    """
+                    SELECT count(*) FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                      AND record_schema_version =
+                          'request_understanding_record.p0.v3'
+                    """
+                )
+            ) == 0
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+def test_ru_v3_downgrade_blocks_cycle2_continuation_without_mutation(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-downgrade-blocker")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    adapter = PostgresRecordAdapter(build_session_factory(engine))
+    staged = _dnr_v3_staging_command(with_current_dnr=True)
+    try:
+        _seed_continuation_roots(adapter, staged)
+        assert asyncio.run(
+            adapter.apply_continuation_task_delta_if_current(staged)
+        ).value == "APPLIED"
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT record_id FROM p0_records
+                    WHERE record_code = 'request_understanding_record'
+                    """
+                )
+            ).mappings().one()
+        before = _record_row(engine, row["record_id"])
+
+        with pytest.raises(RuntimeError) as captured:
+            command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+
+        assert str(captured.value) == _RU_V3_DOWNGRADE_BLOCKED_MESSAGE
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
+        assert _record_row(engine, row["record_id"]) == before
+    finally:
+        engine.dispose()
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize("direction", ("upgrade", "downgrade"))
+def test_ru_v3_cutover_lock_blocks_record_and_reference_dml(
+    postgres_namespace_factory,
+    direction: str,
+) -> None:
+    namespace = postgres_namespace_factory.create(f"ru-v3-{direction}-lock")
+    engine = namespace.build_engine()
+    config = alembic_config(
+        namespace.database_url,
+        schema=namespace.schema,
+        testing=True,
+    )
+    if direction == "upgrade":
+        command.downgrade(config, _RU_V3_PREVIOUS_MIGRATION_REVISION)
+        migrate = lambda: command.upgrade(config, _RU_V3_MIGRATION_REVISION)
+        expected_revision = _RU_V3_MIGRATION_REVISION
+    else:
+        migrate = lambda: command.downgrade(
+            config,
+            _RU_V3_PREVIOUS_MIGRATION_REVISION,
+        )
+        expected_revision = _RU_V3_PREVIOUS_MIGRATION_REVISION
+    barrier_connection = engine.connect()
+    barrier_transaction = barrier_connection.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = None
+    try:
+        barrier_connection.execute(
+            text("LOCK TABLE p0_records IN ACCESS SHARE MODE")
+        )
+        future = executor.submit(migrate)
+        _wait_for_real_downgrade_lock(
+            engine,
+            schema=namespace.schema,
+            relation_name="p0_records",
+        )
+        _assert_lock_timeout(
+            engine,
+            text(
+                """
+                INSERT INTO p0_records (
+                    record_id, record_code, record_schema_version,
+                    logical_identity, envelope
+                ) VALUES (
+                    :record_id, 'conversation_record',
+                    'conversation_record.p0.v1',
+                    CAST(:identity AS jsonb), CAST(:envelope AS jsonb)
+                )
+                """
+            ),
+            parameters={
+                "record_id": uuid4(),
+                "identity": json.dumps([["conversation_id", str(uuid4())]]),
+                "envelope": "{}",
+            },
+        )
+        _assert_lock_timeout(
+            engine,
+            text(
+                """
+                INSERT INTO p0_record_references (
+                    reference_id, source_record_code,
+                    source_logical_identity, ordinal, relation,
+                    target_record_code, target_logical_identity
+                ) VALUES (
+                    :reference_id, 'conversation_record',
+                    CAST(:source_identity AS jsonb), 0, 'probe',
+                    'conversation_record',
+                    CAST(:target_identity AS jsonb)
+                )
+                """
+            ),
+            parameters={
+                "reference_id": uuid4(),
+                "source_identity": json.dumps(
+                    [["conversation_id", str(uuid4())]]
+                ),
+                "target_identity": json.dumps(
+                    [["conversation_id", str(uuid4())]]
+                ),
+            },
+        )
+    finally:
+        barrier_transaction.rollback()
+        barrier_connection.close()
+        executor.shutdown(wait=True)
+    assert future is not None
+    assert future.result(timeout=10) is None
+    assert _migration_revision(engine) == expected_revision
+    engine.dispose()
+    postgres_namespace_factory.drop(namespace)
 
 
 def test_record_history_correction_source_is_self_contained_and_frozen() -> None:
@@ -988,7 +1996,7 @@ def test_cycle2_downgrade_blocks_new_top_level_evidence_before_mutation(
 
         assert str(captured.value) == _CYCLE2_DOWNGRADE_BLOCKED_MESSAGE
         assert "must-not-leak-from-v2-only-evidence" not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         assert _record_row(engine, record_id) == before
     finally:
         engine.dispose()
@@ -1013,13 +2021,13 @@ def test_empty_and_phase1_head_upgrade_paths_converge_to_exact_structure(
             phase1_config,
             _CYCLE2_PREVIOUS_MIGRATION_REVISION,
         )
-        command.upgrade(phase1_config, _RECORD_HISTORY_MIGRATION_REVISION)
+        command.upgrade(phase1_config, _RU_V3_MIGRATION_REVISION)
 
         assert _migration_revision(empty_engine) == (
-            _RECORD_HISTORY_MIGRATION_REVISION
+            _RU_V3_MIGRATION_REVISION
         )
         assert _migration_revision(phase1_engine) == (
-            _RECORD_HISTORY_MIGRATION_REVISION
+            _RU_V3_MIGRATION_REVISION
         )
         assert _schema_structure(phase1_engine) == empty_structure
         with phase1_engine.connect() as connection:
@@ -1428,7 +2436,7 @@ def test_search_authority_downgrade_blocks_durable_evidence_before_mutation(
 
         assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         inspector = inspect(engine)
         assert "mock_order_search_snapshots" in inspector.get_table_names()
         assert "status" in {
@@ -1598,7 +2606,7 @@ def test_search_authority_downgrade_waits_for_prior_snapshot_then_fails_bounded(
             downgrade_future.result(timeout=10)
         assert str(captured.value) == _SEARCH_AUTHORITY_DOWNGRADE_BLOCKED_MESSAGE
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         with engine.connect() as connection:
             assert (
                 connection.scalar(
@@ -2044,7 +3052,7 @@ def test_record_history_downgrade_blocks_any_history_before_mutation(
         assert str(captured.value) == _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE
         assert "must-not-leak-history-owner" not in str(captured.value)
         assert str(values["history_id"]) not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         assert "p0_record_state_history" in inspect(engine).get_table_names()
         with engine.connect() as connection:
             assert connection.scalar(
@@ -2203,7 +3211,7 @@ def test_record_history_downgrade_waits_for_prior_insert_then_fails_bounded(
             downgrade_future.result(timeout=10)
         assert str(captured.value) == _RECORD_HISTORY_DOWNGRADE_BLOCKED_MESSAGE
         assert "must-not-leak-prior-history" not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         with engine.connect() as connection:
             assert connection.scalar(
                 select(P0RecordStateHistoryModel.history_id)
@@ -2410,7 +3418,7 @@ def test_namespace_has_exact_p0_schema_at_head(postgres_namespace) -> None:
             )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == (_RECORD_HISTORY_MIGRATION_REVISION)
+            ) == (_RU_V3_MIGRATION_REVISION)
     finally:
         engine.dispose()
 
@@ -2518,7 +3526,7 @@ def test_sqlalchemy_metadata_owns_exact_expanded_physical_pair_set() -> None:
         "_PHYSICAL_CODE_VERSION_PAIRS",
     )
     assert physical_literal == _CYCLE2_CODE_VERSION_PAIRS
-    assert len(physical_literal) == len(set(physical_literal)) == 29
+    assert len(physical_literal) == len(set(physical_literal)) == 30
 
     code_version_assignments = [
         node
@@ -2910,7 +3918,7 @@ def test_expanded_physical_constraint_accepts_only_exact_catalog_pairs(
                 )
 
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT count(*) FROM p0_records")) == 29
+            assert connection.scalar(text("SELECT count(*) FROM p0_records")) == 30
 
         unsupported_pairs = (
             (
@@ -2919,7 +3927,7 @@ def test_expanded_physical_constraint_accepts_only_exact_catalog_pairs(
             ),
             (
                 "request_understanding_record",
-                "request_understanding_record.p0.v3",
+                "request_understanding_record.p0.v4",
             ),
             (
                 "request_understanding_record",
@@ -3323,7 +4331,7 @@ def test_cycle2_downgrade_waits_for_prior_evidence_insert_then_fails_bounded(
         )
         assert str(captured.value) == expected_message
         assert marker not in str(captured.value)
-        assert _migration_revision(engine) == _RECORD_HISTORY_MIGRATION_REVISION
+        assert _migration_revision(engine) == _RU_V3_MIGRATION_REVISION
         assert evidence_table in inspect(engine).get_table_names()
         with engine.connect() as connection:
             assert (
@@ -3482,7 +4490,7 @@ def test_disposable_namespace_upgrade_downgrade_upgrade(
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == _RECORD_HISTORY_MIGRATION_REVISION
+                == _RU_V3_MIGRATION_REVISION
             )
     finally:
         engine.dispose()
