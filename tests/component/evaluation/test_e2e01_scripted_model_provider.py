@@ -32,10 +32,12 @@ from mini_agent.core.presentation import (
 )
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InputCandidate,
     RequestUnderstandingInput,
     RequestUnderstandingOutputV2,
+    TaskDeltaOperation,
 )
 from mini_agent.core.request_processing import (
     _canonical_cycle2_request_and_candidate,
@@ -702,17 +704,23 @@ def test_cycle2_provider_ordinal_quote_passes_core_provenance_gate(
     ordinal: int,
 ) -> None:
     request = _request(message)
-    candidate = asyncio.run(
-        _cycle2_provider(case_id).propose_cycle2_continuation(request)
+    output = asyncio.run(
+        _cycle2_provider(case_id).propose_cycle2_continuation_v3(request)
     )
+    assert type(output) is Cycle2ContinuationRequestUnderstandingOutputV2
+    delta = output.task_delta_candidates[0]
+    candidate = delta.input_candidates[0]
 
     assert candidate == Cycle2InputCandidate(
         name="candidate_ordinal",
         candidate_value=ordinal,
         source_ref=MESSAGE_REF,
-        source_quote=message,
+        source_quote="第六" if ordinal == 6 else "第二",
         confidence=0.99,
     )
+    assert delta.operation is TaskDeltaOperation.SUPPLY_INPUT
+    assert delta.target_task_alias == "current-task"
+    assert delta.target_request_unit_alias == "current-request"
     canonical_request, canonical_candidate, authoritative_message = (
         _canonical_cycle2_request_and_candidate(
             request_input=request,
@@ -723,6 +731,65 @@ def test_cycle2_provider_ordinal_quote_passes_core_provenance_gate(
     assert canonical_request == request
     assert canonical_candidate == candidate
     assert authoritative_message == message
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    (
+        "E2E01-05/order-only-no-shipment",
+        "E2E01-06/stale-refresh-success",
+    ),
+)
+def test_cycle2_provider_v3_projects_one_order_claim(case_id: str) -> None:
+    output = asyncio.run(
+        _cycle2_provider(case_id).propose_cycle2_continuation_v3(
+            _request("订单 O-1001 到哪了？")
+        )
+    )
+
+    assert type(output) is Cycle2ContinuationRequestUnderstandingOutputV2
+    assert output.task_delta_candidates[0].input_candidates == (
+        Cycle2InputCandidate(
+            name="order_id",
+            candidate_value="O-1001",
+            source_ref=MESSAGE_REF,
+            source_quote="O-1001",
+            confidence=0.99,
+        ),
+    )
+
+
+def test_cycle2_provider_v3_projects_dnr_same_child_ordered_dual_claim() -> None:
+    request = _request("订单 O-1001 显示已送达，但我没有收到。")
+    first = asyncio.run(
+        _cycle2_provider(
+            "T2-assessment-delivered-not-received-current-claim"
+        ).propose_cycle2_continuation_v3(request)
+    )
+    second = asyncio.run(
+        _cycle2_provider(
+            "T2-assessment-delivered-not-received-current-claim"
+        ).propose_cycle2_continuation_v3(request)
+    )
+
+    assert first == second
+    delta = first.task_delta_candidates[0]
+    assert delta.operation is TaskDeltaOperation.SUPPLY_INPUT
+    assert tuple(item.name for item in delta.input_candidates) == (
+        "order_id",
+        "shipment_not_received",
+    )
+    assert tuple(item.candidate_value for item in delta.input_candidates) == (
+        "O-1001",
+        True,
+    )
+    assert tuple(item.source_quote for item in delta.input_candidates) == (
+        "O-1001",
+        "没有收到",
+    )
+    assert {
+        item.source_ref for item in delta.input_candidates
+    } == {MESSAGE_REF}
 
 
 def test_cycle2_provider_projects_exact_zero_one_two_control_matrix() -> None:

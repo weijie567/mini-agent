@@ -30,10 +30,11 @@ from mini_agent.application.records import (
     EvalResultRecord,
     EvalResultStatus,
     EvalVersionManifest,
-    ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     InsertOnlyWriteResult,
     MessageDirection,
 )
+from mini_agent.core.request_processing import RequestUnderstandingClosureV3
 from mini_agent.application.run_result_mapper import (
     Cycle2ExecutionOutcomeObservationV1,
 )
@@ -200,8 +201,8 @@ _UNBOUND_EVIDENCE_FIELD_ALLOWLIST = (
     "observations",
     "context_manifests",
     "model_visible_toolset_artifacts",
-    "request_understanding_records_v2",
-    "accepted_task_deltas_v2",
+    "request_understanding_records",
+    "accepted_task_deltas",
     "task_state_transitions",
 )
 _SEMANTIC_SCHEMA_IDENTITY_FIELDS = frozenset({"case_id"})
@@ -346,6 +347,8 @@ _UNBOUND_CYCLE2_EVIDENCE_FIELD_ALLOWLIST = (
     "agent_results",
     "message_records",
     "input_bindings",
+    "request_understanding_records",
+    "accepted_task_deltas",
     "task_records",
     "request_units",
     "run_task_links",
@@ -553,6 +556,14 @@ def map_cycle2_exact_run_evidence_to_unbound(
         agent_results=agent_results,
         message_records=closure.message_records,
         input_bindings=closure.input_binding_records,
+        request_understanding_records=tuple(
+            item.record for item in closure.request_understanding_closures
+        ),
+        accepted_task_deltas=tuple(
+            child
+            for item in closure.request_understanding_closures
+            for child in item.accepted_task_deltas
+        ),
         task_records=closure.task_records,
         request_units=closure.request_unit_records,
         run_task_links=root_links,
@@ -751,12 +762,12 @@ def _exact_run_eval_expected_outcome(
 
 def _exact_run_eval_detached_closure(
     value: object,
-) -> ExactRunEvidenceClosure | None:
+) -> ExactRunEvidenceV3Closure | None:
     if (
-        type(value) is not ExactRunEvidenceClosure
+        type(value) is not ExactRunEvidenceV3Closure
         or not _model_storage_is_closed(
             value,
-            ExactRunEvidenceClosure,
+            ExactRunEvidenceV3Closure,
         )
         or any(
             not _payload_tree_is_closed(
@@ -765,16 +776,34 @@ def _exact_run_eval_detached_closure(
                 allow_any_schema_identity_value=True,
                 allow_semantic_json_keys=True,
             )
-            for field_name in ExactRunEvidenceClosure.model_fields
+            for field_name in ExactRunEvidenceV3Closure.model_fields
         )
     ):
         return None
     try:
         detached_fields: dict[str, object] = {}
-        for field_name in ExactRunEvidenceClosure.model_fields:
+        for field_name in ExactRunEvidenceV3Closure.model_fields:
             field_value = getattr(value, field_name)
             if field_value is None:
                 detached_fields[field_name] = None
+                continue
+            if type(field_value) is RequestUnderstandingClosureV3:
+                detached_record = _detached_canonical_model(
+                    field_value.record,
+                    type(field_value.record),
+                )
+                detached_children = tuple(
+                    _detached_canonical_model(child, type(child))
+                    for child in field_value.accepted_task_deltas
+                )
+                if detached_record is None or any(
+                    child is None for child in detached_children
+                ):
+                    return None
+                detached_fields[field_name] = RequestUnderstandingClosureV3(
+                    record=detached_record,
+                    accepted_task_deltas=detached_children,
+                )
                 continue
             if type(field_value) in _CANONICAL_PAYLOAD_MODEL_TYPES:
                 detached = _detached_canonical_model(
@@ -799,16 +828,16 @@ def _exact_run_eval_detached_closure(
                     return None
                 detached_items.append(detached_item)
             detached_fields[field_name] = tuple(detached_items)
-        rebuilt = ExactRunEvidenceClosure(
+        rebuilt = ExactRunEvidenceV3Closure(
             **detached_fields,
         )
     except Exception:
         return None
     if (
-        type(rebuilt) is not ExactRunEvidenceClosure
+        type(rebuilt) is not ExactRunEvidenceV3Closure
         or not _model_storage_is_closed(
             rebuilt,
-            ExactRunEvidenceClosure,
+            ExactRunEvidenceV3Closure,
         )
         or any(
             not _payload_tree_is_closed(
@@ -817,7 +846,7 @@ def _exact_run_eval_detached_closure(
                 allow_any_schema_identity_value=True,
                 allow_semantic_json_keys=True,
             )
-            for field_name in ExactRunEvidenceClosure.model_fields
+            for field_name in ExactRunEvidenceV3Closure.model_fields
         )
         or not _same_exact_value_tree(value, rebuilt)
         or rebuilt != value
@@ -831,7 +860,7 @@ def _exact_run_eval_map_result(
     execution_ref: UUID,
     http_status: int,
     agent_result: AgentRunResult,
-    closure: ExactRunEvidenceClosure,
+    closure: ExactRunEvidenceV3Closure,
 ) -> tuple[str, EvalCaseSutResult | None]:
     mapped_result: EvalCaseSutResult | None = None
     try:
@@ -847,7 +876,7 @@ def _exact_run_eval_map_result(
             or type(http_status) is not int
             or http_status != 200
             or type(detached_agent_result) is not AgentRunResult
-            or type(detached_closure) is not ExactRunEvidenceClosure
+            or type(detached_closure) is not ExactRunEvidenceV3Closure
         ):
             return "FAILED", None
         run = detached_closure.run_record
@@ -877,9 +906,12 @@ def _exact_run_eval_map_result(
             and detached_agent_result.message != fixed_message
         ):
             return "FAILED", None
+        request_understanding = (
+            detached_closure.request_understanding_closure
+        )
         understanding_records = (
-            (detached_closure.request_understanding_record,)
-            if detached_closure.request_understanding_record is not None
+            (request_understanding.record,)
+            if request_understanding is not None
             else ()
         )
         evidence = UnboundEvalEvidence(
@@ -905,9 +937,11 @@ def _exact_run_eval_map_result(
             model_visible_toolset_artifacts=(
                 detached_closure.model_visible_toolset_artifacts
             ),
-            request_understanding_records_v2=understanding_records,
-            accepted_task_deltas_v2=(
-                detached_closure.accepted_task_deltas
+            request_understanding_records=understanding_records,
+            accepted_task_deltas=(
+                ()
+                if request_understanding is None
+                else request_understanding.accepted_task_deltas
             ),
             task_state_transitions=(
                 detached_closure.task_state_transitions
@@ -943,7 +977,7 @@ def map_exact_run_http_result_to_sut_result(
     execution_ref: UUID,
     http_status: int,
     agent_result: AgentRunResult,
-    closure: ExactRunEvidenceClosure,
+    closure: ExactRunEvidenceV3Closure,
 ) -> EvalCaseSutResult:
     status, mapped_result = _exact_run_eval_map_result(
         execution_ref=execution_ref,
@@ -1512,6 +1546,7 @@ def _reachable_result_types(
         EvalResultRecord,
         GradingOutcome,
         LoadedE2E01Artifacts,
+        RequestUnderstandingClosureV3,
     )
 )
 _CANONICAL_PAYLOAD_MODEL_TYPES = (

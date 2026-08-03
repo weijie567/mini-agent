@@ -19,6 +19,8 @@ from mini_agent.core.presentation import PresentationInput, PresentationPlan
 from mini_agent.core.request_understanding import (
     Cycle2ControlCandidate,
     Cycle2ControlCandidateKind,
+    Cycle2ContinuationRequestUnderstandingOutputV2,
+    Cycle2ContinuationTaskDeltaCandidateV2,
     Cycle2InitialRequestUnderstandingOutputV2,
     Cycle2InitialTaskDeltaCandidateV2,
     Cycle2InputCandidate,
@@ -325,6 +327,14 @@ def _project_step(step: Mapping[str, object]) -> _ExecutableStep:
                     raise ArtifactContractError(
                         "invalid Cycle 2 ordinal candidate"
                     )
+            elif (
+                behavior == "PROPOSE_GET_SHIPMENT"
+                and "shipment_not_received" in candidate_arguments
+            ):
+                expected_arguments = {
+                    "order_id": "O-1001",
+                    "shipment_not_received": True,
+                }
             else:
                 expected_arguments = {"order_id": "O-1001"}
             if dict(candidate_arguments) != expected_arguments:
@@ -436,6 +446,19 @@ class ScriptedModelProviderV2:
         if type(request) is not RequestUnderstandingInput:
             raise TypeError("request must be RequestUnderstandingInput")
         output = _project_cycle2_continuation(self, request)
+        self = None  # type: ignore[assignment]
+        request = None  # type: ignore[assignment]
+        if output is None:
+            raise _fresh_protocol_error()
+        return output
+
+    async def propose_cycle2_continuation_v3(
+        self,
+        request: RequestUnderstandingInput,
+    ) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+        if type(request) is not RequestUnderstandingInput:
+            raise TypeError("request must be RequestUnderstandingInput")
+        output = _project_cycle2_continuation_v3(self, request)
         self = None  # type: ignore[assignment]
         request = None  # type: ignore[assignment]
         if output is None:
@@ -673,6 +696,78 @@ def _project_cycle2_continuation(
             confidence=0.99,
         )
     except (TypeError, ValueError):
+        return None
+
+
+def _project_cycle2_continuation_v3(
+    provider: ScriptedModelProviderV2,
+    request: RequestUnderstandingInput,
+) -> Cycle2ContinuationRequestUnderstandingOutputV2 | None:
+    directive = _take_cycle2_candidate(provider, "REQUEST_UNDERSTANDING")
+    if directive is None:
+        return None
+    projected = {
+        "PROPOSE_CANDIDATE_SELECTION": (
+            ("candidate_ordinal", directive.candidate_arguments.get("candidate_ordinal")),
+        ),
+        "PROPOSE_GET_ORDER": (
+            ("order_id", directive.candidate_arguments.get("order_id")),
+        ),
+        "PROPOSE_GET_SHIPMENT": tuple(
+            (
+                name,
+                directive.candidate_arguments.get(name),
+            )
+            for name in ("order_id", "shipment_not_received")
+            if name in directive.candidate_arguments
+        ),
+    }.get(directive.behavior)
+    if not projected:
+        return None
+    quote_by_name_value: Mapping[tuple[str, object], str] = {
+        ("candidate_ordinal", 2): "第二",
+        ("candidate_ordinal", 6): "第六",
+        ("order_id", "O-1001"): "O-1001",
+        ("shipment_not_received", True): "没有收到",
+    }
+    try:
+        input_candidates = tuple(
+            Cycle2InputCandidate(
+                name=name,
+                candidate_value=value,
+                source_ref=request.message_ref,
+                source_quote=quote_by_name_value[(name, value)],
+                confidence=0.99,
+            )
+            for name, value in projected
+        )
+        return Cycle2ContinuationRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-continuation.p0.v2",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text=request.original_query,
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2ContinuationTaskDeltaCandidateV2(
+                    candidate_id=uuid5(
+                        NAMESPACE_URL,
+                        (
+                            f"{provider.script_execution_ref}:"
+                            f"{request.message_ref}:cycle2-continuation-v3"
+                        ),
+                    ),
+                    operation=TaskDeltaOperation.SUPPLY_INPUT,
+                    target_task_alias="current-task",
+                    target_request_unit_alias="current-request",
+                    input_candidates=input_candidates,
+                    confidence=0.99,
+                ),
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
         return None
 
 

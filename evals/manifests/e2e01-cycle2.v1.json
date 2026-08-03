@@ -41,7 +41,7 @@
       "path": "evals/model_scripts/e2e01-cycle2.v1.json",
       "version_field": "model_script_catalog_version",
       "version": "e2e01-cycle2-model-scripts-v1",
-      "sha256": "a5c434d0455fb1becdbc569d1f5e2d2d2b1a628474b9e2dd286e4fefa41f5820"
+      "sha256": "8d907451ecaf3d970da5a324aaf330cbd9e9ab160d84ebcc0d4c5c8942d4ba62"
     },
     {
       "artifact_id": "e2e01-cycle2-lanes",

@@ -500,7 +500,8 @@
           "purpose": "REQUEST_UNDERSTANDING",
           "behavior": "PROPOSE_GET_SHIPMENT",
           "candidate_arguments": {
-            "order_id": "O-1001"
+            "order_id": "O-1001",
+            "shipment_not_received": true
           }
         },
         {
