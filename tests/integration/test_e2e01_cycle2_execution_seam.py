@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import event, select
 
 from mini_agent.application.persistence import (
+    P0PersistenceIntegrityCategory,
     P0PersistenceIntegrityError,
     P0PersistenceEnvelope,
     P0RecordCode,
@@ -1037,7 +1038,7 @@ async def test_exact_reader_rejects_tampered_observation_source_edge(
         engine.dispose()
 
 
-async def test_exact_reader_loads_referenced_binding_absent_from_current_unit(
+async def test_exact_reader_rejects_historical_candidate_query_after_current_binding_replaced(
     eval_postgres_namespace,
 ) -> None:
     engine, _session_factory, composition = await _start(
@@ -1054,45 +1055,20 @@ async def test_exact_reader_loads_referenced_binding_absent_from_current_unit(
             "帮我查找最近购买的轻量跑鞋订单",
         )
         evidence = await composition.load_exact_run_evidence(result.run_id)
-        historical, replacement = (
+        _historical, _replacement = (
             _replace_current_binding_but_keep_historical_reference(
                 composition,
                 evidence,
             )
         )
-        reread = await composition.load_exact_run_evidence(result.run_id)
-
-        assert reread.request_unit_records[0].input_binding_refs == (
-            replacement.binding_id,
-        )
-        assert {
-            binding.binding_id for binding in reread.input_binding_records
-        } == {historical.binding_id, replacement.binding_id}
-        assert historical.binding_id in (
-            reread.candidate_set_records[0].query_binding_refs
-        )
-        with composition._records.session_factory.begin() as session:
-            historical_row = session.scalar(
-                select(P0RecordModel).where(
-                    P0RecordModel.record_code
-                    == P0RecordCode.INPUT_BINDING_RECORD.value,
-                    P0RecordModel.logical_identity
-                    == [["binding_id", str(historical.binding_id)]],
-                )
-            )
-            assert historical_row is not None
-            corrupted_envelope = json.loads(
-                json.dumps(historical_row.envelope)
-            )
-            corrupted_envelope["record_schema_version"] = (
-                "input_binding_record.p0.v1"
-            )
-            historical_row.envelope = corrupted_envelope
-        with pytest.raises(P0PersistenceIntegrityError):
+        with pytest.raises(P0PersistenceIntegrityError) as caught:
             await composition._records.load_cycle2_exact_run_evidence_for_owner(
                 owner_scope=evidence.owner_scope,
                 run_id=result.run_id,
             )
+        assert caught.value.category is (
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
     finally:
         engine.dispose()
 
