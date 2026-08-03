@@ -72,7 +72,11 @@ from mini_agent.core.task_state import (
     AcceptedTaskDeltaV2,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
     DurableInputCandidateV2,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     DurableQueryContextualizationCandidateV2,
     DurableResolvedReferenceCandidateV2,
     DurableTaskDeltaCandidateV2,
@@ -3583,6 +3587,525 @@ class SupersededRunFinalizationEvidenceV2(_StrictAuditOnlyRecord):
         return self
 
 
+def _validate_cycle2_request_understanding_evidence(
+    *,
+    closures: tuple[RequestUnderstandingClosureV3, ...],
+    root_run_id: UUID,
+    run_by_id: Mapping[UUID, AgentRunRecordV2],
+    messages: Mapping[UUID, MessageRecord],
+    tasks: Mapping[UUID, TaskRecord],
+    units: Mapping[UUID, RequestUnitRecord],
+    unit_by_id: Mapping[UUID, RequestUnitRecord],
+    bindings: Mapping[UUID, InputBindingV2],
+    run_task_links: tuple[RunTaskLinkRecordV2, ...],
+    transitions: tuple[TaskStateTransition, ...],
+) -> None:
+    """Close staged v3 parents against one already selected Cycle 2 graph."""
+
+    if not closures:
+        return
+
+    for unit in units.values():
+        current_binding_names = tuple(
+            bindings[binding_ref].name
+            for binding_ref in unit.input_binding_refs
+        )
+        if len(current_binding_names) != len(set(current_binding_names)):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding current Binding names "
+                "must be unique"
+            )
+
+    links_by_key = {
+        (link.run_id, link.task_id): link for link in run_task_links
+    }
+    accepted_edges_by_task: dict[
+        UUID,
+        dict[tuple[int, int], AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
+    ] = {}
+    relevant_links_by_task: dict[UUID, list[RunTaskLinkRecordV2]] = {}
+    children_by_run_task: dict[
+        tuple[UUID, UUID],
+        list[AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
+    ] = {}
+    graph_entity_ids = {
+        *run_by_id,
+        *messages,
+        *tasks,
+        *unit_by_id,
+        *bindings,
+    }
+    graph_identity_groups = (
+        set(run_by_id),
+        set(messages),
+        set(tasks),
+        set(unit_by_id),
+        set(bindings),
+    )
+    if any(
+        left.intersection(right)
+        for index, left in enumerate(graph_identity_groups)
+        for right in graph_identity_groups[index + 1 :]
+    ):
+        raise ValueError("Cycle 2 v3 evidence graph identities must be disjoint")
+    owned_request_understanding_ids: set[UUID] = set()
+
+    for closure in closures:
+        owned_ids = _validate_request_understanding_v3_identity_groups(
+            closure,
+            graph_entity_ids=graph_entity_ids,
+        )
+        if owned_request_understanding_ids.intersection(owned_ids):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding identities must be unique"
+            )
+        owned_request_understanding_ids.update(owned_ids)
+        record = closure.record
+        current_message = messages.get(record.message_ref)
+        source_run = run_by_id.get(record.run_id)
+        if (
+            source_run is None
+            or current_message is None
+            or current_message.direction is not MessageDirection.USER
+            or source_run.started_at != current_message.received_at
+            or record.created_at < source_run.started_at
+            or (
+                source_run.completed_at is not None
+                and record.created_at > source_run.completed_at
+            )
+            or any(
+                source_ref not in messages
+                for source_ref in record.contextualization.source_message_refs
+            )
+            or any(
+                candidate.source_ref not in messages
+                for candidate in (
+                    record.contextualization.resolved_reference_candidates
+                )
+            )
+            or any(
+                source_ref not in messages
+                for uncertainty in record.contextualization.uncertainties
+                for source_ref in uncertainty.source_message_refs
+            )
+            or any(
+                candidate_input.source_ref not in messages
+                for candidate in record.task_delta_candidates
+                for candidate_input in candidate.input_candidates
+            )
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding source graph mismatch"
+            )
+
+        branch = record.model_output_schema_version
+        if branch == "e2e01-thin-v2":
+            candidate_type = DurablePhase1AddGoalTaskDeltaCandidateV3
+            child_type = AcceptedAddGoalTaskDeltaV3
+        elif branch == "e2e01-cycle2-initial.p0.v1":
+            candidate_type = DurableCycle2AddGoalTaskDeltaCandidateV3
+            child_type = AcceptedAddGoalTaskDeltaV3
+        else:
+            candidate_type = DurableCycle2ContinuationTaskDeltaCandidateV3
+            child_type = AcceptedSupplyInputTaskDeltaV3
+        if any(
+            type(candidate) is not candidate_type
+            for candidate in record.task_delta_candidates
+        ) or any(
+            type(child) is not child_type
+            for child in closure.accepted_task_deltas
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding branch graph mismatch"
+            )
+        if branch == "e2e01-cycle2-continuation.p0.v2":
+            continuation_candidate = record.task_delta_candidates[0]
+            if len(continuation_candidate.input_candidates) == 2 and (
+                tuple(
+                    item.name
+                    for item in continuation_candidate.input_candidates
+                )
+                != ("order_id", "shipment_not_received")
+                or continuation_candidate.input_candidates[
+                    0
+                ].normalized_candidate_value
+                != "O-1001"
+                or continuation_candidate.input_candidates[
+                    1
+                ].normalized_candidate_value
+                is not True
+            ):
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding dual Claim branch mismatch"
+                )
+
+        candidates_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in record.task_delta_candidates
+        }
+        for child in closure.accepted_task_deltas:
+            candidate = candidates_by_id[child.candidate_ref]
+            task = tasks.get(child.task_id)
+            unit = units.get(child.task_id)
+            link = links_by_key.get((record.run_id, child.task_id))
+            if (
+                task is None
+                or unit is None
+                or link is None
+                or child.message_ref != record.message_ref
+            ):
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding Task root mismatch"
+                )
+            if type(child) is AcceptedSupplyInputTaskDeltaV3 and (
+                child.target_request_unit_id != unit.request_unit_id
+            ):
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding RequestUnit mismatch"
+                )
+            if type(child) is AcceptedAddGoalTaskDeltaV3 and (
+                child.goal_text != unit.goal_text
+                or unit.goal_source_refs != (child.message_ref,)
+            ):
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding goal projection mismatch"
+                )
+            child_bindings = tuple(
+                bindings.get(binding_ref)
+                for binding_ref in child.input_binding_refs
+            )
+            if (
+                any(binding is None for binding in child_bindings)
+                or not set(child.input_binding_refs).issubset(
+                    unit.input_binding_refs
+                )
+                or len(child_bindings) != len(candidate.input_candidates)
+            ):
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding Binding root mismatch"
+                )
+            for candidate_input, binding in zip(
+                candidate.input_candidates,
+                child_bindings,
+            ):
+                if binding is None:
+                    raise AssertionError("unreachable missing Binding")
+                if type(candidate_input) is DurableInputCandidateV2:
+                    try:
+                        expected_value: object = _normalize_order_id(
+                            candidate_input.candidate_value
+                        )
+                    except ValueError:
+                        raise ValueError(
+                            "Cycle 2 v3 RequestUnderstanding Binding value invalid"
+                        ) from None
+                elif type(candidate_input) is DurableCycle2InputCandidateV3:
+                    expected_value = candidate_input.normalized_candidate_value
+                else:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding branch mismatch"
+                    )
+                if (
+                    binding.name != candidate_input.name
+                    or binding.normalized_value != expected_value
+                    or binding.authority is not candidate_input.authority
+                    or binding.source_refs != (candidate_input.source_ref,)
+                    or binding.created_at != record.created_at
+                    or binding.updated_at != record.created_at
+                ):
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding Binding projection mismatch"
+                    )
+                if type(child) is AcceptedAddGoalTaskDeltaV3:
+                    if binding.supersedes is not None:
+                        raise ValueError(
+                            "Cycle 2 v3 ADD_GOAL Binding must be clean"
+                        )
+                elif binding.supersedes is not None:
+                    superseded = bindings.get(binding.supersedes)
+                    if (
+                        superseded is None
+                        or superseded.binding_id == binding.binding_id
+                        or superseded.name != binding.name
+                        or superseded.updated_at > binding.created_at
+                    ):
+                        raise ValueError(
+                            "Cycle 2 v3 SUPPLY_INPUT Binding supersession mismatch"
+                        )
+
+            base_version = child.base_task_state_version or 0
+            edge = (base_version, child.result_task_state_version)
+            task_edges = accepted_edges_by_task.setdefault(child.task_id, {})
+            if edge in task_edges:
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
+                )
+            task_edges[edge] = child
+            children_by_run_task.setdefault(
+                (record.run_id, child.task_id),
+                [],
+            ).append(child)
+
+    for (run_id, task_id), children in children_by_run_task.items():
+        link = links_by_key[(run_id, task_id)]
+        first_base = children[0].base_task_state_version
+        last_result = children[-1].result_task_state_version
+        if (
+            link.base_task_state_version != first_base
+            or (
+                link.result_task_state_version is not None
+                and link.result_task_state_version != last_result
+            )
+            or (
+                run_id == root_run_id
+                and link.result_task_state_version is not None
+                and link.result_task_state_version
+                != tasks[task_id].state_version
+            )
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding RunTaskLink mismatch"
+            )
+        relevant_links_by_task.setdefault(task_id, []).append(link)
+
+    transitions_by_task: dict[UUID, dict[tuple[int, int], TaskStateTransition]] = {}
+    for transition in transitions:
+        if transition.task_id not in accepted_edges_by_task:
+            continue
+        edge = (transition.base_state_version, transition.result_state_version)
+        task_transitions = transitions_by_task.setdefault(
+            transition.task_id,
+            {},
+        )
+        if edge in task_transitions:
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding transition effects overlap"
+            )
+        task_transitions[edge] = transition
+
+    for task_id, accepted_edges in accepted_edges_by_task.items():
+        task = tasks[task_id]
+        unit = units[task_id]
+        task_transitions = transitions_by_task.get(task_id, {})
+        for edge, child in accepted_edges.items():
+            if edge in task_transitions:
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
+                )
+
+        edge_keys = sorted(set(accepted_edges) | set(task_transitions))
+        link_bases = tuple(
+            link.base_task_state_version or 0
+            for link in relevant_links_by_task[task_id]
+        )
+        expected_base = min(link_bases)
+        for base_version, result_version in edge_keys:
+            if base_version != expected_base or result_version != base_version + 1:
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding Task timeline has a gap"
+                )
+            expected_base = result_version
+        if expected_base != task.state_version:
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding Task terminal mismatch"
+            )
+        current_status: TaskStatus | None = None
+        last_effect_at: datetime | None = None
+        current_binding_ref_by_name: dict[str, UUID] = {}
+        expected_current_binding_refs: list[UUID] = []
+        for edge in edge_keys:
+            accepted = accepted_edges.get(edge)
+            transition = task_transitions.get(edge)
+            if type(accepted) is AcceptedAddGoalTaskDeltaV3:
+                if (
+                    edge != (0, 1)
+                    or task.created_at != accepted.accepted_at
+                    or unit.created_at != accepted.accepted_at
+                ):
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding initial causality mismatch"
+                    )
+                current_status = TaskStatus.ACTIVE
+                effect_at = accepted.accepted_at
+            elif type(accepted) is AcceptedSupplyInputTaskDeltaV3:
+                effect_at = accepted.accepted_at
+            elif transition is not None:
+                if (
+                    transition.request_unit_id != unit.request_unit_id
+                    or (
+                        current_status is not None
+                        and transition.from_status is not current_status
+                    )
+                ):
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding transition chain mismatch"
+                    )
+                current_status = transition.to_status
+                effect_at = transition.changed_at
+            else:
+                raise AssertionError("unreachable empty Cycle 2 Task edge")
+            if accepted is not None:
+                accepted_bindings = tuple(
+                    bindings[binding_ref]
+                    for binding_ref in accepted.input_binding_refs
+                )
+                if type(accepted) is AcceptedAddGoalTaskDeltaV3:
+                    if (
+                        expected_current_binding_refs
+                        or len(accepted_bindings)
+                        != len({binding.name for binding in accepted_bindings})
+                    ):
+                        raise ValueError(
+                            "Cycle 2 v3 RequestUnderstanding Binding timeline "
+                            "mismatch"
+                        )
+                    expected_current_binding_refs.extend(
+                        accepted.input_binding_refs
+                    )
+                    current_binding_ref_by_name.update(
+                        {
+                            binding.name: binding.binding_id
+                            for binding in accepted_bindings
+                        }
+                    )
+                else:
+                    for binding in accepted_bindings:
+                        previous_ref = current_binding_ref_by_name.get(
+                            binding.name
+                        )
+                        if binding.supersedes != previous_ref:
+                            raise ValueError(
+                                "Cycle 2 v3 RequestUnderstanding Binding "
+                                "supersession mismatch"
+                            )
+                        if previous_ref is None:
+                            expected_current_binding_refs.append(
+                                binding.binding_id
+                            )
+                        else:
+                            try:
+                                binding_index = (
+                                    expected_current_binding_refs.index(
+                                        previous_ref
+                                    )
+                                )
+                            except ValueError:
+                                raise ValueError(
+                                    "Cycle 2 v3 RequestUnderstanding Binding "
+                                    "timeline mismatch"
+                                ) from None
+                            expected_current_binding_refs[binding_index] = (
+                                binding.binding_id
+                            )
+                        current_binding_ref_by_name[binding.name] = (
+                            binding.binding_id
+                        )
+            if last_effect_at is not None and effect_at < last_effect_at:
+                raise ValueError(
+                    "Cycle 2 v3 RequestUnderstanding effect timestamps regress"
+                )
+            last_effect_at = effect_at
+
+        if current_status is None:
+            current_status = task.status
+        if (
+            current_status is not task.status
+            or last_effect_at != task.updated_at
+            or last_effect_at != unit.updated_at
+            or tuple(expected_current_binding_refs)
+            != unit.input_binding_refs
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding Task terminal mismatch"
+            )
+
+        valid_results = {result for _base, result in edge_keys}
+        if any(
+            link.result_task_state_version is not None
+            and link.result_task_state_version not in valid_results
+            for link in relevant_links_by_task[task_id]
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding link timeline mismatch"
+            )
+
+
+def _validate_request_understanding_v3_identity_groups(
+    closure: RequestUnderstandingClosureV3,
+    *,
+    graph_entity_ids: set[UUID],
+) -> frozenset[UUID]:
+    """Replay the frozen Core v3 identity allocation without changing v2."""
+
+    record = closure.record
+    candidate_ids = tuple(
+        candidate.candidate_id for candidate in record.task_delta_candidates
+    )
+    accepted_ids = tuple(
+        child.accepted_delta_id for child in closure.accepted_task_deltas
+    )
+    binding_ids = tuple(
+        binding_ref
+        for child in closure.accepted_task_deltas
+        for binding_ref in child.input_binding_refs
+    )
+    task_ids = {child.task_id for child in closure.accepted_task_deltas}
+    request_unit_ids = {
+        child.target_request_unit_id
+        for child in closure.accepted_task_deltas
+        if type(child) is AcceptedSupplyInputTaskDeltaV3
+    }
+    singleton_ids = {
+        record.run_id,
+        record.message_ref,
+        *(
+            ()
+            if record.next_move_candidate_ref is None
+            else (record.next_move_candidate_ref,)
+        ),
+    }
+    identity_groups = (
+        singleton_ids,
+        set(candidate_ids),
+        set(accepted_ids),
+        set(binding_ids),
+        task_ids,
+        request_unit_ids,
+    )
+    if (
+        len(singleton_ids)
+        != 2 + (record.next_move_candidate_ref is not None)
+        or len(candidate_ids) != len(set(candidate_ids))
+        or len(accepted_ids) != len(set(accepted_ids))
+        or len(binding_ids) != len(set(binding_ids))
+        or any(
+            left.intersection(right)
+            for index, left in enumerate(identity_groups)
+            for right in identity_groups[index + 1 :]
+        )
+        or any(
+            record.request_understanding_record_id in identity_group
+            for identity_group in identity_groups
+        )
+    ):
+        raise ValueError("v3 RequestUnderstanding identity graph mismatch")
+    owned_ids = frozenset(
+        {
+            record.request_understanding_record_id,
+            *candidate_ids,
+            *accepted_ids,
+            *(
+                ()
+                if record.next_move_candidate_ref is None
+                else (record.next_move_candidate_ref,)
+            ),
+        }
+    )
+    if owned_ids.intersection(graph_entity_ids):
+        raise ValueError("v3 RequestUnderstanding identity graph mismatch")
+    return owned_ids
+
+
 class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     """Expectation-free exact logical evidence for one owner-scoped v2 Run."""
 
@@ -3595,6 +4118,10 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
     task_records: tuple[TaskRecord, ...]
     request_unit_records: tuple[RequestUnitRecord, ...]
     input_binding_records: tuple[InputBindingV2, ...]
+    request_understanding_closures: tuple[
+        RequestUnderstandingClosureV3,
+        ...,
+    ] = ()
     task_state_transition_records: tuple[TaskStateTransition, ...] = ()
     candidate_set_records: tuple[OrderCandidateSetRecord, ...] = ()
     candidate_selection_records: tuple[OrderCandidateSelectionRecord, ...] = ()
@@ -3632,6 +4159,7 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
                 "task_records": TaskRecord,
                 "request_unit_records": RequestUnitRecord,
                 "input_binding_records": InputBindingV2,
+                "request_understanding_closures": RequestUnderstandingClosureV3,
                 "task_state_transition_records": TaskStateTransition,
                 "candidate_set_records": OrderCandidateSetRecord,
                 "candidate_selection_records": OrderCandidateSelectionRecord,
@@ -3701,6 +4229,39 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             tuple(task.task_id for task in self.task_records),
             tuple(unit.request_unit_id for unit in self.request_unit_records),
             tuple(binding.binding_id for binding in self.input_binding_records),
+            tuple(
+                closure.record.request_understanding_record_id
+                for closure in self.request_understanding_closures
+            ),
+            tuple(
+                closure.record.run_id
+                for closure in self.request_understanding_closures
+            ),
+            tuple(
+                child.accepted_delta_id
+                for closure in self.request_understanding_closures
+                for child in closure.accepted_task_deltas
+            ),
+            tuple(
+                candidate.candidate_id
+                for closure in self.request_understanding_closures
+                for candidate in closure.record.task_delta_candidates
+            ),
+            tuple(
+                identity
+                for closure in self.request_understanding_closures
+                for identity in (
+                    closure.record.request_understanding_record_id,
+                    *(
+                        candidate.candidate_id
+                        for candidate in closure.record.task_delta_candidates
+                    ),
+                    *(
+                        child.accepted_delta_id
+                        for child in closure.accepted_task_deltas
+                    ),
+                )
+            ),
             tuple(
                 (transition.task_id, transition.result_state_version)
                 for transition in self.task_state_transition_records
@@ -3791,6 +4352,18 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             for transition in self.task_state_transition_records
         ):
             raise ValueError("Cycle 2 exact evidence transition root mismatch")
+        _validate_cycle2_request_understanding_evidence(
+            closures=self.request_understanding_closures,
+            root_run_id=run.run_id,
+            run_by_id=run_by_id,
+            messages=messages,
+            tasks=tasks,
+            units=units,
+            unit_by_id=unit_by_id,
+            bindings=bindings,
+            run_task_links=self.run_task_link_records,
+            transitions=self.task_state_transition_records,
+        )
         owner = self.owner_scope.customer_id
         task_unit_children = (
             *self.candidate_set_records,
@@ -3992,15 +4565,32 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             for record in self.tool_call_records
             if record.run_id != run.run_id
         )
+        supporting_ru_run_ids = {
+            closure.record.run_id
+            for closure in self.request_understanding_closures
+            if closure.record.run_id != run.run_id
+        }
+        supporting_ru_link_keys = {
+            (closure.record.run_id, child.task_id)
+            for closure in self.request_understanding_closures
+            if closure.record.run_id != run.run_id
+            for child in closure.accepted_task_deltas
+        }
         if (
             set(supporting_runs)
-            != {record.run_id for record in supporting_tool_calls}
+            != {
+                *(record.run_id for record in supporting_tool_calls),
+                *supporting_ru_run_ids,
+            }
             or {
                 (link.run_id, link.task_id) for link in supporting_links
             }
             != {
-                (record.run_id, record.task_id)
-                for record in supporting_tool_calls
+                *(
+                    (record.run_id, record.task_id)
+                    for record in supporting_tool_calls
+                ),
+                *supporting_ru_link_keys,
             }
         ):
             raise ValueError("Cycle 2 exact evidence supporting Run graph mismatch")
@@ -9108,16 +9698,68 @@ def _new_exact_run_evidence_binding_validation_error() -> ValidationError:
     )
 
 
+def _new_exact_run_evidence_v3_validation_error(
+    error: ValidationError,
+) -> ValidationError:
+    sanitized_lines: list[dict[str, object]] = []
+    for line_error in error.errors(
+        include_url=False,
+        include_context=True,
+        include_input=False,
+    ):
+        context = line_error.get("ctx")
+        source_error = (
+            context.get("error") if isinstance(context, Mapping) else None
+        )
+        safe_message = "v3 exact evidence graph invalid"
+        if (
+            type(source_error) is ValueError
+            and len(source_error.args) == 1
+            and type(source_error.args[0]) is str
+        ):
+            safe_message = source_error.args[0]
+        sanitized_lines.append(
+            {
+                "type": "value_error",
+                "loc": tuple(line_error.get("loc", ())),
+                "input": None,
+                "ctx": {"error": ValueError(safe_message)},
+            }
+        )
+    if not sanitized_lines:
+        sanitized_lines.append(
+            {
+                "type": "value_error",
+                "loc": ("request_understanding_closure",),
+                "input": None,
+                "ctx": {
+                    "error": ValueError("v3 exact evidence graph invalid")
+                },
+            }
+        )
+    return ValidationError.from_exception_data(
+        "ExactRunEvidenceV3Closure",
+        sanitized_lines,
+        input_type="python",
+        hide_input=True,
+    )
+
+
 class _ExactRunEvidenceClosureMeta(type(_StrictRuntimePrivateRecord)):
     def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         try:
             return super().__call__(*args, **kwargs)
         except ValidationError as error:
-            if not _is_exact_run_evidence_binding_validation_error(error):
+            if _is_exact_run_evidence_binding_validation_error(error):
+                sanitized_error = (
+                    _new_exact_run_evidence_binding_validation_error()
+                )
+            elif cls.__name__ == "ExactRunEvidenceV3Closure":
+                sanitized_error = _new_exact_run_evidence_v3_validation_error(
+                    error
+                )
+            else:
                 raise
-            sanitized_error = (
-                _new_exact_run_evidence_binding_validation_error()
-            )
         raise sanitized_error from None
 
 
@@ -9208,6 +9850,10 @@ class ExactRunEvidenceClosure(
 
     @model_validator(mode="after")
     def supplied_graph_is_exact_and_root_closed(self) -> Self:
+        _validate_exact_run_evidence_graph(self)
+        return self
+
+    def _validate_supplied_graph_is_exact_and_root_closed(self) -> None:
         conversation = self.conversation_record
         run = self.run_record
         if (
@@ -10475,4 +11121,256 @@ class ExactRunEvidenceClosure(
             raise ValueError(
                 "ModelVisibleToolsetArtifact family must be the exact referenced set"
             )
+        return None
+
+
+class _ExactRunEvidenceV3GraphView:
+    """Private validation-only projection; it is never a DTO or read result."""
+
+    __slots__ = (
+        "accepted_task_deltas",
+        "context_manifests",
+        "conversation_record",
+        "conversation_task_links",
+        "gate_decisions",
+        "input_binding_records",
+        "message_records",
+        "model_visible_toolset_artifacts",
+        "observation_records",
+        "request_understanding_record",
+        "request_unit_records",
+        "run_record",
+        "run_task_links",
+        "task_records",
+        "task_state_transitions",
+        "tool_attempts",
+        "tool_calls",
+        "trace_events",
+    )
+
+    def __init__(self, closure: ExactRunEvidenceV3Closure) -> None:
+        request_understanding = closure.request_understanding_closure
+        self.request_understanding_record = (
+            None if request_understanding is None else request_understanding.record
+        )
+        self.accepted_task_deltas = (
+            ()
+            if request_understanding is None
+            else request_understanding.accepted_task_deltas
+        )
+        for field_name in _EXACT_EVIDENCE_V3_TUPLE_TYPES:
+            setattr(self, field_name, getattr(closure, field_name))
+        self.conversation_record = closure.conversation_record
+        self.run_record = closure.run_record
+
+
+def _validate_exact_run_evidence_graph(
+    closure: ExactRunEvidenceClosure | _ExactRunEvidenceV3GraphView,
+) -> None:
+    """Run one branch-neutral Phase 1 graph validator for v2 and staged v3."""
+
+    ExactRunEvidenceClosure._validate_supplied_graph_is_exact_and_root_closed(
+        closure
+    )
+
+
+_EXACT_EVIDENCE_V3_TUPLE_TYPES = {
+    field_name: expected_type
+    for field_name, expected_type in _EXACT_EVIDENCE_TUPLE_TYPES.items()
+    if field_name != "accepted_task_deltas"
+}
+
+
+class ExactRunEvidenceV3Closure(
+    _StrictRuntimePrivateRecord,
+    metaclass=_ExactRunEvidenceClosureMeta,
+):
+    """Inactive Phase 1 v3-only exact evidence from one consistent snapshot."""
+
+    conversation_record: ConversationRecord
+    run_record: AgentRunRecord
+    message_records: tuple[MessageRecord, ...]
+    request_understanding_closure: RequestUnderstandingClosureV3 | None
+    input_binding_records: tuple[InputBinding, ...]
+    task_records: tuple[TaskRecord, ...]
+    task_state_transitions: tuple[TaskStateTransition, ...]
+    request_unit_records: tuple[RequestUnitRecord, ...]
+    conversation_task_links: tuple[ConversationTaskLinkRecord, ...]
+    run_task_links: tuple[RunTaskLinkRecord, ...]
+    gate_decisions: tuple[GateDecision, ...]
+    tool_calls: tuple[ToolCallRecord, ...]
+    tool_attempts: tuple[ToolAttemptRecord, ...]
+    observation_records: tuple[OrderObservation, ...]
+    context_manifests: tuple[ContextManifest, ...]
+    model_visible_toolset_artifacts: tuple[ModelVisibleToolsetArtifact, ...]
+    trace_events: tuple[TraceEvent, ...]
+
+    @field_validator("conversation_record", "run_record", mode="before")
+    @classmethod
+    def root_records_are_exact(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> BaseModel:
+        expected_type = (
+            ConversationRecord
+            if info.field_name == "conversation_record"
+            else AgentRunRecord
+        )
+        return _strict_rebuild_exact_model(
+            value,
+            expected_type,
+            error_message=f"{info.field_name} must be a canonical exact record",
+        )
+
+    @field_validator("request_understanding_closure", mode="before")
+    @classmethod
+    def request_understanding_closure_is_exact_or_absent(
+        cls,
+        value: object,
+    ) -> RequestUnderstandingClosureV3 | None:
+        if value is None:
+            return None
+        return _strict_rebuild_exact_write_contract_model(
+            value,
+            RequestUnderstandingClosureV3,
+            error_message=(
+                "request_understanding_closure must be a canonical exact v3 closure"
+            ),
+        )
+
+    @field_validator(*_EXACT_EVIDENCE_V3_TUPLE_TYPES, mode="before")
+    @classmethod
+    def record_families_are_exact_tuples(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> tuple[BaseModel, ...]:
+        if type(value) is not tuple:
+            raise ValueError(f"{info.field_name} must be an exact tuple")
+        expected_type = _EXACT_EVIDENCE_V3_TUPLE_TYPES[info.field_name]
+        return tuple(
+            _strict_rebuild_exact_model(
+                record,
+                expected_type,
+                error_message=(
+                    f"{info.field_name} must contain canonical exact records"
+                ),
+            )
+            for record in value
+        )
+
+    @model_validator(mode="after")
+    def supplied_v3_graph_is_exact_and_root_closed(self) -> Self:
+        request_understanding = self.request_understanding_closure
+        if request_understanding is not None and (
+            request_understanding.record.model_output_schema_version
+            != "e2e01-thin-v2"
+            or any(
+                type(candidate)
+                is not DurablePhase1AddGoalTaskDeltaCandidateV3
+                for candidate in (
+                    request_understanding.record.task_delta_candidates
+                )
+            )
+            or any(
+                type(child) is not AcceptedAddGoalTaskDeltaV3
+                for child in request_understanding.accepted_task_deltas
+            )
+        ):
+            raise ValueError(
+                "Phase 1 v3 evidence requires the exact generic ADD_GOAL branch"
+            )
+        if request_understanding is not None:
+            record = request_understanding.record
+            message_by_id = {
+                message.message_id: message for message in self.message_records
+            }
+            current_message = message_by_id.get(record.message_ref)
+            if (
+                current_message is None
+                or current_message.direction is not MessageDirection.USER
+                or self.run_record.started_at
+                != current_message.received_at
+                or record.created_at < self.run_record.started_at
+                or (
+                    self.run_record.completed_at is not None
+                    and record.created_at > self.run_record.completed_at
+                )
+            ):
+                raise ValueError(
+                    "Phase 1 v3 RequestUnderstanding trusted root mismatch"
+                )
+            binding_by_id = {
+                binding.binding_id: binding
+                for binding in self.input_binding_records
+            }
+            if any(
+                (binding := binding_by_id.get(binding_ref)) is None
+                or binding.created_at != record.created_at
+                or binding.updated_at != record.created_at
+                or binding.supersedes is not None
+                for child in request_understanding.accepted_task_deltas
+                for binding_ref in child.input_binding_refs
+            ):
+                raise ValueError(
+                    "Phase 1 v3 RequestUnderstanding Binding time mismatch"
+                )
+            task_by_id = {task.task_id: task for task in self.task_records}
+            unit_by_task_id = {
+                unit.task_id: unit for unit in self.request_unit_records
+            }
+            conversation_link_by_task_id = {
+                link.task_id: link for link in self.conversation_task_links
+            }
+            if any(
+                (task := task_by_id.get(child.task_id)) is None
+                or (unit := unit_by_task_id.get(child.task_id)) is None
+                or (
+                    conversation_link := conversation_link_by_task_id.get(
+                        child.task_id
+                    )
+                )
+                is None
+                or task.created_at != child.accepted_at
+                or unit.created_at != child.accepted_at
+                or unit.updated_at != task.updated_at
+                or unit.goal_source_refs != (child.message_ref,)
+                or unit.input_binding_refs != child.input_binding_refs
+                or conversation_link.linked_at != child.accepted_at
+                or (
+                    self.run_record.completed_at is not None
+                    and task.updated_at > self.run_record.completed_at
+                )
+                for child in request_understanding.accepted_task_deltas
+            ):
+                raise ValueError(
+                    "Phase 1 v3 RequestUnderstanding causality time mismatch"
+                )
+            graph_identity_groups = (
+                {self.run_record.run_id},
+                {message.message_id for message in self.message_records},
+                {task.task_id for task in self.task_records},
+                {
+                    unit.request_unit_id
+                    for unit in self.request_unit_records
+                },
+                {
+                    binding.binding_id
+                    for binding in self.input_binding_records
+                },
+            )
+            if any(
+                left.intersection(right)
+                for index, left in enumerate(graph_identity_groups)
+                for right in graph_identity_groups[index + 1 :]
+            ):
+                raise ValueError(
+                    "Phase 1 v3 evidence graph identities must be disjoint"
+                )
+            _validate_request_understanding_v3_identity_groups(
+                request_understanding,
+                graph_entity_ids=set().union(*graph_identity_groups),
+            )
+        _validate_exact_run_evidence_graph(_ExactRunEvidenceV3GraphView(self))
         return self

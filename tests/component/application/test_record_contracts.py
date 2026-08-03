@@ -54,6 +54,7 @@ from mini_agent.application.records import (
     EvalUsageSummary,
     EvalVersionManifest,
     ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     FinalizeRunCommand,
     AppendRecoveredToolAttemptV2Command,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
@@ -152,15 +153,22 @@ from mini_agent.core.request_processing import (
     Cycle2ContinuationIdentityAllocationV3,
     Cycle2OrdinalClaimPreparation,
     Cycle2OrdinalSelectionRejectionReason,
+    RequestUnderstandingClosureV3,
     reject_cycle2_ordinal_selection,
     reduce_cycle2_continuation_task_delta,
 )
 from mini_agent.core.task_state import (
+    AcceptedAddGoalTaskDeltaV3,
+    AcceptedSupplyInputTaskDeltaV3,
     AcceptedTaskDeltaV2,
     CandidateRejectionReasonCode,
     CandidateValidationDecision,
     CandidateValidationRecordV2,
     DurableInputCandidateV2,
+    DurableCycle2AddGoalTaskDeltaCandidateV3,
+    DurableCycle2ContinuationTaskDeltaCandidateV3,
+    DurableCycle2InputCandidateV3,
+    DurablePhase1AddGoalTaskDeltaCandidateV3,
     DurableQueryContextualizationCandidateV2,
     DurableTaskDeltaCandidateV2,
     InputBinding,
@@ -174,6 +182,7 @@ from mini_agent.core.task_state import (
     OrderCandidateSetOutcome,
     OrderCandidateSetRecord,
     RequestUnderstandingRecordV2,
+    RequestUnderstandingRecordV3,
     RequestUnitRecord,
     TaskRecord,
     TaskStateTransition,
@@ -443,6 +452,7 @@ def test_cycle2_exact_run_evidence_exposes_complete_expectation_free_families() 
         "superseded_run_finalizations",
         "context_manifest_records",
         "model_visible_toolset_artifacts",
+        "request_understanding_closures",
     }
 
     assert expected_families <= set(Cycle2ExactRunEvidenceClosure.model_fields)
@@ -454,6 +464,688 @@ def test_cycle2_exact_run_evidence_exposes_complete_expectation_free_families() 
         "grader_results",
         "assertions_pass",
     }.intersection(Cycle2ExactRunEvidenceClosure.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "accepted_count"),
+    ((0, 0), (2, 0), (2, 1), (2, 2)),
+)
+def test_cycle2_v3_evidence_preserves_generic_candidate_order_and_cardinality(
+    candidate_count: int,
+    accepted_count: int,
+) -> None:
+    closure = _cycle2_generic_v3_exact_run_evidence(
+        candidate_count=candidate_count,
+        accepted_count=accepted_count
+    )
+    request_understanding = closure.request_understanding_closures[0]
+    assert tuple(
+        child.candidate_ref
+        for child in request_understanding.accepted_task_deltas
+    ) == tuple(
+        candidate.candidate_id
+        for candidate in request_understanding.record.task_delta_candidates[
+            :accepted_count
+        ]
+    )
+    assert len(request_understanding.record.task_delta_candidates) == candidate_count
+    assert len(closure.task_records) == accepted_count
+
+
+def test_cycle2_v3_evidence_closes_initial_and_dual_continuation_timeline() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    initial, continuation = closure.request_understanding_closures
+    assert initial.record.model_output_schema_version == (
+        "e2e01-cycle2-initial.p0.v1"
+    )
+    assert continuation.record.model_output_schema_version == (
+        "e2e01-cycle2-continuation.p0.v2"
+    )
+    assert tuple(
+        binding.name for binding in closure.input_binding_records
+    ) == ("product_description", "order_id", "shipment_not_received")
+    assert tuple(
+        child.result_task_state_version
+        for parent in closure.request_understanding_closures
+        for child in parent.accepted_task_deltas
+    ) == (1, 2)
+    assert initial.record.run_id == closure.supporting_run_records[0].run_id
+    assert continuation.record.run_id == closure.run_record.run_id
+    assert tuple(
+        (link.base_task_state_version, link.result_task_state_version)
+        for link in closure.run_task_link_records
+    ) == ((None, 1), (1, None))
+    assert closure.task_state_transition_records == ()
+    assert closure.task_records[0].status is TaskStatus.ACTIVE
+
+
+def test_cycle2_v3_evidence_closes_later_independent_status_transition() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    changed_at = UTC_NOW + timedelta(milliseconds=2)
+    terminal_task = TaskRecord(
+        **{
+            **task.model_dump(mode="python"),
+            "status": TaskStatus.WAITING_USER,
+            "state_version": 3,
+            "updated_at": changed_at,
+        }
+    )
+    terminal_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "status": TaskStatus.WAITING_USER,
+            "state_version": 3,
+            "updated_at": changed_at,
+        }
+    )
+    transition = TaskStateTransition(
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=TaskStatus.WAITING_USER,
+        base_state_version=2,
+        result_state_version=3,
+        reason_ref=closure.message_records[-1].message_id,
+        changed_at=changed_at,
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    terminal = Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "task_records": (terminal_task,),
+            "request_unit_records": (terminal_unit,),
+            "task_state_transition_records": (transition,),
+        }
+    )
+    assert terminal.task_records[0].state_version == 3
+    assert terminal.task_state_transition_records == (transition,)
+
+    wrong_from = TaskStateTransition(
+        **{
+            **transition.model_dump(mode="python"),
+            "from_status": TaskStatus.BLOCKED,
+        }
+    )
+    with pytest.raises(ValidationError, match="transition chain mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "task_records": (terminal_task,),
+                "request_unit_records": (terminal_unit,),
+                "task_state_transition_records": (wrong_from,),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_v2_or_reconstructed_parent() -> None:
+    closure = _cycle2_generic_v3_exact_run_evidence(accepted_count=0)
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    legacy = _request_understanding_exact_run_evidence(
+        candidate_count=0,
+        accepted_count=0,
+    )
+    with pytest.raises(ValidationError, match="request_understanding_closures"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (
+                    legacy.request_understanding_record,
+                ),
+            }
+        )
+    with pytest.raises(ValidationError, match="request_understanding_closures"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (
+                    closure.request_understanding_closures[0].model_dump(
+                        mode="python"
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_duplicate_parent_and_effect_overlap() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    initial, continuation = closure.request_understanding_closures
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (
+                    initial,
+                    continuation,
+                    continuation,
+                ),
+            }
+        )
+
+    child = continuation.accepted_task_deltas[0]
+    candidate = continuation.record.task_delta_candidates[0]
+    duplicate_candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        **{
+            **candidate.model_dump(mode="python"),
+            "candidate_id": uuid4(),
+        }
+    )
+    duplicate_child = AcceptedSupplyInputTaskDeltaV3(
+        **{
+            **child.model_dump(mode="python"),
+            "accepted_delta_id": uuid4(),
+            "candidate_ref": duplicate_candidate.candidate_id,
+        }
+    )
+    duplicate_run = AgentRunRecordV2(
+        **{
+            **closure.run_record.model_dump(mode="python"),
+            "run_id": uuid4(),
+        }
+    )
+    duplicate_record = RequestUnderstandingRecordV3(
+        **{
+            **continuation.record.model_dump(mode="python"),
+            "request_understanding_record_id": uuid4(),
+            "run_id": duplicate_run.run_id,
+            "task_delta_candidates": (duplicate_candidate,),
+            "candidate_validation": (
+                CandidateValidationRecordV2(
+                    candidate_ref=duplicate_candidate.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            "accepted_delta_refs": (duplicate_child.accepted_delta_id,),
+        }
+    )
+    duplicate_effect = RequestUnderstandingClosureV3(
+        record=duplicate_record,
+        accepted_task_deltas=(duplicate_child,),
+    )
+    with pytest.raises(ValidationError, match="effects cannot overlap"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "supporting_run_records": (
+                    *closure.supporting_run_records,
+                    duplicate_run,
+                ),
+                "run_task_link_records": (
+                    *closure.run_task_link_records,
+                    RunTaskLinkRecordV2(
+                        run_id=duplicate_run.run_id,
+                        task_id=child.task_id,
+                        base_task_state_version=1,
+                        result_task_state_version=None,
+                    ),
+                ),
+                "request_understanding_closures": (
+                    initial,
+                    continuation,
+                    duplicate_effect,
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_duplicate_root_and_identity_collisions() -> None:
+    zero = _cycle2_generic_v3_exact_run_evidence(
+        candidate_count=0,
+        accepted_count=0,
+    )
+    parent = zero.request_understanding_closures[0]
+    duplicate_record = RequestUnderstandingRecordV3(
+        **{
+            **parent.record.model_dump(mode="python"),
+            "request_understanding_record_id": uuid4(),
+        }
+    )
+    duplicate_parent = RequestUnderstandingClosureV3(
+        record=duplicate_record,
+        accepted_task_deltas=(),
+    )
+    zero_values = {
+        field_name: getattr(zero, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **zero_values,
+                "request_understanding_closures": (parent, duplicate_parent),
+            }
+        )
+
+    closure = _cycle2_generic_v3_exact_run_evidence(accepted_count=1)
+    parent = closure.request_understanding_closures[0]
+    binding = closure.input_binding_records[0]
+    colliding_record = RequestUnderstandingRecordV3(
+        **{
+            **parent.record.model_dump(mode="python"),
+            "request_understanding_record_id": binding.binding_id,
+        }
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    with pytest.raises(ValidationError, match="identity graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (
+                    RequestUnderstandingClosureV3(
+                        record=colliding_record,
+                        accepted_task_deltas=parent.accepted_task_deltas,
+                    ),
+                ),
+            }
+        )
+
+    unit = closure.request_unit_records[0]
+    colliding_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "request_unit_id": binding.binding_id,
+        }
+    )
+    with pytest.raises(ValidationError, match="identities must be disjoint"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (colliding_unit,),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_non_user_or_early_current_message() -> None:
+    closure = _cycle2_generic_v3_exact_run_evidence(
+        candidate_count=0,
+        accepted_count=0,
+    )
+    parent = closure.request_understanding_closures[0]
+    message = closure.message_records[0]
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    assistant_message = MessageRecord(
+        **{
+            **message.model_dump(mode="python"),
+            "direction": MessageDirection.ASSISTANT,
+        }
+    )
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "message_records": (assistant_message,)}
+        )
+
+    early_record = RequestUnderstandingRecordV3(
+        **{
+            **parent.record.model_dump(mode="python"),
+            "created_at": UTC_NOW - timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (
+                    RequestUnderstandingClosureV3(
+                        record=early_record,
+                        accepted_task_deltas=(),
+                    ),
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_effect_after_source_run_completion() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    initial, continuation = closure.request_understanding_closures
+    effect_at = UTC_NOW + timedelta(microseconds=500)
+    completed_supporting_run = AgentRunRecordV2(
+        **{
+            **closure.supporting_run_records[0].model_dump(mode="python"),
+            "completed_at": UTC_NOW,
+        }
+    )
+    initial_child = AcceptedAddGoalTaskDeltaV3(
+        **{
+            **initial.accepted_task_deltas[0].model_dump(mode="python"),
+            "accepted_at": effect_at,
+        }
+    )
+    initial_record = RequestUnderstandingRecordV3(
+        **{
+            **initial.record.model_dump(mode="python"),
+            "created_at": effect_at,
+        }
+    )
+    product_binding = InputBindingV2(
+        **{
+            **closure.input_binding_records[0].model_dump(mode="python"),
+            "created_at": effect_at,
+            "updated_at": effect_at,
+        }
+    )
+    task = TaskRecord(
+        **{
+            **closure.task_records[0].model_dump(mode="python"),
+            "created_at": effect_at,
+        }
+    )
+    unit = RequestUnitRecord(
+        **{
+            **closure.request_unit_records[0].model_dump(mode="python"),
+            "created_at": effect_at,
+        }
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="source graph mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "supporting_run_records": (completed_supporting_run,),
+                "task_records": (task,),
+                "request_unit_records": (unit,),
+                "input_binding_records": (
+                    product_binding,
+                    *closure.input_binding_records[1:],
+                ),
+                "request_understanding_closures": (
+                    RequestUnderstandingClosureV3(
+                        record=initial_record,
+                        accepted_task_deltas=(initial_child,),
+                    ),
+                    continuation,
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_gap_wrong_terminal_and_binding() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    initial, continuation = closure.request_understanding_closures
+    continuation_child = continuation.accepted_task_deltas[0]
+    gap_child = AcceptedSupplyInputTaskDeltaV3(
+        **{
+            **continuation_child.model_dump(mode="python"),
+            "base_task_state_version": 2,
+            "result_task_state_version": 3,
+        }
+    )
+    gap_task = TaskRecord(
+        **{
+            **closure.task_records[0].model_dump(mode="python"),
+            "state_version": 3,
+        }
+    )
+    gap_unit = RequestUnitRecord(
+        **{
+            **closure.request_unit_records[0].model_dump(mode="python"),
+            "state_version": 3,
+        }
+    )
+    gap_root_link = RunTaskLinkRecordV2(
+        **{
+            **closure.run_task_link_records[1].model_dump(mode="python"),
+            "base_task_state_version": 2,
+        }
+    )
+    with pytest.raises(ValidationError, match="Task timeline has a gap"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    closure.run_task_link_records[0],
+                    gap_root_link,
+                ),
+                "task_records": (gap_task,),
+                "request_unit_records": (gap_unit,),
+                "request_understanding_closures": (
+                    initial,
+                    RequestUnderstandingClosureV3(
+                        record=continuation.record,
+                        accepted_task_deltas=(gap_child,),
+                    ),
+                ),
+            }
+        )
+
+    borrowed_supporting_link = RunTaskLinkRecordV2(
+        **{
+            **closure.run_task_link_records[0].model_dump(mode="python"),
+            "result_task_state_version": 2,
+        }
+    )
+    with pytest.raises(ValidationError, match="RunTaskLink mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    borrowed_supporting_link,
+                    closure.run_task_link_records[1],
+                ),
+            }
+        )
+
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    wrong_task = TaskRecord(
+        **{
+            **task.model_dump(mode="python"),
+            "state_version": 3,
+        }
+    )
+    wrong_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "state_version": 3,
+        }
+    )
+    with pytest.raises(ValidationError, match="Task terminal mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "task_records": (wrong_task,),
+                "request_unit_records": (wrong_unit,),
+            }
+        )
+
+    order_binding = closure.input_binding_records[1]
+    wrong_binding = InputBindingV2(
+        **{
+            **order_binding.model_dump(mode="python"),
+            "normalized_value": "O-9999",
+        }
+    )
+    with pytest.raises(ValidationError, match="Binding projection mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "input_binding_records": (
+                    closure.input_binding_records[0],
+                    wrong_binding,
+                    closure.input_binding_records[2],
+                ),
+            }
+        )
+
+    duplicate_order_binding = InputBindingV2(
+        **{
+            **closure.input_binding_records[1].model_dump(mode="python"),
+            "binding_id": uuid4(),
+            "supersedes": closure.input_binding_records[1].binding_id,
+        }
+    )
+    duplicate_name_unit = RequestUnitRecord(
+        **{
+            **closure.request_unit_records[0].model_dump(mode="python"),
+            "input_binding_refs": (
+                *closure.request_unit_records[0].input_binding_refs,
+                duplicate_order_binding.binding_id,
+            ),
+        }
+    )
+    with pytest.raises(ValidationError, match="Binding names must be unique"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (duplicate_name_unit,),
+                "input_binding_records": (
+                    *closure.input_binding_records,
+                    duplicate_order_binding,
+                ),
+            }
+        )
+
+    unrooted_previous_binding = InputBindingV2(
+        **{
+            **closure.input_binding_records[1].model_dump(mode="python"),
+            "binding_id": uuid4(),
+            "created_at": UTC_NOW,
+            "updated_at": UTC_NOW,
+            "supersedes": None,
+        }
+    )
+    unrooted_superseding_binding = InputBindingV2(
+        **{
+            **closure.input_binding_records[1].model_dump(mode="python"),
+            "supersedes": unrooted_previous_binding.binding_id,
+        }
+    )
+    with pytest.raises(ValidationError, match="Binding supersession mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "input_binding_records": (
+                    closure.input_binding_records[0],
+                    unrooted_previous_binding,
+                    unrooted_superseding_binding,
+                    closure.input_binding_records[2],
+                ),
+            }
+        )
+
+    extra_goal_source_unit = RequestUnitRecord(
+        **{
+            **closure.request_unit_records[0].model_dump(mode="python"),
+            "goal_source_refs": (
+                *closure.request_unit_records[0].goal_source_refs,
+                closure.message_records[1].message_id,
+            ),
+        }
+    )
+    with pytest.raises(ValidationError, match="goal projection mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_unit_records": (extra_goal_source_unit,),
+            }
+        )
+
+    early_task = TaskRecord(
+        **{
+            **closure.task_records[0].model_dump(mode="python"),
+            "created_at": UTC_NOW - timedelta(days=1),
+        }
+    )
+    early_unit = RequestUnitRecord(
+        **{
+            **closure.request_unit_records[0].model_dump(mode="python"),
+            "created_at": UTC_NOW - timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="initial causality mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "task_records": (early_task,),
+                "request_unit_records": (early_unit,),
+            }
+        )
+
+    drifted_binding = InputBindingV2(
+        **{
+            **closure.input_binding_records[0].model_dump(mode="python"),
+            "created_at": UTC_NOW + timedelta(days=1),
+            "updated_at": UTC_NOW + timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="Binding projection mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "input_binding_records": (
+                    drifted_binding,
+                    *closure.input_binding_records[1:],
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_impossible_dual_order_claim_branch() -> None:
+    closure = _cycle2_dual_parent_v3_exact_run_evidence()
+    initial, continuation = closure.request_understanding_closures
+    candidate = continuation.record.task_delta_candidates[0]
+    duplicate_order_input = DurableCycle2InputCandidateV3(
+        **{
+            **candidate.input_candidates[1].model_dump(mode="python"),
+            "name": "order_id",
+            "normalized_candidate_value": "O-1001",
+        }
+    )
+    impossible_candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        **{
+            **candidate.model_dump(mode="python"),
+            "input_candidates": (
+                candidate.input_candidates[0],
+                duplicate_order_input,
+            ),
+        }
+    )
+    impossible_record = RequestUnderstandingRecordV3(
+        **{
+            **continuation.record.model_dump(mode="python"),
+            "task_delta_candidates": (impossible_candidate,),
+        }
+    )
+    impossible_parent = RequestUnderstandingClosureV3(
+        record=impossible_record,
+        accepted_task_deltas=continuation.accepted_task_deltas,
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(ValidationError, match="dual Claim branch mismatch"):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "request_understanding_closures": (initial, impossible_parent),
+            }
+        )
 
 
 def test_cycle2_exact_run_evidence_rejects_raw_or_cross_run_children() -> None:
@@ -520,6 +1212,371 @@ def _cycle2_exact_run_evidence_with_task() -> Cycle2ExactRunEvidenceClosure:
             "task_records": (task,),
             "request_unit_records": (unit,),
             "input_binding_records": (binding,),
+        }
+    )
+
+
+def _cycle2_v3_input(
+    *,
+    name: str,
+    value: object,
+    message: MessageRecord,
+) -> DurableCycle2InputCandidateV3:
+    return DurableCycle2InputCandidateV3(
+        name=name,
+        normalized_candidate_value=value,
+        authority=InputAuthority.USER_CLAIM,
+        source_kind=InputSourceKind.CURRENT_MESSAGE,
+        source_ref=message.message_id,
+        source_span_start=0,
+        source_span_end_exclusive=len(message.content),
+        source_quote_sha256=sha256(message.content.encode("utf-8")).hexdigest(),
+        confidence=0.98,
+    )
+
+
+def _cycle2_generic_v3_exact_run_evidence(
+    *,
+    candidate_count: int = 2,
+    accepted_count: int,
+) -> Cycle2ExactRunEvidenceClosure:
+    if not 0 <= accepted_count <= candidate_count <= 2:
+        raise ValueError("test fixture supports 0..2 Candidates")
+    base = _minimal_cycle2_exact_run_evidence()
+    message = _message(
+        message_id=base.message_records[0].message_id,
+        conversation_id=base.conversation_record.conversation_id,
+        content="查订单 O-1001 和 O-1002",
+    )
+    candidate_ids = tuple(uuid4() for _ in range(candidate_count))
+    candidates = tuple(
+        DurablePhase1AddGoalTaskDeltaCandidateV3(
+            **_durable_evidence_candidate(
+                candidate_id=candidate_id,
+                message=message,
+                order_id=f"O-{1001 + index}",
+            ).model_dump(mode="python")
+        )
+        for index, candidate_id in enumerate(candidate_ids)
+    )
+    decisions = tuple(
+        CandidateValidationRecordV2(
+            candidate_ref=candidate.candidate_id,
+            decision=(
+                CandidateValidationDecision.ACCEPT
+                if index < accepted_count
+                else CandidateValidationDecision.REJECT
+            ),
+            reason_code=(
+                None
+                if index < accepted_count
+                else CandidateRejectionReasonCode.INPUT_VALUE_INVALID
+            ),
+        )
+        for index, candidate in enumerate(candidates)
+    )
+    children: list[AcceptedAddGoalTaskDeltaV3] = []
+    bindings: list[InputBindingV2] = []
+    tasks: list[TaskRecord] = []
+    units: list[RequestUnitRecord] = []
+    links: list[RunTaskLinkRecordV2] = []
+    for index, candidate in enumerate(candidates[:accepted_count]):
+        binding = _input_binding_v2(
+            normalized_value=f"O-{1001 + index}",
+            source_refs=(message.message_id,),
+        )
+        task = _task()
+        unit = _request_unit(
+            task_id=task.task_id,
+            goal_text=candidate.goal_patch,
+            goal_source_refs=(message.message_id,),
+            input_binding_refs=(binding.binding_id,),
+        )
+        child = AcceptedAddGoalTaskDeltaV3(
+            accepted_delta_id=uuid4(),
+            candidate_ref=candidate.candidate_id,
+            message_ref=message.message_id,
+            operation=TaskDeltaOperation.ADD_GOAL,
+            goal_text=candidate.goal_patch,
+            input_binding_refs=(binding.binding_id,),
+            accepted_at=UTC_NOW,
+            task_id=task.task_id,
+            base_task_state_version=None,
+            result_task_state_version=1,
+        )
+        children.append(child)
+        bindings.append(binding)
+        tasks.append(task)
+        units.append(unit)
+        links.append(
+            RunTaskLinkRecordV2(
+                run_id=base.run_record.run_id,
+                task_id=task.task_id,
+                base_task_state_version=None,
+                result_task_state_version=None,
+            )
+        )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=base.run_record.run_id,
+        message_ref=message.message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-thin-v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text="查询当前消息中的订单",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(message.message_id,),
+        ),
+        task_delta_candidates=candidates,
+        candidate_validation=decisions,
+        accepted_delta_refs=tuple(
+            child.accepted_delta_id for child in children
+        ),
+        created_at=UTC_NOW,
+    )
+    request_understanding = RequestUnderstandingClosureV3(
+        record=record,
+        accepted_task_deltas=tuple(children),
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "message_records": (message,),
+            "run_task_link_records": tuple(links),
+            "task_records": tuple(tasks),
+            "request_unit_records": tuple(units),
+            "input_binding_records": tuple(bindings),
+            "request_understanding_closures": (request_understanding,),
+        }
+    )
+
+
+def _cycle2_dual_parent_v3_exact_run_evidence() -> (
+    Cycle2ExactRunEvidenceClosure
+):
+    base = _minimal_cycle2_exact_run_evidence()
+    initial_message = _message(
+        message_id=base.message_records[0].message_id,
+        conversation_id=base.conversation_record.conversation_id,
+        content="wireless earphones",
+    )
+    continuation_at = UTC_NOW + timedelta(milliseconds=1)
+    continuation_message = _message(
+        conversation_id=base.conversation_record.conversation_id,
+        content="O-1001 还没收到",
+        received_at=continuation_at,
+    )
+    supporting_initial_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=base.conversation_record.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane="offline_cycle2",
+        started_at=UTC_NOW,
+        completed_at=continuation_at,
+        stop_reason=StopReasonV2.CLARIFICATION_REQUIRED,
+    )
+    continuation_run = AgentRunRecordV2(
+        **{
+            **base.run_record.model_dump(mode="python"),
+            "started_at": continuation_at,
+        }
+    )
+    product_binding = _input_binding_v2(
+        name="product_description",
+        normalized_value="wireless earphones",
+        source_refs=(initial_message.message_id,),
+    )
+    order_binding = _input_binding_v2(
+        name="order_id",
+        normalized_value="O-1001",
+        source_refs=(continuation_message.message_id,),
+        created_at=continuation_at,
+        updated_at=continuation_at,
+    )
+    claim_binding = _input_binding_v2(
+        name="shipment_not_received",
+        normalized_value=True,
+        source_refs=(continuation_message.message_id,),
+        created_at=continuation_at,
+        updated_at=continuation_at,
+    )
+    task = _task(
+        status=TaskStatus.ACTIVE,
+        state_version=2,
+        updated_at=continuation_at,
+    )
+    unit = _request_unit(
+        task_id=task.task_id,
+        goal_text="查找 wireless earphones 的订单",
+        goal_source_refs=(initial_message.message_id,),
+        input_binding_refs=(
+            product_binding.binding_id,
+            order_binding.binding_id,
+            claim_binding.binding_id,
+        ),
+        status=TaskStatus.ACTIVE,
+        state_version=2,
+        updated_at=continuation_at,
+    )
+    initial_candidate = DurableCycle2AddGoalTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch=unit.goal_text,
+        input_candidates=(
+            _cycle2_v3_input(
+                name="product_description",
+                value="wireless earphones",
+                message=initial_message,
+            ),
+        ),
+        confidence=0.98,
+    )
+    initial_child = AcceptedAddGoalTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=initial_candidate.candidate_id,
+        message_ref=initial_message.message_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text=unit.goal_text,
+        input_binding_refs=(product_binding.binding_id,),
+        accepted_at=UTC_NOW,
+        task_id=task.task_id,
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    initial_record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=supporting_initial_run.run_id,
+        message_ref=initial_message.message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-initial.p0.v1",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text="查找商品对应订单",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(initial_message.message_id,),
+        ),
+        task_delta_candidates=(initial_candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=initial_candidate.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(initial_child.accepted_delta_id,),
+        validated_task_state_version=1,
+        next_move_candidate_ref=uuid4(),
+        created_at=UTC_NOW,
+    )
+    continuation_candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="current-task",
+        target_request_unit_alias="current-unit",
+        input_candidates=(
+            _cycle2_v3_input(
+                name="order_id",
+                value="O-1001",
+                message=continuation_message,
+            ),
+            _cycle2_v3_input(
+                name="shipment_not_received",
+                value=True,
+                message=continuation_message,
+            ),
+        ),
+        confidence=0.99,
+    )
+    continuation_child = AcceptedSupplyInputTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=continuation_candidate.candidate_id,
+        message_ref=continuation_message.message_id,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        task_id=task.task_id,
+        target_request_unit_id=unit.request_unit_id,
+        input_binding_refs=(order_binding.binding_id, claim_binding.binding_id),
+        accepted_at=continuation_at,
+        base_task_state_version=1,
+        result_task_state_version=2,
+    )
+    continuation_record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=uuid4(),
+        run_id=continuation_run.run_id,
+        message_ref=continuation_message.message_id,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version="e2e01-thin-v1",
+        model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+        contextualization=DurableQueryContextualizationCandidateV2(
+            text="补充当前任务输入",
+            resolved_reference_candidates=(),
+            uncertainties=(),
+            source_message_refs=(continuation_message.message_id,),
+        ),
+        task_delta_candidates=(continuation_candidate,),
+        candidate_validation=(
+            CandidateValidationRecordV2(
+                candidate_ref=continuation_candidate.candidate_id,
+                decision=CandidateValidationDecision.ACCEPT,
+            ),
+        ),
+        accepted_delta_refs=(continuation_child.accepted_delta_id,),
+        created_at=continuation_at,
+    )
+    root_trace = TraceEventV2(
+        **{
+            **base.trace_records[0].model_dump(mode="python"),
+            "occurred_at": continuation_at,
+        }
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "run_record": continuation_run,
+            "supporting_run_records": (supporting_initial_run,),
+            "message_records": (initial_message, continuation_message),
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=supporting_initial_run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=None,
+                    result_task_state_version=1,
+                ),
+                RunTaskLinkRecordV2(
+                    run_id=continuation_run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=1,
+                    result_task_state_version=None,
+                ),
+            ),
+            "task_records": (task,),
+            "request_unit_records": (unit,),
+            "input_binding_records": (
+                product_binding,
+                order_binding,
+                claim_binding,
+            ),
+            "request_understanding_closures": (
+                RequestUnderstandingClosureV3(
+                    record=initial_record,
+                    accepted_task_deltas=(initial_child,),
+                ),
+                RequestUnderstandingClosureV3(
+                    record=continuation_record,
+                    accepted_task_deltas=(continuation_child,),
+                ),
+            ),
+            "task_state_transition_records": (),
+            "trace_records": (root_trace,),
         }
     )
 
@@ -6157,6 +7214,76 @@ def _request_understanding_exact_run_evidence(
     )
 
 
+def _phase1_v3_exact_run_evidence(
+    *,
+    candidate_count: int,
+    accepted_count: int,
+) -> ExactRunEvidenceV3Closure:
+    legacy = _request_understanding_exact_run_evidence(
+        candidate_count=candidate_count,
+        accepted_count=accepted_count,
+    )
+    legacy_record = legacy.request_understanding_record
+    assert legacy_record is not None
+    candidates = tuple(
+        DurablePhase1AddGoalTaskDeltaCandidateV3(
+            **candidate.model_dump(mode="python")
+        )
+        for candidate in legacy_record.task_delta_candidates
+    )
+    children = tuple(
+        AcceptedAddGoalTaskDeltaV3(**child.model_dump(mode="python"))
+        for child in legacy.accepted_task_deltas
+    )
+    record = RequestUnderstandingRecordV3(
+        request_understanding_record_id=(
+            legacy_record.request_understanding_record_id
+        ),
+        run_id=legacy_record.run_id,
+        message_ref=legacy_record.message_ref,
+        record_schema_version="request_understanding_record.p0.v3",
+        model_input_schema_version=legacy_record.model_input_schema_version,
+        model_output_schema_version="e2e01-thin-v2",
+        contextualization=legacy_record.contextualization,
+        task_delta_candidates=candidates,
+        candidate_validation=legacy_record.candidate_validation,
+        accepted_delta_refs=legacy_record.accepted_delta_refs,
+        proposed_base_task_state_version=(
+            legacy_record.proposed_base_task_state_version
+        ),
+        validated_task_state_version=(
+            legacy_record.validated_task_state_version
+        ),
+        next_move_candidate_ref=legacy_record.next_move_candidate_ref,
+        created_at=legacy_record.created_at,
+    )
+    request_understanding = RequestUnderstandingClosureV3(
+        record=record,
+        accepted_task_deltas=children,
+    )
+    values = {
+        field_name: getattr(legacy, field_name)
+        for field_name in ExactRunEvidenceV3Closure.model_fields
+        if field_name != "request_understanding_closure"
+    }
+    return ExactRunEvidenceV3Closure(
+        **values,
+        request_understanding_closure=request_understanding,
+    )
+
+
+def _rebuild_phase1_v3_exact_run_evidence(
+    closure: ExactRunEvidenceV3Closure,
+    **updates: object,
+) -> ExactRunEvidenceV3Closure:
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in ExactRunEvidenceV3Closure.model_fields
+    }
+    values.update(updates)
+    return ExactRunEvidenceV3Closure(**values)
+
+
 def _tool_exact_run_evidence() -> ExactRunEvidenceClosure:
     base = _request_understanding_exact_run_evidence(
         candidate_count=1,
@@ -6354,6 +7481,419 @@ def test_exact_run_evidence_closure_has_exact_required_private_surface() -> None
                 for field_name in ExactRunEvidenceClosure.model_fields
             },
             case_id="E2E01-01",
+        )
+
+
+def test_phase1_v3_exact_run_evidence_has_one_independent_v3_only_surface() -> None:
+    expected_fields = (
+        "conversation_record",
+        "run_record",
+        "message_records",
+        "request_understanding_closure",
+        "input_binding_records",
+        "task_records",
+        "task_state_transitions",
+        "request_unit_records",
+        "conversation_task_links",
+        "run_task_links",
+        "gate_decisions",
+        "tool_calls",
+        "tool_attempts",
+        "observation_records",
+        "context_manifests",
+        "model_visible_toolset_artifacts",
+        "trace_events",
+    )
+    assert tuple(ExactRunEvidenceV3Closure.model_fields) == expected_fields
+    assert not {
+        "request_understanding_record",
+        "accepted_task_deltas",
+        "request_understanding_record_v2",
+        "case_id",
+        "expectation",
+    }.intersection(ExactRunEvidenceV3Closure.model_fields)
+    assert tuple(ExactRunEvidenceClosure.model_fields) == (
+        _EXACT_EVIDENCE_FIELD_NAMES
+    )
+    resolved = get_type_hints(ExactRunEvidenceV3Closure, include_extras=True)
+    assert resolved["request_understanding_closure"] == (
+        RequestUnderstandingClosureV3 | None
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "accepted_count"),
+    ((0, 0), (2, 0), (2, 1), (2, 2)),
+)
+def test_phase1_v3_exact_run_evidence_preserves_candidate_order_and_cardinality(
+    candidate_count: int,
+    accepted_count: int,
+) -> None:
+    closure = _phase1_v3_exact_run_evidence(
+        candidate_count=candidate_count,
+        accepted_count=accepted_count,
+    )
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    assert len(request_understanding.record.task_delta_candidates) == candidate_count
+    assert len(request_understanding.accepted_task_deltas) == accepted_count
+    assert tuple(
+        child.candidate_ref
+        for child in request_understanding.accepted_task_deltas
+    ) == tuple(
+        candidate.candidate_id
+        for candidate in request_understanding.record.task_delta_candidates[
+            :accepted_count
+        ]
+    )
+    assert len(closure.task_records) == accepted_count
+
+
+def test_phase1_v3_exact_run_evidence_accepts_no_ru_only_without_task_graph() -> None:
+    legacy = _minimal_exact_run_evidence()
+    values = {
+        field_name: getattr(legacy, field_name)
+        for field_name in ExactRunEvidenceV3Closure.model_fields
+        if field_name != "request_understanding_closure"
+    }
+    closure = ExactRunEvidenceV3Closure(
+        **values,
+        request_understanding_closure=None,
+    )
+    assert closure.request_understanding_closure is None
+
+    with pytest.raises(ValidationError, match="accepted child Task refs"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            _phase1_v3_exact_run_evidence(candidate_count=1, accepted_count=1),
+            request_understanding_closure=None,
+        )
+
+
+def test_phase1_v3_exact_run_evidence_rejects_cycle2_branch() -> None:
+    closure = _phase1_v3_exact_run_evidence(candidate_count=0, accepted_count=0)
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    message = closure.message_records[0]
+    candidate = DurableCycle2AddGoalTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_patch="查找订单商品",
+        input_candidates=(
+            DurableCycle2InputCandidateV3(
+                name="product_description",
+                normalized_candidate_value="订单商品",
+                authority=InputAuthority.USER_CLAIM,
+                source_kind=InputSourceKind.CURRENT_MESSAGE,
+                source_ref=message.message_id,
+                source_span_start=0,
+                source_span_end_exclusive=len(message.content),
+                source_quote_sha256=sha256(
+                    message.content.encode("utf-8")
+                ).hexdigest(),
+                confidence=0.95,
+            ),
+        ),
+        confidence=0.95,
+    )
+    accepted = AcceptedAddGoalTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=candidate.candidate_id,
+        message_ref=message.message_id,
+        operation=TaskDeltaOperation.ADD_GOAL,
+        goal_text=candidate.goal_patch,
+        input_binding_refs=(uuid4(),),
+        accepted_at=UTC_NOW,
+        task_id=uuid4(),
+        base_task_state_version=None,
+        result_task_state_version=1,
+    )
+    record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "model_output_schema_version": "e2e01-cycle2-initial.p0.v1",
+            "task_delta_candidates": (candidate,),
+            "candidate_validation": (
+                CandidateValidationRecordV2(
+                    candidate_ref=candidate.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            "accepted_delta_refs": (accepted.accepted_delta_id,),
+            "next_move_candidate_ref": candidate.candidate_id,
+            "proposed_base_task_state_version": None,
+            "validated_task_state_version": 1,
+        }
+    )
+    cycle2_branch = RequestUnderstandingClosureV3(
+        record=record,
+        accepted_task_deltas=(accepted,),
+    )
+    with pytest.raises(ValidationError, match="generic ADD_GOAL branch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=cycle2_branch,
+        )
+
+
+def test_phase1_v3_exact_run_evidence_reuses_sanitized_binding_boundary() -> None:
+    raw_value = "phase1-v3-private-order-secret"
+    closure = _phase1_v3_exact_run_evidence(candidate_count=1, accepted_count=1)
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    candidate = request_understanding.record.task_delta_candidates[0]
+    candidate_input = candidate.input_candidates[0]
+    poisoned_input = DurableInputCandidateV2(
+        **{
+            **candidate_input.model_dump(mode="python"),
+            "candidate_value": raw_value,
+        }
+    )
+    poisoned_candidate = DurablePhase1AddGoalTaskDeltaCandidateV3(
+        **{
+            **candidate.model_dump(mode="python"),
+            "input_candidates": (poisoned_input,),
+        }
+    )
+    poisoned_record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "task_delta_candidates": (poisoned_candidate,),
+        }
+    )
+    poisoned_closure = RequestUnderstandingClosureV3(
+        record=poisoned_record,
+        accepted_task_deltas=request_understanding.accepted_task_deltas,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="accepted child bindings must preserve validated input values",
+    ) as exc_info:
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=poisoned_closure,
+        )
+
+    error = exc_info.value
+    projections = (
+        str(error),
+        repr(error),
+        error.json(include_url=False),
+        repr(error.errors(include_url=False)),
+        repr(error.__cause__),
+        repr(error.__context__),
+    )
+    assert all(raw_value not in projection for projection in projections)
+    assert error.errors(include_url=False)[0]["input"] is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+    colliding_record = RequestUnderstandingRecordV3(
+        **{
+            **poisoned_record.model_dump(mode="python"),
+            "request_understanding_record_id": (
+                closure.input_binding_records[0].binding_id
+            ),
+        }
+    )
+    colliding_closure = RequestUnderstandingClosureV3(
+        record=colliding_record,
+        accepted_task_deltas=request_understanding.accepted_task_deltas,
+    )
+    with pytest.raises(ValidationError) as identity_exc_info:
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=colliding_closure,
+        )
+    identity_error = identity_exc_info.value
+    identity_projections = (
+        str(identity_error),
+        repr(identity_error),
+        identity_error.json(include_url=False),
+        repr(identity_error.errors(include_url=False)),
+        repr(identity_error.__cause__),
+        repr(identity_error.__context__),
+    )
+    assert all(
+        raw_value not in projection for projection in identity_projections
+    )
+    assert identity_error.errors(include_url=False)[0]["input"] is None
+    assert identity_error.__cause__ is None
+    assert identity_error.__context__ is None
+
+
+def test_phase1_v3_exact_run_evidence_rejects_wrong_root_and_reconstruction() -> None:
+    closure = _phase1_v3_exact_run_evidence(candidate_count=1, accepted_count=1)
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    wrong_run_record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "run_id": uuid4(),
+        }
+    )
+    with pytest.raises(ValidationError, match="bind the root Run"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=RequestUnderstandingClosureV3(
+                record=wrong_run_record,
+                accepted_task_deltas=request_understanding.accepted_task_deltas,
+            ),
+        )
+    with pytest.raises(ValidationError, match="canonical exact v3 closure"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=request_understanding.model_dump(
+                mode="python"
+            ),
+        )
+
+
+def test_phase1_v3_exact_run_evidence_rejects_identity_and_time_provenance() -> None:
+    closure = _phase1_v3_exact_run_evidence(candidate_count=1, accepted_count=1)
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    colliding_record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "request_understanding_record_id": (
+                closure.input_binding_records[0].binding_id
+            ),
+        }
+    )
+    with pytest.raises(ValidationError, match="identity graph mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=RequestUnderstandingClosureV3(
+                record=colliding_record,
+                accepted_task_deltas=request_understanding.accepted_task_deltas,
+            ),
+        )
+
+    early_record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "created_at": UTC_NOW - timedelta(days=1),
+        }
+    )
+    early_children = tuple(
+        AcceptedAddGoalTaskDeltaV3(
+            **{
+                **child.model_dump(mode="python"),
+                "accepted_at": UTC_NOW - timedelta(days=1),
+            }
+        )
+        for child in request_understanding.accepted_task_deltas
+    )
+    with pytest.raises(ValidationError, match="trusted root mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_understanding_closure=RequestUnderstandingClosureV3(
+                record=early_record,
+                accepted_task_deltas=early_children,
+            ),
+        )
+
+    binding = closure.input_binding_records[0]
+    drifted_binding = InputBinding(
+        **{
+            **binding.model_dump(mode="python"),
+            "created_at": UTC_NOW + timedelta(days=1),
+            "updated_at": UTC_NOW + timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="Binding time mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            input_binding_records=(drifted_binding,),
+        )
+
+    unit = closure.request_unit_records[0]
+    early_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "created_at": UTC_NOW - timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="causality time mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_unit_records=(early_unit,),
+        )
+
+    late_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "updated_at": UTC_NOW + timedelta(days=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="causality time mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            request_unit_records=(late_unit,),
+        )
+
+    historical_message = _message(
+        conversation_id=closure.conversation_record.conversation_id,
+        content="historical context",
+        received_at=UTC_NOW - timedelta(days=1),
+    )
+    extra_goal_source_unit = RequestUnitRecord(
+        **{
+            **unit.model_dump(mode="python"),
+            "goal_source_refs": (
+                *unit.goal_source_refs,
+                historical_message.message_id,
+            ),
+        }
+    )
+    with pytest.raises(ValidationError, match="causality time mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            message_records=(historical_message, *closure.message_records),
+            request_unit_records=(extra_goal_source_unit,),
+        )
+
+
+def test_phase1_v3_exact_run_evidence_rejects_effect_after_run_completion() -> None:
+    closure = _phase1_v3_exact_run_evidence(
+        candidate_count=0,
+        accepted_count=0,
+    )
+    request_understanding = closure.request_understanding_closure
+    assert request_understanding is not None
+    completed_at = closure.run_record.started_at
+    completed_run = _project_run(
+        closure.run_record,
+        completed_at=completed_at,
+    )
+    late_record = RequestUnderstandingRecordV3(
+        **{
+            **request_understanding.record.model_dump(mode="python"),
+            "created_at": completed_at + timedelta(microseconds=1),
+        }
+    )
+    trace_events = tuple(
+        TraceEvent(
+            **{
+                **event.model_dump(mode="python"),
+                "occurred_at": completed_at,
+            }
+        )
+        if event.event_type is TraceEventType.RUN_STOPPED
+        else event
+        for event in closure.trace_events
+    )
+
+    with pytest.raises(ValidationError, match="trusted root mismatch"):
+        _rebuild_phase1_v3_exact_run_evidence(
+            closure,
+            run_record=completed_run,
+            request_understanding_closure=RequestUnderstandingClosureV3(
+                record=late_record,
+                accepted_task_deltas=(),
+            ),
+            trace_events=trace_events,
         )
 
 

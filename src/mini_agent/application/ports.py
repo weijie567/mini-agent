@@ -39,6 +39,7 @@ from mini_agent.application.records import (
     EvalExecutionFailureRecord,
     EvalResultRecord,
     ExactRunEvidenceClosure,
+    ExactRunEvidenceV3Closure,
     FinalizeCycle2RunCommand,
     FinalizeRunCommand,
     FinalizeBudgetExhaustedToolRecoveryV2Command,
@@ -512,6 +513,19 @@ class Cycle2RuntimeRecordPort(Protocol):
         run_id: UUID,
     ) -> Cycle2ExactRunEvidenceClosure | None:
         """Load one expectation-free exact normal-turn evidence closure."""
+        ...
+
+    async def load_cycle2_exact_run_evidence_v3_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> Cycle2ExactRunEvidenceClosure | None:
+        """Stage one owner-scoped, one-snapshot v3-only evidence closure."""
+        ...
+
+    async def assert_request_understanding_v3_ready(self) -> None:
+        """Fail closed unless the global physical v3 cutover is exact."""
         ...
 
     async def load_continuation_input_binding_closure_for_owner(
@@ -1032,3 +1046,12 @@ class ExactRunEvidencePort(Protocol):
         owner_scope: TrustedOwnerScope,
         run_id: UUID,
     ) -> ExactRunEvidenceClosure | None: ...
+
+    async def load_exact_run_evidence_v3_for_owner(
+        self,
+        *,
+        owner_scope: TrustedOwnerScope,
+        run_id: UUID,
+    ) -> ExactRunEvidenceV3Closure | None:
+        """Stage one owner-scoped, one-snapshot Phase 1 v3 closure."""
+        ...
