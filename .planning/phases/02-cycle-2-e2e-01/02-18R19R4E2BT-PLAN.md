@@ -13,7 +13,7 @@ requirements: [E2E01-01, E2E01-02, E2E01-03, E2E01-04, E2E01-05, E2E01-06]
 
 ```yaml
 task_id: 02-18R19R4E2BT
-goal: 在两个现有Integration测试文件内，对齐已经合并的Cycle2RequestUnderstandingProvider v3 staging方法与canonical Eval result enum集合，关闭R4E2B完整Integration门禁中可在其clean base精确复现的10个测试阻断；不修改生产代码、合同、Case、指标、架构或active route。
+goal: 在两个现有Integration测试文件内，对齐已经合并的Cycle2RequestUnderstandingProvider v3 staging方法与canonical Eval result enum集合，关闭exact R4E2B产品树上的10个BT-owned测试阻断，并在BT + exact R4E2B首个闭合prospective tree执行唯一零失败完整Integration门禁；不修改生产代码、合同、Case、指标、架构或active route。
 repository: weijie567/mini-agent
 remote: origin
 head_branch: codex/e2e01-cycle2-w12-r4e2bt-test-compat
@@ -57,8 +57,10 @@ dependencies:
   - merged canonical result enum closure in src/mini_agent/evaluation/graders.py@d8cfbb5faf06e83c438e627bf455b2fb8425b409
   - R4E2B product remains a separate exact five-file Packet and is not imported into this branch
 preflight_facts:
-  - clean base ef41d749上的完整Integration门禁为10 failed；其中9项由_Cycle2DirectProvider未实现已经合并的propose_cycle2_continuation_v3 Protocol方法导致，1项由canonical result enum名称断言未同步已经合并的grader闭集导致
-  - 两个失败均可在不含R4E2B五文件产品改动的clean base上精确复现，因此不是R4E2B Infrastructure回归；但R4E2B Plan明确要求完整Integration PASS，必须先关闭而不能用pre-existing waiver绕过
+  - 原Plan审查时报告的10项归因运行实际包含未提交的R4E2B五文件，不是clean ef41 base；本修正显式撤回该clean-base计数结论，不把dirty-tree结果继续当作base evidence
+  - exact BT产品树的两个focused/neighbor模块为401 passed，但完整Integration为2 failed / 756 passed；两项分别要求R4E2B拥有的physical v3 pair和Postgres v3 Port实现，均在BT两文件allowlist之外
+  - exact R4E2B产品树的完整Integration为10 failed / 794 passed；其中9项由_Cycle2DirectProvider缺失已经合并的propose_cycle2_continuation_v3 Protocol方法导致，1项由canonical result enum名称断言未同步已经合并的grader闭集导致，均在R4E2B五文件allowlist之外
+  - 因此只有BT + exact R4E2B prospective tree同时具备两个owner的闭包；完整Integration必须在该首个闭合节点零失败，不允许把任一红项豁免为pre-existing
   - 生产Provider Protocol、v3 staging语义与grader enum闭集已经冻结；本Packet只能修正测试double和精确名称断言，不得反向修改生产合同
 contract_freeze:
   baseline: 253bb6bd8dc2f84d6ca95a98f625d80fa80e5461
@@ -75,14 +77,14 @@ owner_decisions:
     - update only the exact expected type-name set so it equals the already-imported _CANONICAL_RESULT_ENUM_TYPES at base: include ImportedMapperReference and Cycle2MappingSourceKind, and remove SupersededRunInvalidationKind which is not in the active grader closure
     - do not change the canonical tuple, enum definitions, comparison logic, grader behavior, Case, metric or result artifact
   integration_order:
-    - merge this test-only blocker Packet before reviewing the R4E2B prospective merge tree; R4E2B retains its exact five-file allowlist and does not absorb either repair file
-    - after this Packet is merged, validate the prospective integration tree containing this repair plus exact R4E2B product head; no gate waiver is permitted
+    - independently review exact BT head and exact R4E2B head first；R4E2B retains its exact five-file allowlist and does not absorb either BT repair file
+    - before either product merge, construct a validation Worktree containing both exact reviewed heads and require complete Integration zero failure；then merge BT followed by R4E2B serially and confirm the resulting integration tree equals or revalidates the prospective evidence；no gate-after-merge或waiver permitted
 implementation_tasks:
   - import the already-frozen continuation v3 output and candidate types in the execution-seam test and implement the missing exact Protocol method on _Cycle2DirectProvider
   - add one direct async regression that invokes propose_cycle2_continuation_v3 with a real RequestUnderstandingInput-shaped current message and asserts strict validation plus every frozen envelope/candidate/source field, including fresh candidate_id != message_ref and both outer/inner confidence values; a runtime-checkable attribute-presence assertion alone is insufficient
   - align the offline-harness canonical enum type-name assertion with the current imported grader closure
-  - run both focused failures, their complete containing modules and the complete Integration suite from the isolated Packet worktree
-  - prove exact two-file scope and unchanged production tree; after merge, run the R4E2B prospective-merge Integration gate
+  - run both focused failures and their complete containing modules from the isolated BT Packet worktree
+  - prove exact two-file scope and unchanged production tree；在BT + exact R4E2B prospective validation Worktree运行唯一完整Integration gate
 contract_changes: NONE — test fixtures consume already-merged frozen contracts; no owner semantics change.
 security_impact: NONE — no production identity, authorization, owner, Evidence, CAS, idempotency or side-effect boundary changes.
 eval_impact: VERIFICATION_FIXTURE_ONLY — restores exact test coverage of the existing grader enum closure and v3 staging Provider Protocol without adding Case, metric, threshold or Result semantics.
@@ -93,30 +95,31 @@ review_profile:
     - exact two-test-file allowlist and zero production diff
     - continuation v3 test double returns the existing exact schema/operation/aliases/input candidate and grants no extra behavior
     - enum expected set equals current canonical tuple without modifying the tuple itself
-    - clean-base 10 failures close and complete Integration becomes green
+    - exact BT head只剩两个精确归属于R4E2B的缺失实现失败；BT自身10个fixture drift失败全部关闭
   focused_tests:
     - direct strict continuation-v3 provider envelope regression
     - canonical result enum type-name closure regression
   neighbor_tests:
     - complete tests/integration/test_e2e01_cycle2_execution_seam.py
     - complete tests/integration/evaluation/test_e2e01_offline_harness.py
-  full_suite_gate: complete tests/integration on exact product head, then complete tests/integration on prospective integration tree with exact R4E2B head
+  full_suite_gate: complete tests/integration only on the first closed prospective integration tree containing exact reviewed BT and exact reviewed R4E2B heads; zero failure required and no waiver
   phase_end_deep_audit: DEFERRED_TO_FINAL_REFROZEN_02_18
 required_checks:
   - uv run pytest -q tests/integration/evaluation/test_e2e01_offline_harness.py::test_canonical_result_enum_types_are_import_time_closed
   - uv run pytest -q tests/integration/test_e2e01_cycle2_execution_seam.py::test_direct_provider_v3_continuation_is_exact_frozen_envelope
   - uv run pytest -q tests/integration/test_e2e01_cycle2_execution_seam.py
   - uv run pytest -q tests/integration/evaluation/test_e2e01_offline_harness.py
-  - uv run pytest -q tests/integration
   - git diff --check
   - exact changed-file containment and zero src/alembic/evals/docs/.planning/graphify-out product diff
+  - in the BT + exact R4E2B prospective validation Worktree, uv run pytest -q tests/integration
 required_check_expectations:
-  - every pytest command exits 0 with zero failure, Critical failure or execution failure
+  - every focused/neighbor pytest command on BT exact head exits 0 with zero failure, Critical failure or execution failure
   - git diff --check exits 0 and exact changed files equal the two owned test files
-  - prospective R4E2B merge validation exits 0 before R4E2B exact-head review can pass
+  - prospective BT + exact R4E2B complete Integration exits 0 before either product merge can be treated as closing the shared gate
 full_suite_gate: DEFERRED_TO_FINAL_REFROZEN_02_18
 done_when:
-  - both formerly failing surfaces and the complete Integration suite pass on this exact head
+  - both formerly failing surfaces and both complete containing modules pass on exact BT head
+  - complete Integration passes on the first prospective tree containing exact reviewed BT and R4E2B heads, with no ignored or waived failure
   - exact two-file implementation scope and zero production diff are mechanically proven
   - local independent implementation review and remote exact-head review are PASS with zero open findings
   - product merges as B_C2_W12_INTEGRATION_FIXTURE_ALIGNMENT; R4E2B prospective merge tree then satisfies its complete Integration gate
@@ -125,7 +128,7 @@ rollback:
   - never weaken runtime Protocol checks, remove v3 staging, suppress the enum closure assertion, skip tests or convert the Integration gate into a waiver
 handoff_format:
   - exact branch/base/head/tree and changed files
-  - focused/module/Integration commands and results
+  - focused/module commands on BT head and complete Integration command/result on BT + exact R4E2B prospective tree
   - explicit NONE contract/security/production impact, allowlist proof and prospective R4E2B merge-gate result
 output_barrier: B_C2_W12_INTEGRATION_FIXTURE_ALIGNMENT
 handoff_to: tech-lead
