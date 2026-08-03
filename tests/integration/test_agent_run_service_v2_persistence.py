@@ -180,7 +180,7 @@ async def _run_script(
                 message="请查询订单 O-1001",
             )
         )
-        evidence = await records.load_exact_run_evidence_for_owner(
+        evidence = await records.load_exact_run_evidence_v3_for_owner(
             owner_scope=_owner_scope(),
             run_id=result.run_id,
         )
@@ -200,20 +200,21 @@ async def test_actual_v2_runtime_persists_exact_one_graph_before_tool_use(
     assert result.outcome is AgentOutcome.COMPLETED
     assert evidence is not None
     assert evidence.run_record.stop_reason is StopReason.GOAL_COMPLETED
-    assert evidence.request_understanding_record is not None
+    understanding = evidence.request_understanding_closure
+    assert understanding is not None
     assert (
-        evidence.request_understanding_record.schema_version
-        == "request_understanding_record.p0.v2"
+        understanding.record.record_schema_version
+        == "request_understanding_record.p0.v3"
     )
     assert (
-        evidence.request_understanding_record.model_input_schema_version
+        understanding.record.model_input_schema_version
         == "e2e01-thin-v1"
     )
     assert (
-        evidence.request_understanding_record.model_output_schema_version
+        understanding.record.model_output_schema_version
         == "e2e01-thin-v2"
     )
-    assert len(evidence.accepted_task_deltas) == 1
+    assert len(understanding.accepted_task_deltas) == 1
     assert len(evidence.task_records) == 1
     assert evidence.task_records[0].status is TaskStatus.COMPLETED
     assert len(evidence.request_unit_records) == 1
@@ -269,8 +270,7 @@ async def test_actual_v2_candidate_invalid_scripts_stop_without_task_graph(
     assert result.outcome is AgentOutcome.BLOCKED
     assert evidence is not None
     assert evidence.run_record.stop_reason is StopReason.INPUT_INVALID
-    assert evidence.request_understanding_record is None
-    assert evidence.accepted_task_deltas == ()
+    assert evidence.request_understanding_closure is None
     assert evidence.task_records == ()
     assert evidence.request_unit_records == ()
     assert evidence.input_binding_records == ()
@@ -297,7 +297,7 @@ async def test_actual_v2_protocol_fault_remains_protocol_error(
         evidence.run_record.stop_reason
         is StopReason.PROVIDER_PROTOCOL_ERROR
     )
-    assert evidence.request_understanding_record is None
+    assert evidence.request_understanding_closure is None
     assert evidence.task_records == ()
     assert evidence.gate_decisions == ()
     assert evidence.tool_calls == ()
