@@ -360,6 +360,7 @@ class RuntimeSpy:
         events: list[str],
         *,
         graph_result: ConditionalWriteResult = ConditionalWriteResult.APPLIED,
+        v3_graph_result: Cycle2WriteResult | None = None,
         graph_error: Exception | None = None,
         finalize_run_result: ConditionalWriteResult = (
             ConditionalWriteResult.APPLIED
@@ -373,6 +374,7 @@ class RuntimeSpy:
     ) -> None:
         self.events = events
         self.graph_result = graph_result
+        self.v3_graph_result = v3_graph_result
         self.graph_error = graph_error
         self.finalize_run_result = finalize_run_result
         self.finalize_run_effects = list(finalize_run_effects or ())
@@ -396,6 +398,9 @@ class RuntimeSpy:
         self.finalize_run_commands: list[FinalizeRunCommand] = []
         self.aggregate_messages: list[object] = []
         self.aggregate_trace_events: list[TraceEvent] = []
+        self.v2_initial_graph_commands: list[object] = []
+        self.v3_initial_graph_commands: list[CreateInitialTaskGraphV3Command] = []
+        self.v3_no_task_commands: list[SaveRequestUnderstandingV3NoTaskCommand] = []
 
     async def insert_run(self, command: object) -> InsertOnlyWriteResult:
         self.events.append("run_inserted")
@@ -472,6 +477,7 @@ class RuntimeSpy:
         self,
         command: object,
     ) -> ConditionalWriteResult:
+        self.v2_initial_graph_commands.append(command)
         self.events.append("initial_graph_v2_saved")
         if self.graph_error is not None:
             raise self.graph_error
@@ -483,6 +489,50 @@ class RuntimeSpy:
             self.task_history.append(self.task)
             self.request_unit_history.append(self.request_unit)
         return self.graph_result
+
+    def _resolved_v3_graph_result(self) -> Cycle2WriteResult:
+        if self.v3_graph_result is not None:
+            return self.v3_graph_result
+        return {
+            ConditionalWriteResult.APPLIED: Cycle2WriteResult.APPLIED,
+            ConditionalWriteResult.NOT_APPLICABLE: (
+                Cycle2WriteResult.NOT_APPLICABLE
+            ),
+            ConditionalWriteResult.PROJECTION_CONFLICT: (
+                Cycle2WriteResult.PROJECTION_CONFLICT
+            ),
+        }[self.graph_result]
+
+    async def save_request_understanding_v3_no_task_if_current(
+        self,
+        command: SaveRequestUnderstandingV3NoTaskCommand,
+    ) -> Cycle2WriteResult:
+        self.events.append("initial_ru_v3_saved")
+        if self.graph_error is not None:
+            raise self.graph_error
+        self.v3_no_task_commands.append(command)
+        return self._resolved_v3_graph_result()
+
+    async def create_initial_task_graph_v3_if_current(
+        self,
+        command: CreateInitialTaskGraphV3Command,
+    ) -> Cycle2WriteResult:
+        self.events.append("initial_graph_v3_saved")
+        if self.graph_error is not None:
+            raise self.graph_error
+        self.v3_initial_graph_commands.append(command)
+        result = self._resolved_v3_graph_result()
+        if result is Cycle2WriteResult.APPLIED:
+            assert len(command.accepted_task_graphs) >= 1
+            graph = command.accepted_task_graphs[0]
+            assert len(graph.input_bindings) == 1
+            self.task = graph.initial_task.initial_record
+            self.request_unit = graph.initial_request_unit.initial_record
+            self.input_binding = graph.input_bindings[0].record
+            self.run_task_link = graph.run_task_link.active_record
+            self.task_history.append(self.task)
+            self.request_unit_history.append(self.request_unit)
+        return result
 
     async def apply_task_transition_if_current(
         self,
@@ -1171,9 +1221,11 @@ def test_success_trajectory_has_exact_budgets_ordering_and_safe_trace() -> None:
     assert _index(events, "messages_reloaded") < _index(
         events, "provider:request_understanding"
     )
-    assert _index(events, "initial_graph_v2_saved") < _index(
+    assert _index(events, "initial_graph_v3_saved") < _index(
         events, "gate_saved"
     )
+    assert runtime.v2_initial_graph_commands == []
+    assert len(runtime.v3_initial_graph_commands) == 1
     assert _index(events, "gate_saved") < _index(events, "tool_call_created")
     assert _index(events, "dispatch_fence") < _index(events, "order_read")
     assert _index(events, "observation_saved") < _index(events, "manifest:2")
@@ -1562,6 +1614,8 @@ def test_untrusted_authoritative_message_reads_fail_before_provider(
 
     assert model.next_move_calls == 0
     assert "initial_graph_v2_saved" not in events
+    assert "initial_graph_v3_saved" not in events
+    assert "initial_ru_v3_saved" not in events
     assert runtime.task_history == []
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
@@ -1581,7 +1635,7 @@ def test_untrusted_authoritative_message_reads_fail_before_provider(
     ],
     ids=("zero", "all-reject", "multi-accept"),
 )
-def test_unscoped_v2_outcomes_fail_without_write_or_product_completion(
+def test_unscoped_v3_outcomes_fail_without_authority_or_product_completion(
     task_candidate_count: int,
     reject_all_candidates: bool,
 ) -> None:
@@ -1602,7 +1656,9 @@ def test_unscoped_v2_outcomes_fail_without_write_or_product_completion(
         _run(service)
 
     assert "initial_graph_v2_saved" not in events
-    assert runtime.task_history == []
+    assert runtime.v2_initial_graph_commands == []
+    assert runtime.v3_initial_graph_commands == []
+    assert runtime.v3_no_task_commands == []
     assert runtime.gates == []
     assert runtime.create_tool_commands == []
     assert runtime.observation_commands == []
@@ -2345,16 +2401,18 @@ def test_after_revalidation_hook_defaults_to_noop_and_has_no_fixture_surface() -
 
 def test_active_runtime_source_has_no_v1_or_source_version_fallback() -> None:
     source = inspect.getsource(agent_run_service_module.AgentRunService)
+    module_source = inspect.getsource(agent_run_service_module)
 
     assert "validate_and_reduce_initial_request(" not in source
     assert "SaveRequestUnderstandingCommand(" not in source
     assert ".create_initial_task_graph_if_current(" not in source
     assert 'or "order-observation.p0.v1"' not in source
-    assert ".create_initial_task_graph_v2_if_current(" in source
-    assert "validate_and_reduce_initial_request_v2(" in source
+    assert ".create_initial_task_graph_v2_if_current(" not in source
+    assert ".create_initial_task_graph_v3_if_current(" in source
+    assert "validate_and_reduce_initial_request_v2(" in module_source
 
 
-def test_active_runtime_and_owned_double_expose_only_ru_v2_symbols() -> None:
+def test_active_runtime_uses_v3_writer_without_v2_fallback() -> None:
     legacy_symbols = {
         "ModelProvider",
         "RequestUnderstandingOutput",
@@ -2401,9 +2459,13 @@ def test_active_runtime_and_owned_double_expose_only_ru_v2_symbols() -> None:
     assert {
         "ModelProviderV2",
         "validate_and_reduce_initial_request_v2",
-        "CreateInitialTaskGraphV2Command",
-        "create_initial_task_graph_v2_if_current",
+        "CreateInitialTaskGraphV3Command",
+        "create_initial_task_graph_v3_if_current",
+        "save_request_understanding_v3_no_task_if_current",
     } <= runtime_symbols | owned_double_methods
+    service_source = inspect.getsource(agent_run_service_module.AgentRunService)
+    assert "CreateInitialTaskGraphV2Command" not in service_source
+    assert ".create_initial_task_graph_v2_if_current(" not in service_source
 
 
 def test_cycle2_mapper_is_complete_disjoint_and_imports_phase1_by_reference() -> None:
@@ -2765,16 +2827,53 @@ class _Cycle2ProviderHarness:
 
 
 class _Cycle2OrderIdProvider(_Cycle2ProviderHarness):
+    def __init__(self, *, order_id: str = "O-1001") -> None:
+        super().__init__()
+        self.order_id = order_id
+
     async def propose_cycle2_continuation(
         self,
         request: object,
     ) -> Cycle2InputCandidate:
         return Cycle2InputCandidate(
             name="order_id",
-            candidate_value="O-1001",
+            candidate_value=self.order_id,
             source_ref=request.message_ref,
-            source_quote="O-1001",
+            source_quote=self.order_id,
             confidence=0.99,
+        )
+
+    async def propose_cycle2_continuation_v3(
+        self,
+        request: object,
+    ) -> Cycle2ContinuationRequestUnderstandingOutputV2:
+        return Cycle2ContinuationRequestUnderstandingOutputV2(
+            schema_version="e2e01-cycle2-continuation.p0.v2",
+            message_ref=request.message_ref,
+            contextualization=QueryContextualizationCandidateV2(
+                text=f"查询订单 {self.order_id}",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(request.message_ref,),
+            ),
+            task_delta_candidates=(
+                Cycle2ContinuationTaskDeltaCandidateV2(
+                    candidate_id=uuid4(),
+                    operation=TaskDeltaOperation.SUPPLY_INPUT,
+                    target_task_alias="current-task",
+                    target_request_unit_alias="current-request",
+                    input_candidates=(
+                        Cycle2InputCandidate(
+                            name="order_id",
+                            candidate_value=self.order_id,
+                            source_ref=request.message_ref,
+                            source_quote=self.order_id,
+                            confidence=0.99,
+                        ),
+                    ),
+                    confidence=0.99,
+                ),
+            ),
         )
 
 
@@ -2862,6 +2961,8 @@ class _Cycle2RuntimeHarness:
         self,
         command: object,
     ):
+        self.events.append("create-initial-graph-v3")
+        self.initial_graph_command = command
         self.v3_initial_commands.append(command)
         return self.v3_initial_write_result
 
@@ -3273,8 +3374,9 @@ def test_cycle2_handler_first_turn_builds_real_trusted_root_and_graph() -> None:
         "load-current-session",
         "insert-run-root",
         "start-run",
-        "create-initial-graph",
+        "create-initial-graph-v3",
     ]
+    assert runtime.v3_initial_commands == [initial]
     assert root.current_session_closure is None
     assert root.owner_scope.customer_id == "customer-A"
     assert root.conversation_record.owner_customer_id == "customer-A"
@@ -3646,15 +3748,16 @@ def test_cycle2_handler_continues_multiple_with_ordinal_without_research() -> No
     handler._get_order = capture_get_order  # type: ignore[method-assign]
     second = asyncio.run(
         handler.handle(
-            AgentRunCommand(customer_context=_context(), message="2")
+            AgentRunCommand(customer_context=_context(), message="第二个")
         )
     )
 
     assert second is sentinel
     assert runtime.search_load_count == 1
     assert len(runtime.search_commands) == 1
-    assert len(runtime.selection_commands) == 1
-    selection = runtime.selection_commands[0]
+    assert runtime.selection_commands == []
+    assert len(runtime.v3_selection_commands) == 1
+    selection = runtime.v3_selection_commands[0]
     assert selection.ordinal_input_binding_record.normalized_value == 2
     assert selection.next_task_record.status is TaskStatus.ACTIVE
     assert selection.next_task_record.state_version == 3
@@ -3728,9 +3831,14 @@ def test_cycle2_rejected_ordinal_persists_claim_without_selection_or_tool() -> N
 
     assert outbound is sentinel
     assert runtime.selection_commands == []
-    assert len(runtime.binding_commands) == 1
-    rejected_command = runtime.binding_commands[0]
-    assert rejected_command.new_input_binding_record.normalized_value == 6
+    assert runtime.binding_commands == []
+    assert len(runtime.v3_continuation_commands) == 1
+    rejected_command = runtime.v3_continuation_commands[0]
+    assert (
+        rejected_command.rejected_ordinal_selection.ordinal_input_binding
+        .normalized_value
+        == 6
+    )
     assert (
         rejected_command.rejected_ordinal_selection.rejection_reason.value
         == "OUT_OF_RANGE"
@@ -3833,10 +3941,14 @@ def test_cycle2_all_typed_ordinal_rejections_use_binding_only_cas(
 
     assert outbound is sentinel
     assert runtime.selection_commands == []
-    assert len(runtime.binding_commands) == 1
-    rejected = runtime.binding_commands[0]
+    assert runtime.binding_commands == []
+    assert len(runtime.v3_continuation_commands) == 1
+    rejected = runtime.v3_continuation_commands[0]
     assert rejected.rejected_ordinal_selection.rejection_reason is reason
-    assert rejected.new_input_binding_record.normalized_value == ordinal
+    assert (
+        rejected.rejected_ordinal_selection.ordinal_input_binding.normalized_value
+        == ordinal
+    )
     assert rejected.next_task_record.status is TaskStatus.WAITING_USER
     assert rejected.next_request_unit_record.open_questions
     assert not hasattr(rejected, "selection_record")
@@ -3925,8 +4037,134 @@ def test_cycle2_direct_order_id_routes_from_actual_current_observation_state(
     assert outbound is sentinel
     assert routed == ["get_shipment" if has_current_shipment else "get_order"]
     assert provider.control_purposes == []
-    assert len(runtime.binding_commands) == 1
-    assert runtime.binding_commands[0].new_input_binding_record.name == "order_id"
+    assert runtime.binding_commands == []
+    assert len(runtime.v3_continuation_commands) == 1
+    assert runtime.v3_continuation_commands[0].decision.input_bindings[0].name == (
+        "order_id"
+    )
+
+
+def test_cycle2_committed_order_claim_must_match_verified_target_before_direct_shipment() -> (
+    None
+):
+    runtime = _Cycle2RuntimeHarness()
+    provider = _Cycle2OrderIdProvider(order_id="O-2002")
+    handler = _cycle2_handler(runtime, provider)
+    sentinel, _captured = _capture_cycle2_initial_turn(handler)
+    initial = runtime.initial_graph_command
+    assert initial is not None
+    graph = initial.reducer_decision.task_graph
+    target_ref = uuid4()
+    observation_ref = uuid4()
+    observed_at = NOW - SHIPMENT_FRESHNESS_TTL * 2
+    unit = graph.request_unit.model_copy(
+        update={"observation_refs": (observation_ref,)}
+    )
+    runtime.current_session = Cycle2CurrentSessionTaskClosure(
+        owner_scope=initial.owner_scope,
+        session_ref_hash=_context().session_ref_hash,
+        conversation_record=initial.expected_conversation_record,
+        current_conversation_task_link_record=(
+            initial.conversation_task_link_record
+        ),
+        current_task_record=graph.task,
+        current_request_unit_record=unit,
+        current_input_binding_records=(graph.input_binding,),
+        current_shipment_observation_records=(
+            ShipmentObservation(
+                observation_id=observation_ref,
+                private_owner_scope="customer-A",
+                task_id=graph.task.task_id,
+                request_unit_id=unit.request_unit_id,
+                verified_order_target_ref=str(target_ref),
+                source_tool="get_shipment",
+                source_tool_call_id=uuid4(),
+                source_resource_ref="private-shipment-O-1001",
+                source_version=(
+                    "mock-shipment-source-version.p0.v1:sha256:" + "c" * 64
+                ),
+                normalized_type="SHIPMENT_SUMMARY",
+                normalized_value=ShipmentSummaryProjection(
+                    shipment_status=ShipmentStatus.IN_TRANSIT,
+                    latest_event_code=ShipmentEventCode.IN_TRANSIT,
+                    latest_event_at=observed_at,
+                    promised_delivery_at=NOW + SHIPMENT_FRESHNESS_TTL * 100,
+                ),
+                observed_at=observed_at,
+                recorded_at=observed_at,
+                valid_until=observed_at + SHIPMENT_FRESHNESS_TTL,
+                raw_result_ref=str(uuid4()),
+            ),
+        ),
+        trusted_now=NOW,
+    )
+    captured_shipment: dict[str, object] = {}
+
+    async def capture_shipment(**kwargs: object) -> AgentRunResult:
+        captured_shipment.update(kwargs)
+        return sentinel
+
+    handler._get_shipment = capture_shipment  # type: ignore[method-assign]
+
+    outbound = asyncio.run(
+        handler.handle(
+            AgentRunCommand(
+                customer_context=_context(),
+                message="订单 O-2002 状态怎么样？",
+            )
+        )
+    )
+
+    assert outbound is sentinel
+    assert len(runtime.v3_continuation_commands) == 1
+    committed = runtime.v3_continuation_commands[0]
+    task = committed.next_task_record
+    request_unit = committed.next_request_unit_record
+    origin_binding_ref = graph.input_binding.binding_id
+    closure = InitialToolCallV2ReadClosure(
+        owner_scope=initial.owner_scope,
+        current_task_record=task,
+        current_request_unit_record=request_unit,
+        current_input_binding_records=(
+            handler._committed_continuation_bindings_v3(committed)
+        ),
+        current_verified_order_targets=(
+            Cycle2VerifiedOrderTargetFacts(
+                verified_target_ref=target_ref,
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                task_state_version=task.state_version,
+                order_id="O-1001",
+                source_observation_ref=observation_ref,
+                source_observation_version="order-observation-v1",
+                input_binding_refs=(origin_binding_ref,),
+            ),
+        ),
+        current_target_observations=(
+            Cycle2TargetObservationFacts(
+                observation_ref=observation_ref,
+                observation_version="order-observation-v1",
+                private_owner_scope_ref="customer-A",
+                owner_customer_id="customer-A",
+                task_id=task.task_id,
+                request_unit_id=request_unit.request_unit_id,
+                task_state_version=task.state_version,
+                verified_target_ref=target_ref,
+                input_binding_refs=(origin_binding_ref,),
+            ),
+        ),
+        trusted_read_at=NOW,
+    )
+    candidate_factory = captured_shipment["candidate_factory"]
+    assert callable(candidate_factory)
+
+    with pytest.raises(
+        AgentRunExecutionError,
+        match="does not match current target",
+    ):
+        candidate_factory(closure, uuid4(), uuid4(), None)
 
 
 def test_cycle2_terminal_control_and_actual_observation_follow_durable_evidence() -> None:
@@ -4965,6 +5203,7 @@ def test_cycle2_initial_v3_staging_exposes_decision_only_for_applied(
     provider = _Cycle2ProviderHarness()
     handler = _cycle2_handler(runtime, provider)
     _sentinel, captured = _capture_cycle2_initial_turn(handler)
+    runtime.v3_initial_commands.clear()
     runtime.v3_initial_write_result = write_result
     run_command = AgentRunCommand(
         customer_context=_context(),
@@ -4972,7 +5211,7 @@ def test_cycle2_initial_v3_staging_exposes_decision_only_for_applied(
     )
 
     result, decision = asyncio.run(
-        handler._stage_initial_turn_v3(
+        handler._persist_initial_turn_v3(
             command=run_command,
             turn=captured["turn"],
         )
@@ -5032,7 +5271,7 @@ def test_cycle2_v3_out_of_range_ordinal_is_atomic_rejected_claim(
     runtime.v3_continuation_write_result = write_result
 
     result, trigger = asyncio.run(
-        handler._stage_continuation_turn_v3(
+        handler._persist_continuation_turn_v3(
             command=AgentRunCommand(
                 customer_context=_context(),
                 message=message.content,
@@ -5043,10 +5282,13 @@ def test_cycle2_v3_out_of_range_ordinal_is_atomic_rejected_claim(
     )
 
     assert result is write_result
-    assert trigger is None
     assert len(runtime.v3_continuation_commands) == 1
     staged = runtime.v3_continuation_commands[0]
     assert type(staged) is ApplyContinuationTaskDeltaV3Command
+    if write_result is Cycle2WriteResult.APPLIED:
+        assert trigger is staged
+    else:
+        assert trigger is None
     assert staged.rejected_ordinal_selection is not None
     assert staged.rejected_ordinal_selection.rejection_reason is (
         Cycle2OrdinalSelectionRejectionReason.OUT_OF_RANGE
@@ -5119,7 +5361,7 @@ def test_cycle2_v3_successful_ordinal_preserves_applied_live_authority_only(
     runtime.v3_selection_write_result = write_result
 
     result, authority = asyncio.run(
-        handler._stage_continuation_turn_v3(
+        handler._persist_continuation_turn_v3(
             command=AgentRunCommand(
                 customer_context=_context(),
                 message=message.content,
