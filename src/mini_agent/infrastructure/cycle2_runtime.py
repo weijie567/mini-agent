@@ -546,6 +546,68 @@ class Cycle2BusinessReadHandler:
                     trusted_now=attempt.started_at,
                 )
             )
+        elif (
+            tool_call.canonical_tool_name is Cycle2ToolName.GET_ORDER
+            and tool_call.verified_target_ref is None
+        ):
+            binding = self._one_argument_binding(closure, tool_call)
+            if (
+                binding.name != "order_id"
+                or type(binding.normalized_value) is not str
+                or len(closure.current_verified_order_targets) != 1
+                or len(closure.current_target_observations) != 1
+            ):
+                raise Cycle2BusinessReadDispatchError(
+                    "direct order authority unavailable"
+                )
+            target = closure.current_verified_order_targets[0]
+            observation = closure.current_target_observations[0]
+            current_binding_ids = {
+                current.binding_id
+                for current in closure.current_input_binding_records
+            }
+            if (
+                target.order_id != binding.normalized_value
+                or binding.binding_id in target.input_binding_refs
+                or not target.input_binding_refs
+                or not set(target.input_binding_refs).issubset(
+                    current_binding_ids
+                )
+                or target.source_observation_ref
+                not in closure.current_request_unit_record.observation_refs
+                or target.private_owner_scope_ref != owner_scope.customer_id
+                or target.owner_customer_id != owner_scope.customer_id
+                or target.task_id != tool_call.task_id
+                or target.request_unit_id != tool_call.request_unit_id
+                or target.task_state_version
+                != tool_call.validated_task_state_version
+                or target.superseded_by is not None
+                or observation.verified_target_ref
+                != target.verified_target_ref
+                or observation.observation_ref
+                != target.source_observation_ref
+                or observation.observation_version
+                != target.source_observation_version
+                or observation.private_owner_scope_ref
+                != owner_scope.customer_id
+                or observation.owner_customer_id != owner_scope.customer_id
+                or observation.task_id != target.task_id
+                or observation.request_unit_id != target.request_unit_id
+                or observation.task_state_version
+                != target.task_state_version
+                or observation.input_binding_refs
+                != target.input_binding_refs
+                or observation.superseded_by is not None
+            ):
+                raise Cycle2BusinessReadDispatchError(
+                    "direct order authority changed"
+                )
+            result = await self._get_order_port.get_order(
+                GetOrderQuery(
+                    customer_id=owner_scope.customer_id,
+                    order_id=binding.normalized_value,
+                )
+            )
         else:
             targets = tuple(
                 target

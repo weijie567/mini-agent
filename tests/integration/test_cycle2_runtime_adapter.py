@@ -219,6 +219,54 @@ def _graph(
     return closure, call, attempt
 
 
+def _direct_order_graph() -> tuple[
+    InitialToolCallV2ReadClosure,
+    ToolCallRecordV2,
+    ToolAttemptRecordV2,
+]:
+    closure, call, attempt = _graph(Cycle2ToolName.GET_ORDER)
+    target_origin = closure.current_input_binding_records[0]
+    direct_order = InputBindingV2(
+        binding_id=uuid4(),
+        name="order_id",
+        normalized_value="O-1001",
+        authority=InputAuthority.USER_CLAIM,
+        source_refs=(uuid4(),),
+        validation_status=InputValidationStatus.ACCEPTED,
+        confirmed_by_user=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    request_unit = closure.current_request_unit_record.model_copy(
+        update={
+            "input_binding_refs": (
+                target_origin.binding_id,
+                direct_order.binding_id,
+            )
+        }
+    )
+    direct_closure = InitialToolCallV2ReadClosure(
+        owner_scope=closure.owner_scope,
+        current_task_record=closure.current_task_record,
+        current_request_unit_record=request_unit,
+        current_input_binding_records=(target_origin, direct_order),
+        current_verified_order_targets=(
+            closure.current_verified_order_targets
+        ),
+        current_target_observations=closure.current_target_observations,
+        trusted_read_at=closure.trusted_read_at,
+    )
+    direct_call = ToolCallRecordV2.model_validate(
+        {
+            **call.model_dump(),
+            "argument_binding_refs": (direct_order.binding_id,),
+            "verified_target_ref": None,
+        },
+        strict=True,
+    )
+    return direct_closure, direct_call, attempt
+
+
 @pytest.mark.parametrize(
     ("tool", "expected_query_type"),
     (
@@ -256,6 +304,160 @@ async def test_runtime_handler_maps_all_three_reads_from_durable_closure(
     assert type(queries[0]) is expected_query_type
     assert queries[0].customer_id == "customer-A"
     assert "customer-B" not in result.model_dump_json()
+
+
+async def test_runtime_handler_maps_direct_order_from_distinct_current_authorities() -> (
+    None
+):
+    closure, call, attempt = _direct_order_graph()
+    order = _OrderPort()
+    handler = Cycle2BusinessReadHandler(
+        runtime_record_port=_RecordPort(closure),
+        search_orders_port=_SearchPort(),
+        get_order_port=order,
+        get_shipment_port=_ShipmentPort(),
+        owner_scopes={closure.owner_scope.customer_id: closure.owner_scope},
+        clock=lambda: NOW + timedelta(microseconds=1),
+    )
+
+    result = await handler(call, attempt, 137)
+
+    assert result.outcome is ToolResultOutcome.SUCCESS
+    assert call.verified_target_ref is None
+    assert call.argument_binding_refs != (
+        closure.current_verified_order_targets[0].input_binding_refs
+    )
+    assert order.queries == [
+        GetOrderQuery(customer_id="customer-A", order_id="O-1001")
+    ]
+
+
+@pytest.mark.parametrize(
+    "variant",
+    (
+        "wrong-binding-name",
+        "wrong-binding-type",
+        "missing-binding",
+        "ambiguous-binding",
+        "missing-target",
+        "ambiguous-target",
+        "missing-observation",
+        "ambiguous-observation",
+        "target-order-mismatch",
+        "observation-target-mismatch",
+        "merged-authority-binding",
+        "superseded-target",
+    ),
+)
+async def test_runtime_handler_rejects_incomplete_direct_order_authority(
+    variant: str,
+) -> None:
+    closure, call, attempt = _direct_order_graph()
+    target_origin, direct_order = closure.current_input_binding_records
+    target = closure.current_verified_order_targets[0]
+    observation = closure.current_target_observations[0]
+    if variant == "wrong-binding-name":
+        direct_order = direct_order.model_copy(
+            update={"name": "product_description"}
+        )
+        closure = closure.model_copy(
+            update={
+                "current_input_binding_records": (
+                    target_origin,
+                    direct_order,
+                )
+            }
+        )
+    elif variant == "wrong-binding-type":
+        direct_order = direct_order.model_copy(update={"normalized_value": 1001})
+        closure = closure.model_copy(
+            update={
+                "current_input_binding_records": (
+                    target_origin,
+                    direct_order,
+                )
+            }
+        )
+    elif variant == "missing-binding":
+        call = call.model_copy(update={"argument_binding_refs": (uuid4(),)})
+    elif variant == "ambiguous-binding":
+        call = call.model_copy(
+            update={
+                "argument_binding_refs": (
+                    target_origin.binding_id,
+                    direct_order.binding_id,
+                )
+            }
+        )
+    elif variant == "missing-target":
+        closure = closure.model_copy(
+            update={"current_verified_order_targets": ()}
+        )
+    elif variant == "ambiguous-target":
+        closure = closure.model_copy(
+            update={"current_verified_order_targets": (target, target)}
+        )
+    elif variant == "missing-observation":
+        closure = closure.model_copy(
+            update={"current_target_observations": ()}
+        )
+    elif variant == "ambiguous-observation":
+        closure = closure.model_copy(
+            update={"current_target_observations": (observation, observation)}
+        )
+    elif variant == "target-order-mismatch":
+        closure = closure.model_copy(
+            update={
+                "current_verified_order_targets": (
+                    target.model_copy(update={"order_id": "O-2002"}),
+                )
+            }
+        )
+    elif variant == "observation-target-mismatch":
+        closure = closure.model_copy(
+            update={
+                "current_target_observations": (
+                    observation.model_copy(
+                        update={"verified_target_ref": uuid4()}
+                    ),
+                )
+            }
+        )
+    elif variant == "merged-authority-binding":
+        target = target.model_copy(
+            update={"input_binding_refs": (direct_order.binding_id,)}
+        )
+        observation = observation.model_copy(
+            update={"input_binding_refs": (direct_order.binding_id,)}
+        )
+        closure = closure.model_copy(
+            update={
+                "current_verified_order_targets": (target,),
+                "current_target_observations": (observation,),
+            }
+        )
+    else:
+        closure = closure.model_copy(
+            update={
+                "current_verified_order_targets": (
+                    target.model_copy(update={"superseded_by": uuid4()}),
+                )
+            }
+        )
+    order = _OrderPort()
+    handler = Cycle2BusinessReadHandler(
+        runtime_record_port=_RecordPort(closure),
+        search_orders_port=_SearchPort(),
+        get_order_port=order,
+        get_shipment_port=_ShipmentPort(),
+        owner_scopes={closure.owner_scope.customer_id: closure.owner_scope},
+        clock=lambda: NOW + timedelta(microseconds=1),
+    )
+
+    with pytest.raises(Cycle2BusinessReadDispatchError):
+        await handler(call, attempt, 137)
+
+    assert order.queries == []
 
 
 async def test_fault_is_attempt_bound_and_skips_business_dispatch() -> None:
