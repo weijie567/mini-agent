@@ -5,6 +5,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -13,12 +14,11 @@ from sqlalchemy import func, select
 
 from mini_agent.application.persistence import P0RecordCode
 from mini_agent.application.records import (
-    RunTaskLinkRecordV2,
     SupersededRunInvalidationKind,
     TrustedOwnerScope,
 )
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.trace import AgentRunRecordV2, AgentRunStatusV2
+from mini_agent.core.trace import AgentRunStatusV2
 from mini_agent.infrastructure.cycle2_fixture_seed import (
     W12_SETUP_SCHEMA_VERSION,
     W12_TRUSTED_CLOCK,
@@ -392,6 +392,8 @@ def test_recovery_fixture_materializes_old_fresh_and_invalidated_snapshots() -> 
     target = _runtime_source(graph, "auto_target.current")
     run = _runtime_source(graph, "recovery_root.run")
     link = _runtime_source(graph, "recovery_root.link")
+    replacement_run = _runtime_source(graph, "recovery_replacement.run")
+    replacement_link = _runtime_source(graph, "recovery_replacement.link")
     manifest = _runtime_source(graph, "recovery_root.context_manifest")
     gate = _runtime_source(graph, "recovery_root.gate")
     tool = _runtime_source(graph, "recovery_root.tool_call")
@@ -415,6 +417,14 @@ def test_recovery_fixture_materializes_old_fresh_and_invalidated_snapshots() -> 
     assert task.state_version == unit.state_version == 4
     assert link.base_task_state_version == 2
     assert link.result_task_state_version is None
+    assert replacement_run.run_id != run.run_id
+    assert replacement_run.conversation_id == run.conversation_id
+    assert replacement_run.status is AgentRunStatusV2.RUNNING
+    assert replacement_run.started_at >= run.started_at
+    assert replacement_link.run_id == replacement_run.run_id
+    assert replacement_link.task_id == task.task_id
+    assert replacement_link.base_task_state_version == task.state_version
+    assert replacement_link.result_task_state_version is None
     assert manifest.selected_message_refs == (auxiliary.message_id,)
     assert manifest.task_state_ref_and_version.state_version == 3
     assert gate.proposed_base_task_state_version == 3
@@ -547,6 +557,7 @@ def test_recovery_provenance_tampering_fails_closed() -> None:
         state.base_records, "message.historical_user.order_id"
     )
     tool = _runtime_source(state.base_records, "recovery_root.tool_call")
+    obsolete_run = _runtime_source(state.base_records, "recovery_root.run")
     tampered_records = (
         _replace_runtime_source(
             state.base_records,
@@ -580,6 +591,31 @@ def test_recovery_provenance_tampering_fails_closed() -> None:
             state.base_records,
             role="task.current",
             update={"updated_at": tool.attempts[0].finished_at},
+        ),
+        tuple(
+            record
+            for record in state.base_records
+            if record.record_role != "recovery_replacement.link"
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="recovery_replacement.run",
+            update={"run_id": obsolete_run.run_id},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="recovery_replacement.run",
+            update={"conversation_id": uuid4()},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="recovery_replacement.link",
+            update={"task_id": uuid4()},
+        ),
+        _replace_runtime_source(
+            state.base_records,
+            role="recovery_replacement.link",
+            update={"base_task_state_version": 3},
         ),
     )
     for records in tampered_records:
@@ -1149,42 +1185,17 @@ def test_w12_overlay_stale_and_recovery_graphs_survive_atomic_postgres_encoding(
             fresh_order_binding = _runtime_source(
                 graph, "binding.order_id.recovery_root"
             )
-            replacement_run_id = deterministic_cycle2_setup_uuid(
-                "fx-retry-scheduled-obsolete-run-owner-a-v1",
-                "recovery_replacement.run",
+            replacement_run = _runtime_source(
+                graph, "recovery_replacement.run"
             )
-            replacement_run = AgentRunRecordV2(
-                run_id=replacement_run_id,
-                conversation_id=obsolete_run.conversation_id,
-                status=AgentRunStatusV2.RUNNING,
-                provider_lane="scripted-cycle2",
-                started_at=task.updated_at,
+            replacement_link = _runtime_source(
+                graph, "recovery_replacement.link"
             )
-            replacement_link = RunTaskLinkRecordV2(
-                run_id=replacement_run_id,
-                task_id=task.task_id,
-                base_task_state_version=task.state_version,
-                result_task_state_version=None,
-            )
+            replacement_run_id = replacement_run.run_id
             reader = PostgresRecordAdapter(
                 factory,
                 cycle2_clock=lambda: W12_TRUSTED_CLOCK,
             )
-            with factory.begin() as session:
-                reader._cycle2_insert(
-                    session,
-                    (
-                        reader._cycle2_encode(
-                            P0RecordCode.AGENT_RUN_RECORD,
-                            replacement_run,
-                        ),
-                        reader._cycle2_encode(
-                            P0RecordCode.RUN_TASK_LINK_RECORD,
-                            replacement_link,
-                        ),
-                    ),
-                    owner_customer_id="customer-A",
-                )
             owner_scope = TrustedOwnerScope.from_customer_context(
                 CustomerContext(
                     subject_ref="subject-A",
@@ -1205,6 +1216,8 @@ def test_w12_overlay_stale_and_recovery_graphs_survive_atomic_postgres_encoding(
                 )
             )
             assert superseded is not None
+            assert superseded.current_authoritative_run_record == replacement_run
+            assert superseded.current_authoritative_link_record == replacement_link
             assert superseded.obsolete_task_record is not None
             assert superseded.obsolete_request_unit_record is not None
             assert superseded.obsolete_task_record.state_version == 2

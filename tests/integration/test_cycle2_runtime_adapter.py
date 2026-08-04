@@ -527,7 +527,10 @@ async def test_runtime_handler_rejects_unmapped_owner_before_business_read() -> 
         ),
         (
             "fault:get-shipment:restart-after-retry-finalize-v1",
-            ((1, Cycle2FaultBoundary.AFTER_RETRY_FINALIZE, Cycle2FaultDirectiveKind.PROCESS_RESTART),),
+            (
+                (1, Cycle2FaultBoundary.BEFORE_DISPATCH, Cycle2FaultDirectiveKind.SYSTEM_FAILURE),
+                (1, Cycle2FaultBoundary.AFTER_RETRY_FINALIZE, Cycle2FaultDirectiveKind.PROCESS_RESTART),
+            ),
         ),
         (
             "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1",
@@ -627,6 +630,14 @@ def test_retry_finalize_restart_is_consumed_only_by_explicit_lifecycle_hook() ->
         ]
     )
     controller.attach()
+    transient = controller.consume(
+        canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
+        attempt_no=1,
+        boundary=Cycle2FaultBoundary.BEFORE_DISPATCH,
+    )
+    assert transient is not None
+    assert transient.kind is Cycle2FaultDirectiveKind.SYSTEM_FAILURE
+    assert transient.error_code == "SHIPMENT_SERVICE_TRANSIENT"
     with pytest.raises(Cycle2InjectedProcessRestart, match="RETRY_RECOVERY"):
         consume_cycle2_retry_finalize_boundary(
             controller,
