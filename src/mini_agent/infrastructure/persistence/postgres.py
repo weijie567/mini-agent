@@ -8225,6 +8225,34 @@ class PostgresRecordAdapter:
                 InputBindingV2,
                 loaded[1].source_record,
             )
+        if include_v3_request_understanding:
+            pending_predecessor_ids = [
+                binding.supersedes
+                for binding in binding_by_id.values()
+                if binding.supersedes is not None
+            ]
+            while pending_predecessor_ids:
+                predecessor_id = pending_predecessor_ids.pop()
+                if predecessor_id in binding_by_id:
+                    continue
+                loaded = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                    logical_identity=(("binding_id", predecessor_id),),
+                )
+                if loaded is None:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+                    )
+                predecessor = loaded[1].source_record
+                if type(predecessor) is not InputBindingV2:
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.SOURCE_MODEL_MISMATCH
+                    )
+                binding_by_id[predecessor_id] = predecessor
+                if predecessor.supersedes is not None:
+                    pending_predecessor_ids.append(predecessor.supersedes)
         bindings = sorted(
             binding_by_id.values(),
             key=lambda record: (

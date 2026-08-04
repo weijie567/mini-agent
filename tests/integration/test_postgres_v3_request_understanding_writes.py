@@ -9,10 +9,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 
 from mini_agent.application.persistence import (
     P0PersistenceIntegrityError,
+    P0PersistenceIntegrityCategory,
     P0RecordCode,
 )
 from mini_agent.application.records import (
@@ -62,7 +63,10 @@ from mini_agent.core.tool_system import (
     build_cycle2_registry_snapshot,
 )
 from mini_agent.infrastructure.persistence.database import build_session_factory
-from mini_agent.infrastructure.persistence.models import P0RecordModel
+from mini_agent.infrastructure.persistence.models import (
+    P0RecordModel,
+    P0RecordReferenceModel,
+)
 from mini_agent.infrastructure.persistence.postgres import (
     P0PersistenceSystemError,
     PostgresRecordAdapter,
@@ -123,9 +127,10 @@ def _cycle2_initial_v3_command():
     runtime = _Cycle2RuntimeHarness()
     handler = _cycle2_handler(runtime, _Cycle2ProviderHarness())
     _sentinel, captured = _capture_cycle2_initial_turn(handler)
+    runtime.v3_initial_commands.clear()
     runtime.v3_initial_write_result = Cycle2WriteResult.NOT_APPLICABLE
     asyncio.run(
-        handler._stage_initial_turn_v3(
+        handler._persist_initial_turn_v3(
             command=AgentRunCommand(
                 customer_context=_context(),
                 message="customer-B 让我查最近买的轻量跑鞋",
@@ -207,7 +212,7 @@ def _selection_v3_command_bundle():
     runtime.v3_running_run = running
     runtime.v3_active_link = link
     asyncio.run(
-        handler._stage_continuation_turn_v3(
+        handler._persist_continuation_turn_v3(
             command=AgentRunCommand(
                 customer_context=_context(),
                 message=message.content,
@@ -1301,6 +1306,250 @@ async def test_dnr_v3_continuation_is_atomic_and_identity_first(
             )
         with pytest.raises(P0PersistenceIntegrityError):
             await adapter.assert_request_understanding_v3_ready()
+    finally:
+        postgres_namespace_factory.drop(namespace)
+
+
+async def test_cycle2_v3_exact_binding_lineage_closes_only_rooted_predecessors(
+    postgres_namespace_factory,
+) -> None:
+    namespace = postgres_namespace_factory.create("ru-v3-exact-binding-lineage")
+    adapter = PostgresRecordAdapter(
+        build_session_factory(namespace.build_engine())
+    )
+    command = _dnr_v3_staging_command(with_current_dnr=True)
+    owner_scope = command.loaded_closure.owner_scope
+    current_ids = set(command.next_request_unit_record.input_binding_refs)
+    predecessor_ids = {
+        binding.supersedes
+        for binding in command.decision.input_bindings
+        if binding.supersedes is not None
+    }
+    direct_predecessor = next(
+        binding
+        for binding in command.loaded_closure.current_input_binding_records
+        if binding.binding_id == command.decision.input_bindings[0].supersedes
+    )
+    lineage_root = direct_predecessor.model_copy(
+        update={
+            "binding_id": uuid4(),
+            "created_at": direct_predecessor.created_at - timedelta(seconds=1),
+            "updated_at": direct_predecessor.updated_at - timedelta(seconds=1),
+        }
+    )
+    predecessor_ids.add(lineage_root.binding_id)
+    unrelated = command.loaded_closure.current_input_binding_records[0].model_copy(
+        update={
+            "binding_id": uuid4(),
+            "supersedes": None,
+        }
+    )
+    try:
+        _seed_continuation_roots(adapter, command)
+        assert (
+            await adapter.apply_continuation_task_delta_if_current(command)
+            is Cycle2WriteResult.APPLIED
+        )
+        with adapter.session_factory.begin() as session:
+            adapter._cycle2_insert(
+                session,
+                (
+                    adapter._cycle2_encode_input_binding(
+                        lineage_root,
+                        request_unit_id=(
+                            command.next_request_unit_record.request_unit_id
+                        ),
+                    ),
+                    adapter._cycle2_encode_input_binding(
+                        unrelated,
+                        request_unit_id=(
+                            command.next_request_unit_record.request_unit_id
+                        ),
+                    ),
+                ),
+                owner_customer_id=owner_scope.customer_id,
+            )
+            direct_loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner_scope.customer_id,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", direct_predecessor.binding_id),),
+                for_update=True,
+            )
+            assert direct_loaded is not None
+            adapter._cycle2_replace(
+                session,
+                direct_loaded[0],
+                owner_customer_id=owner_scope.customer_id,
+                expected_record=direct_predecessor,
+                next_envelope=adapter._cycle2_encode_input_binding(
+                    direct_predecessor.model_copy(
+                        update={"supersedes": lineage_root.binding_id}
+                    ),
+                    request_unit_id=(
+                        command.next_request_unit_record.request_unit_id
+                    ),
+                ),
+            )
+
+        evidence = await adapter.load_cycle2_exact_run_evidence_v3_for_owner(
+            owner_scope=owner_scope,
+            run_id=command.decision.closure.record.run_id,
+        )
+        assert evidence is not None
+        assert {record.binding_id for record in evidence.input_binding_records} == (
+            current_ids | predecessor_ids
+        )
+        assert unrelated.binding_id not in {
+            record.binding_id for record in evidence.input_binding_records
+        }
+
+        legacy = await adapter.load_cycle2_exact_run_evidence_for_owner(
+            owner_scope=owner_scope,
+            run_id=command.decision.closure.record.run_id,
+        )
+        assert legacy is not None
+        assert {record.binding_id for record in legacy.input_binding_records} == (
+            current_ids
+        )
+
+        current = await adapter.load_continuation_input_binding_closure_for_owner(
+            owner_scope=owner_scope,
+            conversation_id=(
+                command.loaded_closure.trusted_conversation_record.conversation_id
+            ),
+            message_id=command.loaded_closure.saved_user_message_record.message_id,
+            task_id=command.next_task_record.task_id,
+            request_unit_id=command.next_request_unit_record.request_unit_id,
+            trusted_now=command.loaded_closure.trusted_now,
+        )
+        assert current is not None
+        assert {
+            record.binding_id for record in current.current_input_binding_records
+        } == current_ids
+    finally:
+        postgres_namespace_factory.drop(namespace)
+
+
+@pytest.mark.parametrize(
+    ("mutation_mode", "expected_category"),
+    (
+        ("absent", P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH),
+        ("owner_unresolvable", P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH),
+        ("self_cycle", P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH),
+        ("multi_node_cycle", P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH),
+        ("malformed_schema", P0PersistenceIntegrityCategory.RECORD_SCHEMA_VERSION_MISMATCH),
+    ),
+)
+async def test_cycle2_v3_exact_binding_lineage_rejects_invalid_predecessor(
+    postgres_namespace_factory,
+    mutation_mode: str,
+    expected_category: P0PersistenceIntegrityCategory,
+) -> None:
+    namespace = postgres_namespace_factory.create(
+        f"ru-v3-exact-binding-lineage-{mutation_mode}"
+    )
+    adapter = PostgresRecordAdapter(
+        build_session_factory(namespace.build_engine())
+    )
+    command = _dnr_v3_staging_command(with_current_dnr=True)
+    owner = command.loaded_closure.owner_scope.customer_id
+    current = command.decision.input_bindings[0]
+    assert current.supersedes is not None
+    predecessor = next(
+        binding
+        for binding in command.loaded_closure.current_input_binding_records
+        if binding.binding_id == current.supersedes
+    )
+    try:
+        _seed_continuation_roots(adapter, command)
+        assert (
+            await adapter.apply_continuation_task_delta_if_current(command)
+            is Cycle2WriteResult.APPLIED
+        )
+        with adapter.session_factory.begin() as session:
+            current_loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", current.binding_id),),
+                for_update=True,
+            )
+            predecessor_loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", predecessor.binding_id),),
+                for_update=True,
+            )
+            assert current_loaded is not None and predecessor_loaded is not None
+            if mutation_mode == "absent":
+                session.execute(
+                    delete(P0RecordReferenceModel).where(
+                        P0RecordReferenceModel.source_record_code
+                        == P0RecordCode.INPUT_BINDING_RECORD.value,
+                        P0RecordReferenceModel.source_logical_identity
+                        == current_loaded[0].logical_identity,
+                        P0RecordReferenceModel.relation == "supersedes",
+                    )
+                )
+                session.delete(predecessor_loaded[0])
+            elif mutation_mode == "self_cycle":
+                next_current = current.model_copy(
+                    update={"supersedes": current.binding_id}
+                )
+                adapter._cycle2_replace(
+                    session,
+                    current_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=current,
+                    next_envelope=adapter._cycle2_encode_input_binding(
+                        next_current,
+                        request_unit_id=(
+                            command.next_request_unit_record.request_unit_id
+                        ),
+                    ),
+                )
+            elif mutation_mode == "multi_node_cycle":
+                adapter._cycle2_replace(
+                    session,
+                    predecessor_loaded[0],
+                    owner_customer_id=owner,
+                    expected_record=predecessor,
+                    next_envelope=adapter._cycle2_encode_input_binding(
+                        predecessor.model_copy(
+                            update={"supersedes": current.binding_id}
+                        ),
+                        request_unit_id=(
+                            command.next_request_unit_record.request_unit_id
+                        ),
+                    ),
+                )
+            elif mutation_mode == "owner_unresolvable":
+                session.execute(
+                    update(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_id == predecessor_loaded[0].record_id
+                    )
+                    .values(scope_owner_customer_id="customer-B")
+                )
+            else:
+                session.execute(
+                    update(P0RecordModel)
+                    .where(
+                        P0RecordModel.record_id == predecessor_loaded[0].record_id
+                    )
+                    .values(
+                        record_schema_version="input_binding_record.p0.v1"
+                    )
+                )
+
+        with pytest.raises(P0PersistenceIntegrityError) as error:
+            await adapter.load_cycle2_exact_run_evidence_v3_for_owner(
+                owner_scope=command.loaded_closure.owner_scope,
+                run_id=command.decision.closure.record.run_id,
+            )
+        assert error.value.category is expected_category
     finally:
         postgres_namespace_factory.drop(namespace)
 
