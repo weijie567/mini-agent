@@ -1325,6 +1325,19 @@ async def test_cycle2_v3_exact_binding_lineage_closes_only_rooted_predecessors(
         for binding in command.decision.input_bindings
         if binding.supersedes is not None
     }
+    direct_predecessor = next(
+        binding
+        for binding in command.loaded_closure.current_input_binding_records
+        if binding.binding_id == command.decision.input_bindings[0].supersedes
+    )
+    lineage_root = direct_predecessor.model_copy(
+        update={
+            "binding_id": uuid4(),
+            "created_at": direct_predecessor.created_at - timedelta(seconds=1),
+            "updated_at": direct_predecessor.updated_at - timedelta(seconds=1),
+        }
+    )
+    predecessor_ids.add(lineage_root.binding_id)
     unrelated = command.loaded_closure.current_input_binding_records[0].model_copy(
         update={
             "binding_id": uuid4(),
@@ -1342,6 +1355,12 @@ async def test_cycle2_v3_exact_binding_lineage_closes_only_rooted_predecessors(
                 session,
                 (
                     adapter._cycle2_encode_input_binding(
+                        lineage_root,
+                        request_unit_id=(
+                            command.next_request_unit_record.request_unit_id
+                        ),
+                    ),
+                    adapter._cycle2_encode_input_binding(
                         unrelated,
                         request_unit_id=(
                             command.next_request_unit_record.request_unit_id
@@ -1349,6 +1368,28 @@ async def test_cycle2_v3_exact_binding_lineage_closes_only_rooted_predecessors(
                     ),
                 ),
                 owner_customer_id=owner_scope.customer_id,
+            )
+            direct_loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=owner_scope.customer_id,
+                record_code=P0RecordCode.INPUT_BINDING_RECORD,
+                logical_identity=(("binding_id", direct_predecessor.binding_id),),
+                for_update=True,
+            )
+            assert direct_loaded is not None
+            adapter._cycle2_replace(
+                session,
+                direct_loaded[0],
+                owner_customer_id=owner_scope.customer_id,
+                expected_record=direct_predecessor,
+                next_envelope=adapter._cycle2_encode_input_binding(
+                    direct_predecessor.model_copy(
+                        update={"supersedes": lineage_root.binding_id}
+                    ),
+                    request_unit_id=(
+                        command.next_request_unit_record.request_unit_id
+                    ),
+                ),
             )
 
         evidence = await adapter.load_cycle2_exact_run_evidence_v3_for_owner(
