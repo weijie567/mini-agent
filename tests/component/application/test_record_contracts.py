@@ -10712,6 +10712,244 @@ def test_cycle2_v3_evidence_closes_each_producing_run_link() -> None:
         )
 
 
+def _cycle2_v3_exact_tool_binding_timeline_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    base = _cycle2_dnr_v3_exact_run_evidence()
+    historical_message = base.message_records[0]
+    task = base.task_records[0]
+    unit = base.request_unit_records[0]
+    product_binding, historical_order_binding, current_order_binding, claim = (
+        base.input_binding_records
+    )
+    history_at = historical_message.received_at
+    observation_at = history_at + timedelta(microseconds=500)
+    supporting_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=base.conversation_record.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane=base.run_record.provider_lane,
+        started_at=history_at,
+        completed_at=observation_at,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    source_call = _c2_tool_call(
+        name=Cycle2ToolName.GET_ORDER,
+        owner=base.owner_scope.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=2,
+        argument_binding_refs=(historical_order_binding.binding_id,),
+        run_id=supporting_run.run_id,
+        started_at=history_at,
+    )
+    source_attempt = ToolAttemptRecordV2(
+        tool_call_id=source_call.tool_call_id,
+        attempt_no=1,
+        started_at=history_at,
+        finished_at=observation_at,
+        outcome=ToolResultOutcome.SUCCESS,
+        retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+    )
+    source_call = _c2_project(
+        source_call,
+        attempts=(source_attempt,),
+        attempt_count=1,
+        status=ToolCallStatus.SUCCEEDED,
+        finished_at=observation_at,
+        result_ref=uuid4(),
+    )
+    order_observation = _observation(
+        source_version="mock-order-source-version.p0.v1:sha256:" + "e" * 64,
+        normalized_value=OrderSummaryProjection(
+            order_number="O-1001",
+            status=OrderStatus.SHIPPED,
+            line_items=(
+                OrderLineSummary(product_name="wireless earphones", quantity=1),
+            ),
+            ordered_at=history_at - timedelta(days=1),
+            status_updated_at=history_at,
+        ),
+        observed_at=observation_at,
+        recorded_at=observation_at,
+    )
+    current_understanding = base.request_understanding_closures[0]
+    current_child = _c2_project(
+        current_understanding.accepted_task_deltas[0],
+        base_task_state_version=3,
+        result_task_state_version=4,
+    )
+    terminal_task = _c2_project(
+        task,
+        state_version=4,
+        updated_at=current_child.accepted_at,
+    )
+    terminal_unit = _c2_project(
+        unit,
+        state_version=4,
+        updated_at=current_child.accepted_at,
+        observation_refs=(order_observation.observation_id,),
+    )
+    snapshot = build_cycle2_registry_snapshot()
+    artifact = ModelVisibleToolsetArtifact(
+        model_visible_toolset_hash=snapshot.model_visible_toolset_hash,
+        provider_visible_tool_specs=snapshot.provider_visible_toolset,
+    )
+    manifest = ContextManifest(
+        context_manifest_id=source_call.context_manifest_id,
+        run_id=source_call.run_id,
+        model_call_id=source_call.model_call_id,
+        tool_registry_version=source_call.tool_registry_version,
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(historical_message.message_id,),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=source_call.started_at,
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "supporting_run_records": (supporting_run,),
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=supporting_run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=2,
+                    result_task_state_version=3,
+                ),
+                _c2_project(
+                    base.run_task_link_records[0],
+                    base_task_state_version=3,
+                ),
+            ),
+            "task_records": (terminal_task,),
+            "request_unit_records": (terminal_unit,),
+            "input_binding_records": (
+                product_binding,
+                historical_order_binding,
+                current_order_binding,
+                claim,
+            ),
+            "request_understanding_closures": (
+                RequestUnderstandingClosureV3(
+                    record=current_understanding.record,
+                    accepted_task_deltas=(current_child,),
+                ),
+            ),
+            "order_observation_records": (order_observation,),
+            "observation_source_edges": (
+                Cycle2ObservationSourceEdge(
+                    observation_ref=order_observation.observation_id,
+                    source_tool_call_id=source_call.tool_call_id,
+                    source_run_id=source_call.run_id,
+                    task_id=source_call.task_id,
+                    request_unit_id=source_call.request_unit_id,
+                ),
+            ),
+            "gate_decision_records": (_c2_gate_for_tool_call(source_call),),
+            "tool_call_records": (source_call,),
+            "context_manifest_records": (manifest,),
+            "model_visible_toolset_artifacts": (artifact,),
+        }
+    )
+
+
+def test_cycle2_v3_exact_tool_binding_timeline_accepts_supporting_ancestor(
+) -> None:
+    closure = _cycle2_v3_exact_tool_binding_timeline_evidence()
+
+    source_call = closure.tool_call_records[0]
+    historical_order_binding = closure.input_binding_records[1]
+    current_order_binding = closure.input_binding_records[2]
+    assert source_call.run_id == closure.supporting_run_records[0].run_id
+    assert source_call.validated_task_state_version == 2
+    assert source_call.argument_binding_refs == (
+        historical_order_binding.binding_id,
+    )
+    assert current_order_binding.supersedes == historical_order_binding.binding_id
+
+
+@pytest.mark.parametrize(
+    "binding_position",
+    (
+        "ancestor_after_successor",
+        "successor_before_activation",
+        "unknown_version",
+    ),
+)
+def test_cycle2_v3_exact_tool_binding_timeline_rejects_wrong_version(
+    binding_position: str,
+) -> None:
+    closure = _cycle2_v3_exact_tool_binding_timeline_evidence()
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    historical_order_binding = closure.input_binding_records[1]
+    current_order_binding = closure.input_binding_records[2]
+    if binding_position == "ancestor_after_successor":
+        binding_ref = historical_order_binding.binding_id
+        validated_version = 4
+        source_run = closure.run_record
+        source_message = closure.message_records[1]
+    elif binding_position == "successor_before_activation":
+        binding_ref = current_order_binding.binding_id
+        validated_version = 2
+        source_run = closure.supporting_run_records[0]
+        source_message = closure.message_records[0]
+    else:
+        binding_ref = current_order_binding.binding_id
+        validated_version = task.state_version + 1
+        source_run = closure.run_record
+        source_message = closure.message_records[1]
+    probe = _c2_tool_call(
+        name=Cycle2ToolName.GET_ORDER,
+        owner=closure.owner_scope.customer_id,
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        validated_task_state_version=validated_version,
+        argument_binding_refs=(binding_ref,),
+        run_id=source_run.run_id,
+        started_at=source_run.started_at,
+    )
+    artifact = closure.model_visible_toolset_artifacts[0]
+    manifest = ContextManifest(
+        context_manifest_id=probe.context_manifest_id,
+        run_id=probe.run_id,
+        model_call_id=probe.model_call_id,
+        tool_registry_version=probe.tool_registry_version,
+        model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+        selected_message_refs=(source_message.message_id,),
+        redaction_policy_version="redaction-v1",
+        token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+        assembled_at=probe.started_at,
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="v3 ToolCall Binding timeline mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    *closure.gate_decision_records,
+                    _c2_gate_for_tool_call(probe),
+                ),
+                "tool_call_records": (*closure.tool_call_records, probe),
+                "context_manifest_records": (
+                    *closure.context_manifest_records,
+                    manifest,
+                ),
+            }
+        )
+
+
 def _c2_ordinal_target_exact_run_evidence(
 ) -> Cycle2ExactRunEvidenceClosure:
     command = _c2_multiple_search_command()

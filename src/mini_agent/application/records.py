@@ -3654,11 +3654,11 @@ def _validate_cycle2_request_understanding_evidence(
     shipment_observations: tuple[ShipmentObservation, ...],
     observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...],
     tool_calls: tuple[ToolCallRecordV2, ...],
-) -> None:
+) -> frozenset[UUID]:
     """Close staged v3 parents against one already selected Cycle 2 graph."""
 
     if not closures:
-        return
+        return frozenset()
 
     for unit in units.values():
         current_binding_names = tuple(
@@ -4265,9 +4265,19 @@ def _validate_cycle2_request_understanding_evidence(
             bindings[binding_ref].name: binding_ref
             for binding_ref in expected_current_binding_refs
         }
+        binding_refs_by_state_version: dict[int, frozenset[UUID]] = {
+            task.state_version: frozenset(expected_current_binding_refs)
+        }
         for edge in reversed(edge_keys):
+            base_version, result_version = edge
+            binding_refs_by_state_version[result_version] = frozenset(
+                expected_current_binding_refs
+            )
             accepted = accepted_edges.get(edge)
             if accepted is None:
+                binding_refs_by_state_version[base_version] = frozenset(
+                    expected_current_binding_refs
+                )
                 continue
             for binding_ref in reversed(accepted.input_binding_refs):
                 binding = bindings[binding_ref]
@@ -4308,10 +4318,27 @@ def _validate_cycle2_request_understanding_evidence(
                     current_binding_ref_by_name[binding.name] = (
                         previous.binding_id
                     )
+            binding_refs_by_state_version[base_version] = frozenset(
+                expected_current_binding_refs
+            )
         if min(link_bases) == 0 and expected_current_binding_refs:
             raise ValueError(
                 "Cycle 2 v3 RequestUnderstanding Binding timeline mismatch"
             )
+        if any(
+            call.request_unit_id != unit.request_unit_id
+            or call.validated_task_state_version
+            not in binding_refs_by_state_version
+            or not set(call.argument_binding_refs).issubset(
+                binding_refs_by_state_version.get(
+                    call.validated_task_state_version,
+                    frozenset(),
+                )
+            )
+            for call in tool_calls
+            if call.task_id == task_id
+        ):
+            raise ValueError("Cycle 2 v3 ToolCall Binding timeline mismatch")
 
         if current_status is None:
             current_status = task.status
@@ -4323,7 +4350,7 @@ def _validate_cycle2_request_understanding_evidence(
             raise ValueError(
                 "Cycle 2 v3 RequestUnderstanding Task terminal mismatch"
             )
-
+    return frozenset(accepted_edges_by_task)
 
 
 def _validate_request_understanding_v3_identity_groups(
@@ -4674,7 +4701,7 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             for transition in self.task_state_transition_records
         ):
             raise ValueError("Cycle 2 exact evidence transition root mismatch")
-        _validate_cycle2_request_understanding_evidence(
+        v3_timeline_task_ids = _validate_cycle2_request_understanding_evidence(
             closures=self.request_understanding_closures,
             root_run_id=run.run_id,
             run_by_id=run_by_id,
@@ -5417,12 +5444,15 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             or unit_by_id[record.request_unit_id].task_id != record.task_id
             or record.private_owner_scope_ref != owner
             or any(ref not in bindings for ref in record.argument_binding_refs)
-            or any(
-                ref
-                not in unit_by_id[
-                    record.request_unit_id
-                ].input_binding_refs
-                for ref in record.argument_binding_refs
+            or (
+                record.task_id not in v3_timeline_task_ids
+                and any(
+                    ref
+                    not in unit_by_id[
+                        record.request_unit_id
+                    ].input_binding_refs
+                    for ref in record.argument_binding_refs
+                )
             )
             for record in self.tool_call_records
         ):
