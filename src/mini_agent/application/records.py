@@ -8716,11 +8716,17 @@ class FinalizeCreatedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
 
 
 class FinalizeUnfinishedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
-    """Atomically append a decision child and terminate only the parent."""
+    """Atomically close one unfinished Tool/Run/Task no-result aggregate."""
 
     loaded_closure: ToolRetryRecoveryReadClosureV2
     recovery_decision_record: ToolRetryRecoveryDecisionRecordV2
     terminal_tool_call_record: ToolCallRecordV2
+    task_transition: ApplyTaskTransitionCommand
+    terminal_run_record: AgentRunRecordV2
+    terminal_run_task_link_record: RunTaskLinkRecordV2
+    recovery_trace_records: Annotated[
+        tuple[TraceEventV2, ...], Field(min_length=3, max_length=3)
+    ]
 
     @model_validator(mode="before")
     @classmethod
@@ -8731,7 +8737,11 @@ class FinalizeUnfinishedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
                 "loaded_closure": ToolRetryRecoveryReadClosureV2,
                 "recovery_decision_record": ToolRetryRecoveryDecisionRecordV2,
                 "terminal_tool_call_record": ToolCallRecordV2,
+                "task_transition": ApplyTaskTransitionCommand,
+                "terminal_run_record": AgentRunRecordV2,
+                "terminal_run_task_link_record": RunTaskLinkRecordV2,
             },
+            tuple_model_fields={"recovery_trace_records": TraceEventV2},
         )
 
     @model_validator(mode="after")
@@ -8762,6 +8772,119 @@ class FinalizeUnfinishedToolRecoveryV2Command(_StrictRuntimePrivateRecord):
             or terminal.result_ref is not None
         ):
             raise ValueError("unfinished recovery terminal projection is not exact")
+
+        transition = self.task_transition
+        reason_ref = transition.task_state_transition.reason_ref
+        decided_at = decision.decided_at
+        expected_task = TaskRecord.model_validate(
+            {
+                **closure.current_task_record.model_dump(mode="python"),
+                "status": TaskStatus.BLOCKED,
+                "state_version": closure.current_task_record.state_version + 1,
+                "updated_at": decided_at,
+                "last_outcome_ref": reason_ref,
+            },
+            strict=True,
+        )
+        expected_unit = RequestUnitRecord.model_validate(
+            {
+                **closure.current_request_unit_record.model_dump(mode="python"),
+                "status": TaskStatus.BLOCKED,
+                "state_version": (
+                    closure.current_request_unit_record.state_version + 1
+                ),
+                "updated_at": decided_at,
+                "result_refs": (
+                    *closure.current_request_unit_record.result_refs,
+                    reason_ref,
+                ),
+            },
+            strict=True,
+        )
+        expected_transition = ApplyTaskTransitionCommand(
+            expected_task_record=closure.current_task_record,
+            next_task_record=expected_task,
+            expected_request_unit_record=closure.current_request_unit_record,
+            next_request_unit_record=expected_unit,
+            task_state_transition=TaskStateTransition(
+                task_id=closure.current_task_record.task_id,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+                from_status=closure.current_task_record.status,
+                to_status=TaskStatus.BLOCKED,
+                base_state_version=closure.current_task_record.state_version,
+                result_state_version=expected_task.state_version,
+                reason_ref=reason_ref,
+                changed_at=decided_at,
+            ),
+        )
+        if transition != expected_transition:
+            raise ValueError("unfinished recovery Task transition is not exact")
+
+        expected_run = AgentRunRecordV2.model_validate(
+            {
+                **closure.active_run_record.model_dump(mode="python"),
+                "status": AgentRunStatusV2.INCOMPLETE,
+                "completed_at": decided_at,
+                "stop_reason": StopReasonV2.PROCESS_RESTART_DETECTED,
+                "incomplete_reason": "PROCESS_RESTART_DETECTED",
+            },
+            strict=True,
+        )
+        expected_link = RunTaskLinkRecordV2.model_validate(
+            {
+                **closure.active_run_task_link_record.model_dump(mode="python"),
+                "result_task_state_version": expected_task.state_version,
+            },
+            strict=True,
+        )
+        if (
+            self.terminal_run_record != expected_run
+            or self.terminal_run_task_link_record != expected_link
+        ):
+            raise ValueError("unfinished recovery Run/link closure is not exact")
+
+        traces = self.recovery_trace_records
+        trace_ids = tuple(trace.trace_event_id for trace in traces)
+        expected_traces = (
+            TraceEventV2(
+                trace_event_id=traces[0].trace_event_id,
+                event_type=TraceEventType.RUN_STOPPED,
+                occurred_at=decided_at,
+                run_id=closure.active_run_record.run_id,
+                task_id=closure.current_task_record.task_id,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+                user_outcome=AgentOutcome.BLOCKED,
+                stop_reason=StopReasonV2.PROCESS_RESTART_DETECTED,
+            ),
+            TraceEventV2(
+                trace_event_id=traces[1].trace_event_id,
+                event_type=TraceEventType.TASK_STATE_CHANGED,
+                occurred_at=decided_at,
+                run_id=closure.active_run_record.run_id,
+                task_id=closure.current_task_record.task_id,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+            ),
+            TraceEventV2(
+                trace_event_id=traces[2].trace_event_id,
+                event_type=TraceEventType.TOOL_CALL_INTERRUPTED,
+                occurred_at=decided_at,
+                run_id=closure.active_run_record.run_id,
+                task_id=closure.current_task_record.task_id,
+                request_unit_id=(
+                    closure.current_request_unit_record.request_unit_id
+                ),
+                tool_call_id=closure.tool_call_record.tool_call_id,
+                tool_call_terminal_status=ToolCallStatus.INTERRUPTED,
+            ),
+        )
+        if len(trace_ids) != len(set(trace_ids)) or traces != expected_traces:
+            raise ValueError("unfinished recovery Trace closure is not exact")
         return self
 
 

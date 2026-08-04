@@ -25,6 +25,7 @@ from mini_agent.application.records import (
     RecoveryWriteResult,
     RestartRecoveryClosure,
     RunTaskLinkRecord,
+    RunTaskLinkRecordV2,
     ToolRetryRecoveryDecisionRecordV2,
     ToolRetryRecoveryReadClosureV2,
     TrustedOwnerScope,
@@ -420,12 +421,111 @@ class Cycle2ToolRestartRecoveryService:
                 ),
                 recovery_decision_ref=child.recovery_decision_id,
             )
+            reason_ref = self._uuid_factory()
+            next_task = _project_task(
+                closure.current_task_record,
+                status=TaskStatus.BLOCKED,
+                state_version=closure.current_task_record.state_version + 1,
+                updated_at=decision.decided_at,
+                last_outcome_ref=reason_ref,
+            )
+            next_unit = _project_request_unit(
+                closure.current_request_unit_record,
+                status=TaskStatus.BLOCKED,
+                state_version=(
+                    closure.current_request_unit_record.state_version + 1
+                ),
+                updated_at=decision.decided_at,
+                result_refs=(
+                    *closure.current_request_unit_record.result_refs,
+                    reason_ref,
+                ),
+            )
+            transition = ApplyTaskTransitionCommand(
+                expected_task_record=closure.current_task_record,
+                next_task_record=next_task,
+                expected_request_unit_record=closure.current_request_unit_record,
+                next_request_unit_record=next_unit,
+                task_state_transition=TaskStateTransition(
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    from_status=closure.current_task_record.status,
+                    to_status=TaskStatus.BLOCKED,
+                    base_state_version=(
+                        closure.current_task_record.state_version
+                    ),
+                    result_state_version=next_task.state_version,
+                    reason_ref=reason_ref,
+                    changed_at=decision.decided_at,
+                ),
+            )
+            incomplete_run = type(closure.active_run_record).model_validate(
+                {
+                    **closure.active_run_record.model_dump(mode="python"),
+                    "status": AgentRunStatusV2.INCOMPLETE,
+                    "completed_at": decision.decided_at,
+                    "stop_reason": StopReasonV2.PROCESS_RESTART_DETECTED,
+                    "incomplete_reason": "PROCESS_RESTART_DETECTED",
+                },
+                strict=True,
+            )
+            terminal_link = RunTaskLinkRecordV2.model_validate(
+                {
+                    **closure.active_run_task_link_record.model_dump(
+                        mode="python"
+                    ),
+                    "result_task_state_version": next_task.state_version,
+                },
+                strict=True,
+            )
+            traces = (
+                TraceEventV2(
+                    trace_event_id=self._uuid_factory(),
+                    event_type=TraceEventType.RUN_STOPPED,
+                    occurred_at=decision.decided_at,
+                    run_id=closure.active_run_record.run_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    user_outcome=AgentOutcome.BLOCKED,
+                    stop_reason=StopReasonV2.PROCESS_RESTART_DETECTED,
+                ),
+                TraceEventV2(
+                    trace_event_id=self._uuid_factory(),
+                    event_type=TraceEventType.TASK_STATE_CHANGED,
+                    occurred_at=decision.decided_at,
+                    run_id=closure.active_run_record.run_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                ),
+                TraceEventV2(
+                    trace_event_id=self._uuid_factory(),
+                    event_type=TraceEventType.TOOL_CALL_INTERRUPTED,
+                    occurred_at=decision.decided_at,
+                    run_id=closure.active_run_record.run_id,
+                    task_id=closure.current_task_record.task_id,
+                    request_unit_id=(
+                        closure.current_request_unit_record.request_unit_id
+                    ),
+                    tool_call_id=closure.tool_call_record.tool_call_id,
+                    tool_call_terminal_status=ToolCallStatus.INTERRUPTED,
+                ),
+            )
             result = await (
                 self._runtime_record_port.finalize_unfinished_tool_recovery_if_current(
                     FinalizeUnfinishedToolRecoveryV2Command(
                         loaded_closure=closure,
                         recovery_decision_record=child,
                         terminal_tool_call_record=terminal,
+                        task_transition=transition,
+                        terminal_run_record=incomplete_run,
+                        terminal_run_task_link_record=terminal_link,
+                        recovery_trace_records=traces,
                     )
                 )
             )
