@@ -10280,6 +10280,438 @@ def _c2_unique_auto_target_exact_run_evidence(
     )
 
 
+def _cycle2_v3_business_timeline_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    base = _c2_unique_auto_target_exact_run_evidence()
+    message = base.message_records[0]
+    binding = base.input_binding_records[0]
+    current_task = base.task_records[0]
+    current_unit = base.request_unit_records[0]
+    candidate_set = base.candidate_set_records[0]
+    auto_target = base.auto_target_records[0]
+    run = base.run_record
+
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="current-task",
+        target_request_unit_alias="current-unit",
+        input_candidates=(
+            _cycle2_v3_input(
+                name="product_description",
+                value=binding.normalized_value,
+                message=message,
+            ),
+        ),
+        confidence=0.99,
+    )
+    child = AcceptedSupplyInputTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=candidate.candidate_id,
+        message_ref=message.message_id,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        task_id=current_task.task_id,
+        target_request_unit_id=current_unit.request_unit_id,
+        input_binding_refs=(binding.binding_id,),
+        accepted_at=binding.created_at,
+        base_task_state_version=2,
+        result_task_state_version=3,
+    )
+    understanding = RequestUnderstandingClosureV3(
+        record=RequestUnderstandingRecordV3(
+            request_understanding_record_id=uuid4(),
+            run_id=run.run_id,
+            message_ref=message.message_id,
+            record_schema_version="request_understanding_record.p0.v3",
+            model_input_schema_version="e2e01-thin-v1",
+            model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+            contextualization=DurableQueryContextualizationCandidateV2(
+                text="查找商品对应订单",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(message.message_id,),
+            ),
+            task_delta_candidates=(candidate,),
+            candidate_validation=(
+                CandidateValidationRecordV2(
+                    candidate_ref=candidate.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            accepted_delta_refs=(child.accepted_delta_id,),
+            created_at=binding.created_at,
+        ),
+        accepted_task_deltas=(child,),
+    )
+
+    def succeeded_call(
+        *,
+        name: Cycle2ToolName,
+        validated_version: int,
+        started_at: datetime,
+    ) -> tuple[ToolCallRecordV2, datetime]:
+        call = _c2_tool_call(
+            name=name,
+            owner=base.owner_scope.customer_id,
+            task_id=current_task.task_id,
+            request_unit_id=current_unit.request_unit_id,
+            validated_task_state_version=validated_version,
+            argument_binding_refs=(binding.binding_id,),
+            verified_target_ref=auto_target.verified_target_ref,
+            run_id=run.run_id,
+            started_at=started_at,
+        )
+        finished_at = started_at + timedelta(seconds=1)
+        attempt = ToolAttemptRecordV2(
+            tool_call_id=call.tool_call_id,
+            attempt_no=1,
+            started_at=started_at,
+            finished_at=finished_at,
+            outcome=ToolResultOutcome.SUCCESS,
+            retry_decision=ToolRetryDecision.NOT_APPLICABLE,
+        )
+        return (
+            _c2_project(
+                call,
+                attempts=(attempt,),
+                attempt_count=1,
+                status=ToolCallStatus.SUCCEEDED,
+                finished_at=finished_at,
+                result_ref=uuid4(),
+            ),
+            finished_at,
+        )
+
+    order_call, order_recorded_at = succeeded_call(
+        name=Cycle2ToolName.GET_ORDER,
+        validated_version=candidate_set.result_task_state_version,
+        started_at=candidate_set.created_at,
+    )
+    order_observation = _observation(
+        observed_at=order_recorded_at,
+        recorded_at=order_recorded_at,
+        source_version=(
+            "mock-order-source-version.p0.v1:sha256:" + "d" * 64
+        ),
+    )
+    shipment_call, shipment_recorded_at = succeeded_call(
+        name=Cycle2ToolName.GET_SHIPMENT,
+        validated_version=candidate_set.result_task_state_version + 1,
+        started_at=order_recorded_at,
+    )
+    shipment_observation = ShipmentObservation(
+        observation_id=uuid4(),
+        private_owner_scope=base.owner_scope.customer_id,
+        task_id=current_task.task_id,
+        request_unit_id=current_unit.request_unit_id,
+        verified_order_target_ref=str(auto_target.verified_target_ref),
+        source_tool="get_shipment",
+        source_tool_call_id=shipment_call.tool_call_id,
+        source_resource_ref="shipment:1",
+        source_version=C2_SHIPMENT_VERSION,
+        normalized_type="SHIPMENT_SUMMARY",
+        normalized_value=ShipmentSummaryProjection(
+            shipment_status=ShipmentStatus.IN_TRANSIT,
+            latest_event_code=ShipmentEventCode.IN_TRANSIT,
+            latest_event_at=order_recorded_at - timedelta(hours=1),
+            promised_delivery_at=(
+                shipment_recorded_at + timedelta(minutes=1)
+            ),
+        ),
+        observed_at=order_recorded_at,
+        recorded_at=shipment_recorded_at,
+        valid_until=order_recorded_at + timedelta(minutes=5),
+        raw_result_ref=str(shipment_call.result_ref),
+    )
+    task = _c2_project(
+        current_task,
+        state_version=candidate_set.result_task_state_version + 2,
+        updated_at=shipment_recorded_at,
+    )
+    unit = _c2_project(
+        current_unit,
+        state_version=task.state_version,
+        updated_at=shipment_recorded_at,
+        observation_refs=(
+            *current_unit.observation_refs,
+            order_observation.observation_id,
+            shipment_observation.observation_id,
+        ),
+    )
+    artifact = base.model_visible_toolset_artifacts[0]
+
+    def manifest(call: ToolCallRecordV2) -> ContextManifest:
+        return ContextManifest(
+            context_manifest_id=call.context_manifest_id,
+            run_id=call.run_id,
+            model_call_id=call.model_call_id,
+            tool_registry_version=call.tool_registry_version,
+            model_visible_toolset_hash=artifact.model_visible_toolset_hash,
+            selected_message_refs=(message.message_id,),
+            redaction_policy_version="redaction-v1",
+            token_counts=TokenCounts(input_tokens=None, output_tokens=None),
+            assembled_at=call.started_at,
+        )
+
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=2,
+                ),
+            ),
+            "task_records": (task,),
+            "request_unit_records": (unit,),
+            "request_understanding_closures": (understanding,),
+            "order_observation_records": (order_observation,),
+            "shipment_observation_records": (shipment_observation,),
+            "observation_source_edges": (
+                *base.observation_source_edges,
+                Cycle2ObservationSourceEdge(
+                    observation_ref=order_observation.observation_id,
+                    source_tool_call_id=order_call.tool_call_id,
+                    source_run_id=order_call.run_id,
+                    task_id=order_call.task_id,
+                    request_unit_id=order_call.request_unit_id,
+                ),
+                Cycle2ObservationSourceEdge(
+                    observation_ref=shipment_observation.observation_id,
+                    source_tool_call_id=shipment_call.tool_call_id,
+                    source_run_id=shipment_call.run_id,
+                    task_id=shipment_call.task_id,
+                    request_unit_id=shipment_call.request_unit_id,
+                ),
+            ),
+            "gate_decision_records": (
+                base.gate_decision_records[0],
+                _c2_gate_for_tool_call(order_call),
+                _c2_gate_for_tool_call(shipment_call),
+            ),
+            "tool_call_records": (
+                base.tool_call_records[0],
+                order_call,
+                shipment_call,
+            ),
+            "context_manifest_records": (
+                base.context_manifest_records[0],
+                manifest(order_call),
+                manifest(shipment_call),
+            ),
+        }
+    )
+
+
+def test_cycle2_v3_evidence_closes_exact_business_effect_timeline() -> None:
+    closure = _cycle2_v3_business_timeline_evidence()
+
+    assert closure.task_records[0].state_version == 6
+    assert tuple(
+        record.canonical_tool_name for record in closure.tool_call_records
+    ) == (
+        Cycle2ToolName.SEARCH_ORDERS,
+        Cycle2ToolName.GET_ORDER,
+        Cycle2ToolName.GET_SHIPMENT,
+    )
+
+
+def test_cycle2_v3_evidence_rejects_missing_or_overlapping_business_effect(
+) -> None:
+    closure = _cycle2_v3_business_timeline_evidence()
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="Task terminal mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{**values, "shipment_observation_records": ()}
+        )
+
+    shipment_call = closure.tool_call_records[-1]
+    overlapping_call = _c2_project(
+        shipment_call,
+        validated_task_state_version=(
+            shipment_call.validated_task_state_version - 1
+        ),
+    )
+    with pytest.raises(
+        ValidationError,
+        match="business effects cannot overlap",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "gate_decision_records": (
+                    *closure.gate_decision_records[:-1],
+                    _c2_gate_for_tool_call(overlapping_call),
+                ),
+                "tool_call_records": (
+                    *closure.tool_call_records[:-1],
+                    overlapping_call,
+                ),
+            }
+        )
+
+
+def test_cycle2_v3_evidence_rejects_impossible_business_inbound_status(
+) -> None:
+    closure = _cycle2_v3_business_timeline_evidence()
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+    binding = closure.input_binding_records[0]
+    transition = TaskStateTransition(
+        task_id=task.task_id,
+        request_unit_id=unit.request_unit_id,
+        from_status=TaskStatus.ACTIVE,
+        to_status=TaskStatus.WAITING_USER,
+        base_state_version=1,
+        result_state_version=2,
+        reason_ref=closure.message_records[0].message_id,
+        changed_at=binding.created_at,
+    )
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="business effect status chain mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    _c2_project(
+                        closure.run_task_link_records[0],
+                        base_task_state_version=1,
+                    ),
+                ),
+                "task_state_transition_records": (transition,),
+            }
+        )
+
+
+def _cycle2_v3_multi_run_business_timeline_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    base = _cycle2_v3_business_timeline_evidence()
+    run = base.run_record
+    candidate_set = base.candidate_set_records[0]
+    understanding = base.request_understanding_closures[0]
+    supporting_run = AgentRunRecordV2(
+        run_id=uuid4(),
+        conversation_id=run.conversation_id,
+        status=AgentRunStatusV2.COMPLETED,
+        provider_lane=run.provider_lane,
+        started_at=run.started_at,
+        completed_at=candidate_set.created_at,
+        stop_reason=StopReasonV2.GOAL_COMPLETED,
+    )
+    supporting_understanding = RequestUnderstandingClosureV3(
+        record=_c2_project(
+            understanding.record,
+            run_id=supporting_run.run_id,
+        ),
+        accepted_task_deltas=understanding.accepted_task_deltas,
+    )
+    search_call = _c2_project(
+        base.tool_call_records[0],
+        run_id=supporting_run.run_id,
+    )
+    search_source_edge = _c2_project(
+        base.observation_source_edges[0],
+        source_run_id=supporting_run.run_id,
+    )
+    search_manifest = _c2_project(
+        base.context_manifest_records[0],
+        run_id=supporting_run.run_id,
+    )
+    task = base.task_records[0]
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "supporting_run_records": (supporting_run,),
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=supporting_run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=2,
+                    result_task_state_version=(
+                        candidate_set.result_task_state_version
+                    ),
+                ),
+                RunTaskLinkRecordV2(
+                    run_id=run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=(
+                        candidate_set.result_task_state_version
+                    ),
+                ),
+            ),
+            "request_understanding_closures": (
+                supporting_understanding,
+            ),
+            "observation_source_edges": (
+                search_source_edge,
+                *base.observation_source_edges[1:],
+            ),
+            "tool_call_records": (
+                search_call,
+                *base.tool_call_records[1:],
+            ),
+            "context_manifest_records": (
+                search_manifest,
+                *base.context_manifest_records[1:],
+            ),
+        }
+    )
+
+
+def test_cycle2_v3_evidence_closes_each_producing_run_link() -> None:
+    closure = _cycle2_v3_multi_run_business_timeline_evidence()
+
+    assert tuple(
+        link.result_task_state_version
+        for link in closure.run_task_link_records
+    ) == (4, None)
+
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    borrowed_root_result = _c2_project(
+        closure.run_task_link_records[0],
+        result_task_state_version=closure.task_records[0].state_version,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="RunTaskLink mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "run_task_link_records": (
+                    borrowed_root_result,
+                    closure.run_task_link_records[1],
+                ),
+            }
+        )
+
+
 def _c2_ordinal_target_exact_run_evidence(
 ) -> Cycle2ExactRunEvidenceClosure:
     command = _c2_multiple_search_command()
@@ -10419,6 +10851,115 @@ def _c2_ordinal_target_exact_run_evidence(
             ),
         ),
     )
+
+
+def _cycle2_v3_ordinal_selection_timeline_evidence(
+) -> Cycle2ExactRunEvidenceClosure:
+    base = _c2_ordinal_target_exact_run_evidence()
+    run = base.run_record
+    message = base.message_records[0]
+    task = base.task_records[0]
+    unit = base.request_unit_records[0]
+    selection = base.candidate_selection_records[0]
+    ordinal_binding = base.input_binding_records[1]
+    candidate = DurableCycle2ContinuationTaskDeltaCandidateV3(
+        candidate_id=uuid4(),
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        target_task_alias="current-task",
+        target_request_unit_alias="current-unit",
+        input_candidates=(
+            _cycle2_v3_input(
+                name="candidate_ordinal",
+                value=ordinal_binding.normalized_value,
+                message=message,
+            ),
+        ),
+        confidence=0.99,
+    )
+    child = AcceptedSupplyInputTaskDeltaV3(
+        accepted_delta_id=uuid4(),
+        candidate_ref=candidate.candidate_id,
+        message_ref=message.message_id,
+        operation=TaskDeltaOperation.SUPPLY_INPUT,
+        task_id=task.task_id,
+        target_request_unit_id=unit.request_unit_id,
+        input_binding_refs=(ordinal_binding.binding_id,),
+        accepted_at=selection.selected_at,
+        base_task_state_version=selection.base_task_state_version,
+        result_task_state_version=selection.result_task_state_version,
+    )
+    understanding = RequestUnderstandingClosureV3(
+        record=RequestUnderstandingRecordV3(
+            request_understanding_record_id=uuid4(),
+            run_id=run.run_id,
+            message_ref=message.message_id,
+            record_schema_version="request_understanding_record.p0.v3",
+            model_input_schema_version="e2e01-thin-v1",
+            model_output_schema_version="e2e01-cycle2-continuation.p0.v2",
+            contextualization=DurableQueryContextualizationCandidateV2(
+                text="选择候选订单",
+                resolved_reference_candidates=(),
+                uncertainties=(),
+                source_message_refs=(message.message_id,),
+            ),
+            task_delta_candidates=(candidate,),
+            candidate_validation=(
+                CandidateValidationRecordV2(
+                    candidate_ref=candidate.candidate_id,
+                    decision=CandidateValidationDecision.ACCEPT,
+                ),
+            ),
+            accepted_delta_refs=(child.accepted_delta_id,),
+            created_at=selection.selected_at,
+        ),
+        accepted_task_deltas=(child,),
+    )
+    values = {
+        field_name: getattr(base, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    return Cycle2ExactRunEvidenceClosure(
+        **{
+            **values,
+            "run_task_link_records": (
+                RunTaskLinkRecordV2(
+                    run_id=run.run_id,
+                    task_id=task.task_id,
+                    base_task_state_version=(
+                        base.candidate_set_records[0].base_task_state_version
+                    ),
+                ),
+            ),
+            "request_understanding_closures": (understanding,),
+        }
+    )
+
+
+def test_cycle2_v3_evidence_composes_ordinal_ru_and_selection_once() -> None:
+    closure = _cycle2_v3_ordinal_selection_timeline_evidence()
+    task = closure.task_records[0]
+    unit = closure.request_unit_records[0]
+
+    assert task.status is TaskStatus.ACTIVE
+    assert task.state_version == 5
+
+    values = {
+        field_name: getattr(closure, field_name)
+        for field_name in Cycle2ExactRunEvidenceClosure.model_fields
+    }
+    waiting_task = _c2_project(task, status=TaskStatus.WAITING_USER)
+    waiting_unit = _c2_project(unit, status=TaskStatus.WAITING_USER)
+    with pytest.raises(
+        ValidationError,
+        match="Task terminal mismatch",
+    ):
+        Cycle2ExactRunEvidenceClosure(
+            **{
+                **values,
+                "task_records": (waiting_task,),
+                "request_unit_records": (waiting_unit,),
+            }
+        )
 
 
 def test_cycle2_exact_run_evidence_closes_gate_and_unique_auto_target() -> None:

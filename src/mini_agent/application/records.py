@@ -3648,6 +3648,12 @@ def _validate_cycle2_request_understanding_evidence(
     bindings: Mapping[UUID, InputBindingV2],
     run_task_links: tuple[RunTaskLinkRecordV2, ...],
     transitions: tuple[TaskStateTransition, ...],
+    candidate_sets: tuple[OrderCandidateSetRecord, ...],
+    selections: tuple[OrderCandidateSelectionRecord, ...],
+    order_observations: tuple[OrderObservation, ...],
+    shipment_observations: tuple[ShipmentObservation, ...],
+    observation_source_edges: tuple[Cycle2ObservationSourceEdge, ...],
+    tool_calls: tuple[ToolCallRecordV2, ...],
 ) -> None:
     """Close staged v3 parents against one already selected Cycle 2 graph."""
 
@@ -3694,10 +3700,9 @@ def _validate_cycle2_request_understanding_evidence(
         UUID,
         dict[tuple[int, int], AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
     ] = {}
-    relevant_links_by_task: dict[UUID, list[RunTaskLinkRecordV2]] = {}
-    children_by_run_task: dict[
-        tuple[UUID, UUID],
-        list[AcceptedAddGoalTaskDeltaV3 | AcceptedSupplyInputTaskDeltaV3],
+    accepted_run_by_task_edge: dict[
+        tuple[UUID, tuple[int, int]],
+        UUID,
     ] = {}
     graph_entity_ids = {
         *run_by_id,
@@ -3936,38 +3941,131 @@ def _validate_cycle2_request_understanding_evidence(
                     "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
                 )
             task_edges[edge] = child
-            children_by_run_task.setdefault(
-                (record.run_id, child.task_id),
-                [],
-            ).append(child)
+            accepted_run_by_task_edge[(child.task_id, edge)] = record.run_id
 
-    for (run_id, task_id), children in children_by_run_task.items():
-        link = links_by_key[(run_id, task_id)]
-        first_base = children[0].base_task_state_version
-        last_result = children[-1].result_task_state_version
+    tool_calls_by_id = {record.tool_call_id: record for record in tool_calls}
+    source_edges_by_observation = {
+        record.observation_ref: record for record in observation_source_edges
+    }
+    business_edges_by_task: dict[
+        UUID,
+        dict[
+            tuple[int, int],
+            OrderCandidateSetRecord
+            | OrderCandidateSelectionRecord
+            | OrderObservation
+            | ShipmentObservation,
+        ],
+    ] = {}
+    business_run_by_task_edge: dict[
+        tuple[UUID, tuple[int, int]],
+        UUID,
+    ] = {}
+
+    def add_business_effect(
+        *,
+        task_id: UUID,
+        edge: tuple[int, int],
+        run_id: UUID,
+        record: OrderCandidateSetRecord
+        | OrderCandidateSelectionRecord
+        | OrderObservation
+        | ShipmentObservation,
+    ) -> None:
+        if edge[1] != edge[0] + 1:
+            raise ValueError(
+                "Cycle 2 v3 business effect must advance exactly once"
+            )
+        task_effects = business_edges_by_task.setdefault(task_id, {})
+        if edge in task_effects:
+            raise ValueError(
+                "Cycle 2 v3 business effects cannot overlap"
+            )
+        if run_id not in run_by_id:
+            raise ValueError(
+                "Cycle 2 v3 business effect producing Run mismatch"
+            )
+        task_effects[edge] = record
+        business_run_by_task_edge[(task_id, edge)] = run_id
+
+    for candidate_set in candidate_sets:
+        if candidate_set.task_id not in accepted_edges_by_task:
+            continue
+        source_call = tool_calls_by_id.get(candidate_set.source_tool_call_id)
         if (
-            link.base_task_state_version != first_base
-            or (
-                run_id != root_run_id
-                and run_by_id[run_id].status is AgentRunStatusV2.COMPLETED
-                and link.result_task_state_version != last_result
-            )
-            or (
-                run_id != root_run_id
-                and link.result_task_state_version is not None
-                and link.result_task_state_version != last_result
-            )
-            or (
-                run_id == root_run_id
-                and link.result_task_state_version is not None
-                and link.result_task_state_version
-                != tasks[task_id].state_version
-            )
+            source_call is None
+            or source_call.task_id != candidate_set.task_id
+            or source_call.request_unit_id != candidate_set.request_unit_id
         ):
             raise ValueError(
-                "Cycle 2 v3 RequestUnderstanding RunTaskLink mismatch"
+                "Cycle 2 v3 CandidateSet producing Run mismatch"
             )
-        relevant_links_by_task.setdefault(task_id, []).append(link)
+        add_business_effect(
+            task_id=candidate_set.task_id,
+            edge=(
+                candidate_set.base_task_state_version,
+                candidate_set.result_task_state_version,
+            ),
+            run_id=source_call.run_id,
+            record=candidate_set,
+        )
+
+    for selection in selections:
+        if selection.task_id not in accepted_edges_by_task:
+            continue
+        edge = (
+            selection.base_task_state_version,
+            selection.result_task_state_version,
+        )
+        accepted = accepted_edges_by_task[selection.task_id].get(edge)
+        if (
+            type(accepted) is not AcceptedSupplyInputTaskDeltaV3
+            or accepted.target_request_unit_id != selection.request_unit_id
+            or accepted.input_binding_refs
+            != (selection.ordinal_input_binding_ref,)
+            or accepted.accepted_at != selection.selected_at
+        ):
+            raise ValueError(
+                "Cycle 2 v3 Selection atomic effect mismatch"
+            )
+        run_id = accepted_run_by_task_edge[(selection.task_id, edge)]
+        add_business_effect(
+            task_id=selection.task_id,
+            edge=edge,
+            run_id=run_id,
+            record=selection,
+        )
+
+    for observation in (*order_observations, *shipment_observations):
+        source_edge = source_edges_by_observation.get(
+            observation.observation_id
+        )
+        source_call = (
+            None
+            if source_edge is None
+            else tool_calls_by_id.get(source_edge.source_tool_call_id)
+        )
+        if source_edge is None or source_call is None:
+            continue
+        if source_edge.task_id not in accepted_edges_by_task:
+            continue
+        if (
+            source_edge.source_run_id != source_call.run_id
+            or source_edge.task_id != source_call.task_id
+            or source_edge.request_unit_id != source_call.request_unit_id
+        ):
+            raise ValueError(
+                "Cycle 2 v3 Observation producing Run mismatch"
+            )
+        add_business_effect(
+            task_id=source_edge.task_id,
+            edge=(
+                source_call.validated_task_state_version,
+                source_call.validated_task_state_version + 1,
+            ),
+            run_id=source_call.run_id,
+            record=observation,
+        )
 
     transitions_by_task: dict[UUID, dict[tuple[int, int], TaskStateTransition]] = {}
     for transition in transitions:
@@ -3984,17 +4082,96 @@ def _validate_cycle2_request_understanding_evidence(
             )
         task_transitions[edge] = transition
 
+    effect_edges_by_run_task: dict[
+        tuple[UUID, UUID],
+        set[tuple[int, int]],
+    ] = {}
+    for task_id, accepted_edges in accepted_edges_by_task.items():
+        for edge in accepted_edges:
+            run_id = accepted_run_by_task_edge[(task_id, edge)]
+            effect_edges_by_run_task.setdefault((run_id, task_id), set()).add(
+                edge
+            )
+    for task_id, business_edges in business_edges_by_task.items():
+        for edge, record in business_edges.items():
+            run_id = business_run_by_task_edge[(task_id, edge)]
+            accepted = accepted_edges_by_task[task_id].get(edge)
+            if accepted is not None:
+                if type(record) is not OrderCandidateSelectionRecord:
+                    raise ValueError(
+                        "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
+                    )
+                if accepted_run_by_task_edge[(task_id, edge)] != run_id:
+                    raise ValueError(
+                        "Cycle 2 v3 Selection producing Run mismatch"
+                    )
+                continue
+            effect_edges_by_run_task.setdefault((run_id, task_id), set()).add(
+                edge
+            )
+    for task_id, task_transitions in transitions_by_task.items():
+        for edge in task_transitions:
+            effect_edges_by_run_task.setdefault(
+                (root_run_id, task_id),
+                set(),
+            ).add(edge)
+
+    relevant_links_by_task: dict[UUID, list[RunTaskLinkRecordV2]] = {}
+    for (run_id, task_id), effect_edges in effect_edges_by_run_task.items():
+        link = links_by_key.get((run_id, task_id))
+        if link is None:
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding RunTaskLink mismatch"
+            )
+        first_base = min(base for base, _result in effect_edges)
+        last_result = max(result for _base, result in effect_edges)
+        expected_base = None if first_base == 0 else first_base
+        run_status = run_by_id[run_id].status
+        if (
+            link.base_task_state_version != expected_base
+            or (
+                run_status is AgentRunStatusV2.COMPLETED
+                and link.result_task_state_version != last_result
+            )
+            or (
+                run_status
+                in {
+                    AgentRunStatusV2.CREATED,
+                    AgentRunStatusV2.RUNNING,
+                    AgentRunStatusV2.SUPERSEDED,
+                }
+                and link.result_task_state_version is not None
+            )
+            or (
+                run_status
+                in {AgentRunStatusV2.FAILED, AgentRunStatusV2.INCOMPLETE}
+                and link.result_task_state_version is not None
+                and link.result_task_state_version != last_result
+            )
+        ):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding RunTaskLink mismatch"
+            )
+        relevant_links_by_task.setdefault(task_id, []).append(link)
+
     for task_id, accepted_edges in accepted_edges_by_task.items():
         task = tasks[task_id]
         unit = units[task_id]
         task_transitions = transitions_by_task.get(task_id, {})
+        business_edges = business_edges_by_task.get(task_id, {})
         for edge, child in accepted_edges.items():
             if edge in task_transitions:
                 raise ValueError(
                     "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
                 )
+        if set(task_transitions).intersection(business_edges):
+            raise ValueError(
+                "Cycle 2 v3 RequestUnderstanding effects cannot overlap"
+            )
 
-        edge_keys = sorted(set(accepted_edges) | set(task_transitions))
+        edge_keys = sorted(
+            set(accepted_edges) | set(task_transitions) | set(business_edges)
+        )
         link_bases = tuple(
             link.base_task_state_version or 0
             for link in relevant_links_by_task[task_id]
@@ -4015,6 +4192,7 @@ def _validate_cycle2_request_understanding_evidence(
         for edge in edge_keys:
             accepted = accepted_edges.get(edge)
             transition = task_transitions.get(edge)
+            business = business_edges.get(edge)
             if type(accepted) is AcceptedAddGoalTaskDeltaV3:
                 if (
                     edge != (0, 1)
@@ -4026,7 +4204,10 @@ def _validate_cycle2_request_understanding_evidence(
                     )
                 current_status = TaskStatus.ACTIVE
                 effect_at = accepted.accepted_at
-            elif type(accepted) is AcceptedSupplyInputTaskDeltaV3:
+            elif (
+                type(accepted) is AcceptedSupplyInputTaskDeltaV3
+                and type(business) is not OrderCandidateSelectionRecord
+            ):
                 effect_at = accepted.accepted_at
             elif transition is not None:
                 if (
@@ -4041,6 +4222,36 @@ def _validate_cycle2_request_understanding_evidence(
                     )
                 current_status = transition.to_status
                 effect_at = transition.changed_at
+            elif type(business) is OrderCandidateSetRecord:
+                if (
+                    current_status is not None
+                    and current_status is not TaskStatus.ACTIVE
+                ):
+                    raise ValueError(
+                        "Cycle 2 v3 business effect status chain mismatch"
+                    )
+                current_status = (
+                    TaskStatus.WAITING_USER
+                    if business.outcome is OrderCandidateSetOutcome.MULTIPLE
+                    else TaskStatus.ACTIVE
+                )
+                effect_at = business.created_at
+            elif type(business) is OrderCandidateSelectionRecord:
+                if (
+                    type(accepted) is not AcceptedSupplyInputTaskDeltaV3
+                    or accepted.accepted_at != business.selected_at
+                    or (
+                        current_status is not None
+                        and current_status is not TaskStatus.WAITING_USER
+                    )
+                ):
+                    raise ValueError(
+                        "Cycle 2 v3 business effect status chain mismatch"
+                    )
+                current_status = TaskStatus.ACTIVE
+                effect_at = business.selected_at
+            elif type(business) in (OrderObservation, ShipmentObservation):
+                effect_at = business.recorded_at
             else:
                 raise AssertionError("unreachable empty Cycle 2 Task edge")
             if last_effect_at is not None and effect_at < last_effect_at:
@@ -4113,15 +4324,6 @@ def _validate_cycle2_request_understanding_evidence(
                 "Cycle 2 v3 RequestUnderstanding Task terminal mismatch"
             )
 
-        valid_results = {result for _base, result in edge_keys}
-        if any(
-            link.result_task_state_version is not None
-            and link.result_task_state_version not in valid_results
-            for link in relevant_links_by_task[task_id]
-        ):
-            raise ValueError(
-                "Cycle 2 v3 RequestUnderstanding link timeline mismatch"
-            )
 
 
 def _validate_request_understanding_v3_identity_groups(
@@ -4483,6 +4685,12 @@ class Cycle2ExactRunEvidenceClosure(_StrictRuntimePrivateRecord):
             bindings=bindings,
             run_task_links=self.run_task_link_records,
             transitions=self.task_state_transition_records,
+            candidate_sets=self.candidate_set_records,
+            selections=self.candidate_selection_records,
+            order_observations=self.order_observation_records,
+            shipment_observations=self.shipment_observation_records,
+            observation_source_edges=self.observation_source_edges,
+            tool_calls=self.tool_call_records,
         )
         owner = self.owner_scope.customer_id
         task_unit_children = (
