@@ -5187,7 +5187,7 @@ class Cycle2AgentRunHandler:
         if finalized is not Cycle2WriteResult.APPLIED:
             raise AgentRunExecutionError("Cycle 2 Run finalization conflict")
         evidence = await (
-            self._runtime_record_port.load_cycle2_exact_run_evidence_for_owner(
+            self._runtime_record_port.load_cycle2_exact_run_evidence_v3_for_owner(
                 owner_scope=turn.owner_scope,
                 run_id=turn.running_run.run_id,
             )
