@@ -773,6 +773,42 @@ def _integrity(
     return P0PersistenceIntegrityError(category, uuid4())
 
 
+def _cycle2_search_observation_source_edge_facts(
+    *,
+    observation: SearchOrdersObservation,
+    rooted_candidate_sets: tuple[OrderCandidateSetRecord, ...],
+) -> tuple[UUID, None, UUID, UUID]:
+    if not rooted_candidate_sets:
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    first = rooted_candidate_sets[0]
+    if any(
+        candidate_set.private_owner_scope_ref
+        != observation.private_owner_scope
+        or candidate_set.source_tool_call_id
+        != observation.source_tool_call_id
+        or candidate_set.task_id != first.task_id
+        or candidate_set.request_unit_id != first.request_unit_id
+        or candidate_set.search_observation_ref
+        != observation.observation_id
+        or candidate_set.search_observation_record_schema_version
+        != observation.record_schema_version
+        or candidate_set.search_observation_source_version
+        != observation.source_version
+        for candidate_set in rooted_candidate_sets
+    ):
+        raise _integrity(
+            P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+        )
+    return (
+        observation.source_tool_call_id,
+        None,
+        first.task_id,
+        first.request_unit_id,
+    )
+
+
 def _json_identity(
     logical_identity: tuple[tuple[str, object], ...],
 ) -> list[list[object]]:
@@ -8103,22 +8139,13 @@ class PostgresRecordAdapter:
                     reference_uuid("source_request_unit_id"),
                 )
             elif type(observation) is SearchOrdersObservation:
-                rooted_candidates = candidate_by_observation.get(
-                    observation_id,
-                    [],
-                )
-                if len(rooted_candidates) != 1:
-                    raise _integrity(
-                        P0PersistenceIntegrityCategory.LINK_CARDINALITY_MISMATCH
-                        if rooted_candidates
-                        else P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
-                    )
-                candidate = rooted_candidates[0]
                 source_edge_facts[observation_id] = (
-                    observation.source_tool_call_id,
-                    None,
-                    candidate.task_id,
-                    candidate.request_unit_id,
+                    _cycle2_search_observation_source_edge_facts(
+                        observation=observation,
+                        rooted_candidate_sets=tuple(
+                            candidate_by_observation.get(observation_id, [])
+                        ),
+                    )
                 )
             else:
                 source_edge_facts[observation_id] = (

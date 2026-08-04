@@ -12,7 +12,11 @@ from pydantic import ValidationError
 import pytest
 from sqlalchemy import func, select
 
-from mini_agent.application.persistence import P0RecordCode
+from mini_agent.application.persistence import (
+    P0PersistenceIntegrityCategory,
+    P0PersistenceIntegrityError,
+    P0RecordCode,
+)
 from mini_agent.application.records import (
     SupersededRunInvalidationKind,
     TrustedOwnerScope,
@@ -46,7 +50,10 @@ from mini_agent.infrastructure.persistence.models import (
     P0RecordModel,
     P0RecordStateHistoryModel,
 )
-from mini_agent.infrastructure.persistence.postgres import PostgresRecordAdapter
+from mini_agent.infrastructure.persistence.postgres import (
+    PostgresRecordAdapter,
+    _cycle2_search_observation_source_edge_facts,
+)
 
 
 def _runtime_source(records, role: str):
@@ -890,6 +897,135 @@ def test_w12_fold_materializes_one_final_graph_and_atomic_setup_attaches(
         assert target.setup is None
     finally:
         engine.dispose()
+
+
+def test_search_observation_candidate_history_reads_one_exact_source_edge(
+    eval_postgres_namespace,
+) -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-superseded-candidate-set-owner-a-v1",
+        ),
+        environment_fixture_refs=(),
+        fault_ref=None,
+    )
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    target = _SetupAttachmentTarget()
+    setup = None
+    try:
+        setup = apply_cycle2_execution_setup_plan(
+            factory,
+            plan,
+            attachment_target=target,
+        )
+        adapter = PostgresRecordAdapter(
+            factory,
+            cycle2_clock=lambda: W12_TRUSTED_CLOCK,
+        )
+        with factory() as session:
+            observation_rows = adapter._cycle2_rows(
+                session,
+                owner_customer_id="customer-A",
+                record_code=P0RecordCode.ORDER_SEARCH_OBSERVATION_RECORD,
+            )
+            candidate_rows = adapter._cycle2_rows(
+                session,
+                owner_customer_id="customer-A",
+                record_code=P0RecordCode.ORDER_CANDIDATE_SET_RECORD,
+            )
+        assert len(observation_rows) == 1
+        assert len(candidate_rows) == 2
+        observation = observation_rows[0][1].source_record
+        candidate_sets = tuple(
+            row[1].source_record for row in candidate_rows
+        )
+        facts = _cycle2_search_observation_source_edge_facts(
+            observation=observation,
+            rooted_candidate_sets=candidate_sets,
+        )
+        assert facts[0] == observation.source_tool_call_id
+        assert facts[1] is None
+        assert {
+            (record.task_id, record.request_unit_id)
+            for record in candidate_sets
+        } == {(facts[2], facts[3])}
+    finally:
+        if setup is not None:
+            setup.detach()
+            setup.dispose()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    (
+        ("private_owner_scope_ref", "customer-B"),
+        ("source_tool_call_id", uuid4()),
+        ("task_id", uuid4()),
+        ("request_unit_id", uuid4()),
+        ("search_observation_ref", uuid4()),
+        ("search_observation_record_schema_version", "wrong-schema"),
+        ("search_observation_source_version", "wrong-version"),
+    ),
+)
+def test_search_observation_candidate_history_source_tamper_fails_closed(
+    field_name: str,
+    bad_value: object,
+) -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-superseded-candidate-set-owner-a-v1",
+        ),
+        environment_fixture_refs=(),
+        fault_ref=None,
+    )
+    graph = fold_cycle2_runtime_records(plan.runtime_state)
+    observation = _runtime_source(graph, "observation.search.search")
+    candidate_sets = tuple(
+        record.source_record
+        for record in graph
+        if record.record_role.startswith("candidate_set.")
+    )
+    assert len(candidate_sets) == 2
+    tampered = candidate_sets[1].model_copy(
+        update={field_name: bad_value}
+    )
+
+    with pytest.raises(P0PersistenceIntegrityError) as caught:
+        _cycle2_search_observation_source_edge_facts(
+            observation=observation,
+            rooted_candidate_sets=(candidate_sets[0], tampered),
+        )
+    assert caught.value.category is (
+        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+    )
+
+
+def test_search_observation_candidate_history_requires_one_rooted_set() -> None:
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-superseded-candidate-set-owner-a-v1",
+        ),
+        environment_fixture_refs=(),
+        fault_ref=None,
+    )
+    observation = _runtime_source(
+        fold_cycle2_runtime_records(plan.runtime_state),
+        "observation.search.search",
+    )
+
+    with pytest.raises(P0PersistenceIntegrityError) as caught:
+        _cycle2_search_observation_source_edge_facts(
+            observation=observation,
+            rooted_candidate_sets=(),
+        )
+    assert caught.value.category is (
+        P0PersistenceIntegrityCategory.LINK_PROJECTION_MISMATCH
+    )
 
 
 def test_w12_attach_failure_rolls_back_every_row_and_disposes_controller(
