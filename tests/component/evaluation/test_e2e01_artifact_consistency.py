@@ -91,6 +91,20 @@ CYCLE2_TRAJECTORY_CASE_IDS = {
     "T2-two-active-packages-integrity-blocked",
 }
 
+CYCLE2_POST_ORDER_GET_SHIPMENT_CASE_IDS = (
+    "E2E01-06/transient-once-then-success",
+    "E2E01-06/transient-exhausted-blocked",
+    "E2E01-06/deterministic-source-integrity-no-retry",
+    "E2E01-06/insufficient-promise-need-human",
+    "E2E01-06/no-shipment-need-human",
+    "T2-assessment-delayed-boundary",
+    "T2-assessment-claim-corrected",
+    "T2-timeout-after-dispatch-then-success",
+    "T2-retry-finalize-before-second-fence-recovery",
+    "T2-retry-unfinished-attempt-restart-blocked",
+    "T2-two-active-packages-integrity-blocked",
+)
+
 ARTIFACT_PATHS = (
     FIXTURE_PATH,
     CASES_PATH,
@@ -1415,6 +1429,75 @@ def test_cycle2_bundle_has_exact_pair_lane_and_bidirectional_closure() -> None:
     assert manifest["case_lifecycle_status"] == "EXECUTABLE"
     assert manifest["eval_result_artifacts_created"] is False
     assert manifest["baseline_result_artifacts_created"] is False
+
+
+def test_cycle2_scripts_and_cases_freeze_post_order_and_recovery_cardinality() -> (
+    None
+):
+    dataset = _load_json(CYCLE2_CASES_PATH)
+    scripts = _load_json(CYCLE2_SCRIPTS_PATH)
+    script_by_case = {
+        script["case_refs"][0]: script for script in scripts["scenarios"]
+    }
+    case_by_id = {case["case_id"]: case for case in dataset["cases"]}
+
+    assert {
+        purpose: sum(
+            step["purpose"] == purpose
+            for script in scripts["scenarios"]
+            for step in script["steps"]
+        )
+        for purpose in (
+            "REQUEST_UNDERSTANDING",
+            "CONTROL_CANDIDATE",
+            "FAULT_DIRECTIVE",
+        )
+    } == {
+        "REQUEST_UNDERSTANDING": 26,
+        "CONTROL_CANDIDATE": 37,
+        "FAULT_DIRECTIVE": 7,
+    }
+
+    for case_id in CYCLE2_POST_ORDER_GET_SHIPMENT_CASE_IDS:
+        steps = script_by_case[case_id]["steps"]
+        assert [step["purpose"] for step in steps[:2]] == [
+            "REQUEST_UNDERSTANDING",
+            "CONTROL_CANDIDATE",
+        ]
+        assert steps[1] == {
+            "purpose": "CONTROL_CANDIDATE",
+            "behavior": "PROPOSE_GET_SHIPMENT",
+            "candidate_arguments": {},
+        }
+        assert case_by_id[case_id]["expectations"]["required_events"][:3] == [
+            "REQ_BINDING(order_id,$ORDER_BINDING_REF,$TASK_VERSION_AT_GATE)",
+            "REQ_TOOL(get_order,1,1,SUCCEEDED,FOUND)",
+            "REQ_ATTEMPT(get_order,1,SUCCESS,NONE,NONE,NOT_APPLICABLE)",
+        ]
+
+    assert script_by_case[
+        "T2-retry-finalize-before-second-fence-state-invalidated"
+    ]["steps"] == [
+        {
+            "purpose": "FAULT_DIRECTIVE",
+            "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
+            "candidate_arguments": {},
+            "fault_ref": (
+                "fault:get-shipment:"
+                "restart-after-retry-finalize-state-invalidated-v1"
+            ),
+        }
+    ]
+    assert [
+        step["purpose"]
+        for step in script_by_case[
+            "T2-retry-unfinished-attempt-restart-blocked"
+        ]["steps"]
+    ] == [
+        "REQUEST_UNDERSTANDING",
+        "CONTROL_CANDIDATE",
+        "FAULT_DIRECTIVE",
+    ]
 
 
 def test_cycle2_manifest_authenticates_exact_companion_bytes() -> None:

@@ -25,7 +25,7 @@ EXPECTED_MANIFEST_SHA256 = (
 )
 CYCLE2_MANIFEST_RELATIVE_PATH = "evals/manifests/e2e01-cycle2.v1.json"
 CYCLE2_EXPECTED_MANIFEST_SHA256 = (
-    "111bf2d4eee18bccd7564e581270f5fceb8e44fd1f07feb7c2ceda87a5571ad1"
+    "9a349242700d31b2fe8728f4f766423a96f3adef0de3807e9a1e6805be9941c3"
 )
 _RUNTIME_VERSION_PLACEHOLDER = "BOUND_AT_EVAL_RUN_FROM_SOURCE_REVISION_OR_BUILD_ID"
 _MANIFEST_ARTIFACT_ID = "e2e01-thin-version-manifest"
@@ -830,24 +830,24 @@ _CYCLE2_CASE_CONTRACT_SHA256: Mapping[str, str] = {
     "E2E01-05/order-only-no-shipment": "c08226b426e41c731564b83cc1aa3662cc1d3a3079ced1935b191e6cfd422910",
     "E2E01-05/logistics-required-uses-shipment": "08fed8ff08bb78bcdc53c0d57a2d4789ccea0cce16f45e2e1d10b5e44e1e49c9",
     "E2E01-06/stale-refresh-success": "e80f4eae205bb424c5e3e7439624113ed494bd99b51e2fb55c5e650540843f4a",
-    "E2E01-06/transient-once-then-success": "5b854aa16b740ec7fcf9eed573d19e5244adae8ccd176244820c860710bfc7d7",
-    "E2E01-06/transient-exhausted-blocked": "7552cb8f0477d20fea4674a5e59e4d6aa946e7f9e05dccb82a1040639af921f3",
-    "E2E01-06/deterministic-source-integrity-no-retry": "f2416899453bcb75b1fecb07fc10ea3b6972b7cfae4f6fa2f85816766cf81ebe",
-    "E2E01-06/insufficient-promise-need-human": "7fea580d4538fa85126c2a1b7373f41265f5d8c4849221e443f8d1815e4345a4",
-    "E2E01-06/no-shipment-need-human": "a852aa4322553a5b87ae2534a86b2dd66a6fce6af6387c6df97d9208d653271f",
+    "E2E01-06/transient-once-then-success": "be0fe2719cf6d5ee194fc4164884790392f0dcdbfd77ae1bc11e805ed72f94af",
+    "E2E01-06/transient-exhausted-blocked": "89766db6f961b35c6b95dd373c16e95568600e700ac23a26ffa84743a64e31cb",
+    "E2E01-06/deterministic-source-integrity-no-retry": "2582fab18082b0c6f7d8048cd163042bf227fa2e0e6fc350592cdd4f735d4479",
+    "E2E01-06/insufficient-promise-need-human": "193b0241b559c563046edceae247a3a1a2ff9a3989251bcd041746062152bdf9",
+    "E2E01-06/no-shipment-need-human": "ab7fbb6e623f248943f945d21ca2f7b34060d3a848a29bf8f5751874a62384fd",
     "T2-candidate-owner-mismatch-rejected": "83c8af58c3f9bc5d125ed407f52636f0f665e4ee3783e98d52d16d09a695a9d1",
     "T2-candidate-superseded-rejected": "d00b4745c41f38da52bc2bcb62730bbaa27edffa95ff960a91fa3ce0342d33fa",
     "T2-candidate-out-of-range-rejected": "2be5fbf789cbd066627046400d65d15254531a4640f9a370331af322d240d4ba",
     "T2-candidate-zero-or-multiple-current-rejected": "59215aef52fd1e023551880e9292e12ce4f67ec8ee9b6469833efbd7bc213a36",
-    "T2-assessment-delayed-boundary": "44edf83b3f93f52b96a3bbe81519577beba72c9f3fed71c313cf7ebeec913c07",
+    "T2-assessment-delayed-boundary": "ca3c53bed842f84eb7642b6dc6444ec5a000807dca1e50e2c6316c36bdc3d812",
     "T2-assessment-delivered-not-received-current-claim": "d17411f76a8caf57301675f8bf89a970627e8640a80cdbf4320c864ecf6c58c6",
-    "T2-assessment-claim-corrected": "9a42397998834fc9b20413e6fac10b80bbdcf46bdbc179e52e8899c953d4737f",
-    "T2-timeout-after-dispatch-then-success": "c3af4d119790dd801f77c3b4fa3d1336c8493d20f87af8065c13dab48885a971",
-    "T2-retry-finalize-before-second-fence-recovery": "83512fb3a720fa24116c0f3be614cd1fba78f70ea916d1f3b3d5495b4b88ff7e",
+    "T2-assessment-claim-corrected": "49e2f2304ce058a8b6a653609ae230806e61bf633f14cdce2eda239324d4ba06",
+    "T2-timeout-after-dispatch-then-success": "81b93a4354f8ccb4491c38c9a9d020a2f99689edca2ec3810fbc0f243671be7d",
+    "T2-retry-finalize-before-second-fence-recovery": "dda2986ced9667aed0619fb127c26f851259af179cd33e5686dd797b1cf1ce95",
     "T2-retry-finalize-before-second-fence-state-invalidated": "4b8f7bd5eaa44ab0c65bcfa55f40a5cf905bb67767be312a4b7c2c3195885720",
-    "T2-retry-unfinished-attempt-restart-blocked": "0e8429a9097cdc338f003174ebac48ce11da2e5f665e93e5193535773fbdf9ec",
+    "T2-retry-unfinished-attempt-restart-blocked": "c854b163e2f9f986d86edb07659a8fcc42da62b3b0383088bd95f1b9a3057ebe",
     "T2-refresh-returns-already-stale-blocked": "6d98db02589d01dae1f10f607fa7dd77f2c52cbf2c289fd0f5770ce9f685374f",
-    "T2-two-active-packages-integrity-blocked": "4ad825bab0d5b8c787b8f21a7a687dae972b41115673b1122b1b41a7ddca8eb6",
+    "T2-two-active-packages-integrity-blocked": "78d79b8669b7f83a7f2d1c8723a515278a68b2a7798bbaca6cb9718818363ec0",
 }
 _CYCLE2_SHARED_EXPECTATIONS = (
     "TRUSTED_IDENTITY_NOT_USER_CONTROLLED",

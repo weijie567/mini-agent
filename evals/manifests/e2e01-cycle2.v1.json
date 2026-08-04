@@ -34,14 +34,14 @@
       "path": "evals/cases/e2e01-cycle2.v1.json",
       "version_field": "dataset_version",
       "version": "e2e01-cycle2-dataset-v1",
-      "sha256": "c391094d6b92ca77844d557a25369ccde4d69ebae49a4d061932e3424b122c9d"
+      "sha256": "2f0686a87a8c58988799ccaca1df3a2a0e00d1048a874eccccdc6baee31a7fe8"
     },
     {
       "artifact_id": "e2e01-cycle2-model-scripts",
       "path": "evals/model_scripts/e2e01-cycle2.v1.json",
       "version_field": "model_script_catalog_version",
       "version": "e2e01-cycle2-model-scripts-v1",
-      "sha256": "8d907451ecaf3d970da5a324aaf330cbd9e9ab160d84ebcc0d4c5c8942d4ba62"
+      "sha256": "a944ea5d5d879cab031974d1747cc55568a5e35257017a3b684ac052f959ba64"
     },
     {
       "artifact_id": "e2e01-cycle2-lanes",
