@@ -2934,6 +2934,8 @@ class _Cycle2RuntimeHarness:
         self.selection_closure_available = True
         self.binding_commands: list[object] = []
         self.finalize_commands: list[object] = []
+        self.v3_evidence_load_count = 0
+        self.legacy_evidence_load_count = 0
         self.search_load_count = 0
 
     async def load_current_session_task_for_owner(self, **kwargs: object):
@@ -3107,6 +3109,14 @@ class _Cycle2RuntimeHarness:
         return Cycle2WriteResult.APPLIED
 
     async def load_cycle2_exact_run_evidence_for_owner(self, **_kwargs: object):
+        self.legacy_evidence_load_count += 1
+        raise AssertionError("active terminal path cannot use legacy evidence")
+
+    async def load_cycle2_exact_run_evidence_v3_for_owner(
+        self,
+        **_kwargs: object,
+    ):
+        self.v3_evidence_load_count += 1
         command = self.finalize_commands[-1]
         root = self.root_commands[-1]
         task = command.current_task_record
@@ -4191,6 +4201,8 @@ def test_cycle2_terminal_control_and_actual_observation_follow_durable_evidence(
         Cycle2ControlPurpose.PROPOSE_FIXED_RESPONSE
     ]
     assert len(runtime.finalize_commands) == 1
+    assert runtime.v3_evidence_load_count == 1
+    assert runtime.legacy_evidence_load_count == 0
     assert len(observer.observations) == 1
     observation = observer.observations[0]
     assert observation.cycle2_signal is Cycle2MapperSignal.SEARCH_NO_MATCH
