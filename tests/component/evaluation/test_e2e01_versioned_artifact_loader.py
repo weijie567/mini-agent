@@ -331,6 +331,30 @@ def test_cycle2_reauthenticated_mixed_case_lifecycle_fails_closed(
         load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
 
 
+def test_cycle2_reauthenticated_case_semantic_digest_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _copy_cycle2_artifacts(tmp_path)
+    cases = _read_json(root, CYCLE2_REFERENCED[1])
+    case = next(
+        item
+        for item in cases["cases"]  # type: ignore[union-attr]
+        if item["case_id"] == "E2E01-06/transient-once-then-success"
+    )
+    case["expectations"]["required_events"][1] = (  # type: ignore[index]
+        "REQ_TOOL(get_order,1,1,SUCCEEDED,INVALID)"
+    )
+    _write_json(root, CYCLE2_REFERENCED[1], cases)
+    _reauthenticate_cycle2_cases(root, monkeypatch)
+
+    with pytest.raises(
+        ArtifactContractError,
+        match="Case semantic contract digest",
+    ):
+        load_e2e01_cycle2_artifacts(root, candidate_version="candidate")
+
+
 def test_cycle2_reauthenticated_registry_version_drift_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

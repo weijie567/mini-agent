@@ -246,6 +246,11 @@
           }
         },
         {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
           "purpose": "FAULT_DIRECTIVE",
           "behavior": "INJECT_TOOL_FAULT",
           "candidate_arguments": {},
@@ -276,6 +281,11 @@
           }
         },
         {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
           "purpose": "FAULT_DIRECTIVE",
           "behavior": "INJECT_TOOL_FAULT",
           "candidate_arguments": {},
@@ -304,6 +314,11 @@
           "candidate_arguments": {
             "order_id": "O-1001"
           }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
         },
         {
           "purpose": "FAULT_DIRECTIVE",
@@ -337,6 +352,11 @@
         },
         {
           "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
           "behavior": "PROPOSE_FIXED_RESPONSE",
           "candidate_arguments": {}
         }
@@ -358,6 +378,11 @@
           "candidate_arguments": {
             "order_id": "O-1001"
           }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
         },
         {
           "purpose": "CONTROL_CANDIDATE",
@@ -481,6 +506,11 @@
         },
         {
           "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
           "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
           "candidate_arguments": {}
         }
@@ -530,6 +560,11 @@
         },
         {
           "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
           "behavior": "PROPOSE_SHIPMENT_ASSESSMENT",
           "candidate_arguments": {}
         }
@@ -551,6 +586,11 @@
           "candidate_arguments": {
             "order_id": "O-1001"
           }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
         },
         {
           "purpose": "FAULT_DIRECTIVE",
@@ -583,6 +623,11 @@
           }
         },
         {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
+        },
+        {
           "purpose": "FAULT_DIRECTIVE",
           "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
           "candidate_arguments": {},
@@ -605,13 +650,6 @@
         "T2-retry-finalize-before-second-fence-state-invalidated"
       ],
       "steps": [
-        {
-          "purpose": "REQUEST_UNDERSTANDING",
-          "behavior": "PROPOSE_GET_SHIPMENT",
-          "candidate_arguments": {
-            "order_id": "O-1001"
-          }
-        },
         {
           "purpose": "FAULT_DIRECTIVE",
           "behavior": "INJECT_RUNTIME_RECOVERY_FAULT",
@@ -636,6 +674,11 @@
           "candidate_arguments": {
             "order_id": "O-1001"
           }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
         },
         {
           "purpose": "FAULT_DIRECTIVE",
@@ -685,6 +728,11 @@
           "candidate_arguments": {
             "order_id": "O-1001"
           }
+        },
+        {
+          "purpose": "CONTROL_CANDIDATE",
+          "behavior": "PROPOSE_GET_SHIPMENT",
+          "candidate_arguments": {}
         },
         {
           "purpose": "CONTROL_CANDIDATE",

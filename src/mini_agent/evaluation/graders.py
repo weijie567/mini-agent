@@ -4186,6 +4186,25 @@ def _cycle2_tool_result_code(
     call: ToolCallRecordV2,
 ) -> str:
     if call.status is ToolCallStatus.SUCCEEDED:
+        if call.canonical_tool_name.value == "get_order":
+            observations = tuple(
+                observation
+                for observation in evidence.order_observations
+                if observation.source_tool == "get_order"
+                and observation.observation_id == call.result_ref
+            )
+            if len(observations) == 1:
+                source_edges = tuple(
+                    edge
+                    for edge in evidence.observation_source_edges
+                    if edge.observation_ref == observations[0].observation_id
+                )
+                if (
+                    len(source_edges) == 1
+                    and source_edges[0].source_tool_call_id
+                    == call.tool_call_id
+                ):
+                    return "FOUND"
         if call.canonical_tool_name.value == "search_orders":
             observations = tuple(
                 observation
@@ -4214,8 +4233,6 @@ def _cycle2_tool_result_code(
             )
             if len(observations) == 1:
                 return "FOUND"
-        # Cycle2EvalEvidence currently has no typed OrderObservation family,
-        # so a get_order result_ref cannot prove FOUND by itself.
         return "INVALID"
     if call.status is ToolCallStatus.INTERRUPTED:
         return "NONE"

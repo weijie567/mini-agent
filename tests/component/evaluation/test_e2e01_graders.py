@@ -135,6 +135,7 @@ from mini_agent.evaluation.graders import (
     cycle2_grader_registry,
     ordinary_trace_shape,
     raw_cycle2_trace_is_disclosure_safe,
+    _cycle2_tool_result_code,
     _normalized_tool_result_matches_typed_records,
     _tool_lifecycle_references_match,
 )
@@ -4606,7 +4607,7 @@ def _cycle2_evidence_with_supporting_order_source() -> Cycle2EvalEvidence:
         result_ref=UUID(int=9835),
     )
     observation = OrderObservation(
-        observation_id=UUID(int=9836),
+        observation_id=UUID(int=9835),
         source_tool="get_order",
         source_resource_ref="order:O-1001",
         source_version="order-v1",
@@ -4752,6 +4753,54 @@ def test_cycle2_supporting_source_graph_mismatch_fails_closed(
         _minimal_cycle2_expectations(),
     )
     assert result.status is EvalGraderStatus.FAIL
+
+
+def test_cycle2_get_order_result_requires_exact_typed_source_linkage() -> None:
+    evidence = _cycle2_evidence_with_supporting_order_source()
+    call = evidence.supporting_tool_calls[0]
+
+    assert _cycle2_tool_result_code(evidence, call) == "FOUND"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_observation",
+        "duplicate_observation",
+        "missing_edge",
+        "duplicate_edge",
+        "wrong_source_call",
+        "wrong_result_ref",
+    ),
+)
+def test_cycle2_get_order_result_linkage_tamper_is_invalid(
+    mutation: str,
+) -> None:
+    evidence = _cycle2_evidence_with_supporting_order_source()
+    call = evidence.supporting_tool_calls[0]
+    observation = evidence.order_observations[0]
+    edge = evidence.observation_source_edges[0]
+    updates: dict[str, object] = {}
+
+    if mutation == "missing_observation":
+        updates = {"order_observations": ()}
+    elif mutation == "duplicate_observation":
+        updates = {"order_observations": (observation, observation)}
+    elif mutation == "missing_edge":
+        updates = {"observation_source_edges": ()}
+    elif mutation == "duplicate_edge":
+        updates = {"observation_source_edges": (edge, edge)}
+    elif mutation == "wrong_source_call":
+        updates = {
+            "observation_source_edges": (
+                edge.model_copy(update={"source_tool_call_id": UUID(int=9837)}),
+            )
+        }
+    else:
+        call = call.model_copy(update={"result_ref": UUID(int=9838)})
+
+    tampered = evidence.model_copy(update=updates)
+    assert _cycle2_tool_result_code(tampered, call) == "INVALID"
 
 
 def test_phase1_and_cycle2_profiles_are_exact_separate_and_ordered() -> None:

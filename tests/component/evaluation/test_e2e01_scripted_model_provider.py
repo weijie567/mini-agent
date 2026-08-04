@@ -622,8 +622,9 @@ def test_cycle2_provider_consumes_ordered_candidate_and_fault_directives() -> No
     provider = _cycle2_provider("E2E01-06/transient-once-then-success")
 
     request = provider.take_cycle2_directive("REQUEST_UNDERSTANDING")
+    post_order = provider.take_cycle2_directive("CONTROL_CANDIDATE")
     fault = provider.take_cycle2_directive("FAULT_DIRECTIVE")
-    control = provider.take_cycle2_directive("CONTROL_CANDIDATE")
+    assessment = provider.take_cycle2_directive("CONTROL_CANDIDATE")
 
     assert request == Cycle2ScriptDirective(
         purpose="REQUEST_UNDERSTANDING",
@@ -631,7 +632,13 @@ def test_cycle2_provider_consumes_ordered_candidate_and_fault_directives() -> No
         candidate_arguments={"order_id": "O-1001"},
         fault_ref=None,
     )
-    assert control == Cycle2ScriptDirective(
+    assert post_order == Cycle2ScriptDirective(
+        purpose="CONTROL_CANDIDATE",
+        behavior="PROPOSE_GET_SHIPMENT",
+        candidate_arguments={},
+        fault_ref=None,
+    )
+    assert assessment == Cycle2ScriptDirective(
         purpose="CONTROL_CANDIDATE",
         behavior="PROPOSE_SHIPMENT_ASSESSMENT",
         candidate_arguments={},
@@ -825,9 +832,22 @@ def test_cycle2_provider_projects_exact_zero_one_two_control_matrix() -> None:
     no_result = _cycle2_provider(
         "T2-retry-finalize-before-second-fence-state-invalidated"
     )
-    asyncio.run(no_result.propose_cycle2_continuation(_request()))
     no_result.take_cycle2_directive("FAULT_DIRECTIVE")
     no_result.assert_exhausted()
+
+    unfinished = _cycle2_provider(
+        "T2-retry-unfinished-attempt-restart-blocked"
+    )
+    asyncio.run(unfinished.propose_cycle2_continuation(_request()))
+    continuation = asyncio.run(
+        unfinished.propose_cycle2_control(
+            _request(), Cycle2ControlPurpose.PROPOSE_POST_ORDER
+        )
+    )
+    assert continuation.kind is Cycle2ControlCandidateKind.CALL_TOOL
+    assert continuation.requested_tool_name == "get_shipment"
+    unfinished.take_cycle2_directive("FAULT_DIRECTIVE")
+    unfinished.assert_exhausted()
 
 
 @pytest.mark.parametrize(
@@ -858,6 +878,15 @@ def test_cycle2_provider_projects_matching_control_purposes(
     provider = _cycle2_provider(case_id)
     first = provider.take_cycle2_directive("REQUEST_UNDERSTANDING")
     assert first.purpose == "REQUEST_UNDERSTANDING"
+
+    if case_id == "E2E01-06/no-shipment-need-human":
+        post_order = asyncio.run(
+            provider.propose_cycle2_control(
+                _request(), Cycle2ControlPurpose.PROPOSE_POST_ORDER
+            )
+        )
+        assert post_order.kind is Cycle2ControlCandidateKind.CALL_TOOL
+        assert post_order.requested_tool_name == "get_shipment"
 
     candidate = asyncio.run(provider.propose_cycle2_control(_request(), purpose))
 
