@@ -731,10 +731,12 @@ class Cycle2RuntimeRecordPort(Protocol):
         self,
         command: FinalizeUnfinishedToolRecoveryV2Command,
     ) -> Cycle2WriteResult:
-        """Same-CAS append the decision child and parent-only terminal closure.
+        """Same-CAS close the unfinished Tool/Run/Task no-result aggregate.
 
-        APPLIED preserves the unfinished attempt. Every non-APPLIED result is
-        zero-write and grants no dispatch.
+        APPLIED preserves the unfinished attempt and atomically commits the
+        interrupted ToolCall, incomplete Run, blocked Task/RequestUnit,
+        terminal RunTaskLink, and exact recovery Trace children. Every
+        non-APPLIED result is zero-write and grants no dispatch.
         """
         ...
 

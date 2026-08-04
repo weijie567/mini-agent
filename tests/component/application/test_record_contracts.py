@@ -15810,12 +15810,115 @@ def test_cycle2_unfinished_and_budget_recovery_terminal_commands_are_exact() -> 
         ),
         recovery_decision_ref=unfinished_child.recovery_decision_id,
     )
-    FinalizeUnfinishedToolRecoveryV2Command(
+    reason_ref = uuid4()
+    next_task = _c2_project(
+        unfinished.current_task_record,
+        status=TaskStatus.BLOCKED,
+        state_version=unfinished.current_task_record.state_version + 1,
+        updated_at=unfinished.trusted_read_at,
+        last_outcome_ref=reason_ref,
+    )
+    next_unit = _c2_project(
+        unfinished.current_request_unit_record,
+        status=TaskStatus.BLOCKED,
+        state_version=unfinished.current_request_unit_record.state_version + 1,
+        updated_at=unfinished.trusted_read_at,
+        result_refs=(
+            *unfinished.current_request_unit_record.result_refs,
+            reason_ref,
+        ),
+    )
+    task_transition = ApplyTaskTransitionCommand(
+        expected_task_record=unfinished.current_task_record,
+        next_task_record=next_task,
+        expected_request_unit_record=unfinished.current_request_unit_record,
+        next_request_unit_record=next_unit,
+        task_state_transition=TaskStateTransition(
+            task_id=unfinished.current_task_record.task_id,
+            request_unit_id=(
+                unfinished.current_request_unit_record.request_unit_id
+            ),
+            from_status=unfinished.current_task_record.status,
+            to_status=TaskStatus.BLOCKED,
+            base_state_version=unfinished.current_task_record.state_version,
+            result_state_version=next_task.state_version,
+            reason_ref=reason_ref,
+            changed_at=unfinished.trusted_read_at,
+        ),
+    )
+    terminal_run = _c2_project(
+        unfinished.active_run_record,
+        status=AgentRunStatusV2.INCOMPLETE,
+        completed_at=unfinished.trusted_read_at,
+        stop_reason=StopReasonV2.PROCESS_RESTART_DETECTED,
+        incomplete_reason="PROCESS_RESTART_DETECTED",
+    )
+    terminal_link = _c2_project(
+        unfinished.active_run_task_link_record,
+        result_task_state_version=next_task.state_version,
+    )
+    recovery_traces = (
+        TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.RUN_STOPPED,
+            occurred_at=unfinished.trusted_read_at,
+            run_id=unfinished.active_run_record.run_id,
+            task_id=unfinished.current_task_record.task_id,
+            request_unit_id=(
+                unfinished.current_request_unit_record.request_unit_id
+            ),
+            user_outcome=AgentOutcome.BLOCKED,
+            stop_reason=StopReasonV2.PROCESS_RESTART_DETECTED,
+        ),
+        TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.TASK_STATE_CHANGED,
+            occurred_at=unfinished.trusted_read_at,
+            run_id=unfinished.active_run_record.run_id,
+            task_id=unfinished.current_task_record.task_id,
+            request_unit_id=(
+                unfinished.current_request_unit_record.request_unit_id
+            ),
+        ),
+        TraceEventV2(
+            trace_event_id=uuid4(),
+            event_type=TraceEventType.TOOL_CALL_INTERRUPTED,
+            occurred_at=unfinished.trusted_read_at,
+            run_id=unfinished.active_run_record.run_id,
+            task_id=unfinished.current_task_record.task_id,
+            request_unit_id=(
+                unfinished.current_request_unit_record.request_unit_id
+            ),
+            tool_call_id=unfinished.tool_call_record.tool_call_id,
+            tool_call_terminal_status=ToolCallStatus.INTERRUPTED,
+        ),
+    )
+    unfinished_command = FinalizeUnfinishedToolRecoveryV2Command(
         loaded_closure=unfinished,
         recovery_decision_record=unfinished_child,
         terminal_tool_call_record=unfinished_terminal,
+        task_transition=task_transition,
+        terminal_run_record=terminal_run,
+        terminal_run_task_link_record=terminal_link,
+        recovery_trace_records=recovery_traces,
     )
     assert unfinished_terminal.attempts == unfinished.tool_call_record.attempts
+    assert unfinished_command.task_transition.next_task_record.status is (
+        TaskStatus.BLOCKED
+    )
+    with pytest.raises(ValidationError, match="Run/link"):
+        FinalizeUnfinishedToolRecoveryV2Command(
+            loaded_closure=unfinished,
+            recovery_decision_record=unfinished_child,
+            terminal_tool_call_record=unfinished_terminal,
+            task_transition=task_transition,
+            terminal_run_record=terminal_run,
+            terminal_run_task_link_record=_c2_project(
+                terminal_link,
+                result_task_state_version=(next_task.state_version + 1),
+            ),
+            recovery_trace_records=recovery_traces,
+        )
 
     exhausted = _c2_retry_recovery_closure(budget_ms=500)
     exhausted_child = _c2_recovery_decision_record(exhausted)

@@ -638,6 +638,33 @@ def test_cycle2_created_and_unfinished_recovery_never_grant_dispatch(
         assert terminal.recovery_disposition is (
             ToolRecoveryDisposition.UNFINISHED_ATTEMPT_INTERRUPTED
         )
+        command = port.commands[0]
+        assert command.task_transition.expected_task_record is (
+            closure.current_task_record
+        )
+        assert command.task_transition.next_task_record.status is (
+            TaskStatus.BLOCKED
+        )
+        assert command.task_transition.next_task_record.state_version == 4
+        assert command.task_transition.next_request_unit_record.status is (
+            TaskStatus.BLOCKED
+        )
+        assert command.terminal_run_record.status is (
+            AgentRunStatusV2.INCOMPLETE
+        )
+        assert command.terminal_run_record.stop_reason is (
+            StopReasonV2.PROCESS_RESTART_DETECTED
+        )
+        assert command.terminal_run_task_link_record.result_task_state_version == 4
+        assert tuple(
+            trace.event_type for trace in command.recovery_trace_records
+        ) == (
+            TraceEventType.RUN_STOPPED,
+            TraceEventType.TASK_STATE_CHANGED,
+            TraceEventType.TOOL_CALL_INTERRUPTED,
+        )
+        assert not hasattr(command, "terminal_result")
+        assert not hasattr(command, "assistant_message_record")
 
 
 def test_cycle2_recovered_append_returns_only_exact_applied_dispatch_grant() -> None:
