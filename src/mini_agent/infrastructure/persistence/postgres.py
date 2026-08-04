@@ -9589,6 +9589,217 @@ class PostgresRecordAdapter:
             and persisted[1].logical_children == desired_children
         )
 
+    def _cycle2_unfinished_recovery_postimage_is_complete(
+        self,
+        session: Session,
+        command: FinalizeUnfinishedToolRecoveryV2Command,
+        *,
+        for_update: bool,
+    ) -> bool:
+        """Recognize only the exact all-or-nothing unfinished postimage."""
+
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        transition = command.task_transition
+
+        tool = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TOOL_CALL_RECORD,
+            logical_identity=((
+                "tool_call_id",
+                closure.tool_call_record.tool_call_id,
+            ),),
+            for_update=for_update,
+        )
+        run = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.AGENT_RUN_RECORD,
+            logical_identity=(("run_id", closure.active_run_record.run_id),),
+            for_update=for_update,
+        )
+        task = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.TASK_RECORD,
+            logical_identity=(("task_id", closure.current_task_record.task_id),),
+            for_update=for_update,
+        )
+        unit = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+            logical_identity=((
+                "request_unit_id",
+                closure.current_request_unit_record.request_unit_id,
+            ),),
+            for_update=for_update,
+        )
+        link = self._cycle2_row(
+            session,
+            owner_customer_id=owner,
+            record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+            logical_identity=(
+                ("run_id", closure.active_run_task_link_record.run_id),
+                ("task_id", closure.active_run_task_link_record.task_id),
+            ),
+            for_update=for_update,
+        )
+        traces = tuple(
+            self._cycle2_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TRACE_EVENT_RECORD,
+                logical_identity=(("trace_event_id", trace.trace_event_id),),
+                for_update=for_update,
+            )
+            for trace in command.recovery_trace_records
+        )
+
+        desired_tool_children: tuple[BaseModel, ...] = (
+            *command.terminal_tool_call_record.attempts,
+            command.recovery_decision_record,
+        )
+        tool_is_desired = tool is not None and (
+            tool[1].source_record == command.terminal_tool_call_record
+            and tool[1].logical_children == desired_tool_children
+        )
+        run_is_desired = run is not None and (
+            run[1].source_record == command.terminal_run_record
+            and not run[1].logical_children
+        )
+        link_is_desired = link is not None and (
+            link[1].source_record == command.terminal_run_task_link_record
+            and not link[1].logical_children
+        )
+
+        historical_task = None
+        historical_unit = None
+        if task is not None and (
+            task[1].source_record == transition.next_task_record
+        ):
+            historical_task = self._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=(("task_id", closure.current_task_record.task_id),),
+                state_version=closure.current_task_record.state_version,
+            )
+        if unit is not None and (
+            unit[1].source_record == transition.next_request_unit_record
+        ):
+            historical_unit = self._cycle2_historical_row(
+                session,
+                owner_customer_id=owner,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=((
+                    "request_unit_id",
+                    closure.current_request_unit_record.request_unit_id,
+                ),),
+                state_version=closure.current_request_unit_record.state_version,
+            )
+        task_is_desired = (
+            task is not None
+            and historical_task is not None
+            and historical_task.source_record == closure.current_task_record
+            and all(
+                type(child) is TaskStateTransition
+                for child in historical_task.logical_children
+            )
+            and task[1].source_record == transition.next_task_record
+            and task[1].logical_children
+            == (
+                *historical_task.logical_children,
+                transition.task_state_transition,
+            )
+        )
+        unit_is_desired = (
+            unit is not None
+            and historical_unit is not None
+            and historical_unit.source_record
+            == closure.current_request_unit_record
+            and not historical_unit.logical_children
+            and unit[1].source_record == transition.next_request_unit_record
+            and not unit[1].logical_children
+        )
+        traces_are_desired = tuple(
+            persisted is not None
+            and persisted[1].source_record == expected
+            and not persisted[1].logical_children
+            for persisted, expected in zip(
+                traces,
+                command.recovery_trace_records,
+                strict=True,
+            )
+        )
+        desired_states = (
+            tool_is_desired,
+            run_is_desired,
+            task_is_desired,
+            unit_is_desired,
+            link_is_desired,
+            *traces_are_desired,
+        )
+        if all(desired_states):
+            return True
+
+        postimage_observed = any(
+            (
+                tool is not None
+                and tool[1].source_record
+                == command.terminal_tool_call_record,
+                run is not None
+                and run[1].source_record == command.terminal_run_record,
+                task is not None
+                and task[1].source_record == transition.next_task_record,
+                unit is not None
+                and unit[1].source_record
+                == transition.next_request_unit_record,
+                link is not None
+                and link[1].source_record
+                == command.terminal_run_task_link_record,
+                any(persisted is not None for persisted in traces),
+            )
+        )
+        if postimage_observed:
+            raise _Cycle2ProjectionConflict() from None
+
+        if any(item is None for item in (tool, run, task, unit, link)):
+            raise _Cycle2NotApplicable() from None
+        assert tool is not None
+        assert run is not None
+        assert task is not None
+        assert unit is not None
+        assert link is not None
+        expected_tool_children: tuple[BaseModel, ...] = (
+            closure.tool_call_record.attempts
+            if not closure.recovery_decision_records
+            else (
+                closure.tool_call_record.attempts[0],
+                closure.recovery_decision_records[0],
+                *closure.tool_call_record.attempts[1:],
+            )
+        )
+        if (
+            tool[1].source_record != closure.tool_call_record
+            or tool[1].logical_children != expected_tool_children
+            or run[1].source_record != closure.active_run_record
+            or run[1].logical_children
+            or task[1].source_record != closure.current_task_record
+            or any(
+                type(child) is not TaskStateTransition
+                for child in task[1].logical_children
+            )
+            or unit[1].source_record != closure.current_request_unit_record
+            or unit[1].logical_children
+            or link[1].source_record
+            != closure.active_run_task_link_record
+            or link[1].logical_children
+        ):
+            raise _Cycle2NotApplicable() from None
+        return False
+
     def _cycle2_finalize_recovery_in_transaction(
         self,
         session: Session,
@@ -9683,11 +9894,133 @@ class PostgresRecordAdapter:
         self,
         command: FinalizeUnfinishedToolRecoveryV2Command,
     ) -> Cycle2WriteResult:
-        return self._cycle2_finalize_recovery(
-            loaded_closure=command.loaded_closure,
-            terminal_record=command.terminal_tool_call_record,
-            recovery_decision=command.recovery_decision_record,
-        )
+        closure = command.loaded_closure
+        owner = closure.owner_scope.customer_id
+        try:
+            with self.session_factory.begin() as session:
+                if self._cycle2_unfinished_recovery_postimage_is_complete(
+                    session,
+                    command,
+                    for_update=True,
+                ):
+                    raise _Cycle2AlreadyApplied() from None
+                self._cycle2_finalize_recovery_in_transaction(
+                    session,
+                    loaded_closure=closure,
+                    terminal_record=command.terminal_tool_call_record,
+                    recovery_decision=command.recovery_decision_record,
+                )
+                run = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.AGENT_RUN_RECORD,
+                    logical_identity=(("run_id", closure.active_run_record.run_id),),
+                    for_update=True,
+                )
+                task = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.TASK_RECORD,
+                    logical_identity=(("task_id", closure.current_task_record.task_id),),
+                    for_update=True,
+                )
+                unit = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                    logical_identity=((
+                        "request_unit_id",
+                        closure.current_request_unit_record.request_unit_id,
+                    ),),
+                    for_update=True,
+                )
+                link = self._cycle2_row(
+                    session,
+                    owner_customer_id=owner,
+                    record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                    logical_identity=(
+                        ("run_id", closure.active_run_task_link_record.run_id),
+                        ("task_id", closure.active_run_task_link_record.task_id),
+                    ),
+                    for_update=True,
+                )
+                if any(item is None for item in (run, task, unit, link)):
+                    raise _Cycle2NotApplicable() from None
+                assert run is not None
+                assert task is not None
+                assert unit is not None
+                assert link is not None
+                existing_transitions = task[1].logical_children
+                if any(
+                    type(child) is not TaskStateTransition
+                    for child in existing_transitions
+                ):
+                    raise _integrity(
+                        P0PersistenceIntegrityCategory.CHILD_MISMATCH
+                    )
+                self._cycle2_replace(
+                    session,
+                    run[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.active_run_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.AGENT_RUN_RECORD,
+                        command.terminal_run_record,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    task[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_task_record,
+                    expected_children=existing_transitions,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.TASK_RECORD,
+                        command.task_transition.next_task_record,
+                        logical_children=(
+                            *existing_transitions,
+                            command.task_transition.task_state_transition,
+                        ),
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    unit[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.current_request_unit_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.REQUEST_UNIT_RECORD,
+                        command.task_transition.next_request_unit_record,
+                    ),
+                )
+                self._cycle2_replace(
+                    session,
+                    link[0],
+                    owner_customer_id=owner,
+                    expected_record=closure.active_run_task_link_record,
+                    next_envelope=self._cycle2_encode(
+                        P0RecordCode.RUN_TASK_LINK_RECORD,
+                        command.terminal_run_task_link_record,
+                    ),
+                )
+                self._cycle2_insert(
+                    session,
+                    tuple(
+                        self._cycle2_encode(
+                            P0RecordCode.TRACE_EVENT_RECORD,
+                            trace,
+                        )
+                        for trace in command.recovery_trace_records
+                    ),
+                    owner_customer_id=owner,
+                )
+        except _Cycle2NotApplicable:
+            return Cycle2WriteResult.NOT_APPLICABLE
+        except _Cycle2ProjectionConflict:
+            return Cycle2WriteResult.PROJECTION_CONFLICT
+        except _Cycle2AlreadyApplied:
+            return Cycle2WriteResult.ALREADY_APPLIED
+        return Cycle2WriteResult.APPLIED
 
     async def finalize_budget_exhausted_tool_recovery_if_current(
         self,

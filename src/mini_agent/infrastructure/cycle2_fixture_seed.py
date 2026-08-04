@@ -933,6 +933,40 @@ class Cycle2RuntimeSetupV1(_SeedModel):
         )
         if len(identities) != len(set(identities)):
             raise ValueError("runtime base record roles must be unique")
+        if self.recovery_subject_run_id is not None:
+            by_role = {
+                record.record_role: record.source_record
+                for record in self.base_records
+            }
+            obsolete_run = by_role.get("recovery_root.run")
+            obsolete_link = by_role.get("recovery_root.link")
+            replacement_run = by_role.get("recovery_replacement.run")
+            replacement_link = by_role.get("recovery_replacement.link")
+            current_task = by_role.get("task.current")
+            if (
+                type(obsolete_run) is not AgentRunRecordV2
+                or type(obsolete_link) is not RunTaskLinkRecordV2
+                or type(replacement_run) is not AgentRunRecordV2
+                or type(replacement_link) is not RunTaskLinkRecordV2
+                or type(current_task) is not TaskRecord
+                or obsolete_run.run_id != self.recovery_subject_run_id
+                or obsolete_run.run_id == replacement_run.run_id
+                or obsolete_run.conversation_id is None
+                or replacement_run.conversation_id
+                != obsolete_run.conversation_id
+                or replacement_run.status is not AgentRunStatusV2.RUNNING
+                or replacement_run.started_at < obsolete_run.started_at
+                or obsolete_link.run_id != obsolete_run.run_id
+                or replacement_link.run_id != replacement_run.run_id
+                or obsolete_link.task_id != current_task.task_id
+                or replacement_link.task_id != current_task.task_id
+                or replacement_link.base_task_state_version
+                != current_task.state_version
+                or replacement_link.result_task_state_version is not None
+            ):
+                raise ValueError(
+                    "recovery setup requires one exact authoritative replacement"
+                )
         if len(self.integrity_vectors) != len(set(self.integrity_vectors)):
             raise ValueError("integrity vectors must be unique")
         return self
@@ -1158,6 +1192,7 @@ _W12_FAULT_CATALOG = MappingProxyType(
         ),
         "fault:get-shipment:restart-after-retry-finalize-v1": _fault(
             "fault:get-shipment:restart-after-retry-finalize-v1",
+            _failure_directive(1, _TRANSIENT),
             Cycle2FaultDirective(
                 canonical_tool_name=Cycle2ToolName.GET_SHIPMENT,
                 attempt_no=1,
@@ -1970,6 +2005,10 @@ def _runtime_setup(
             raise Cycle2SeedError("recovery root requires the authenticated single USER message")
         fixture_ref = graph_definitions[0].fixture_ref
         recovery_ref = deterministic_cycle2_setup_uuid(fixture_ref, "recovery_root.run")
+        replacement_ref = deterministic_cycle2_setup_uuid(
+            fixture_ref,
+            "recovery_replacement.run",
+        )
         target = next(
             item.source_record
             for item in base_records
@@ -2123,6 +2162,29 @@ def _runtime_setup(
                     run_id=recovery_ref,
                     task_id=task.task_id,
                     base_task_state_version=2,
+                    result_task_state_version=None,
+                ),
+            ),
+            _runtime_record(
+                fixture_ref,
+                "recovery_replacement.run",
+                P0RecordCode.AGENT_RUN_RECORD,
+                AgentRunRecordV2(
+                    run_id=replacement_ref,
+                    conversation_id=historical.conversation_id,
+                    status=AgentRunStatusV2.RUNNING,
+                    provider_lane="scripted-cycle2-recovery",
+                    started_at=invalidated_at,
+                ),
+            ),
+            _runtime_record(
+                fixture_ref,
+                "recovery_replacement.link",
+                P0RecordCode.RUN_TASK_LINK_RECORD,
+                RunTaskLinkRecordV2(
+                    run_id=replacement_ref,
+                    task_id=task.task_id,
+                    base_task_state_version=4,
                     result_task_state_version=None,
                 ),
             ),
@@ -2831,6 +2893,16 @@ def _validate_cycle2_w12_provenance_graph(
             role="recovery_root.link",
             expected_type=RunTaskLinkRecordV2,
         )
+        replacement_run = _runtime_source_for_role(
+            graph,
+            role="recovery_replacement.run",
+            expected_type=AgentRunRecordV2,
+        )
+        replacement_link = _runtime_source_for_role(
+            graph,
+            role="recovery_replacement.link",
+            expected_type=RunTaskLinkRecordV2,
+        )
         manifest = _runtime_source_for_role(
             graph,
             role="recovery_root.context_manifest",
@@ -2856,6 +2928,8 @@ def _validate_cycle2_w12_provenance_graph(
             and type(fresh_order_binding) is InputBindingV2
             and type(run) is AgentRunRecordV2
             and type(link) is RunTaskLinkRecordV2
+            and type(replacement_run) is AgentRunRecordV2
+            and type(replacement_link) is RunTaskLinkRecordV2
             and type(manifest) is ContextManifest
             and type(gate) is GateDecisionV2
             and type(tool) is ToolCallRecordV2
@@ -2898,6 +2972,14 @@ def _validate_cycle2_w12_provenance_graph(
             or link.task_id != task.task_id
             or link.base_task_state_version != 2
             or link.result_task_state_version is not None
+            or replacement_run.run_id == run.run_id
+            or replacement_run.conversation_id != run.conversation_id
+            or replacement_run.status is not AgentRunStatusV2.RUNNING
+            or replacement_run.started_at < run.started_at
+            or replacement_link.run_id != replacement_run.run_id
+            or replacement_link.task_id != task.task_id
+            or replacement_link.base_task_state_version != task.state_version
+            or replacement_link.result_task_state_version is not None
             or manifest.run_id != run.run_id
             or manifest.selected_message_refs != (auxiliary.message_id,)
             or manifest.task_state_ref_and_version.task_id != task.task_id

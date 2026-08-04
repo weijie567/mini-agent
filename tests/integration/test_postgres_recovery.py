@@ -24,15 +24,27 @@ from mini_agent.application.records import (
     CreateRunCommand,
     CreateToolCallCommand,
     Cycle2ExactRunEvidenceClosure,
+    Cycle2RunBudgetPolicyEvidence,
+    Cycle2WriteResult,
     InterruptToolCallForRecoveryCommand,
     MarkRunIncompleteForRecoveryCommand,
     MessageDirection,
     RecoveryWriteResult,
+    ToolRetryRecoveryDecisionRecordV2,
     TransitionRunCommand,
     TrustedOwnerScope,
 )
+from mini_agent.application.restart_recovery_service import (
+    Cycle2ToolRestartRecoveryService,
+)
 from mini_agent.core.identity import CustomerContext
-from mini_agent.core.tool_system import ToolCallStatus, ToolEffect
+from mini_agent.core.tool_system import (
+    ToolAttemptRecordV2,
+    ToolCallRecordV2,
+    ToolCallStatus,
+    ToolEffect,
+    ToolRecoveryDecision,
+)
 from mini_agent.core.trace import AgentRunStatus, StopReason
 from mini_agent.infrastructure.persistence import postgres as postgres_persistence
 from mini_agent.infrastructure.persistence.database import build_session_factory
@@ -45,6 +57,7 @@ from mini_agent.infrastructure.persistence.recovery import (
     PostgresRestartRecoveryAdapter,
 )
 from mini_agent.infrastructure.cycle2_fixture_seed import (
+    W12_TRUSTED_CLOCK,
     apply_cycle2_execution_setup_plan,
     resolve_cycle2_execution_setup_plan,
 )
@@ -180,6 +193,23 @@ class _RecoverySetupTarget:
     ) -> None:
         if self.setup is setup:
             self.setup = None
+
+
+class _CapturingUnfinishedRecoveryPort:
+    def __init__(self, adapter: PostgresRecordAdapter) -> None:
+        self.adapter = adapter
+        self.command = None
+
+    async def load_tool_retry_recovery_closure_for_owner(self, **kwargs):
+        return await self.adapter.load_tool_retry_recovery_closure_for_owner(
+            **kwargs
+        )
+
+    async def finalize_unfinished_tool_recovery_if_current(self, command):
+        self.command = command
+        return await self.adapter.finalize_unfinished_tool_recovery_if_current(
+            command
+        )
 
 
 def _w12_owner_scope() -> TrustedOwnerScope:
@@ -386,6 +416,380 @@ async def test_w12_recovery_setup_reads_exact_root_and_supporting_closure(
         setup.detach()
         setup.dispose()
     finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("unfinished_attempt_no", (1, 2))
+async def test_cycle2_unfinished_recovery_is_atomic_replayable_and_closed(
+    eval_postgres_namespace,
+    monkeypatch: pytest.MonkeyPatch,
+    unfinished_attempt_no: int,
+) -> None:
+    engine = eval_postgres_namespace.build_engine()
+    factory = build_session_factory(engine)
+    target = _RecoverySetupTarget()
+    setup = None
+    plan = resolve_cycle2_execution_setup_plan(
+        trusted_context_fixture_ref="session:alice",
+        initial_state_fixture_refs=(
+            "fx-retry-scheduled-obsolete-run-owner-a-v1",
+        ),
+        environment_fixture_refs=("fx-shipment-current-owner-a-v1",),
+        fault_ref=(
+            "fault:get-shipment:restart-after-retry-finalize-state-invalidated-v1"
+        ),
+        authenticated_user_message="订单 O-1001 到哪了？",
+    )
+    policy = Cycle2RunBudgetPolicyEvidence(
+        policy_version="cycle2-w12-test-budget.v1",
+        run_time_budget_ms=10_000,
+    )
+    adapter = PostgresRecordAdapter(
+        factory,
+        cycle2_clock=lambda: W12_TRUSTED_CLOCK,
+        cycle2_run_budget_policy=policy,
+    )
+    try:
+        setup = apply_cycle2_execution_setup_plan(
+            factory,
+            plan,
+            attachment_target=target,
+        )
+        source_tool = next(
+            record.source_record
+            for record in plan.runtime_state.base_records
+            if record.record_role == "recovery_root.tool_call"
+        )
+        assert type(source_tool) is ToolCallRecordV2
+        source_attempt = source_tool.attempts[0]
+        prior_decision = None
+        if unfinished_attempt_no == 1:
+            unfinished_attempts = (
+                ToolAttemptRecordV2(
+                    tool_call_id=source_attempt.tool_call_id,
+                    attempt_no=1,
+                    started_at=source_attempt.started_at,
+                ),
+            )
+            unfinished_children = unfinished_attempts
+        else:
+            assert source_attempt.finished_at is not None
+            prior_decision = ToolRetryRecoveryDecisionRecordV2(
+                recovery_decision_id=uuid4(),
+                tool_call_id=source_tool.tool_call_id,
+                last_attempt_no=1,
+                decision=ToolRecoveryDecision.APPEND_SECOND_ATTEMPT,
+                stable_reason_code="RETRY_REVALIDATED_CAS_REQUIRED",
+                candidate_next_attempt_no=2,
+                decided_at=source_attempt.finished_at,
+            )
+            unfinished_attempts = (
+                source_attempt,
+                ToolAttemptRecordV2(
+                    tool_call_id=source_attempt.tool_call_id,
+                    attempt_no=2,
+                    started_at=source_attempt.finished_at,
+                ),
+            )
+            unfinished_children = (
+                source_attempt,
+                prior_decision,
+                unfinished_attempts[1],
+            )
+        unfinished_tool = ToolCallRecordV2.model_validate(
+            {
+                **source_tool.model_dump(mode="python"),
+                "attempts": unfinished_attempts,
+                "attempt_count": unfinished_attempt_no,
+                "status": ToolCallStatus.RUNNING,
+            },
+            strict=True,
+        )
+        with factory.begin() as session:
+            loaded = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TOOL_CALL_RECORD,
+                logical_identity=(("tool_call_id", source_tool.tool_call_id),),
+                for_update=True,
+            )
+            assert loaded is not None
+            adapter._cycle2_replace(
+                session,
+                loaded[0],
+                owner_customer_id=plan.owner_customer_id,
+                expected_record=source_tool,
+                expected_children=source_tool.attempts,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.TOOL_CALL_RECORD,
+                    unfinished_tool,
+                    logical_children=unfinished_children,
+                ),
+            )
+        with factory() as session:
+            message_count = session.scalar(
+                select(func.count())
+                .select_from(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.MESSAGE_RECORD.value
+                )
+            )
+        expected_closure = (
+            await adapter.load_tool_retry_recovery_closure_for_owner(
+                owner_scope=_w12_owner_scope(),
+                tool_call_id=unfinished_tool.tool_call_id,
+            )
+        )
+        assert expected_closure is not None
+
+        rollback_port = _CapturingUnfinishedRecoveryPort(adapter)
+        rollback_service = Cycle2ToolRestartRecoveryService(
+            runtime_record_port=rollback_port,
+            uuid_factory=uuid4,
+        )
+
+        def fail_last_insert(*_args, **_kwargs):
+            raise postgres_persistence._Cycle2ProjectionConflict() from None
+
+        with monkeypatch.context() as context:
+            context.setattr(adapter, "_cycle2_insert", fail_last_insert)
+            rolled_back, attempt, result = await rollback_service.recover_tool_call(
+                owner_scope=_w12_owner_scope(),
+                tool_call_id=unfinished_tool.tool_call_id,
+            )
+        assert result is Cycle2WriteResult.PROJECTION_CONFLICT
+        assert attempt is None
+        assert rolled_back == unfinished_tool
+        after_rollback = (
+            await adapter.load_tool_retry_recovery_closure_for_owner(
+                owner_scope=_w12_owner_scope(),
+                tool_call_id=unfinished_tool.tool_call_id,
+            )
+        )
+        assert after_rollback is not None
+        assert after_rollback == expected_closure
+        rollback_command = rollback_port.command
+        assert rollback_command is not None
+
+        stale_run = expected_closure.active_run_record.model_copy(
+            update={"provider_lane": "scripted-cycle2-stale-test"}
+        )
+        with factory.begin() as session:
+            run = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=((
+                    "run_id",
+                    expected_closure.active_run_record.run_id,
+                ),),
+                for_update=True,
+            )
+            task = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=((
+                    "task_id",
+                    expected_closure.current_task_record.task_id,
+                ),),
+                for_update=True,
+            )
+            unit = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=((
+                    "request_unit_id",
+                    expected_closure.current_request_unit_record.request_unit_id,
+                ),),
+                for_update=True,
+            )
+            link = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                logical_identity=(
+                    ("run_id", expected_closure.active_run_record.run_id),
+                    ("task_id", expected_closure.current_task_record.task_id),
+                ),
+                for_update=True,
+            )
+            assert run is not None
+            assert task is not None
+            assert unit is not None
+            assert link is not None
+            task_snapshot = task[1]
+            unit_snapshot = unit[1]
+            link_snapshot = link[1]
+            adapter._cycle2_replace(
+                session,
+                run[0],
+                owner_customer_id=plan.owner_customer_id,
+                expected_record=expected_closure.active_run_record,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.AGENT_RUN_RECORD,
+                    stale_run,
+                ),
+            )
+        assert (
+            await adapter.finalize_unfinished_tool_recovery_if_current(
+                rollback_command
+            )
+            is Cycle2WriteResult.NOT_APPLICABLE
+        )
+        with factory.begin() as session:
+            assert all(
+                adapter._cycle2_row(
+                    session,
+                    owner_customer_id=plan.owner_customer_id,
+                    record_code=P0RecordCode.TRACE_EVENT_RECORD,
+                    logical_identity=(("trace_event_id", trace.trace_event_id),),
+                )
+                is None
+                for trace in rollback_command.recovery_trace_records
+            )
+            tool = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TOOL_CALL_RECORD,
+                logical_identity=((
+                    "tool_call_id",
+                    unfinished_tool.tool_call_id,
+                ),),
+            )
+            run = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.AGENT_RUN_RECORD,
+                logical_identity=(("run_id", stale_run.run_id),),
+                for_update=True,
+            )
+            task = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TASK_RECORD,
+                logical_identity=((
+                    "task_id",
+                    expected_closure.current_task_record.task_id,
+                ),),
+            )
+            unit = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.REQUEST_UNIT_RECORD,
+                logical_identity=((
+                    "request_unit_id",
+                    expected_closure.current_request_unit_record.request_unit_id,
+                ),),
+            )
+            link = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.RUN_TASK_LINK_RECORD,
+                logical_identity=(
+                    ("run_id", expected_closure.active_run_record.run_id),
+                    ("task_id", expected_closure.current_task_record.task_id),
+                ),
+            )
+            assert tool is not None
+            assert tool[1].source_record == unfinished_tool
+            assert tool[1].logical_children == unfinished_children
+            assert run is not None
+            assert run[1].source_record == stale_run
+            assert task is not None and task[1] == task_snapshot
+            assert unit is not None and unit[1] == unit_snapshot
+            assert link is not None and link[1] == link_snapshot
+            adapter._cycle2_replace(
+                session,
+                run[0],
+                owner_customer_id=plan.owner_customer_id,
+                expected_record=stale_run,
+                next_envelope=adapter._cycle2_encode(
+                    P0RecordCode.AGENT_RUN_RECORD,
+                    expected_closure.active_run_record,
+                ),
+            )
+
+        port = _CapturingUnfinishedRecoveryPort(adapter)
+        service = Cycle2ToolRestartRecoveryService(
+            runtime_record_port=port,
+            uuid_factory=uuid4,
+        )
+        terminal, attempt, result = await service.recover_tool_call(
+            owner_scope=_w12_owner_scope(),
+            tool_call_id=unfinished_tool.tool_call_id,
+        )
+
+        assert result is Cycle2WriteResult.APPLIED
+        assert attempt is None
+        assert terminal.status is ToolCallStatus.INTERRUPTED
+        command = port.command
+        assert command is not None
+        with factory() as session:
+            assert adapter._cycle2_unfinished_recovery_postimage_is_complete(
+                session,
+                command,
+                for_update=False,
+            )
+            persisted_tool = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TOOL_CALL_RECORD,
+                logical_identity=((
+                    "tool_call_id",
+                    command.terminal_tool_call_record.tool_call_id,
+                ),),
+            )
+            assert persisted_tool is not None
+            assert persisted_tool[1].logical_children == (
+                *command.terminal_tool_call_record.attempts,
+                command.recovery_decision_record,
+            )
+            assert session.scalar(
+                select(func.count())
+                .select_from(P0RecordModel)
+                .where(
+                    P0RecordModel.record_code
+                    == P0RecordCode.MESSAGE_RECORD.value
+                )
+            ) == message_count
+
+        assert (
+            await adapter.finalize_unfinished_tool_recovery_if_current(command)
+            is Cycle2WriteResult.ALREADY_APPLIED
+        )
+
+        missing_trace = command.recovery_trace_records[-1]
+        with factory.begin() as session:
+            trace = adapter._cycle2_row(
+                session,
+                owner_customer_id=plan.owner_customer_id,
+                record_code=P0RecordCode.TRACE_EVENT_RECORD,
+                logical_identity=((
+                    "trace_event_id",
+                    missing_trace.trace_event_id,
+                ),),
+                for_update=True,
+            )
+            assert trace is not None
+            session.execute(
+                delete(P0RecordReferenceModel).where(
+                    P0RecordReferenceModel.source_record_code
+                    == trace[0].record_code,
+                    P0RecordReferenceModel.source_logical_identity
+                    == trace[0].logical_identity,
+                )
+            )
+            session.delete(trace[0])
+        assert (
+            await adapter.finalize_unfinished_tool_recovery_if_current(command)
+            is Cycle2WriteResult.PROJECTION_CONFLICT
+        )
+    finally:
+        if setup is not None and not setup.is_disposed:
+            setup.dispose()
         engine.dispose()
 
 
